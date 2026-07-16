@@ -85,15 +85,20 @@ see.
 **Trigger:** define an allowlist of counters that only ever increase, and only on an actually
 productive outcome (completing a unit of work, producing something, earning something). Positional
 or movement counters (distance covered, steps taken, locations visited) are deliberately left off
-the allowlist, because motion on its own is not progress, and including it would let an agent
-wandering in place read as advancing. Sum the allowlisted counters into one monotonic scalar and
-watch it over a sliding time window (illustratively, thirty minutes). If the scalar hasn't moved
-for a full window, send the agent a single corrective instruction to re-steer toward a concrete,
-reachable goal; if it is still flat a second window later, escalate to an alert for a human
-operator.
+the allowlist, because motion on its own is not progress. The progress scalar is the sum of several
+monotonic dimensions: the allowlisted activity counters, plus other milestone-style signals such as
+level totals or milestones-earned counts. Each dimension is fail-safe gated; a dimension whose data
+is missing is suppressed for that sample rather than read as zero, so a data gap never looks like a
+stall or fake progress. Watch this scalar over a sliding time window (illustratively, thirty minutes).
+If the scalar hasn't moved for a full window, send the agent a single corrective instruction to
+re-steer toward a concrete, reachable goal. This re-steer recurs once per window while the stall
+persists. If the scalar is still flat a second window later, escalate to an alert for a human
+operator. Guidance: choose dimensions that move only on real progress; a prior incident came from
+summing a continuously-rising raw value instead of its discrete level, which masked a real stall.
 
-**Reset:** any observed rise in the scalar re-seeds the baseline and restarts the window from
-scratch.
+**Reset:** any observed change in the scalar, whether a rise or an anomalous drop, re-seeds the
+baseline and restarts the window from scratch. A drop means state changed, so the agent is not
+frozen.
 
 **How 4a and 4b relate:** the steward never arms the planner backoff and never marks the agent
 stuck on its own, it only re-steers and alerts, and it deliberately stands down for the whole
