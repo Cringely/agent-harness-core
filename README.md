@@ -1,6 +1,6 @@
 # Agent Harness Core
 
-This repo holds the process layer for running AI coding agents on a project: charter-backed agent roles, session hooks, and the pattern docs that explain why they're built this way. It was extracted from a working harness rather than designed up front, so everything here has already been through at least one real project.
+This is a process layer and pattern documentation, extracted from the SpaceMolt harness. It defines charter-backed agent roles, session hooks, and design patterns for running AI coding agents on a project. This repo contains no code library, only the docs and ceremony layer that explain how and why the agent coordination works.
 
 ## Layering model
 
@@ -32,4 +32,4 @@ pwsh install/Install-Harness.ps1 -Target <project-root>
 
 ## Source
 
-This repo was extracted from `E:\projects\spacemolt`. For the original design writeup, see that project's `docs/anatomy-of-the-harness.md`.
+This repo was extracted from `E:\projects\spacemolt`. For the original design writeup, see that project's `docs/wiki/anatomy-of-the-harness.md`.
