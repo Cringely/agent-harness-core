@@ -1,0 +1,18 @@
+{
+  "_comment": "Ledger of last-run cursors for recurring ceremonies (standups, review cycles, and similar). Local operational state, meant to be gitignored once a project fills it in. Each ceremony updates its own last_run (local ISO timestamp) on completion. At session start, a last_run older than cycle_hours means the ceremony is due and fires immediately. Keeping this in a file instead of memory is what makes scheduled ceremonies idempotent and resumable across sessions.",
+  "standup": {
+    "cycle_hours": 2,
+    "last_run": null,
+    "approx": false
+  },
+  "strategy_review": {
+    "cycle_hours": 6,
+    "last_run": null,
+    "approx": false
+  },
+  "council": {
+    "cycle_hours": 24,
+    "last_run": null,
+    "approx": true
+  }
+}
