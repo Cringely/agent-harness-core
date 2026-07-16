@@ -66,7 +66,7 @@ cost, and a wrong guess would be worse than an honest zero.
 One more event type belongs in the same table: a marker written once per agent at process startup,
 carrying a build identifier (an image tag from the environment if one exists, otherwise a
 timestamp-based fallback so every restart is still distinguishable from the last). Because it
-lands in the same table as everything else, a chart already built from event history, a core
-business metric over time, replan rate over time, can overlay these markers as vertical lines with no new plumbing.
-Answering "did the last deploy actually fix the problem" becomes a matter of looking at the chart
-on either side of the line instead of guessing from memory.
+lands in the same table as everything else, no new plumbing is needed to use it: any chart already
+built from event history (a core business metric over time, replan rate over time) can overlay
+these markers as vertical lines. Answering "did the last deploy actually fix the problem" becomes a
+matter of looking at the chart on either side of the line instead of guessing from memory.
