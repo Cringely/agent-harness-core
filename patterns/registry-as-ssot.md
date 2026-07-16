@@ -21,11 +21,12 @@ step schema that validates a plan, the
 dispatcher that runs a step, and the docs page that lists commands for a human all read from the
 same table.
 
-```
-registry_entry: {
+```typescript
+// pseudo-code: illustrates the shape of one entry, not a runnable schema library
+registryEntry = {
   name: "create_order",
   kind: "mutation",           // "mutation" changes state, "query" only reads
-  params: { customer_id: string, item_id: string, quantity: int >= 1 },
+  params: { customerId: "string", itemId: "string", quantity: "integer, at least 1" },
   label: "Create an order",
 }
 ```
@@ -39,6 +40,62 @@ something the code disagrees with. None of this is specific to any one language:
 a case class in Kotlin, or a plain dict in Python all support the same idea, which is that one
 declarative table is the only place an action's shape is written down, and every consumer reads
 it rather than restating it.
+
+## A worked derivation, in TypeScript
+
+The step-schema union mentioned above is not hand-waving; it derives mechanically from the
+registry with a filter and a map. Using [Zod](https://zod.dev) for the parameter schemas, a real
+registry entry and its derivation look like this:
+
+```typescript
+import { z } from "zod";
+
+type RegistryEntry = {
+  name: string;
+  kind: "mutation" | "query";
+  params: z.ZodTypeAny;
+  label: string;
+};
+
+const REGISTRY: RegistryEntry[] = [
+  {
+    name: "create_order",
+    kind: "mutation",
+    params: z.object({
+      customerId: z.string(),
+      itemId: z.string(),
+      quantity: z.number().int().min(1),
+    }).strict(),
+    label: "Create an order",
+  },
+  {
+    name: "get_order_status",
+    kind: "query",
+    params: z.object({ orderId: z.string() }).strict(),
+    label: "Look up an order",
+  },
+];
+
+function entryToStepSchema(entry: RegistryEntry) {
+  return z.object({
+    action: z.literal(entry.name),
+    params: entry.params,
+  }).strict();
+}
+
+// Queries are excluded here, same rule as the prose above: a read has no
+// business appearing as a step in a runbook.
+const steps = REGISTRY.filter((a) => a.kind === "mutation").map(entryToStepSchema);
+
+const PlanStepSchema = z.union(
+  steps as unknown as [z.ZodTypeAny, z.ZodTypeAny, ...z.ZodTypeAny[]],
+);
+```
+
+Nothing here is Zod-specific or even TypeScript-specific: `filter` by kind, then `map` each
+surviving entry into a derived shape, is the whole mechanism, and it reads the same way over a
+slice of Go structs or a list of Python dicts with no schema library at all. What has to carry
+over to another language is the two-step shape, filter then derive, not the Zod syntax.
 
 ## Testing it against the real contract, not just itself
 

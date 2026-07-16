@@ -6,8 +6,9 @@ A plan-then-execute loop calls a model only when a wake condition fires, but "on
 is not the same as "rarely enough to afford." A single failure mode, a planner that keeps timing
 out, a step that keeps failing the same way, an agent circling without making real headway, can
 each drive the wake condition to fire on almost every tick. One guard rarely covers every failure
-shape, so this pattern stacks four, each catching a different one, checked in order before a
-replan is allowed to happen.
+shape, so this pattern stacks four guards, checked in order before a replan is allowed to happen.
+The fourth is really two separate mechanisms, because "frozen" and "busy but going nowhere" are
+different failure shapes that need different detectors.
 
 ## 1. Exponential backoff on planner failure
 
@@ -48,25 +49,62 @@ failure shapes share one counter without one masking the other.
 
 **Reset:** a wake carrying a different reason or detail breaks the streak and clears the counter.
 
-## 4. Monotonic-scalar no-progress detector
+## 4. No-progress guards: two separate mechanisms
 
-**Prevents:** an agent that is technically active, replanning, executing steps, avoiding the other
-three guards, while never actually advancing toward any goal.
+"The agent is stuck" turns out to mean two different things, on two different timescales, and this
+pattern uses two independent mechanisms rather than one, because collapsing them loses real
+distinctions: which one owns an episode, what it does about it, and how fast it fires.
 
-**Trigger:** define a small set of counters that only ever increase, and only on an actually
-productive outcome (completing a unit of work, producing something, earning something). Sum them
-into one scalar. If that scalar hasn't moved across several consecutive replan boundaries
-(illustratively, six), the agent is stuck: arm a backoff and flag it. Positional or movement
-counters (distance covered, steps taken, locations visited) are deliberately left out of the sum,
-because motion on its own is not progress, and including it would let an agent wandering in place
-read as advancing.
+### 4a. State-fingerprint freeze detector
 
-**Reset:** any observed rise in the scalar clears the stuck flag.
+**Prevents:** a livelock where the agent keeps replanning, and each replan looks like forward
+motion, while the state underneath it never actually changes.
 
-**Hazard, stated once:** the four mechanisms above transfer between projects; the specific list of
-counters that count as progress does not. Every project has to name its own set, and
-getting that list wrong (leaving out a legitimate productive counter, or letting a passive counter
-that increments on its own sneak in) breaks the detector's aim without breaking its code.
+**Trigger:** at every replan boundary, build a fingerprint out of the raw state fields that would
+change if the agent were advancing (position, resource levels, and the plan cursor marking
+which step is active) and compare it to the fingerprint captured at the previous boundary. An
+identical fingerprint across a run of consecutive replan boundaries (illustratively, six) means the
+agent is frozen: arm a planner backoff and mark the agent stuck. This check sits immediately before
+the replan itself, past the three guards above, so it only ever measures boundaries that actually
+reach a replan; a step that is still in progress and produces no replan can't false-trigger it.
+The fingerprint deliberately excludes the planner's own free-text goal description: a livelock that
+keeps replanning with a slightly reworded goal each cycle would make a text-based fingerprint
+change every boundary and evade detection, while the underlying state stays honest no matter how
+the goal is phrased.
+
+**Reset:** any observed change in the fingerprint clears the run, resets the count to one, and
+clears the stuck flag; recovery requires the state to actually change, not just time passing.
+
+### 4b. Time-windowed progress-counter steward
+
+**Prevents:** the mechanism above only catches a state that is completely frozen. It says nothing
+about an agent that keeps moving, keeps consuming resources and changing position, without
+accomplishing anything real over a long stretch. This is the softer, slower failure that 4a can't
+see.
+
+**Trigger:** define an allowlist of counters that only ever increase, and only on an actually
+productive outcome (completing a unit of work, producing something, earning something). Positional
+or movement counters (distance covered, steps taken, locations visited) are deliberately left off
+the allowlist, because motion on its own is not progress, and including it would let an agent
+wandering in place read as advancing. Sum the allowlisted counters into one monotonic scalar and
+watch it over a sliding time window (illustratively, thirty minutes). If the scalar hasn't moved
+for a full window, send the agent a single corrective instruction to re-steer toward a concrete,
+reachable goal; if it is still flat a second window later, escalate to an alert for a human
+operator.
+
+**Reset:** any observed rise in the scalar re-seeds the baseline and restarts the window from
+scratch.
+
+**How 4a and 4b relate:** the steward never arms the planner backoff and never marks the agent
+stuck on its own, it only re-steers and alerts, and it deliberately stands down for the whole
+duration of a 4a freeze episode so the two never act on the same tick. 4a catches a short, hard
+freeze in raw state; 4b catches a longer, softer failure to accomplish anything even while state
+keeps changing.
+
+**Hazard, stated once:** both mechanisms transfer between projects; the specific list of counters
+that count as progress does not. Every project has to name its own set, and getting that list wrong
+(leaving out a legitimate productive counter, or letting a passive counter that increments on its
+own sneak in) breaks the steward's aim without breaking its code.
 
 ## Recovery taxonomy
 
