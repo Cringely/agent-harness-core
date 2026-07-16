@@ -174,9 +174,12 @@ foreach ($eventType in $hooksTemplate.PSObject.Properties.Name) {
     # Drop ceremony-gated hook entries unless -IncludeCeremonies was passed.
     $filteredGroups = New-Object System.Collections.Generic.List[pscustomobject]
     foreach ($group in $templateGroups) {
-        $groupHooks = @($group.hooks) | Where-Object {
+        # Wrap the pipeline OUTPUT (not just the input) in @(): PowerShell unwraps a
+        # single-match Where-Object result to a bare scalar, which would later
+        # serialize "hooks": {...} instead of "hooks": [...] in settings.json.
+        $groupHooks = @($group.hooks | Where-Object {
             $IncludeCeremonies -or ($_.command -notmatch $ceremonyCommandPattern)
-        }
+        })
         if ($groupHooks.Count -gt 0) {
             $newGroup = [pscustomobject]@{}
             if ($group.PSObject.Properties['matcher']) {
@@ -200,7 +203,8 @@ foreach ($eventType in $hooksTemplate.PSObject.Properties.Name) {
     }
 
     foreach ($group in $filteredGroups) {
-        $newHooks = @($group.hooks) | Where-Object { -not $existingCommands.Contains($_.command) }
+        # Same scalar-collapse hazard as above: wrap the pipeline output, not the input.
+        $newHooks = @($group.hooks | Where-Object { -not $existingCommands.Contains($_.command) })
         if ($newHooks.Count -gt 0) {
             $newGroup = [pscustomobject]@{}
             if ($group.PSObject.Properties['matcher']) {

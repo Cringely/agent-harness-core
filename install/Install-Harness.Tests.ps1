@@ -22,6 +22,20 @@ Describe "Install-Harness" {
         $s.hooks | Should -Not -BeNullOrEmpty
     }
 
+    It "serializes each matcher group's hooks as a JSON array, even with a single hook" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $raw = Get-Content "$script:target/.claude/settings.json" -Raw
+        # A single-match PowerShell pipeline can unwrap to a bare object instead of a
+        # 1-element array; that would serialize "hooks": { "type": ... } instead of
+        # "hooks": [ { "type": ... } ], which Claude Code cannot load. Assert it never does.
+        # (A round-trip through ConvertFrom-Json is not a reliable check here: PowerShell's
+        # own JSON deserializer collapses a 1-element JSON array back to a scalar
+        # PSCustomObject, so the file's raw text is the only faithful signal of what
+        # actually got written.)
+        $raw | Should -Not -Match '"hooks":\s*\{\s*"type"'
+        $raw | Should -Match '"hooks":\s*\['
+    }
+
     It "does not overwrite a project-modified installed file" {
         & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
         "PROJECT EDIT" | Add-Content "$script:target/.claude/agents/task-reviewer.md"
