@@ -1,0 +1,14 @@
+# Pattern Index
+
+Each doc below explains one design decision behind the roles, hooks, and templates in `core/`,
+independent of any one codebase or language.
+
+| Doc | Problem it solves |
+|---|---|
+| [`registry-as-ssot.md`](registry-as-ssot.md) | An action's name, parameters, and validation get hand-copied into a prompt, a schema, a dispatcher, and a docs page, and the copies drift apart. |
+| [`plan-then-execute.md`](plan-then-execute.md) | Calling a model on every tick of a running agent is slow and expensive when most ticks need no judgment at all. |
+| [`replan-guards.md`](replan-guards.md) | A wake condition that seemed rare in design can fire on nearly every tick once a planner starts failing, looping, or stalling in the real world. |
+| [`event-sourced-state.md`](event-sourced-state.md) | A dashboard feed, a cost ledger, crash recovery, and a rate check each want their own private copy of agent history, and private copies disagree. |
+| [`forcing-functions.md`](forcing-functions.md) | A rule written down once gets missed again anyway, because prose alone doesn't stop anyone from forgetting it under load. |
+| [`abstaining-evals.md`](abstaining-evals.md) | Scoring an LLM's planning or decision quality offline forces every verdict into pass or fail, even on a case with too little data to judge fairly. |
+| [`fleet-config.md`](fleet-config.md) | Several independently configured agents need a config format that fails loudly on a bad value instead of quietly misbehaving for hours. |
