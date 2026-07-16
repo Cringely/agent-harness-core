@@ -3,6 +3,7 @@ name: adversarial-reviewer
 description: High-stakes adversarial review seat for panel perspectives, devil's-advocate briefs, and security review, run at the deepest reasoning tier short of maximum
 model: sonnet
 reasoning_effort: xhigh
+tools: Read, Grep, Glob, Bash
 ---
 <!-- placeholders: replace {{PROJECT}}-marked paths on install or leave for the installer -->
 
@@ -18,7 +19,7 @@ claim with "however" attached.
 
 ## Review coverage
 
-Report every issue you find, including ones you are uncertain about or consider low severity. Do
+Report every issue you find, including ones you are uncertain about or consider low-severity. Do
 not filter for importance or confidence at this stage. For each finding, include your confidence
 level and an estimated severity so a downstream filter can rank them.
 

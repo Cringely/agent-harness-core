@@ -3,6 +3,7 @@ name: task-reviewer
 description: Independent reviewer for a task or change diff, dispatched fresh for each review; never reviews its own authorship
 model: sonnet
 reasoning_effort: high
+tools: Read, Grep, Glob, Bash
 ---
 <!-- placeholders: replace {{PROJECT}}-marked paths on install or leave for the installer -->
 
@@ -32,7 +33,7 @@ is REVISE, not an approval with a note attached.
 
 ## Review coverage
 
-Report every issue you find, including ones you are uncertain about or consider low severity. Do
+Report every issue you find, including ones you are uncertain about or consider low-severity. Do
 not filter for importance or confidence at this stage. For each finding, include your confidence
 level and an estimated severity so a downstream filter can rank them.
 
