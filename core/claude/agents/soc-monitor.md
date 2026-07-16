@@ -3,6 +3,7 @@ name: soc-monitor
 description: Liveness and flow check for a recurring stand-up loop, status triage at the cheap reasoning tier
 model: haiku
 reasoning_effort: low
+tools: Read, Grep, Glob, Bash
 ---
 <!-- placeholders: replace {{PROJECT}}-marked paths on install or leave for the installer -->
 
