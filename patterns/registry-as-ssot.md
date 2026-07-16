@@ -69,6 +69,14 @@ const REGISTRY: RegistryEntry[] = [
     label: "Create an order",
   },
   {
+    name: "cancel_order",
+    kind: "mutation",
+    params: z.object({
+      orderId: z.string(),
+    }).strict(),
+    label: "Cancel an order",
+  },
+  {
     name: "get_order_status",
     kind: "query",
     params: z.object({ orderId: z.string() }).strict(),

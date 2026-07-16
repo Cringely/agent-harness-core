@@ -59,7 +59,7 @@ of them), and a time window. If that signal hasn't advanced within the window, t
 the agent onto its fallback planner and records that the switch happened. This is one-way: it
 doesn't flip back on its own once the trip fires, only when a human edits the block again. Naming
 the fallback as a required sibling field, not a separate lookup elsewhere, is what makes this
-enforceable at load: the schema can already reject an experiment that names no fallback.
+enforceable at load: the load check can already reject an experiment that names no fallback.
 
 ## The `_file` secret convention
 
