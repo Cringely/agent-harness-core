@@ -30,7 +30,10 @@ portable, and reviewable alongside the code it governs.
 ## Example rules
 
 These four rows are worked examples, not a starter set to keep verbatim. Replace them with the
-project's own recurring misses; delete any that don't apply.
+project's own recurring misses; delete any that don't apply. A rule whose Mechanism column names
+JIT re-injection must have its one-line statement placed above the
+`guardrails:session-start-end` marker; the session-start hook only prints what comes before that
+marker, so a JIT rule left below it never gets printed.
 
 | Rule | Statement | Mechanism | Tier |
 |---|---|---|---|

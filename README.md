@@ -26,9 +26,18 @@ Skills already global in `~/.claude` (prose review, prose linting, council revie
 
 ## Install
 
+Prerequisites: PowerShell 7 (`pwsh`); `bun` on PATH for the worktree gate hook (`agent-worktree-gate.ts`)
+without it the gate silently no-ops; Git Bash or another POSIX `sh` on Windows for the two shell hooks
+(`session-start-guardrails.sh`, `wave-close-handoff.sh`).
+
 ```
 pwsh install/Install-Harness.ps1 -Target <project-root>
 ```
+
+`-IncludeCeremonies` also installs the ceremony components (the `soc-monitor` agent, the
+`wave-close-handoff` hook, and the ceremony ledger), opt-in because they assume a project already
+runs standup/wave ceremonies. `-Force` overwrites files the project has modified since install; the
+default is to skip a modified file and warn, tracked via a SHA256 manifest of what was installed.
 
 ## Source
 
