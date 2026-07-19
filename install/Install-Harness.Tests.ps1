@@ -72,4 +72,58 @@ Describe "Install-Harness" {
         }
         $ceremonyCommands | Where-Object { $_ -match "wave-close-handoff\.sh" } | Should -Not -BeNullOrEmpty
     }
+
+    It "audit reports in-sync after a clean install and writes nothing" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $manifestBefore = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw
+        $settingsBefore = Get-Content "$script:target/.claude/settings.json" -Raw
+        $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String
+        $out | Should -Match "in-sync"
+        # File statuses only — the trailing guidance line legitimately names every status.
+        $out | Should -Not -Match "\.(md|ts|sh)\s+(project-modified|core-updated|conflict|missing)"
+        (Get-Content "$script:target/.claude/.harness-manifest.json" -Raw) | Should -Be $manifestBefore
+        (Get-Content "$script:target/.claude/settings.json" -Raw) | Should -Be $settingsBefore
+    }
+
+    It "audit classifies a project-modified file" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        "PROJECT EDIT" | Add-Content "$script:target/.claude/agents/task-reviewer.md"
+        $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String
+        $out | Should -Match "agents/task-reviewer\.md\s+project-modified"
+    }
+
+    It "audit classifies core-updated when core moved on but the project did not" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        # Simulate "core changed since install": rewrite the installed file AND its
+        # recorded manifest hash to agree with each other but not with core source.
+        $dst = "$script:target/.claude/agents/task-reviewer.md"
+        "OLD CORE VERSION" | Set-Content $dst
+        $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+        $m['agents/task-reviewer.md'] = (Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash
+        $m | ConvertTo-Json -Depth 5 | Set-Content "$script:target/.claude/.harness-manifest.json"
+        $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String
+        $out | Should -Match "agents/task-reviewer\.md\s+core-updated"
+    }
+
+    It "audit classifies missing and orphaned manifest entries" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        Remove-Item "$script:target/.claude/agents/task-reviewer.md"
+        $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+        $m['agents/retired-agent.md'] = 'DEADBEEF'
+        $m | ConvertTo-Json -Depth 5 | Set-Content "$script:target/.claude/.harness-manifest.json"
+        $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String
+        $out | Should -Match "agents/task-reviewer\.md\s+missing"
+        $out | Should -Match "agents/retired-agent\.md\s+orphaned"
+    }
+
+    It "audit handles a hand-built .claude with no manifest as untracked" {
+        New-Item -ItemType Directory -Path "$script:target/.claude/agents" -Force | Out-Null
+        Copy-Item "$PSScriptRoot/../core/claude/agents/task-reviewer.md" "$script:target/.claude/agents/"
+        $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String
+        $out | Should -Match "never installed here"
+        $out | Should -Match "agents/task-reviewer\.md\s+untracked \(matches core\)"
+        $out | Should -Match "not-installed"
+        Test-Path "$script:target/.claude/.harness-manifest.json" | Should -BeFalse
+        Test-Path "$script:target/.claude/settings.json" | Should -BeFalse
+    }
 }
