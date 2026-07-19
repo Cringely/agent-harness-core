@@ -12,10 +12,10 @@ The rule that keeps these from drifting into a mess: core is upstream. Projects 
 
 | Path | Contents |
 |---|---|
-| `core/claude/agents/` | Four charter-backed agent roles |
-| `core/claude/hooks/` | Worktree gate, session guardrails, wave-close handoff |
-| `core/claude/templates/` | `guardrails.md`, a settings fragment, and a ceremony ledger template |
-| `patterns/` | Seven docs explaining the design behind the above |
+| `core/claude/agents/` | Four charter-backed agent roles plus two self-contained specialists (`security-auditor`, `docker-expert`) |
+| `core/claude/hooks/` | Worktree gate, session guardrails, wave-close handoff, prose-lint-on-write |
+| `core/claude/templates/` | `guardrails.template.md`, a settings fragment, and a ceremony ledger template |
+| `patterns/` | Eight docs explaining the design behind the above |
 | `install/` | The installer that copies core into a project's `.claude/` |
 
 ## What's deliberately absent
@@ -26,9 +26,11 @@ Skills already global in `~/.claude` (prose review, prose linting, council revie
 
 ## Install
 
-Prerequisites: PowerShell 7 (`pwsh`); `bun` on PATH for the worktree gate hook (`agent-worktree-gate.ts`)
-without it the gate silently no-ops; Git Bash or another POSIX `sh` on Windows for the two shell hooks
-(`session-start-guardrails.sh`, `wave-close-handoff.sh`).
+Prerequisites: PowerShell 7 (`pwsh`); `bun` on PATH for the TypeScript hooks (`agent-worktree-gate.ts`,
+`lint-doc-prose.ts`) without it they silently no-op; Git Bash or another POSIX `sh` on Windows for the
+two shell hooks (`session-start-guardrails.sh`, `wave-close-handoff.sh`). The prose-lint hook also
+wants `vale` and the prose-lint styles kit on the machine; missing either degrades to an advisory
+skip, never a blocked write.
 
 ```
 pwsh install/Install-Harness.ps1 -Target <project-root>

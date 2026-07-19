@@ -12,3 +12,4 @@ independent of any one codebase or language.
 | [`forcing-functions.md`](forcing-functions.md) | A rule written down once gets missed again anyway, because prose alone doesn't stop anyone from forgetting it under load. |
 | [`abstaining-evals.md`](abstaining-evals.md) | Scoring an LLM's planning or decision quality offline forces every verdict into pass or fail, even on a case with too little data to judge fairly. |
 | [`fleet-config.md`](fleet-config.md) | Several independently configured agents need a config format that fails loudly on a bad value instead of quietly misbehaving for hours. |
+| [`agent-def-shape.md`](agent-def-shape.md) | An agent definition can inline its full role prompt or point at a versioned charter file, and picking the wrong shape either buries process changes in full-file rewrites or adds indirection to a file that never changes. |

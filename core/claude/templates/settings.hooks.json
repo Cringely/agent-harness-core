@@ -30,6 +30,15 @@
             "command": "sh \"$CLAUDE_PROJECT_DIR/.claude/hooks/wave-close-handoff.sh\""
           }
         ]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun \"$CLAUDE_PROJECT_DIR/.claude/hooks/lint-doc-prose.ts\""
+          }
+        ]
       }
     ]
   }
