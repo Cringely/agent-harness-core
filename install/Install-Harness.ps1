@@ -22,6 +22,18 @@
 
 .PARAMETER IncludeCeremonies
     Also install the ceremony-gated agent, hook, ledger, and hook registration.
+
+.PARAMETER Audit
+    Report-only drift check; writes nothing. Three-way compare (core source vs
+    manifest hash vs installed file) classifies every managed file:
+      in-sync           installed file matches current core
+      core-updated      core changed since install, project didn't — re-run installer
+      project-modified  project changed it, core didn't — promotion candidate for core
+      conflict          both sides changed — reconcile by hand
+      missing           in manifest but deleted from the project
+      not-installed     new in core since last install
+      untracked         present in .claude but never installed via manifest
+      orphaned          in manifest but no longer shipped by core
 #>
 [CmdletBinding()]
 param(
@@ -30,7 +42,9 @@ param(
 
     [switch]$Force,
 
-    [switch]$IncludeCeremonies
+    [switch]$IncludeCeremonies,
+
+    [switch]$Audit
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,9 +63,11 @@ $claudeDir = Join-Path $Target '.claude'
 $agentsDst = Join-Path $claudeDir 'agents'
 $hooksDst = Join-Path $claudeDir 'hooks'
 
-foreach ($dir in @($claudeDir, $agentsDst, $hooksDst)) {
-    if (-not (Test-Path -LiteralPath $dir)) {
-        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+if (-not $Audit) {
+    foreach ($dir in @($claudeDir, $agentsDst, $hooksDst)) {
+        if (-not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
     }
 }
 
@@ -77,6 +93,75 @@ if (Test-Path -LiteralPath $manifestPath) {
 }
 
 $results = New-Object System.Collections.Generic.List[pscustomobject]
+
+if ($Audit) {
+    # Map of every file core ships (ceremony files included — if a project installed
+    # them, they should be audited regardless of which switches this run got).
+    $coreFiles = [ordered]@{}
+    Get-ChildItem -LiteralPath $agentsSrc -Filter '*.md' -File | ForEach-Object {
+        $coreFiles["agents/$($_.Name)"] = $_.FullName
+    }
+    Get-ChildItem -LiteralPath $hooksSrc -File | Where-Object { $_.Name -ne '.gitkeep' } | ForEach-Object {
+        $coreFiles["hooks/$($_.Name)"] = $_.FullName
+    }
+    $coreFiles['guardrails.md'] = Join-Path $templatesSrc 'guardrails.template.md'
+
+    if (-not (Test-Path -LiteralPath $manifestPath)) {
+        Write-Host "No .harness-manifest.json in $claudeDir — harness was never installed here via the installer."
+        Write-Host "Files below compare the project's .claude directly against core:"
+    }
+
+    $allKeys = @($coreFiles.Keys) + @($manifest.Keys | Where-Object { $coreFiles.Keys -notcontains $_ }) | Select-Object -Unique
+    foreach ($key in $allKeys) {
+        # Live-state files are expected to diverge; hash comparison is meaningless.
+        if ($key -eq 'ceremony-ledger.json') {
+            $results.Add([pscustomobject]@{ File = $key; Status = 'stateful (not audited)' })
+            continue
+        }
+
+        $srcPath = $coreFiles[$key]
+        $dstPath = Join-Path $claudeDir $key
+        $inManifest = $manifest.Contains($key)
+        $dstExists = Test-Path -LiteralPath $dstPath -PathType Leaf
+
+        if (-not $srcPath) {
+            $results.Add([pscustomobject]@{ File = $key; Status = 'orphaned' })
+            continue
+        }
+
+        $srcHash = Get-FileHashHex -Path $srcPath
+        if (-not $dstExists) {
+            $status = if ($inManifest) { 'missing' } else { 'not-installed' }
+            $results.Add([pscustomobject]@{ File = $key; Status = $status })
+            continue
+        }
+
+        $dstHash = Get-FileHashHex -Path $dstPath
+        if (-not $inManifest) {
+            $status = if ($dstHash -eq $srcHash) { 'untracked (matches core)' } else { 'untracked (differs from core)' }
+            $results.Add([pscustomobject]@{ File = $key; Status = $status })
+            continue
+        }
+
+        $recHash = $manifest[$key]
+        $status = if ($dstHash -eq $srcHash) { 'in-sync' }
+        elseif ($dstHash -eq $recHash) { 'core-updated' }
+        elseif ($srcHash -eq $recHash) { 'project-modified' }
+        else { 'conflict' }
+        $results.Add([pscustomobject]@{ File = $key; Status = $status })
+    }
+
+    $results | Format-Table -AutoSize | Out-String | Write-Host
+
+    $attention = @($results | Where-Object { $_.Status -notin @('in-sync', 'stateful (not audited)') })
+    if ($attention.Count -eq 0) {
+        Write-Host 'All managed files in sync with core.'
+    }
+    else {
+        Write-Host "$($attention.Count) file(s) need attention. project-modified/untracked-differs = candidates to promote into core; core-updated/not-installed = re-run installer to pull down."
+    }
+    return
+}
 
 function Install-ManagedFile {
     param(

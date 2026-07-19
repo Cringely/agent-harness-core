@@ -39,6 +39,13 @@ pwsh install/Install-Harness.ps1 -Target <project-root>
 runs standup/wave ceremonies. `-Force` overwrites files the project has modified since install; the
 default is to skip a modified file and warn, tracked via a SHA256 manifest of what was installed.
 
+`-Audit` writes nothing and reports drift in both directions, using a three-way compare of core
+source, the manifest hash, and the installed file: `project-modified` and `untracked (differs from
+core)` files are candidates to promote upstream, `core-updated` and `not-installed` mean the project
+should re-run the installer. This is the mechanical half of the findings flow in CONTRIBUTING.md;
+run it periodically per project (SpaceMolt wires it into a `core_harvest` ceremony, see that
+project's `docs/wiki/team-ceremonies.md`).
+
 ## Source
 
 This repo was extracted from `E:\projects\spacemolt`. For the original design writeup, see that project's `docs/wiki/anatomy-of-the-harness.md`.
