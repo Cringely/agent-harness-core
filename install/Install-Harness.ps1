@@ -182,6 +182,15 @@ function Install-ManagedFile {
     $currentHash = Get-FileHashHex -Path $DestPath
     $recordedHash = $script:manifest[$ManifestKey]
 
+    # Hand-built layer predating the manifest: a file already identical to core is
+    # adopted into tracking instead of warned about, so planting a baseline on an
+    # existing .claude never requires -Force for files that match.
+    if (-not $recordedHash -and $currentHash -eq $sourceHash) {
+        $script:manifest[$ManifestKey] = $sourceHash
+        $script:results.Add([pscustomobject]@{ File = $ManifestKey; Action = 'adopted' })
+        return
+    }
+
     if ($recordedHash -and $currentHash -eq $recordedHash) {
         if ($currentHash -ne $sourceHash) {
             Copy-Item -LiteralPath $SourcePath -Destination $DestPath -Force

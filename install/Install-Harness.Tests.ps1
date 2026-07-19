@@ -116,6 +116,16 @@ Describe "Install-Harness" {
         $out | Should -Match "agents/retired-agent\.md\s+orphaned"
     }
 
+    It "adopts a hand-built file identical to core into the manifest without -Force" {
+        New-Item -ItemType Directory -Path "$script:target/.claude/agents" -Force | Out-Null
+        Copy-Item "$PSScriptRoot/../core/claude/agents/task-reviewer.md" "$script:target/.claude/agents/"
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+        $m['agents/task-reviewer.md'] | Should -Not -BeNullOrEmpty
+        $src = (Get-FileHash "$PSScriptRoot/../core/claude/agents/task-reviewer.md" -Algorithm SHA256).Hash
+        $m['agents/task-reviewer.md'] | Should -Be $src
+    }
+
     It "audit handles a hand-built .claude with no manifest as untracked" {
         New-Item -ItemType Directory -Path "$script:target/.claude/agents" -Force | Out-Null
         Copy-Item "$PSScriptRoot/../core/claude/agents/task-reviewer.md" "$script:target/.claude/agents/"
