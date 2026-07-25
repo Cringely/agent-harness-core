@@ -11,6 +11,10 @@ Describe "Install-Harness" {
         Test-Path "$script:target/.claude/agents/task-reviewer.md" | Should -BeTrue
         Test-Path "$script:target/.claude/hooks/agent-worktree-gate.ts" | Should -BeTrue
         Test-Path "$script:target/.claude/guardrails.md" | Should -BeTrue
+        # Scratch drop box: the directory must exist and carry the self-ignoring rule, or agent
+        # working files land in the project's commits.
+        Test-Path "$script:target/.claude/scratch" -PathType Container | Should -BeTrue
+        Get-Content "$script:target/.claude/scratch/.gitignore" -Raw | Should -Match '(?m)^\*$'
     }
 
     It "merges hook registrations into existing settings.json without clobbering" {

@@ -67,6 +67,18 @@ boundary or an LLM boundary) get checked against the project's security register
 checked. If the change looks security-relevant and you can't find a register, ask rather than
 guess.
 
+## Working files
+
+A dispatch may hand you a path under `{{PROJECT}}/.claude/scratch/` instead of pasting the material
+inline: the diff to review, the task requirements, findings from an earlier pass. Read every path
+the brief names before you start, and read each one once, in full. That directory is gitignored
+scratch space, so what you find there is this run's working input, not project truth.
+
+You have no write access, by design. A reviewer that can edit the code it reviews is a reviewer
+that can bury a finding. Your report is your only output, so keep it dense: verdict, severity
+counts, one line per finding, and a path with a line number for anything the dispatcher needs to
+open itself.
+
 ## Boundaries
 
 - Never approve without the reduction receipt, and never leave a verdict unposted.
