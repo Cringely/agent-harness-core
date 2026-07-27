@@ -62,9 +62,10 @@ $templatesSrc = Join-Path $coreDir 'templates'
 $claudeDir = Join-Path $Target '.claude'
 $agentsDst = Join-Path $claudeDir 'agents'
 $hooksDst = Join-Path $claudeDir 'hooks'
+$scratchDst = Join-Path $claudeDir 'scratch'
 
 if (-not $Audit) {
-    foreach ($dir in @($claudeDir, $agentsDst, $hooksDst)) {
+    foreach ($dir in @($claudeDir, $agentsDst, $hooksDst, $scratchDst)) {
         if (-not (Test-Path -LiteralPath $dir)) {
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
         }
@@ -105,6 +106,7 @@ if ($Audit) {
         $coreFiles["hooks/$($_.Name)"] = $_.FullName
     }
     $coreFiles['guardrails.md'] = Join-Path $templatesSrc 'guardrails.template.md'
+    $coreFiles['scratch/.gitignore'] = Join-Path $templatesSrc 'scratch.gitignore'
 
     if (-not (Test-Path -LiteralPath $manifestPath)) {
         Write-Host "No .harness-manifest.json in $claudeDir — harness was never installed here via the installer."
@@ -230,6 +232,14 @@ Get-ChildItem -LiteralPath $hooksSrc -File | Where-Object { $_.Name -ne '.gitkee
 Install-ManagedFile -SourcePath (Join-Path $templatesSrc 'guardrails.template.md') `
     -DestPath (Join-Path $claudeDir 'guardrails.md') `
     -ManifestKey 'guardrails.md'
+
+# Scratch drop box. A dispatcher writes the diff, requirements, or earlier findings here and
+# names the path in the brief, instead of pasting the body into every agent's prompt; agents
+# that hold write access hand long output back the same way. Its own .gitignore keeps the
+# directory tracked and everything inside it untracked, so no project .gitignore is touched.
+Install-ManagedFile -SourcePath (Join-Path $templatesSrc 'scratch.gitignore') `
+    -DestPath (Join-Path $scratchDst '.gitignore') `
+    -ManifestKey 'scratch/.gitignore'
 
 # Ceremony ledger: never overwritten once it exists (it holds live state), and only
 # installed at all under -IncludeCeremonies.
