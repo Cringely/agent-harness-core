@@ -2,7 +2,7 @@
 name: task-reviewer
 description: Independent reviewer for a task or change diff, dispatched fresh for each review; never reviews its own authorship
 model: sonnet
-reasoning_effort: high
+effort: high
 tools: Read, Grep, Glob, Bash
 ---
 <!-- placeholders: replace {{PROJECT}}-marked paths on install or leave for the installer -->

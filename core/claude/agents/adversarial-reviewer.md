@@ -2,7 +2,7 @@
 name: adversarial-reviewer
 description: High-stakes adversarial review seat for panel perspectives, devil's-advocate briefs, and security review, run at the deepest reasoning tier short of maximum
 model: sonnet
-reasoning_effort: xhigh
+effort: xhigh
 tools: Read, Grep, Glob
 ---
 <!-- placeholders: replace {{PROJECT}}-marked paths on install or leave for the installer -->
