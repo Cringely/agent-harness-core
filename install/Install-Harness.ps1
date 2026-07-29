@@ -228,6 +228,17 @@ Get-ChildItem -LiteralPath $hooksSrc -File | Where-Object { $_.Name -ne '.gitkee
     Install-ManagedFile -SourcePath $_.FullName -DestPath (Join-Path $hooksDst $_.Name) -ManifestKey "hooks/$($_.Name)"
 }
 
+# Copy-Item doesn't carry the source executable bit, and a git pre-commit hook
+# git won't invoke without one on a platform that has the concept at all.
+# Windows has none, so this is a no-op there — Git for Windows runs the hook
+# by its shebang regardless of the (meaningless) NTFS permission bits.
+if (-not $IsWindows) {
+    $preCommitDst = Join-Path $hooksDst 'pre-commit'
+    if (Test-Path -LiteralPath $preCommitDst) {
+        & chmod +x $preCommitDst
+    }
+}
+
 # Guardrails
 Install-ManagedFile -SourcePath (Join-Path $templatesSrc 'guardrails.template.md') `
     -DestPath (Join-Path $claudeDir 'guardrails.md') `
@@ -325,5 +336,63 @@ foreach ($eventType in $hooksTemplate.PSObject.Properties.Name) {
 
 $settings | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $settingsPath
 $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
+
+# Git hooksPath wiring. The Claude Code PostToolUse hooks above only see this
+# session's direct Write/Edit tool calls — a script-applied OLD/NEW patch
+# over Bash, or a hand-edit outside Claude Code entirely, never fires them.
+# core.hooksPath makes .claude/hooks/pre-commit run on every commit no matter
+# how the file got edited. Guarded, because core.hooksPath REPLACES the whole
+# hooks directory for the repo: a project with its own .git/hooks/pre-push
+# would silently stop running it. Only wired when nothing is there to lose.
+$gitDirRaw = $null
+$gitCheck = & git -C $Target rev-parse --git-dir 2>$null
+if ($LASTEXITCODE -eq 0) { $gitDirRaw = $gitCheck }
+
+if (-not $gitDirRaw) {
+    # Not a git repository (or git missing from PATH) — nothing to wire.
+}
+else {
+    $gitDir = if ([System.IO.Path]::IsPathRooted($gitDirRaw)) { $gitDirRaw } else { Join-Path $Target $gitDirRaw }
+    $gitDir = (Resolve-Path -LiteralPath $gitDir).Path
+    $gitHooksDir = Join-Path $gitDir 'hooks'
+
+    $currentHooksPath = $null
+    $chpCheck = & git -C $Target config --get core.hooksPath 2>$null
+    if ($LASTEXITCODE -eq 0) { $currentHooksPath = $chpCheck }
+
+    # Absolute so the value is correct regardless of which subdirectory a
+    # later `git commit` runs from.
+    $hooksDstAbs = (Resolve-Path -LiteralPath $hooksDst).Path
+
+    $alreadyWired = $false
+    if ($currentHooksPath) {
+        $currentResolved = if ([System.IO.Path]::IsPathRooted($currentHooksPath)) { $currentHooksPath } else { Join-Path $Target $currentHooksPath }
+        if (Test-Path -LiteralPath $currentResolved) {
+            $alreadyWired = (Resolve-Path -LiteralPath $currentResolved).Path -ieq $hooksDstAbs
+        }
+    }
+
+    $existingHookFiles = @()
+    if (Test-Path -LiteralPath $gitHooksDir) {
+        $existingHookFiles = @(Get-ChildItem -LiteralPath $gitHooksDir -File | Where-Object { $_.Extension -ne '.sample' })
+    }
+
+    if ($alreadyWired) {
+        $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'unchanged' })
+    }
+    elseif ($currentHooksPath) {
+        Write-Host "Skipping git hooksPath wiring: core.hooksPath is already set to '$currentHooksPath'. To use the harness pre-commit hook instead, run: git -C `"$Target`" config core.hooksPath `"$hooksDstAbs`""
+        $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'skipped-already-set' })
+    }
+    elseif ($existingHookFiles.Count -gt 0) {
+        $names = ($existingHookFiles | Select-Object -ExpandProperty Name) -join ', '
+        Write-Host "Skipping git hooksPath wiring: $gitHooksDir already has hook(s) ($names) that core.hooksPath would replace. To wire the harness pre-commit hook anyway, run: git -C `"$Target`" config core.hooksPath `"$hooksDstAbs`""
+        $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'skipped-existing-hooks' })
+    }
+    else {
+        & git -C $Target config core.hooksPath $hooksDstAbs
+        $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = "set to $hooksDstAbs" })
+    }
+}
 
 $results | Format-Table -AutoSize | Out-String | Write-Host
