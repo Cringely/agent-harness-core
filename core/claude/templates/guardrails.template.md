@@ -49,6 +49,21 @@ A false positive gets muted, and a muted hook protects nothing. Before adding a 
 whether a cheaper tier already covers the rule, and write down what was considered and rejected.
 Future maintainers need that reasoning as much as the rule itself.
 
+## `core.hooksPath` and other hook managers
+
+The installer points git's `core.hooksPath` at `.claude/hooks` so `pre-commit` (the prose-lint
+gate) fires on every commit, however the file got edited — script-applied patch, agent write, or
+hand-edit alike. Git reads hooks from exactly one directory per repo, so if this project later
+adopts husky or the `pre-commit` framework, both of which also want `core.hooksPath`, whichever
+tool sets it last wins and the other's hooks stop firing silently. That is inherent to how git
+resolves hooks, not a defect in the installer's wiring: the installer only checks for existing
+hooks *at install time*, so it has no way to see a hooksPath claimed by a tool adopted afterward.
+
+If hooks stop firing after adding husky or pre-commit-framework, check `git config
+core.hooksPath` first. Resolution is manual: pick which tool owns the directory, then either
+have its config call the other's script directly, or symlink/copy `.claude/hooks/pre-commit`
+into the winning tool's hook chain.
+
 ## Project-specific rules
 
 <!-- Add this project's own recurring misses below, one row per rule, same table shape as above.
