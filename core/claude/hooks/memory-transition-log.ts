@@ -1,16 +1,24 @@
-// UNWIRED BY DESIGN. This hook is not referenced by settings.hooks.json or any
-// project's settings.json. It ships so an operator can opt in deliberately.
-// To enable, add this block under "PostToolUse" in .claude/settings.json:
+// OPT-IN. Not referenced by settings.hooks.json or any project's
+// settings.json; an operator wires it deliberately. Wire it at USER level
+// (~/.claude/settings.json), not per project: memory writes come from whatever
+// project is open, so a per-project registration counts only that project's
+// share and leaves the rest unrecorded. Counters go to one file under the home
+// directory either way (see STATE_PATH), so the only thing project-level
+// registration changes is how much gets missed.
 //
 //   {
 //     "matcher": "Write|Edit",
 //     "hooks": [
 //       {
 //         "type": "command",
-//         "command": "bun \"$CLAUDE_PROJECT_DIR/.claude/hooks/memory-transition-log.ts\""
+//         "command": "bun \"C:\\\\Users\\\\<you>\\\\.claude\\\\hooks\\\\memory-transition-log.ts\"",
+//         "timeout": 5
 //       }
 //     ]
 //   }
+//
+// No "shell" key: the command invokes bun directly and needs no call operator,
+// unlike the PowerShell hooks alongside it that open with "&".
 //
 // PostToolUse hook (matcher: Write|Edit) — memory-note transition counter.
 //
@@ -53,13 +61,21 @@
 // `bun test` can exercise them with no spawn and no filesystem.
 
 import { existsSync, mkdirSync, appendFileSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { isAbsolute, join, resolve, dirname } from "node:path";
+import { homedir } from "node:os";
 
 /** Directory name that puts a path in scope. Matches on any path segment. */
 const MEMORY_SEGMENT = "memory";
 
-/** Where counters are appended, relative to the project root. */
-const STATE_REL_PATH = join(".claude", "state", "memory-transitions.jsonl");
+/**
+ * Counters go to one file under the home directory, never under the project
+ * root. Memory writes originate from whatever project happens to be open, so a
+ * project-relative counter shards the count across every project the operator
+ * touches, and an empty file then reads as "nothing happened" when the real
+ * answer is "it was recorded somewhere else". One file, absolute note paths in
+ * each line, no glob needed to read it.
+ */
+const STATE_PATH = join(homedir(), ".claude", "state", "memory-transitions.jsonl");
 
 export type Transition =
   | { kind: "status-changed"; old: string; new: string }
@@ -132,13 +148,11 @@ if (import.meta.main) {
     const transitions = detectTransitions(oldText, newText);
     if (transitions.length === 0) process.exit(0);
 
-    const projectDir = process.env.CLAUDE_PROJECT_DIR ?? cwd;
     const abs = isAbsolute(filePath) ? resolve(filePath) : resolve(cwd, filePath);
-    const notePath = relative(projectDir, abs).replace(/\\/g, "/");
-    const statePath = join(projectDir, STATE_REL_PATH);
+    const notePath = abs.replace(/\\/g, "/");
     const ts = new Date().toISOString();
 
-    if (!existsSync(dirname(statePath))) mkdirSync(dirname(statePath), { recursive: true });
+    if (!existsSync(dirname(STATE_PATH))) mkdirSync(dirname(STATE_PATH), { recursive: true });
 
     const lines = transitions
       .map((t) =>
@@ -153,7 +167,7 @@ if (import.meta.main) {
         }),
       )
       .join("\n");
-    appendFileSync(statePath, lines + "\n", "utf8");
+    appendFileSync(STATE_PATH, lines + "\n", "utf8");
   } catch (err) {
     // Fail open: log nothing to the counters file, print nothing to stdout,
     // one stderr line for the transcript, exit 0. A broken counter must never
