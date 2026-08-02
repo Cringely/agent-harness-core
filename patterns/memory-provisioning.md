@@ -18,7 +18,10 @@ Put a pointer to the memory index in the dispatched agent's brief. Not a retriev
 embedding index, not a second memory system. One paragraph naming where the index lives and telling
 the agent to read it before answering anything that turns on a past decision.
 
-Three details carry most of the value, and each was learned by measuring it:
+Three details are believed to carry most of the value. Their evidence is not equal, and the difference
+matters more than the detail does. Only the third was measured as a clause, in a run built to test it.
+The first two come from single observations inside a run that was measuring something else, which makes
+them plausible mechanisms rather than measured ones:
 
 **Name the scope explicitly.** Notes routinely live under a different project directory than the one
 the agent is working in. An agent that searches the wrong scope reports that no record exists, which
@@ -56,6 +59,13 @@ A third run tested a paragraph stating that accepted decisions are binding, and 
 probe found that rule already loaded in every subagent's context and already being followed. The
 distinction is worth keeping. A brief line that closes a gap the agent actually has changes
 behaviour; a brief line restating a rule the agent already follows is decoration.
+
+What has never been run is the composite. The text committed into the agent definitions is the measured
+pointer plus the scope clause, the staleness clause, and the revisit paragraph, and no run has compared
+that assembly against the pointer alone. Two of the three additions rest on a mechanism argument rather
+than a measurement, so the honest reading is that the pointer produced the measured gain and the clauses
+around it are untested additions. A three-arm run comparing no section, pointer only, and the full committed text
+would settle it.
 
 ## When not to use it
 
