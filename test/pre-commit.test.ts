@@ -14,9 +14,9 @@
 // wording) runs against the real binary and is skipped without it.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 
 const HOOK_SRC = join(import.meta.dir, "..", "core", "claude", "hooks", "pre-commit");
 const valePath = Bun.which("vale");
@@ -109,12 +109,54 @@ function pathWithoutVale(): string {
     .join(sep);
 }
 
+/**
+ * A POSIX sh to run the hook with. Bare "sh" is right on Unix and on Git Bash,
+ * but a PowerShell or cmd session on Windows has no sh on PATH, and the whole
+ * suite then fails 10 tests for a reason that has nothing to do with the hook.
+ * Git ships one, so fall back to it, located from `git --exec-path` rather than
+ * a hardcoded Program Files path so it survives a non-default install.
+ */
+let cachedSh: string | undefined;
+/**
+ * Directory holding the fallback sh, or undefined when sh came from PATH. The
+ * hook itself calls grep, sed and friends, and on Windows those live beside the
+ * bundled sh rather than on PATH, so the child needs this appended or the hook
+ * runs but its own subprocesses do not.
+ */
+let cachedShDir: string | undefined;
+
+function posixSh(): string {
+  if (cachedSh) return cachedSh;
+  try {
+    // Bun signals a missing binary by throwing on some platforms and by
+    // returning success:false on others, so check both.
+    const probe = Bun.spawnSync(["sh", "-c", "exit 0"], { stdout: "ignore", stderr: "ignore" });
+    if (probe.success) return (cachedSh = "sh");
+  } catch {
+    // not on PATH; fall through to git's copy
+  }
+  const out = Bun.spawnSync(["git", "--exec-path"], { stdout: "pipe", stderr: "pipe" });
+  const execPath = new TextDecoder().decode(out.stdout).trim();
+  const root = execPath.replace(/[\\/](?:mingw\d*|usr|clang\d*)[\\/]libexec[\\/]git-core[\\/]?$/i, "");
+  const candidate = join(root, "usr", "bin", "sh.exe");
+  if (existsSync(candidate)) {
+    cachedShDir = dirname(candidate);
+    return (cachedSh = candidate);
+  }
+  throw new Error(`no POSIX sh found: not on PATH, and no sh.exe at ${candidate} (git --exec-path was "${execPath}")`);
+}
+
 function runHook(dir: string, env: Record<string, string | undefined> = process.env) {
   // sh, not bash: the hook is written against POSIX sh and must not lean on
   // bash-only features.
-  return Bun.spawnSync(["sh", join(dir, ".claude", "hooks", "pre-commit")], {
+  const sh = posixSh();
+  // Appended, never prepended: tests that put a stub binary first must keep winning.
+  const childEnv = cachedShDir
+    ? { ...env, PATH: `${env.PATH ?? process.env.PATH ?? ""}${delimiter}${cachedShDir}` }
+    : env;
+  return Bun.spawnSync([sh, join(dir, ".claude", "hooks", "pre-commit")], {
     cwd: dir,
-    env,
+    env: childEnv,
     stdout: "pipe",
     stderr: "pipe",
   });
