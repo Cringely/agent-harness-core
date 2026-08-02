@@ -23,19 +23,28 @@ matters more than the detail does. Only the third was measured as a clause, in a
 The first two come from single observations inside a run that was measuring something else, which makes
 them plausible mechanisms rather than measured ones:
 
-**Name the scope explicitly.** Notes routinely live under a different project directory than the one
-the agent is working in. An agent that searches the wrong scope reports that no record exists, which
-is indistinguishable in the output from a record that was never written. Naming both scopes costs six
-words and closes the most common miss.
+**Name the scope explicitly.** Unmeasured, and one attempt to measure it came back null. Notes routinely
+live under a different project directory than the one the agent is working in. An agent that searches
+the wrong scope reports that no record exists, which is indistinguishable in the output from a record
+that was never written. A four-arm run put the deciding note in a third project's directory on two tasks:
+no agent in any arm retrieved it, and the arm carrying this clause searched a narrower set of scopes than
+the arm without it. That is not a refutation, because the clause names the user scope and the current
+project scope while the test hid the note in neither. It does mean the clause has never been shown to
+work, and a mechanism that sounds obviously right is exactly the kind that measures at zero.
 
-**State that notes carry a date and that live evidence outranks them.** Pointing an agent at memory
-makes it trust memory. Without this clause an agent will prefer a stale note to the filesystem in
-front of it, and the cost of that scales with the age of the corpus.
+**State that notes carry a date and that live evidence outranks them.** Unmeasured. Pointing an agent at
+memory makes it trust memory, and without this clause an agent may prefer a stale note to the filesystem
+in front of it. The run built to test it produced no usable task: one of its two stale-note tasks turned
+out to have a current note body and a stale index line, and the other's key omitted the clause an answer
+had to test. And the arm without the clause detected the staleness unaided on both tasks anyway, which
+argues against it carrying weight.
 
-**Reserve revisit authority to the operator.** Decision notes that carry a revisit condition hand the
-agent an override path on every decision. Agents take it: they observe something suggestive, declare
-the trigger satisfied, and proceed as though the decision were reopened. The brief must say that
-reporting an observation and handing the decision back is the whole job.
+**Reserve revisit authority to the operator.** Measured twice, and the only clause here that is. Decision
+notes that carry a revisit condition hand the agent an override path on every decision. Agents take it:
+they observe something suggestive, declare the trigger satisfied, and proceed as though the decision were
+reopened. The brief must say that reporting an observation and handing the decision back is the whole job.
+In the second run the arm carrying this clause returned the decision on both tasks that had a live gate,
+in wording that near-quotes the clause, while both arms without it closed the gate on their own authority.
 
 ## What it costs
 
@@ -60,12 +69,20 @@ probe found that rule already loaded in every subagent's context and already bei
 distinction is worth keeping. A brief line that closes a gap the agent actually has changes
 behaviour; a brief line restating a rule the agent already follows is decoration.
 
-What has never been run is the composite. The text committed into the agent definitions is the measured
-pointer plus the scope clause, the staleness clause, and the revisit paragraph, and no run has compared
-that assembly against the pointer alone. Two of the three additions rest on a mechanism argument rather
-than a measurement, so the honest reading is that the pointer produced the measured gain and the clauses
-around it are untested additions. A three-arm run comparing no section, pointer only, and the full committed text
-would settle it.
+A fourth run compared three arms directly: no section, pointer only, and the full committed text. Across 8
+tasks the arms consulted a note 0 of 8, 4 of 8 and 8 of 8, walked into the documented failure 4 of 8, 3 of 8
+and 0 of 8, and over-deferred in 0 of 24 answers. So the committed text does move behaviour past the pointer
+alone, and it does not buy that with paralysis.
+
+Two things stop this from being a clean win. The outcome measure that matters, whether the advice was
+right, is unusable: a scorer flagged a defect in all 8 answer keys on that axis. And the three clauses were
+not varied independently, so any gap between the pointer and the full text belongs to the bundle unless an
+answer points at one clause, which only the revisit wording did.
+
+Keep the text as written. The case for cutting the two unmeasured clauses rests on one usable task and two
+defective keys, and cutting on that is the same error as the claim this section was written to correct.
+Re-test them on purpose-built tasks instead: cross-scope tasks that hide the note in a scope the clause
+actually names, and stale-note tasks whose note body is stale, not merely its index line.
 
 ## When not to use it
 
