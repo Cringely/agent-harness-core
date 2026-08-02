@@ -1,0 +1,835 @@
+<title>Two Days on the Harness: 31 July to 2 August 2026</title>
+
+<style>
+  :root {
+    --ground: #f3f4f1;
+    --panel: #fbfbf9;
+    --ink: #141c23;
+    --muted: #5c6a73;
+    --faint: #8a959c;
+    --rule: #d9ddd6;
+    --rule-strong: #b9c0b8;
+    --measured: #1a6355;
+    --reversed: #a3402a;
+    --pending: #7a5c12;
+    --deferred: #545e65;
+    --sans: system-ui, "Segoe UI", Roboto, sans-serif;
+    --serif: Georgia, "Iowan Old Style", "Times New Roman", serif;
+    --mono: ui-monospace, "Cascadia Mono", Consolas, "DejaVu Sans Mono", monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #0e1418;
+      --panel: #141c21;
+      --ink: #e3e9e5;
+      --muted: #9aa8ae;
+      --faint: #6e7c83;
+      --rule: #232f36;
+      --rule-strong: #35444c;
+      --measured: #58b7a4;
+      --reversed: #e0805a;
+      --pending: #d1a63f;
+      --deferred: #8b979e;
+    }
+  }
+
+  :root[data-theme="light"] {
+    --ground: #f3f4f1;
+    --panel: #fbfbf9;
+    --ink: #141c23;
+    --muted: #5c6a73;
+    --faint: #8a959c;
+    --rule: #d9ddd6;
+    --rule-strong: #b9c0b8;
+    --measured: #1a6355;
+    --reversed: #a3402a;
+    --pending: #7a5c12;
+    --deferred: #545e65;
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #0e1418;
+    --panel: #141c21;
+    --ink: #e3e9e5;
+    --muted: #9aa8ae;
+    --faint: #6e7c83;
+    --rule: #232f36;
+    --rule-strong: #35444c;
+    --measured: #58b7a4;
+    --reversed: #e0805a;
+    --pending: #d1a63f;
+    --deferred: #8b979e;
+  }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .sheet {
+    max-width: 60rem;
+    margin: 0 auto;
+    padding: 3.5rem 1.5rem 5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 3.25rem;
+  }
+
+  /* ---------- masthead ---------- */
+
+  .masthead { display: flex; flex-direction: column; gap: 1rem; }
+
+  .stamp {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--faint);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.25rem;
+  }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: clamp(2.1rem, 5.5vw, 3.15rem);
+    line-height: 1.08;
+    letter-spacing: -0.015em;
+    text-wrap: balance;
+    margin: 0;
+  }
+
+  .thesis {
+    font-family: var(--serif);
+    font-size: 1.16rem;
+    line-height: 1.55;
+    color: var(--muted);
+    max-width: 44rem;
+    margin: 0;
+  }
+
+  /* ---------- trial balance ---------- */
+
+  .balance {
+    border-top: 2px solid var(--rule-strong);
+    border-bottom: 1px solid var(--rule);
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+  }
+
+  .fig {
+    padding: 1.1rem 1.1rem 1.2rem;
+    border-right: 1px solid var(--rule);
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+
+  .fig:last-child { border-right: 0; }
+
+  .fig-n {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 2.15rem;
+    line-height: 1;
+    letter-spacing: -0.03em;
+  }
+
+  .fig-n.neg { color: var(--reversed); }
+  .fig-n.pos { color: var(--measured); }
+  .fig-n.hold { color: var(--pending); }
+
+  .fig-l { font-size: 0.83rem; line-height: 1.3; }
+  .fig-b { font-size: 0.72rem; color: var(--faint); line-height: 1.35; }
+
+  /* ---------- generic section ---------- */
+
+  section { display: flex; flex-direction: column; gap: 1.1rem; }
+
+  h2 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 1.62rem;
+    letter-spacing: -0.01em;
+    margin: 0;
+    padding-bottom: 0.55rem;
+    border-bottom: 1px solid var(--rule-strong);
+  }
+
+  h2 .count {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.1em;
+    color: var(--faint);
+    text-transform: uppercase;
+    margin-left: 0.6rem;
+    vertical-align: 0.3em;
+  }
+
+  .lede { color: var(--muted); max-width: 46rem; font-size: 0.96rem; margin: 0; }
+
+  /* ---------- workstreams ---------- */
+
+  .stream {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--rule-strong);
+    padding: 1.05rem 1.15rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+
+  .stream.s-measured { border-left-color: var(--measured); }
+  .stream.s-shipped  { border-left-color: var(--pending); }
+  .stream.s-closed   { border-left-color: var(--deferred); }
+
+  .stream-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.6rem; justify-content: space-between; }
+
+  .stream h3 { font-family: var(--serif); font-weight: 400; font-size: 1.15rem; margin: 0; }
+
+  .chip {
+    font-family: var(--mono);
+    font-size: 0.63rem;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    padding: 0.16rem 0.5rem;
+    border: 1px solid currentColor;
+    white-space: nowrap;
+  }
+
+  .chip.c-measured { color: var(--measured); }
+  .chip.c-shipped  { color: var(--pending); }
+  .chip.c-closed   { color: var(--deferred); }
+  .chip.c-null     { color: var(--deferred); }
+  .chip.c-reversed { color: var(--reversed); }
+
+  .stream p { margin: 0; font-size: 0.94rem; color: var(--muted); }
+
+  .stream ul { margin: 0; padding-left: 1.05rem; display: flex; flex-direction: column; gap: 0.3rem; }
+  .stream li { font-size: 0.88rem; }
+
+  code {
+    font-family: var(--mono);
+    font-size: 0.86em;
+    background: rgba(128, 138, 145, 0.14);
+    padding: 0.05em 0.32em;
+  }
+
+  /* ---------- experiments table ---------- */
+
+  .scroll { overflow-x: auto; border: 1px solid var(--rule); background: var(--panel); }
+
+  table { border-collapse: collapse; width: 100%; min-width: 40rem; }
+
+  th {
+    text-align: left;
+    font-family: var(--mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 400;
+    padding: 0.7rem 0.85rem;
+    border-bottom: 1px solid var(--rule-strong);
+    white-space: nowrap;
+  }
+
+  td {
+    padding: 0.75rem 0.85rem;
+    border-bottom: 1px solid var(--rule);
+    font-size: 0.87rem;
+    vertical-align: top;
+  }
+
+  tr:last-child td { border-bottom: 0; }
+
+  td.n { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--muted); font-size: 0.8rem; }
+  td.name { font-family: var(--serif); font-size: 0.98rem; white-space: nowrap; }
+
+  /* ---------- reversals ---------- */
+
+  .rev { display: flex; flex-direction: column; }
+
+  .rev-item {
+    display: grid;
+    grid-template-columns: 1.6rem 1fr;
+    gap: 0 0.55rem;
+    padding: 0.85rem 0;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .rev-item:last-child { border-bottom: 0; }
+
+  .rev-mark {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    color: var(--reversed);
+    padding-top: 0.15rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .rev-was { font-size: 0.92rem; }
+  .rev-now { font-size: 0.87rem; color: var(--muted); margin-top: 0.2rem; }
+  .rev-now::before {
+    content: "now";
+    font-family: var(--mono);
+    font-size: 0.6rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--reversed);
+    margin-right: 0.5rem;
+  }
+
+  /* ---------- timeline ---------- */
+
+  .days { display: flex; flex-direction: column; gap: 0; }
+
+  .day {
+    display: grid;
+    grid-template-columns: 7.5rem 1fr;
+    gap: 0 1.25rem;
+    padding: 1.1rem 0;
+    border-top: 1px solid var(--rule);
+  }
+
+  .day-when { font-family: var(--mono); font-size: 0.78rem; color: var(--muted); }
+  .day-when b { display: block; color: var(--ink); font-weight: 400; font-size: 0.95rem; }
+  .day ul { margin: 0; padding-left: 1rem; display: flex; flex-direction: column; gap: 0.35rem; }
+  .day li { font-size: 0.89rem; }
+
+  /* ---------- plain lists ---------- */
+
+  .plain { display: flex; flex-direction: column; gap: 0.65rem; margin: 0; padding: 0; list-style: none; }
+
+  .plain li {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0 0.6rem;
+    font-size: 0.9rem;
+    padding-bottom: 0.65rem;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .plain li:last-child { border-bottom: 0; }
+
+  .plain .k {
+    font-family: var(--mono);
+    font-size: 0.62rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--faint);
+    padding-top: 0.28rem;
+    white-space: nowrap;
+  }
+
+  .gate { display: block; color: var(--muted); font-size: 0.84rem; margin-top: 0.15rem; }
+  .gate::before {
+    content: "unblocked by";
+    font-family: var(--mono);
+    font-size: 0.6rem;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--faint);
+    margin-right: 0.45rem;
+  }
+
+  /* ---------- negative space panel ---------- */
+
+  .negative {
+    border: 1px solid var(--reversed);
+    background: var(--panel);
+    padding: 1.3rem 1.4rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+  }
+
+  .negative h2 { border-bottom-color: var(--reversed); }
+  .negative ol { margin: 0; padding-left: 1.3rem; display: flex; flex-direction: column; gap: 0.55rem; }
+  .negative li { font-size: 0.91rem; }
+  .negative li b { font-weight: 600; }
+
+  /* ---------- commits ---------- */
+
+  .commits { display: flex; flex-direction: column; gap: 0; font-family: var(--mono); font-size: 0.82rem; }
+
+  .commit {
+    display: grid;
+    grid-template-columns: 5.2rem 4.5rem 1fr;
+    gap: 0 0.85rem;
+    padding: 0.6rem 0;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .commit:last-child { border-bottom: 0; }
+  .commit .h { color: var(--measured); }
+  .commit .t { color: var(--faint); font-variant-numeric: tabular-nums; }
+
+  .branchline {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--reversed);
+    border: 1px dashed var(--reversed);
+    padding: 0.6rem 0.8rem;
+  }
+
+  /* ---------- method footer ---------- */
+
+  footer {
+    border-top: 2px solid var(--rule-strong);
+    padding-top: 1.2rem;
+    font-size: 0.82rem;
+    color: var(--muted);
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  footer .legend { display: flex; flex-wrap: wrap; gap: 0.45rem 1.1rem; font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.08em; text-transform: uppercase; }
+  footer .legend .sq { display: inline-block; width: 0.6em; height: 0.6em; background: currentColor; margin-right: 0.4rem; }
+  footer .legend .l1 { color: var(--measured); }
+  footer .legend .l2 { color: var(--pending); }
+  footer .legend .l3 { color: var(--reversed); }
+  footer .legend .l4 { color: var(--deferred); }
+
+  @media (max-width: 34rem) {
+    .day { grid-template-columns: 1fr; gap: 0.5rem; }
+    .commit { grid-template-columns: 5rem 1fr; }
+    .commit .t { display: none; }
+  }
+</style>
+
+<div class="sheet">
+
+  <header class="masthead">
+    <div class="stamp">
+      <span>Executive summary</span>
+      <span>31 Jul to 2 Aug 2026</span>
+      <span>agent-harness-core</span>
+      <span>branch harness-trust-and-model-reconcile</span>
+    </div>
+    <h1>Two days spent proving what not to build</h1>
+    <p class="thesis">Three memory engines were assessed and none adopted. Four commits landed and none merged.
+    The most useful output of the window is the list of positions withdrawn on evidence, including two of the
+    assistant's own published conclusions and three defective answer keys sitting inside the very experiments that
+    were supposed to settle things.</p>
+  </header>
+
+  <div class="balance">
+    <div class="fig">
+      <span class="fig-n">4</span>
+      <span class="fig-l">Commits, all on 2 August</span>
+      <span class="fig-b">Nothing landed on the two prior days</span>
+    </div>
+    <div class="fig">
+      <span class="fig-n neg">0</span>
+      <span class="fig-l">Merged to master</span>
+      <span class="fig-b">master still at f722642, 27 July</span>
+    </div>
+    <div class="fig">
+      <span class="fig-n neg">0</span>
+      <span class="fig-l">Memory systems adopted</span>
+      <span class="fig-b">Three assessed at source, all skipped</span>
+    </div>
+    <div class="fig">
+      <span class="fig-n pos">96</span>
+      <span class="fig-l">Agents run in three controlled A/B tests</span>
+      <span class="fig-b">33, 32 and 31 across the runs</span>
+    </div>
+    <div class="fig">
+      <span class="fig-n hold">16</span>
+      <span class="fig-l">Positions withdrawn on evidence</span>
+      <span class="fig-b">Harness work only; three more in other projects</span>
+    </div>
+    <div class="fig">
+      <span class="fig-n hold">0</span>
+      <span class="fig-l">Rows in the new counter</span>
+      <span class="fig-b">Registered 11:14 on 2 August</span>
+    </div>
+  </div>
+
+  <section>
+    <h2>Where the work went <span class="count">six streams</span></h2>
+    <p class="lede">Named for what each accomplished rather than which files it touched. The colour on the left
+    edge is the evidence behind the outcome, not the size of the change.</p>
+
+    <div class="stream s-closed">
+      <div class="stream-head">
+        <h3>Prebuilt memory engines evaluated, none adopted</h3>
+        <span class="chip c-closed">Closed</span>
+      </div>
+      <p>Mem0, Supermemory and swafra were each read at source and skipped. All three resolve a conflict with an
+      accepted decision inside the system instead of handing it to the operator, which is the one requirement the
+      incumbent exists to hold.</p>
+      <ul>
+        <li>Mem0 preserves 3 of 15 lifecycle requirements; conflict resolution is the system's, not the operator's</li>
+        <li>Supermemory preserves 0 of 5 checked: closed-source core binary, silent fallback to the vendor's hosted API, no Windows self-host path</li>
+        <li>swafra multiplies retrieval score by a hardcoded <code>exp(-0.005 * days_old)</code> with no pin and no exemption, which contradicts precedence rather than merely omitting it</li>
+        <li>External support: LongMemEval-V2 Small puts files plus agentic search at 0.749 against 0.586 for the best RAG memory pipeline</li>
+        <li>One published figure points the other way and is still unanswered: NOOA reports 38.4% for markdown files against 50.2%, which matters only if its file condition included agentic search</li>
+      </ul>
+    </div>
+
+    <div class="stream s-measured">
+      <div class="stream-head">
+        <h3>Field census, and the mechanisms worth taking</h3>
+        <span class="chip c-measured">Measured</span>
+      </div>
+      <p>All 129 systems in the agent-memory atlas were scored from their own capability frontmatter. That
+      overturned this project's earlier reading that nobody else builds a governed decision ledger.</p>
+      <ul>
+        <li>90% of the corpus holds two or fewer of seven governance capabilities, but two hold six and one holds seven; a system worth learning from lives in that tail</li>
+        <li>Rejection tombstones are held by 4 of 129 systems, and this harness is one of the four</li>
+        <li>Three systems then read at source as harvest targets, not migration targets: Verel, Daimon, TigrimOSR</li>
+        <li>Four mechanisms declined outright: attested promotion gates, hash-chained audit logs, bi-temporal correction chains, a SQLite disposable index</li>
+      </ul>
+    </div>
+
+    <div class="stream s-shipped">
+      <div class="stream-head">
+        <h3>Memory provisioning wired into six agent definitions</h3>
+        <span class="chip c-shipped">Shipped, composite unmeasured</span>
+      </div>
+      <p>A run measured that one line naming the memory index in a dispatched brief takes recall of the deciding
+      fact to ceiling. What shipped is a 14-line section carrying that line plus two riders and a revisit-authority
+      paragraph, and the composite has never been run.</p>
+      <ul>
+        <li>Identical section added to task-reviewer, adversarial-reviewer, doc-steward, security-auditor, soc-monitor and docker-expert</li>
+        <li>Wording pinned verbatim in the commit rationale, because rewording invalidates the measurement behind it</li>
+        <li><code>patterns/memory-provisioning.md</code> written and registered in the pattern index</li>
+        <li>Zero consumers so far: no second project has installed it, and the definitions sit on an unmerged branch</li>
+      </ul>
+    </div>
+
+    <div class="stream s-shipped">
+      <div class="stream-head">
+        <h3>Transition counter built, shipped inert, then switched on</h3>
+        <span class="chip c-shipped">Shipped, zero rows</span>
+      </div>
+      <p>A PostToolUse hook that counts three kinds of memory-note transition. Written deliberately unwired at
+      09:46, approved and registered 88 minutes later. It fires correctly under live capture and has recorded
+      nothing from real work.</p>
+      <ul>
+        <li>Fail-open by contract: never writes stdout, one stderr line on error, always exits zero</li>
+        <li>Counts only. It does not warn, block, or have an opinion the agent can act on</li>
+        <li>A live run caught it sharding counters per project, which the earlier synthetic check had passed; it now writes one file under the home directory</li>
+        <li>Its own success condition is a month of ordinary use with the file still empty</li>
+      </ul>
+    </div>
+
+    <div class="stream s-shipped">
+      <div class="stream-head">
+        <h3>Memory governance rules and schema</h3>
+        <span class="chip c-shipped">Shipped, unmeasured</span>
+      </div>
+      <p>The memory-system skill gained two frontmatter fields and four rules. Two rules files gained one edit
+      each. None of it has been measured, and one of the new checks currently has nothing to fire against.</p>
+      <ul>
+        <li>Agent consensus is one principal, not several; repetition, recency and cross-linking never raise a note's confidence or status</li>
+        <li>Rejected notes leave the index and keep only a compact tombstone line carrying the rejected claim inline, and are exempt from staleness pruning</li>
+        <li><code>evidence_tier</code> and <code>accepted_via</code> added to the frontmatter table; no note in the 239-note corpus uses either yet</li>
+        <li>A wrap-up length cap was written into <code>writing-style.md</code>, moving from about 150 words to about 400 within the hour</li>
+      </ul>
+    </div>
+
+    <div class="stream s-shipped">
+      <div class="stream-head">
+        <h3>Failure modes captured across six projects</h3>
+        <span class="chip c-shipped">Shipped, unmeasured</span>
+      </div>
+      <p>Roughly 29 memory notes written or updated, most recording a diagnosis that was wrong the first time and
+      corrected on evidence. Nothing yet measures whether any of them reaches an agent outside a provisioned dispatch.</p>
+      <ul>
+        <li>A verification script that collapsed absent with unreadable, and stale with reverted, manufacturing false incidents seven times</li>
+        <li>Reading this repo's working tree is not reading what the repo ships, which cost one wrong claim to the operator</li>
+        <li>Two write-capable agents dispatched into one clone on different branches, caught before either wrote</li>
+        <li>Index hygiene is behind the notes: two notes written on 1 August still have no pointer line, and three pointers in another project contradict their own targets</li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
+    <h2>What was actually measured <span class="count">nine runs</span></h2>
+    <p class="lede">Every sample size is stated, including the small ones. A run with four usable cells says four.</p>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr><th>Run</th><th>Question</th><th>Sample</th><th>Result</th><th>Verdict</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="name">Provisioning</td>
+            <td>Does naming the memory index in a brief change what the agent produces?</td>
+            <td class="n">8 tasks &times; 2 arms<br>33 agents<br>effective n=6</td>
+            <td>Recall of the deciding fact 5 of 8 to 8 of 8. Recommendation correct only 5 of 8 to 6 of 8, so perfect recall bought one extra correct answer: reading the note is not the same as acting on it. Known failures 3 of 8 down to between 0 and 1 of 8 after a key error was corrected. One regression: the treated arm trusted a three-month-stale note where control checked live hardware.</td>
+            <td><span class="chip c-measured">Positive</span></td>
+          </tr>
+          <tr>
+            <td class="name">Binding line</td>
+            <td>Does telling an agent that accepted decisions bind reduce re-proposal?</td>
+            <td class="n">8 tasks &times; 2 arms<br>32 agents</td>
+            <td>Nothing moved on any metric. A probe found the rule already loaded into subagent context before the first tool call. Line rejected as redundant.</td>
+            <td><span class="chip c-null">Null</span></td>
+          </tr>
+          <tr>
+            <td class="name">Revisit authority</td>
+            <td>Does reserving revisit-trigger closure to the operator stop agents closing triggers themselves?</td>
+            <td class="n">7 tasks &times; 2 arms<br>31 agents<br>n=4 on the metric</td>
+            <td>Self-authorization 2 of 4 down to 0 of 4, no scorer disagreement across 42 cells. Fisher exact p about 0.43, so directional rather than significant. Sentence adopted.</td>
+            <td><span class="chip c-measured">Positive</span></td>
+          </tr>
+          <tr>
+            <td class="name">Atlas census</td>
+            <td>How much of the field implements governed decision-ledger capabilities?</td>
+            <td class="n">129 reports<br>0 unparseable</td>
+            <td>scope_enforced 70, human_review 26, audit_log 21, negative_eval 17, trust_state 16, bitemporal 9, tombstone 4. The count is reproducible; the marks it counts are one reviewer's.</td>
+            <td><span class="chip c-measured">Positive</span></td>
+          </tr>
+          <tr>
+            <td class="name">Hook capture</td>
+            <td>Does the counter fire and emit correct lines under the real hook runner?</td>
+            <td class="n">1 edit</td>
+            <td>Both expected lines with the true session id. Same run caught the sharding defect and refuted a review finding that the settings entry needed a shell key.</td>
+            <td><span class="chip c-measured">Positive</span></td>
+          </tr>
+          <tr>
+            <td class="name">Citation audit</td>
+            <td>How reliable are the claims the recommendation rests on?</td>
+            <td class="n">46 of 142 claims</td>
+            <td>A 30% defect rate on the audited subset, all tier inflation or miscitation rather than fabrication. Two thirds of the claims were never audited.</td>
+            <td><span class="chip c-measured">Positive</span></td>
+          </tr>
+          <tr>
+            <td class="name">Adversarial pass</td>
+            <td>Which research streams survive an adversarial verifier?</td>
+            <td class="n">18 claims<br>1 of 4 streams</td>
+            <td>One claim overturned outright, three evidence tiers corrected downward. The other three streams remain single-agent and unaudited.</td>
+            <td><span class="chip c-measured">Positive</span></td>
+          </tr>
+          <tr>
+            <td class="name">Counter in use</td>
+            <td>How often do agents actually close a trigger or flip a status in real work?</td>
+            <td class="n">0 rows</td>
+            <td>No answer yet. Zero rows does not separate the hook finding nothing from the hook never firing on a qualifying edit.</td>
+            <td><span class="chip c-null">No data</span></td>
+          </tr>
+          <tr>
+            <td class="name">Gold set</td>
+            <td>Does index-plus-read retrieval beat whole-directory reads and naive grep?</td>
+            <td class="n">35 questions<br>unblinded<br>single scorer</td>
+            <td>Reported 35/35, 35/35 and 32/35, then demoted from evidence. Two arms were simulated against text already in context and scored by the agent that wrote the questions. The null across 30 of 35 questions survives.</td>
+            <td><span class="chip c-reversed">Retracted</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Positions withdrawn <span class="count">sixteen in the harness work</span></h2>
+    <p class="lede">The highest-signal part of the record and the part most easily lost, because the final state of
+    a file shows the fix and hides that a fix was needed. Eight of the sixteen are shown.</p>
+    <div class="rev">
+      <div class="rev-item">
+        <span class="rev-mark">01</span>
+        <div>
+          <div class="rev-was">Run 1 concluded that retrieval worked while decision compliance failed.</div>
+          <div class="rev-now">Withdrawn the same day. The hand-written answer key flattened a scoped rejection into a
+          blanket one and dropped the live carve-out on line 29 of the note, so a defensible answer was scored wrong.
+          Experimenter error, not agent error.</div>
+        </div>
+      </div>
+      <div class="rev-item">
+        <span class="rev-mark">02</span>
+        <div>
+          <div class="rev-was">The answer keys behind the A/B runs were treated as ground truth.</div>
+          <div class="rev-now">Defective three times across two runs, in the single component that decides every score.
+          Two of four keys in Run 3 were caught only because scorers were told to open the note and overrule the key.
+          Standing rule: build keys by quoting note lines verbatim with file and line, never by paraphrasing.</div>
+        </div>
+      </div>
+      <div class="rev-item">
+        <span class="rev-mark">03</span>
+        <div>
+          <div class="rev-was">Runs 1 and 2 were understood to be measuring the agent.</div>
+          <div class="rev-now">Run 3 reclassified both as measuring the note template. Every decision note here carries
+          a revisit clause because the template mandates one, so the failure the runs were built to catch cannot occur
+          in this corpus. Obedience testing closed as unanswerable rather than answered.</div>
+        </div>
+      </div>
+      <div class="rev-item">
+        <span class="rev-mark">04</span>
+        <div>
+          <div class="rev-was">The counter's storage, sharded per project under the project directory.</div>
+          <div class="rev-now">Reversed 95 minutes after it shipped. A user-level hook writing per-project shards splits
+          the one question the counter exists to answer, and an empty shard reads exactly like an empty result. One
+          home-directory file now, with absolute note paths.</div>
+        </div>
+      </div>
+      <div class="rev-item">
+        <span class="rev-mark">05</span>
+        <div>
+          <div class="rev-was">A published line reading "Verified against a synthetic proposed to accepted payload: two correct
+          lines, exit 0, stdout untouched."</div>
+          <div class="rev-now">Rewritten 132 seconds later to "Verified by live capture through the hook runner, not only by
+          piping a payload at the script." The
+          synthetic check is precisely what missed the sharding bug. This particular retraction exists only in the git diff.</div>
+        </div>
+      </div>
+      <div class="rev-item">
+        <span class="rev-mark">06</span>
+        <div>
+          <div class="rev-was">The eight-requirement scorecard used to assess the first three candidates.</div>
+          <div class="rev-now">Conceded as flawed. The requirements were derived from the incumbent's own design, so
+          candidates were scored on resemblance and the incumbent's own row was unfalsifiable. Only one requirement is
+          load-bearing, and harvesting a component was never on the ballot.</div>
+        </div>
+      </div>
+      <div class="rev-item">
+        <span class="rev-mark">07</span>
+        <div>
+          <div class="rev-was">The reading that nothing in the field builds a governed decision ledger.</div>
+          <div class="rev-now">Overturned by scoring all 129 rows instead of three samples. It holds for 90% of the corpus
+          and fails at the tail, which is exactly where a system worth adapting would live. This reversal produced the shortlist.</div>
+        </div>
+      </div>
+      <div class="rev-item">
+        <span class="rev-mark">08</span>
+        <div>
+          <div class="rev-was">A claim to the operator that the repo's master already carried an agent-frontmatter fix.</div>
+          <div class="rev-now">Master still carries the wrong key in six definitions. The branch renamed four of them and dropped
+          the key from the other two, so the fix exists only on the unmerged branch the working tree happened to sit on.
+          Standing rule: name the branch, or run <code>git show master:&lt;path&gt;</code>, before citing any file as
+          evidence of what ships. The count in this row was itself wrong at first draft, caught by the review pass below.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="negative">
+    <h2>What this record does not establish</h2>
+    <ol>
+      <li><b>No memory system was adopted and nothing was migrated.</b> The incumbent file-based system is unchanged.</li>
+      <li><b>The counter has never recorded a row from real work.</b> One live test proves the hook fires. Zero rows
+      proves nothing about how often agents actually overstep.</li>
+      <li><b>The 14-line provisioning section shipped into six agents was never run as written.</b> The A/B tested one
+      line; the shipped text is that line plus three additions.</li>
+      <li><b>None of this window's work is merged.</b> The installer would copy none of it into a project today.</li>
+      <li><b>The 3-of-8-to-1-of-8 result is not a fleet failure rate.</b> The task set was built so the deciding fact
+      always lived in a note. No base rate for ordinary dispatches exists.</li>
+      <li><b>The new frontmatter fields have nothing written against them.</b> No note in 239 uses
+      <code>evidence_tier</code> or <code>accepted_via</code>, so the Lint check that pairs them cannot fire.</li>
+      <li><b>The tombstone rules have nothing to be tested against.</b> Exactly one rejected note exists corpus-wide.</li>
+      <li><b>The wrap-up cap has never been checked against output.</b> No before-and-after word count was taken, and
+      the figure itself moved from about 150 to about 400 within the hour.</li>
+      <li><b>Two thirds of the claims underpinning the recommendation were never audited.</b> Three of four research
+      streams were never adversarially verified either.</li>
+      <li><b>Reasoning effort was raised inside the window with no comparison run at either setting.</b></li>
+      <li><b>The companion assessment page carries counts it never reconciles.</b> Its pattern library is 20 documents
+      in two places and 21 in a third, and a count of 14 mechanisms triaged sits beside one of twenty patterns triaged.</li>
+    </ol>
+    <p class="lede">Eleven of fifteen recorded gaps are shown. The four omitted are narrower versions of the same
+    point: a benchmark question left open, a per-row accuracy check never run, and two unaudited research streams.</p>
+  </section>
+
+  <section>
+    <h2>Deliberately not built <span class="count">and what would unblock each</span></h2>
+    <p class="lede">Twenty-two items were declined or deferred. The pattern is consistent: count before enforcing,
+    and do not spend a normalizer on a problem that has not recurred.</p>
+    <ul class="plain">
+      <li><span class="k">Gated</span><span>Claim-keyed rejection tombstones, with a shared normalizer and a question-scope key.
+        <span class="gate">The counter recording a real status change or a self-closed revisit. It holds zero rows, and nothing
+        else in the queue gets built until it holds something.</span></span></li>
+      <li><span class="k">Gated</span><span>A blocking gate on the proposed-to-accepted transition.
+        <span class="gate">Recorded recurrences. Designed and left unbuilt: four observations is too thin to justify blocking a write.</span></span></li>
+      <li><span class="k">Gated</span><span>The Lint check pairing high confidence against assumption-tier evidence.
+        <span class="gate">A backfill. The fields exist; no note uses them.</span></span></li>
+      <li><span class="k">Open</span><span>Two small adopt-queue items: making the secret-scan gate's fail-open direction visible,
+        and giving the contradiction scan a keep-both outcome.
+        <span class="gate">Nothing. Two lines and one clause, still outstanding.</span></span></li>
+      <li><span class="k">Open</span><span>Merging the branch to master.
+        <span class="gate">Nothing stated. Every change in this window sits on one unmerged branch.</span></span></li>
+      <li><span class="k">Declined</span><span>Attested promotion gates, hash-chained audit logs, bi-temporal correction chains,
+        a SQLite disposable index.
+        <span class="gate">Scale that does not exist here. The audit log is strictly weaker than git; 239 notes is not a corpus
+        where grep stops answering in milliseconds.</span></span></li>
+      <li><span class="k">Unrun</span><span>A decisive obedience test.
+        <span class="gate">A rejected decision with no live carve-out, a task where the rejected option is genuinely best, and a
+        control arm that exhibits the failure. None of the three exists in this corpus.</span></span></li>
+      <li><span class="k">Unrun</span><span>Three swafra questions: benchmark spread, ambient-key egress, linear-scan ceiling.
+        <span class="gate">Re-running the evaluation at the pinned commit, capturing one request body through a proxy, and timing
+        the scan at 239, 2,500 and 5,000 chunks. Read at source only; no packet captured, no arithmetic run.</span></span></li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>How the two days ran</h2>
+    <div class="days">
+      <div class="day">
+        <div class="day-when"><b>31 July</b> no commits</div>
+        <ul>
+          <li>Mem0 and Supermemory closed as skips after a multi-agent run and a citation audit. Recommendation recorded: keep the incumbent, adopt neither, migrate nothing.</li>
+          <li>A note written at 22:28 on why adversarial verifiers cry fabrication: of five citations judges called fabricated, only two were.</li>
+          <li>Reasoning effort raised from high to xhigh at 20:21, with no comparison run at either setting.</li>
+        </ul>
+      </div>
+      <div class="day">
+        <div class="day-when"><b>1 August</b> no commits</div>
+        <ul>
+          <li>Three A/B runs executed back to back: provisioning pointer positive, binding line null, revisit authority positive.</li>
+          <li>Run 1's governance conclusion retracted the same day once the answer key was found to have flattened a scoped rejection.</li>
+          <li>swafra assessed and skipped; the atlas mined and all 129 rows scored.</li>
+          <li>The wrap-up length rule written at 19:11, superseding a note created at 18:08 with a smaller figure.</li>
+        </ul>
+      </div>
+      <div class="day">
+        <div class="day-when"><b>2 August</b> four commits</div>
+        <ul>
+          <li>09:27 provisioning text committed into six agent definitions, with the pattern doc and index row.</li>
+          <li>09:46 the transition hook committed with a header reading "unwired by design", alongside three source reads.</li>
+          <li>11:14 the hook approved and registered; 11:19 the ledger declares it live while it is still writing per project.</li>
+          <li>11:21 the counter moved to one home-directory file, the header rewritten to "opt-in", and the previous commit's verification wording retracted in the same diff.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>The commits</h2>
+    <div class="commits">
+      <div class="commit"><span class="h">ee1255f</span> <span class="t">09:27</span> <span>harness: wire measured memory provisioning into agent defs</span></div>
+      <div class="commit"><span class="h">558fede</span> <span class="t">09:46</span> <span>harness: memory transition log (unwired), shortlist source reads</span></div>
+      <div class="commit"><span class="h">bbba5bd</span> <span class="t">11:19</span> <span>harness: transition log live, ledger updated</span></div>
+      <div class="commit"><span class="h">e7432ce</span> <span class="t">11:21</span> <span>harness: transition counter writes one home-dir file, not per project</span></div>
+    </div>
+    <div class="branchline">All four sit on harness-trust-and-model-reconcile. master and origin/master remain at f722642 from 27 July, so an install or audit run today reproduces none of this.</div>
+  </section>
+
+  <footer>
+    <div class="legend">
+      <span class="l1"><span aria-hidden="true" class="sq"></span>Measured</span>
+      <span class="l2"><span aria-hidden="true" class="sq"></span>Shipped, unmeasured</span>
+      <span class="l3"><span aria-hidden="true" class="sq"></span>Withdrawn or reversed</span>
+      <span class="l4"><span aria-hidden="true" class="sq"></span>Deferred or declined</span>
+    </div>
+    <div>Compiled from four evidence streams: git history, the user configuration tree, memory notes across six
+    projects, and the standing assessment page. Each stream was gathered by one agent and then checked by a second
+    agent whose instruction was to refute it. That pass flagged 22 unsupported claims and 51 omissions, and the
+    corrections are folded into everything above. Two further passes sorted each item by evidence strength and hunted
+    specifically for reversals, which are the class a final-state file hides.</div>
+    <div>This page was then fact-checked against git and the fact sheet before publication: 112 figures checked, 10
+    wrong, all ten corrected here. That pass also found the companion assessment page had a malformed section leaving
+    one experiment dossier outside any container, introduced when that dossier was appended earlier today. It is fixed
+    and the page republished.</div>
+    <div>Source: <code>E:\projects\agent-harness-core\docs\two-day-recap-2026-08-02.html</code>. Durable record:
+    memory note <code>backlog-mem0-memory-evaluation</code>. Companion page: the standing memory-systems assessment.</div>
+  </footer>
+
+</div>
