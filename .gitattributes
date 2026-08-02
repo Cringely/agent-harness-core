@@ -1,0 +1,7 @@
+# Shell scripts must check out with LF even on Windows. core.autocrlf=true
+# would otherwise write CRLF into the working tree, and the installer copies
+# the working-tree bytes into each target project — so `#!/bin/sh\r` reaches
+# a POSIX host and fails as a bad interpreter. Git hooks are named without an
+# extension, so they need listing individually.
+*.sh text eol=lf
+core/claude/hooks/pre-commit text eol=lf
