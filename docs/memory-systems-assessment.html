@@ -1313,9 +1313,12 @@
           <div>
             <time datetime="2026-08-02">2026-08-02</time>
             <p>Transition log switched on, at user level rather than project level, since memory writes come
-            from every project and a project-scoped hook would undercount. Verified against a synthetic
-            <code>proposed</code> to <code>accepted</code> payload: two correct lines, exit 0, stdout untouched.
-            The synthetic lines were purged afterward, so the counter starts at zero. Nothing else in the
+            from every project and a project-scoped hook would undercount. Verified by live capture through
+            the hook runner, not only by piping a payload at the script: a throwaway note edited once produced
+            both expected lines with the real session id on them. That run also caught the counter writing
+            under <code>CLAUDE_PROJECT_DIR</code>, which would have sharded a user-level count across every
+            project and made any single shard unreadable. It now writes one file under the home directory.
+            Probe lines were purged afterward, so the counter starts at zero. Nothing else in the
             adopt queue gets built until this file has something in it. A month of ordinary use with an empty
             counter is the result that argues the prompt fix held and the blocking gate is not worth its
             maintenance.</p>
