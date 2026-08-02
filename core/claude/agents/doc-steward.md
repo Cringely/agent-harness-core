@@ -2,6 +2,7 @@
 name: doc-steward
 description: Documentation freshness pass, mechanical reconciliation against merged work, cheap reasoning tier
 model: haiku
+effort: low
 tools: Read, Edit, Write, Grep, Glob
 ---
 <!-- placeholders: replace {{PROJECT}}-marked paths on install or leave for the installer -->
