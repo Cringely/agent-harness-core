@@ -1181,7 +1181,7 @@
               shared normalizer, and add a question-scope key above the claim key so a reworded proposal that
               misses on claim still lands on the question it belongs to. Two rejections on one question closes
               it. Prerequisite that has to land first: rejected notes are exempt from Lint pruning.</p>
-              <p class="q-cost">Cost: one sentence for the prune exemption, six lines for the normalizer, one template edit, a backfill over the decision notes. The write-surface check that consults the ledger is deferred until the transition log shows a recurrence.</p>
+              <p class="q-cost">Cost: one sentence for the prune exemption, six lines for the normalizer, one template edit, a backfill over the decision notes. The write-surface check that consults the ledger is deferred until the transition log shows a recurrence. That log is live as of 2026-08-02 and empty, so this item has a measurement standing behind it rather than a hunch.</p>
             </div>
           </li>
           <li>
@@ -1309,6 +1309,16 @@
             right shape and needs a normalizer and a question-scope key. Fourteen mechanisms triaged, the
             measured provisioning paragraphs committed into six core agent definitions, and a status-transition
             log written but deliberately left unwired pending approval.</p>
+          </div>
+          <div>
+            <time datetime="2026-08-02">2026-08-02</time>
+            <p>Transition log switched on, at user level rather than project level, since memory writes come
+            from every project and a project-scoped hook would undercount. Verified against a synthetic
+            <code>proposed</code> to <code>accepted</code> payload: two correct lines, exit 0, stdout untouched.
+            The synthetic lines were purged afterward, so the counter starts at zero. Nothing else in the
+            adopt queue gets built until this file has something in it. A month of ordinary use with an empty
+            counter is the result that argues the prompt fix held and the blocking gate is not worth its
+            maintenance.</p>
           </div>
           <div>
             <time datetime="2026-07-31">2026-07-31</time>
