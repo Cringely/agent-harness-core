@@ -408,7 +408,7 @@
     <div class="eyebrow">
       <span>Agent harness core</span>
       <span>Standing assessment</span>
-      <span>Rev 2026-08-01f</span>
+      <span>Rev 2026-08-02</span>
     </div>
     <h1>Memory &amp; context engine assessment</h1>
     <p class="thesis">
@@ -418,11 +418,11 @@
     </p>
 
     <div class="tally">
-      <div><b>4</b><span>assessed at source</span></div>
-      <div><b>0</b><span>adopted</span></div>
+      <div><b>7</b><span>assessed at source</span></div>
+      <div><b>0</b><span>adopted whole</span></div>
       <div><b>3</b><span>skipped</span></div>
       <div><b>129</b><span>catalogued at T3</span></div>
-      <div><b>4</b><span>shortlisted</span></div>
+      <div><b>14</b><span>mechanisms harvested</span></div>
       <div><b>4</b><span>changes queued</span></div>
       <div><b>3&rarr;1</b><span>failures, one disputed</span></div>
       <div><b>1</b><span>own error retracted</span></div>
@@ -994,10 +994,15 @@
           <div class="findings">
             <div class="finding">
               <span class="tier tier-2 tier-star">T2*</span>
-              <p><b>Per-row marks hold; corpus-level prose rots.</b> Four swafra rows spot-checked against swafra's
-              source at the pinned commit held exactly. On the same page, its tombstone pattern doc states
-              "Four," "Three," and "Two" for one count and omits the fourth holder.
-              <span class="cite">spot-checked at atlas commit 6d41292</span></p>
+              <p><b>Per-row marks hold; claims about coupling do not.</b> Three independent source reads confirmed
+              every capability mark, two by execution. What failed was consistently the claim that two
+              mechanisms are wired together: a pending flag said to gate what reaches a run was false in two
+              ways, an approve path said never to launder missed a third route, an append-only ledger held only
+              at the HTTP boundary. Same defect in three unrelated codebases, and the catalog believed the
+              coupling every time. Treat a row as a lead carrying a name to grep, and verify independently any
+              claim that a status field actually gates something. Line numbers were systematically stale for
+              one system and exact for the others, so grep by name and never jump to a cited line.
+              <span class="cite">Verel, Daimon and TigrimOSR read at source against atlas commit 6d41292</span></p>
             </div>
             <div class="finding">
               <span class="tier tier-3">T3</span>
@@ -1039,13 +1044,53 @@
       </section>
 
       <section id="shortlist">
-        <h2>Shortlist: not yet assessed, ranked by the property that matters</h2>
+        <h2>Shortlist: read at source, harvested rather than adopted</h2>
         <p class="section-note">
-          The three candidates assessed at source arrived by circumstance, not by governance fit. Ranking the
-          full 129 by the seven capabilities surfaces a tail that was never looked at. Everything below is a
-          catalog claim at T3, unverified against source, and the honest read is "worth opening," not "better
-          than what we have."
+          The first three candidates arrived by circumstance rather than governance fit. Ranking the full 129
+          by the seven capabilities surfaced a tail nobody had opened. Three of those were then read at source.
+          None is a migration target. All three are worth stealing from, and the tombstone question the
+          shortlist existed to answer came back settled.
         </p>
+
+        <div class="dossier">
+          <div class="d-head">
+            <div class="d-title">
+              <h3>The tombstone call <span class="pill pill-keep">Planned fix is right, and underspecified</span></h3>
+              <span class="d-repo">Verel 7 of 7 &middot; read at source 2026-08-02</span>
+            </div>
+            <div class="d-meta">Answers adopt-queue item 1</div>
+          </div>
+
+          <div class="decider">
+            <strong>What the strongest system in 129 actually does</strong>
+            Verel stores the rejected claim and matches on it. No embeddings, no fuzzy match, no similarity
+            threshold. The best-governed system surveyed answers near-miss re-proposal with a blunt over-block
+            rather than with intelligence, so the planned claim-text fix is the right shape and there is
+            nothing better to buy.
+          </div>
+
+          <div class="facts">
+            <table>
+              <tbody>
+                <tr><th>Add a normalizer</th><td>Raw claim text loses to a capital letter and a double space. Verel's order: NFKC, strip zero-width and bidi controls, collapse whitespace, defang angle brackets, casefold, truncate. Daimon adds a Latin/Cyrillic/Greek confusables fold. Write it once and have both the ledger writer and the checker call it: Verel shipped three consecutive rounds of divergence bugs from two implementations of the same fold.</td></tr>
+                <tr><th>Add a scope key above the claim key</th><td>The missing layer. Verel's ledger hangs off a per-question identity, so a reworded re-proposal that misses on claim still lands on the same question. Two rejections on one question closes it, and further proposals go to the operator.</td></tr>
+                <tr><th>Store the text, not the hash</th><td>Daimon hashes and never stores text, because an append-only log outlives any deletion promise. That rule is for systems answering to third parties. One operator, git already holds every rejected sentence forever, and a human reading the ledger needs to see what was rejected.</td></tr>
+                <tr><th>Accept the ceiling</th><td>This narrows the gap from "any different filename evades it" to "only a real rewording evades it." It does not close it, and the fix for the rest is not embeddings.</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="warn">
+            <strong>Sequencing that matters</strong>
+            <p>Exempt rejected notes from Lint pruning <em>before</em> building any of this. Verel's round 8
+            was TTL pruning deleting the tombstone round 7 had just built, reopening the laundering path one
+            release after closing it. One sentence, and it has to land first.</p>
+            <p>And a rejected note keeps an index line but never a readable body pointer. MEMORY.md loads whole
+            into every session, so it is the retrieval path: a rejected note still linked to a readable body
+            means the status field is a label rather than a filter, and the rejected claim returns to context
+            every session.</p>
+          </div>
+        </div>
 
         <div class="dossier">
           <div class="facts">
@@ -1092,6 +1137,30 @@
             samples and does not survive the full distribution. It holds for 90% of the corpus and fails at the
             tail, which is precisely where a system worth adapting would live.
           </div>
+
+          <div class="findings">
+            <div class="finding">
+              <span class="tier tier-2">T2</span>
+              <p><b>What not to take, and this list is the useful half.</b> Verel's attested promotion gate needs
+              a labeled corpus agents cannot read, a signing keypair, and a verdict bus in a second trust
+              domain: a non-starter here with no path to one. Its hash-chained audit log is strictly weaker
+              than git, which already chains every mutation with author, timestamp and full before/after, and
+              Verel's own module admits it detects neither tail truncation nor a re-forge. Bi-temporal
+              correction chains lose to git history, which is unbounded rather than capped. Daimon's SQLite
+              index passes the infrastructure bar honestly (stdlib, one file, never source of truth) and still
+              should not be built at 239 notes where grep answers in milliseconds.
+              <span class="cite">three independent source reads, 2026-08-02</span></p>
+            </div>
+            <div class="finding">
+              <span class="tier tier-2">T2</span>
+              <p><b>The thing this corpus already gets right.</b> Daimon measured LLM re-emission losing whole
+              items even from lossless input, against perfect fidelity for exact copy in code, and froze the
+              prior text on every dedup hit as a result. A plain markdown note is exact-copy persistence by
+              construction. Naming it so a future "consolidate the notes" pass does not trade it away without
+              knowing what it is trading.
+              <span class="cite">daimon source read</span></p>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -1107,11 +1176,12 @@
           <li>
             <div>
               <div class="q-h">Key the rejection tombstone on the claim, not the slug</div>
-              <p class="q-b">The write-path check against the rejection ledger already exists, which is the rare half of
-              this pattern. The key is wrong in exactly the way the pattern warns about: the <code>Rejected:</code>
-              index line records a filename slug, so a re-proposal phrased differently never collides and the
-              guard silently misses. Record the rejected claim alongside the slug and match on claim text.</p>
-              <p class="q-cost">Cost: one line in the memory-system skill's Decisions index spec, one clause in Lint step 10, plus rewriting the existing entries. No new field, no hook, no schema.</p>
+              <p class="q-b">Confirmed against Verel and now specified. Three parts: record the rejected claim in
+              the <code>Rejected:</code> line and match on it, run both the writer and the checker through one
+              shared normalizer, and add a question-scope key above the claim key so a reworded proposal that
+              misses on claim still lands on the question it belongs to. Two rejections on one question closes
+              it. Prerequisite that has to land first: rejected notes are exempt from Lint pruning.</p>
+              <p class="q-cost">Cost: one sentence for the prune exemption, six lines for the normalizer, one template edit, a backfill over the decision notes. The write-surface check that consults the ledger is deferred until the transition log shows a recurrence.</p>
             </div>
           </li>
           <li>
@@ -1232,6 +1302,13 @@
             <p>Run 3 on revisit authority: self-authorization 2 of 4 down to 0 of 4, no measured cost. Sentence
             adopted. Obedience testing on this corpus closed as unanswerable, since the note template mandates
             a carve-out on every decision.</p>
+          </div>
+          <div>
+            <time datetime="2026-08-02">2026-08-02</time>
+            <p>Verel, Daimon and TigrimOSR read at source. Tombstone question settled: the planned fix is the
+            right shape and needs a normalizer and a question-scope key. Fourteen mechanisms triaged, the
+            measured provisioning paragraphs committed into six core agent definitions, and a status-transition
+            log written but deliberately left unwired pending approval.</p>
           </div>
           <div>
             <time datetime="2026-07-31">2026-07-31</time>
