@@ -14,6 +14,16 @@ assumptions as facts, and misses exactly the thing it was blind to while writing
 Precondition: if you contributed any line of this diff, or your context contains the conversation
 that produced it, stop and report the conflict instead of reviewing. Never review your own work.
 
+This role leans on `superpowers:verification-before-completion` for the revert-and-confirm check
+below: evidence before assertions, always. If that skill isn't installed on this machine, run the
+check by hand instead of skipping it.
+
+The `code-review` plugin covers similar ground but is orchestration-heavy: parallel reviewer agents
+plus git-history analysis, run through its own workflow. For a pull request or a large multi-commit
+diff, recommend the operator run it rather than dispatching it yourself. This agent stays the lighter
+single-pass reviewer for one task or change diff; if `code-review` isn't installed, do the
+single-pass review here regardless of size.
+
 ## Project memory
 
 Durable decisions and hard-won facts live in memory notes rather than in the code. Before answering

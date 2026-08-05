@@ -1,7 +1,7 @@
 # install/Install-Harness.Tests.ps1
 Describe "Install-Harness" {
     BeforeEach {
-        $script:target = Join-Path $env:TEMP ("harness-test-" + [guid]::NewGuid())
+        $script:target = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-test-" + [guid]::NewGuid())
         New-Item -ItemType Directory -Path $script:target | Out-Null
     }
     AfterEach { Remove-Item -Recurse -Force $script:target }
@@ -128,6 +128,232 @@ Describe "Install-Harness" {
         $m['agents/task-reviewer.md'] | Should -Not -BeNullOrEmpty
         $src = (Get-FileHash "$PSScriptRoot/../core/claude/agents/task-reviewer.md" -Algorithm SHA256).Hash
         $m['agents/task-reviewer.md'] | Should -Be $src
+    }
+
+    It "records an empty stackDetected.plugins array when the plugin cache dir is missing, without throwing" {
+        $fakeHome = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-fakehome-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $fakeHome | Out-Null
+        $prevUserProfile = $env:USERPROFILE
+        try {
+            $env:USERPROFILE = $fakeHome
+            { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target } | Should -Not -Throw
+            $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+            $m.Contains('stackDetected') | Should -BeTrue
+            @($m['stackDetected']['plugins']).Count | Should -Be 0
+        }
+        finally {
+            $env:USERPROFILE = $prevUserProfile
+            Remove-Item -Recurse -Force $fakeHome
+        }
+    }
+
+    It "detects plugins from the two-level cache layout as sorted marketplace/plugin entries" {
+        $fakeHome = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-fakehome-" + [guid]::NewGuid())
+        $cacheDir = Join-Path $fakeHome '.claude/plugins/cache'
+        New-Item -ItemType Directory -Path (Join-Path $cacheDir 'zeta-market/zeta-plugin') -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $cacheDir 'alpha-market/alpha-plugin') -Force | Out-Null
+        $prevUserProfile = $env:USERPROFILE
+        try {
+            $env:USERPROFILE = $fakeHome
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+            $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+            @($m['stackDetected']['plugins']) | Should -Be @('alpha-market/alpha-plugin', 'zeta-market/zeta-plugin')
+        }
+        finally {
+            $env:USERPROFILE = $prevUserProfile
+            Remove-Item -Recurse -Force $fakeHome
+        }
+    }
+
+    It "records an empty outputStyles array when the output-styles dir is missing, without throwing" {
+        $fakeHome = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-fakehome-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $fakeHome | Out-Null
+        $prevUserProfile = $env:USERPROFILE
+        try {
+            $env:USERPROFILE = $fakeHome
+            { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target } | Should -Not -Throw
+            $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+            @($m['stackDetected']['outputStyles']).Count | Should -Be 0
+        }
+        finally {
+            $env:USERPROFILE = $prevUserProfile
+            Remove-Item -Recurse -Force $fakeHome
+        }
+    }
+
+    It "serializes a single detected output style as a JSON array, not a bare string" {
+        $fakeHome = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-fakehome-" + [guid]::NewGuid())
+        $stylesDir = Join-Path $fakeHome '.claude/output-styles'
+        New-Item -ItemType Directory -Path $stylesDir -Force | Out-Null
+        'body' | Set-Content (Join-Path $stylesDir 'learning.md')
+        $prevUserProfile = $env:USERPROFILE
+        try {
+            $env:USERPROFILE = $fakeHome
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+            # Same collapse hazard as the settings.json hooks array: a single-match result
+            # captured into a variable can serialize as a bare string instead of a
+            # 1-element array. Assert the raw JSON shape, not just the deserialized value.
+            $raw = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw
+            $raw | Should -Match '"outputStyles":\s*\['
+            $m = $raw | ConvertFrom-Json -AsHashtable
+            @($m['stackDetected']['outputStyles']) | Should -Be @('learning')
+        }
+        finally {
+            $env:USERPROFILE = $prevUserProfile
+            Remove-Item -Recurse -Force $fakeHome
+        }
+    }
+
+    It "collects mcpServers from ~/.claude/settings.json" {
+        $fakeHome = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-fakehome-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path (Join-Path $fakeHome '.claude') -Force | Out-Null
+        '{"mcpServers":{"code-context":{"command":"whatever"}}}' | Set-Content (Join-Path $fakeHome '.claude/settings.json')
+        $prevUserProfile = $env:USERPROFILE
+        try {
+            $env:USERPROFILE = $fakeHome
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+            $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+            @($m['stackDetected']['mcpServers']) | Should -Be @('code-context')
+        }
+        finally {
+            $env:USERPROFILE = $prevUserProfile
+            Remove-Item -Recurse -Force $fakeHome
+        }
+    }
+
+    It "does not throw and returns an empty mcpServers array when the target's .mcp.json is malformed" {
+        '{ this is not valid json' | Set-Content "$script:target/.mcp.json"
+        { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target } | Should -Not -Throw
+        $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+        @($m['stackDetected']['mcpServers']).Count | Should -Be 0
+    }
+
+    It "does not throw when the plugin cache dir is unreadable (permission denied)" -Skip:(-not $IsLinux) {
+        if ((& id -u) -eq '0') {
+            Set-ItResult -Skipped -Because "running as root; permission bits are not enforced, test would false-pass"
+            return
+        }
+        $fakeHome = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-fakehome-" + [guid]::NewGuid())
+        $cacheDir = Join-Path $fakeHome '.claude/plugins/cache'
+        New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
+        $prevUserProfile = $env:USERPROFILE
+        try {
+            $env:USERPROFILE = $fakeHome
+            & chmod 000 $cacheDir
+            { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target } | Should -Not -Throw
+        }
+        finally {
+            # Restore permissions before Remove-Item, or cleanup itself fails on the
+            # now-unreadable/unlistable directory.
+            & chmod 755 $cacheDir
+            $env:USERPROFILE = $prevUserProfile
+            Remove-Item -Recurse -Force $fakeHome
+        }
+    }
+
+    It "gains stackDetected without losing existing manifest keys, and drops the old pluginsDetected key" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+        $m.Contains('guardrails.md') | Should -BeTrue
+        $m.Contains('agents/task-reviewer.md') | Should -BeTrue
+        $m.Contains('pluginsDetected') | Should -BeFalse
+        $m.Contains('stackDetected') | Should -BeTrue
+        $m['stackDetected'].Contains('scannedAt') | Should -BeTrue
+        $m['stackDetected'].Contains('plugins') | Should -BeTrue
+        $m['stackDetected'].Contains('outputStyles') | Should -BeTrue
+        $m['stackDetected'].Contains('mcpServers') | Should -BeTrue
+    }
+
+    It "audit reports plugin drift against the manifest without writing it" {
+        $fakeHome = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-fakehome-" + [guid]::NewGuid())
+        $cacheDir = Join-Path $fakeHome '.claude/plugins/cache'
+        New-Item -ItemType Directory -Path (Join-Path $cacheDir 'mp/plugin-one') -Force | Out-Null
+        $prevUserProfile = $env:USERPROFILE
+        try {
+            $env:USERPROFILE = $fakeHome
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+            New-Item -ItemType Directory -Path (Join-Path $cacheDir 'mp/plugin-two') -Force | Out-Null
+            $manifestBefore = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw
+            $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String
+            $pattern = [regex]::Escape('+ mp/plugin-two')
+            $out | Should -Match $pattern
+            (Get-Content "$script:target/.claude/.harness-manifest.json" -Raw) | Should -Be $manifestBefore
+        }
+        finally {
+            $env:USERPROFILE = $prevUserProfile
+            Remove-Item -Recurse -Force $fakeHome
+        }
+    }
+
+    It "audit reports no output-styles/mcpServers drift after a clean install with none detected" {
+        # Regression: recorded-count arrays were built with `$x = if (...) { @(...) } else
+        # { @() }`, and an if/else used as an expression collapses an empty array result to
+        # $null the same way a pipeline capture does — an empty recorded list then reads
+        # back as "removed" one blank entry instead of "no drift".
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String
+        $out | Should -Match "No Output styles drift since last scan\."
+        $out | Should -Match "No MCP servers drift since last scan\."
+        $out | Should -Not -Match '\s-\s+\(no longer detected\)'
+    }
+
+    It "audit degrades a null stackDetected to nothing recorded, without throwing" {
+        $fakeHome = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-fakehome-" + [guid]::NewGuid())
+        $cacheDir = Join-Path $fakeHome '.claude/plugins/cache'
+        New-Item -ItemType Directory -Path (Join-Path $cacheDir 'mp/plugin-one') -Force | Out-Null
+        $prevUserProfile = $env:USERPROFILE
+        try {
+            $env:USERPROFILE = $fakeHome
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+            $manifestPath = "$script:target/.claude/.harness-manifest.json"
+            $m = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+            $m['stackDetected'] = $null
+            ($m | ConvertTo-Json -Depth 20) | Set-Content $manifestPath
+            $manifestBefore = Get-Content $manifestPath -Raw
+
+            { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit } | Should -Not -Throw
+            $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String
+            $out | Should -Match "Plugins detected: 1 \(manifest last recorded: 0\)"
+            $pattern = [regex]::Escape('+ mp/plugin-one (newly detected)')
+            $out | Should -Match $pattern
+            (Get-Content $manifestPath -Raw) | Should -Be $manifestBefore
+        }
+        finally {
+            $env:USERPROFILE = $prevUserProfile
+            Remove-Item -Recurse -Force $fakeHome
+        }
+    }
+
+    It "audit degrades a wrong-typed stackDetected (number) to nothing recorded, without throwing" {
+        # Not a string: System.String and Object[] both expose a Contains(object) method
+        # that returns $false instead of throwing, so those two "wrong-typed" shapes
+        # happen not to reproduce the crash (verified by ablation). A scalar with no
+        # Contains method at all (e.g. an int, from a hand-edited `"stackDetected": 42`)
+        # is what actually throws "does not contain a method named 'Contains'".
+        $fakeHome = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-fakehome-" + [guid]::NewGuid())
+        $cacheDir = Join-Path $fakeHome '.claude/plugins/cache'
+        New-Item -ItemType Directory -Path (Join-Path $cacheDir 'mp/plugin-one') -Force | Out-Null
+        $prevUserProfile = $env:USERPROFILE
+        try {
+            $env:USERPROFILE = $fakeHome
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+            $manifestPath = "$script:target/.claude/.harness-manifest.json"
+            $m = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+            $m['stackDetected'] = 42
+            ($m | ConvertTo-Json -Depth 20) | Set-Content $manifestPath
+            $manifestBefore = Get-Content $manifestPath -Raw
+
+            { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit } | Should -Not -Throw
+            $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String
+            $out | Should -Match "Plugins detected: 1 \(manifest last recorded: 0\)"
+            $pattern = [regex]::Escape('+ mp/plugin-one (newly detected)')
+            $out | Should -Match $pattern
+            (Get-Content $manifestPath -Raw) | Should -Be $manifestBefore
+        }
+        finally {
+            $env:USERPROFILE = $prevUserProfile
+            Remove-Item -Recurse -Force $fakeHome
+        }
     }
 
     It "audit handles a hand-built .claude with no manifest as untracked" {
