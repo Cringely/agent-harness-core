@@ -16,7 +16,7 @@ The rule that keeps these from drifting into a mess: core is upstream. Projects 
 | `core/claude/hooks/` | Worktree gate, session guardrails, wave-close handoff, prose-lint-on-write |
 | `core/claude/templates/` | `guardrails.template.md`, a settings fragment, and a ceremony ledger template |
 | `patterns/` | The design docs behind the above, listed in [`patterns/INDEX.md`](patterns/INDEX.md) |
-| `install/` | The installer that copies core into a project's `.claude/` |
+| `install/` | The installer that copies core into a project's `.claude/`, plus `Restore-ClaudeProject.ps1` for moving a project and its session history to another machine |
 
 ## What's deliberately absent
 
