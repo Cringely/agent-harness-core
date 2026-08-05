@@ -16,9 +16,13 @@ One occurrence is a note. Two occurrences across different projects make it a ca
 
 A change belongs here if it states a testable constraint or provides machinery a second project can actually reuse, not a fix for one project's specific bug. It should be language-agnostic, or clearly labeled with which language or stack it assumes. And it has to be genericized, stripped of the project name and domain-specific nouns from whatever system it was pulled out of. If a pattern doc needs an example, use a placeholder domain like "orders" or "jobs" instead of the real one.
 
+That's a scrubbing rule: how an example should read. A separate, orthogonal question decides what kind of knowledge a core file is allowed to carry at all: process versus domain. Core agent definitions hold process, how to work, review independently, verify before claiming something works, reconcile docs after a merge, and never a technology, a tool, or a field. The reason is cadence, not quality. Core only updates when a project reruns the installer; a domain moves on its own schedule regardless. A def can pass every clause above, genericized, testable, reusable by any project in that domain, and still fail this one. `docker-expert` did: stripped of any project name, stating a real checklist, reusable by any Docker project, and still going stale on Docker's release cycle rather than the installer's, which is exactly why it doesn't live here anymore.
+
 ## What stays project-level
 
 Domain logic stays where the domain lives. So do thresholds tuned to one system's traffic or scale, and language-specific versions of a pattern described here. If a project builds a core pattern in a different language, that code lives in the project, not here. Only the pattern doc that describes the shape of the solution belongs in core.
+
+A domain agent def follows the same rule even when it's well-written and reusable across several projects. It lives in the account layer or in the project that needs it, never in core, because reuse doesn't offset staleness.
 
 ## Change process
 

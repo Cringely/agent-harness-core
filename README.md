@@ -1,6 +1,6 @@
 # Agent Harness Core
 
-This is a process layer and pattern documentation, extracted from the SpaceMolt harness. It defines charter-backed agent roles, session hooks, and design patterns for running AI coding agents on a project. This repo contains no code library, only the docs and ceremony layer that explain how and why the agent coordination works.
+This is a process layer and pattern documentation, extracted from the SpaceMolt harness. It defines process-role agent definitions, session hooks, and design patterns for running AI coding agents on a project. This repo contains no code library, only the docs and ceremony layer that explain how and why the agent coordination works.
 
 ## Layering model
 
@@ -12,10 +12,10 @@ The rule that keeps these from drifting into a mess: core is upstream. Projects 
 
 | Path | Contents |
 |---|---|
-| `core/claude/agents/` | Four charter-backed agent roles plus two self-contained specialists (`security-auditor`, `docker-expert`) |
+| `core/claude/agents/` | Self-contained process roles `adversarial-reviewer`, `doc-steward`, `research-scout`, `soc-monitor`, `task-reviewer`. See `patterns/agent-def-shape.md` on why none point at a charter yet |
 | `core/claude/hooks/` | Worktree gate, session guardrails, wave-close handoff, prose-lint-on-write |
 | `core/claude/templates/` | `guardrails.template.md`, a settings fragment, and a ceremony ledger template |
-| `patterns/` | Eight docs explaining the design behind the above |
+| `patterns/` | Twelve docs explaining the design behind the above |
 | `install/` | The installer that copies core into a project's `.claude/` |
 
 ## What's deliberately absent
@@ -27,7 +27,8 @@ Skills already global in `~/.claude` (prose review, prose linting, council revie
 ## Install
 
 Prerequisites: PowerShell 7 (`pwsh`); `bun` on PATH for the TypeScript hooks (`agent-worktree-gate.ts`,
-`lint-doc-prose.ts`) without it they silently no-op; Git Bash or another POSIX `sh` on Windows for the
+`lint-doc-prose.ts`), without it the gates stop enforcing and Claude Code surfaces an error notice on
+stderr per dispatch; Git Bash or another POSIX `sh` on Windows for the
 two shell hooks (`session-start-guardrails.sh`, `wave-close-handoff.sh`). The prose-lint hook also
 wants `vale` and the prose-lint styles kit on the machine; missing either degrades to an advisory
 skip, never a blocked write.
