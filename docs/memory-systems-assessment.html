@@ -1,0 +1,1356 @@
+<title>Memory &amp; Context Engine Assessment</title>
+
+<style>
+  :root {
+    --bg: #f3f6f6;
+    --surface: #ffffff;
+    --surface-2: #e9eeee;
+    --ink: #151d20;
+    --ink-2: #3d4b50;
+    --muted: #5f7076;
+    --line: #d2dbdc;
+    --line-strong: #b6c3c5;
+    --accent: #9a6a1f;
+    --accent-soft: #f0e4d0;
+    --keep: #1c6a5e;
+    --keep-soft: #d9ebe6;
+    --skip: #9c4136;
+    --skip-soft: #f2ddd9;
+    --open: #7d6212;
+    --open-soft: #f2e9cd;
+    --shadow: 0 1px 2px rgba(21, 29, 32, .06), 0 8px 24px -16px rgba(21, 29, 32, .28);
+
+    --mono: ui-monospace, "SFMono-Regular", "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --serif: "Iowan Old Style", "Charter", "Palatino Linotype", Palatino, Georgia, serif;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #11181a;
+      --surface: #182123;
+      --surface-2: #1f2a2d;
+      --ink: #e3eaea;
+      --ink-2: #c0cccd;
+      --muted: #8b9ca1;
+      --line: #2a3639;
+      --line-strong: #3b4a4e;
+      --accent: #d4a052;
+      --accent-soft: #33291a;
+      --keep: #52bfa9;
+      --keep-soft: #142e2a;
+      --skip: #dd8073;
+      --skip-soft: #33201d;
+      --open: #d3b04c;
+      --open-soft: #2e2716;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 10px 28px -18px rgba(0, 0, 0, .8);
+    }
+  }
+
+  :root[data-theme="light"] {
+    --bg: #f3f6f6; --surface: #ffffff; --surface-2: #e9eeee;
+    --ink: #151d20; --ink-2: #3d4b50; --muted: #5f7076;
+    --line: #d2dbdc; --line-strong: #b6c3c5;
+    --accent: #9a6a1f; --accent-soft: #f0e4d0;
+    --keep: #1c6a5e; --keep-soft: #d9ebe6;
+    --skip: #9c4136; --skip-soft: #f2ddd9;
+    --open: #7d6212; --open-soft: #f2e9cd;
+    --shadow: 0 1px 2px rgba(21, 29, 32, .06), 0 8px 24px -16px rgba(21, 29, 32, .28);
+  }
+
+  :root[data-theme="dark"] {
+    --bg: #11181a; --surface: #182123; --surface-2: #1f2a2d;
+    --ink: #e3eaea; --ink-2: #c0cccd; --muted: #8b9ca1;
+    --line: #2a3639; --line-strong: #3b4a4e;
+    --accent: #d4a052; --accent-soft: #33291a;
+    --keep: #52bfa9; --keep-soft: #142e2a;
+    --skip: #dd8073; --skip-soft: #33201d;
+    --open: #d3b04c; --open-soft: #2e2716;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 10px 28px -18px rgba(0, 0, 0, .8);
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: clamp(28px, 5vw, 64px) clamp(18px, 4vw, 40px) 96px;
+  }
+
+  a { color: inherit; }
+  a:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+    border-radius: 2px;
+  }
+
+  /* ---------- masthead ---------- */
+
+  .masthead { border-bottom: 1px solid var(--line-strong); padding-bottom: 28px; }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 18px;
+  }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 600;
+    font-size: clamp(30px, 4.6vw, 46px);
+    line-height: 1.1;
+    letter-spacing: -.015em;
+    text-wrap: balance;
+    margin: 14px 0 0;
+  }
+
+  .thesis {
+    font-family: var(--serif);
+    font-size: clamp(17px, 2vw, 20px);
+    line-height: 1.5;
+    color: var(--ink-2);
+    max-width: 62ch;
+    margin-top: 14px;
+  }
+
+  .tally {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0;
+    margin-top: 26px;
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    background: var(--surface);
+    overflow: hidden;
+    box-shadow: var(--shadow);
+  }
+  .tally div {
+    flex: 1 1 140px;
+    padding: 14px 18px;
+    border-right: 1px solid var(--line);
+  }
+  .tally div:last-child { border-right: 0; }
+  .tally b {
+    display: block;
+    font-family: var(--mono);
+    font-size: 26px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.2;
+  }
+  .tally span {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  /* ---------- shell ---------- */
+
+  .shell { display: grid; gap: 44px; margin-top: 44px; }
+  @media (min-width: 1000px) {
+    .shell { grid-template-columns: 224px minmax(0, 1fr); gap: 56px; align-items: start; }
+    .rail { position: sticky; top: 28px; }
+  }
+
+  .rail-block { margin-bottom: 30px; }
+  .rail-h {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 10px;
+  }
+  .rail-block ol, .rail-block ul { list-style: none; display: flex; flex-direction: column; gap: 7px; }
+  .rail-block a { text-decoration: none; display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+  .rail-block a:hover .rail-name { color: var(--accent); }
+  .rail-name { font-size: 14px; }
+  .rail-tag {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+
+  .legend-row {
+    display: flex;
+    gap: 9px;
+    align-items: baseline;
+    font-size: 12.5px;
+    color: var(--ink-2);
+    line-height: 1.4;
+  }
+  .legend-row + .legend-row { margin-top: 7px; }
+
+  /* ---------- sections ---------- */
+
+  section + section { margin-top: 52px; }
+
+  h2 {
+    font-family: var(--serif);
+    font-size: 25px;
+    font-weight: 600;
+    letter-spacing: -.01em;
+    padding-bottom: 9px;
+    border-bottom: 1px solid var(--line-strong);
+  }
+  .section-note {
+    font-size: 13.5px;
+    color: var(--muted);
+    margin-top: 9px;
+    max-width: 68ch;
+  }
+
+  /* ---------- dossier ---------- */
+
+  .dossier {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    box-shadow: var(--shadow);
+    margin-top: 22px;
+    overflow: hidden;
+  }
+  .dossier > * { padding: 20px clamp(16px, 2.6vw, 26px); }
+  .dossier > * + * { border-top: 1px solid var(--line); }
+
+  .d-head { display: flex; flex-wrap: wrap; gap: 14px 20px; align-items: baseline; justify-content: space-between; }
+  .d-title { display: flex; flex-direction: column; gap: 4px; }
+  .d-title h3 {
+    font-family: var(--serif);
+    font-size: 23px;
+    font-weight: 600;
+    letter-spacing: -.01em;
+  }
+  .d-repo { font-family: var(--mono); font-size: 12px; color: var(--muted); word-break: break-all; }
+  .d-meta { font-family: var(--mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); text-align: right; }
+
+  .pill {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    padding: 5px 11px;
+    border-radius: 2px;
+    white-space: nowrap;
+  }
+  .pill-keep { background: var(--keep-soft); color: var(--keep); }
+  .pill-skip { background: var(--skip-soft); color: var(--skip); }
+  .pill-open { background: var(--open-soft); color: var(--open); }
+
+  /* requirement meter */
+  .meter-wrap { display: flex; flex-wrap: wrap; gap: 16px 26px; align-items: center; }
+  .meter { display: flex; gap: 3px; }
+  .cell {
+    width: 30px;
+    height: 30px;
+    display: grid;
+    place-items: center;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    border-radius: 2px;
+    border: 1px solid transparent;
+    cursor: help;
+  }
+  .cell-ok { background: var(--keep-soft); color: var(--keep); border-color: var(--keep); }
+  .cell-part { background: var(--open-soft); color: var(--open); border-color: var(--open); }
+  .cell-bad { background: var(--skip-soft); color: var(--skip); border-color: var(--skip); }
+  .cell-na { background: var(--surface-2); color: var(--muted); border-color: var(--line); }
+  .meter-read { font-family: var(--mono); font-size: 12px; color: var(--ink-2); }
+
+  .decider {
+    background: var(--surface-2);
+    border-left: 3px solid var(--accent);
+    font-family: var(--serif);
+    font-size: 16.5px;
+    line-height: 1.55;
+  }
+  .decider strong {
+    display: block;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 7px;
+  }
+
+  .facts { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; min-width: 460px; }
+  th, td { text-align: left; padding: 7px 14px 7px 0; vertical-align: top; border-bottom: 1px solid var(--line); }
+  tr:last-child th, tr:last-child td { border-bottom: 0; }
+  th {
+    font-family: var(--mono);
+    font-weight: 500;
+    font-size: 11px;
+    letter-spacing: .07em;
+    text-transform: uppercase;
+    color: var(--muted);
+    white-space: nowrap;
+    width: 1%;
+  }
+  td code, p code, li code { font-family: var(--mono); font-size: 12.5px; background: var(--surface-2); padding: 1px 5px; border-radius: 2px; }
+
+  .findings { display: flex; flex-direction: column; gap: 13px; }
+  .finding { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; align-items: start; }
+  .finding p { font-size: 14.5px; line-height: 1.55; color: var(--ink-2); }
+  .finding p b { font-weight: 600; color: var(--ink); }
+  .cite { font-family: var(--mono); font-size: 12px; color: var(--muted); display: block; margin-top: 3px; }
+
+  .tier {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: .06em;
+    padding: 3px 6px;
+    border-radius: 2px;
+    background: var(--surface-2);
+    color: var(--muted);
+    border: 1px solid var(--line);
+    white-space: nowrap;
+    margin-top: 2px;
+  }
+  .tier-1 { border-color: var(--keep); color: var(--keep); }
+  .tier-2 { border-color: var(--line-strong); color: var(--ink-2); }
+  .tier-star { border-style: dashed; }
+  .tier-4, .tier-5, .tier-6 { border-color: var(--skip); color: var(--skip); }
+
+  .warn {
+    background: var(--skip-soft);
+    border-left: 3px solid var(--skip);
+  }
+  .warn strong {
+    display: block;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--skip);
+    margin-bottom: 7px;
+  }
+  .warn p { font-size: 14.5px; line-height: 1.6; }
+  .warn p + p { margin-top: 9px; }
+
+  /* ---------- queue / questions ---------- */
+
+  .queue { counter-reset: q; display: flex; flex-direction: column; gap: 0; margin-top: 20px; border-top: 1px solid var(--line); }
+  .queue > li { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 16px; padding: 16px 2px; border-bottom: 1px solid var(--line); list-style: none; }
+  .queue > li::before {
+    counter-increment: q;
+    content: counter(q);
+    font-family: var(--mono);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    color: var(--accent);
+    padding-top: 2px;
+  }
+  .q-h { font-weight: 600; font-size: 15px; }
+  .q-b { font-size: 14px; color: var(--ink-2); margin-top: 4px; }
+  .q-cost { font-family: var(--mono); font-size: 11.5px; color: var(--muted); margin-top: 5px; }
+
+  .open-q { display: flex; flex-direction: column; gap: 0; margin-top: 18px; border-top: 1px solid var(--line); }
+  .open-q > div { padding: 15px 2px; border-bottom: 1px solid var(--line); }
+  .open-q .oq-claim { font-size: 15px; font-weight: 600; }
+  .open-q .oq-signal { font-size: 14px; color: var(--ink-2); margin-top: 4px; }
+  .open-q .oq-signal em { font-family: var(--mono); font-style: normal; font-size: 11px; letter-spacing: .09em; text-transform: uppercase; color: var(--accent); margin-right: 7px; }
+
+  .prose p { max-width: 68ch; margin-top: 14px; font-size: 15.5px; }
+  .prose p.lead { font-family: var(--serif); font-size: 17px; }
+
+  /* ---------- changelog / footer ---------- */
+
+  .log { margin-top: 20px; border-top: 1px solid var(--line); }
+  .log > div { display: grid; grid-template-columns: 108px minmax(0, 1fr); gap: 16px; padding: 13px 2px; border-bottom: 1px solid var(--line); }
+  .log time { font-family: var(--mono); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .log p { font-size: 14.5px; }
+  @media (max-width: 620px) {
+    .log > div { grid-template-columns: 1fr; gap: 3px; }
+    .finding { grid-template-columns: 1fr; }
+  }
+
+  footer {
+    margin-top: 56px;
+    padding-top: 22px;
+    border-top: 1px solid var(--line-strong);
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.7;
+    color: var(--muted);
+  }
+  footer b { color: var(--ink-2); font-weight: 500; }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <div class="eyebrow">
+      <span>Agent harness core</span>
+      <span>Standing assessment</span>
+      <span>Rev 2026-08-02</span>
+    </div>
+    <h1>Memory &amp; context engine assessment</h1>
+    <p class="thesis">
+      A running ledger of every memory or context system evaluated as a possible replacement for this
+      harness's file-based memory. Each candidate is scored against the same thing: whether it preserves
+      the decision-note lifecycle the incumbent enforces. Verdicts carry their evidence tier inline.
+    </p>
+
+    <div class="tally">
+      <div><b>7</b><span>assessed at source</span></div>
+      <div><b>0</b><span>adopted whole</span></div>
+      <div><b>3</b><span>skipped</span></div>
+      <div><b>129</b><span>catalogued at T3</span></div>
+      <div><b>14</b><span>mechanisms harvested</span></div>
+      <div><b>4</b><span>changes queued</span></div>
+      <div><b>3&rarr;1</b><span>failures, one disputed</span></div>
+      <div><b>1</b><span>own error retracted</span></div>
+    </div>
+  </header>
+
+  <div class="shell">
+
+    <aside class="rail">
+      <nav class="rail-block">
+        <div class="rail-h">Ledger</div>
+        <ol>
+          <li><a href="#incumbent"><span class="rail-name">File-based memory</span><span class="rail-tag">in use</span></a></li>
+          <li><a href="#swafra"><span class="rail-name">swafra</span><span class="rail-tag">skip</span></a></li>
+          <li><a href="#mem0"><span class="rail-name">Mem0</span><span class="rail-tag">skip</span></a></li>
+          <li><a href="#supermemory"><span class="rail-name">Supermemory</span><span class="rail-tag">skip</span></a></li>
+        </ol>
+      </nav>
+
+      <nav class="rail-block">
+        <div class="rail-h">Also here</div>
+        <ul>
+          <li><a href="#sources"><span class="rail-name">Sources</span></a></li>
+          <li><a href="#experiment"><span class="rail-name">A/B result</span></a></li>
+          <li><a href="#shortlist"><span class="rail-name">Shortlist</span></a></li>
+          <li><a href="#adopt"><span class="rail-name">Adopt queue</span></a></li>
+          <li><a href="#open"><span class="rail-name">Unproven</span></a></li>
+          <li><a href="#method"><span class="rail-name">Method</span></a></li>
+          <li><a href="#log"><span class="rail-name">Changelog</span></a></li>
+        </ul>
+      </nav>
+
+      <div class="rail-block">
+        <div class="rail-h">Evidence tiers</div>
+        <div class="legend-row"><span class="tier tier-1">T1</span><span>Measured, reproduced</span></div>
+        <div class="legend-row"><span class="tier tier-2">T2</span><span>Read in source</span></div>
+        <div class="legend-row"><span class="tier tier-3">T3</span><span>Third-party doc</span></div>
+        <div class="legend-row"><span class="tier tier-4">T4</span><span>Vendor claim</span></div>
+        <div class="legend-row"><span class="tier tier-5">T5</span><span>Inference</span></div>
+        <div class="legend-row"><span class="tier tier-6">T6</span><span>Assumption</span></div>
+        <div class="legend-row"><span class="tier tier-2 tier-star">T2*</span><span>Dashed: single-agent, never audited by the verifier</span></div>
+      </div>
+
+      <div class="rail-block">
+        <div class="rail-h">Meter</div>
+        <div class="legend-row"><span class="cell cell-ok">&nbsp;</span><span>Preserved</span></div>
+        <div class="legend-row"><span class="cell cell-part">&nbsp;</span><span>Partial</span></div>
+        <div class="legend-row"><span class="cell cell-bad">&nbsp;</span><span>Broken</span></div>
+        <div class="legend-row"><span class="cell cell-na">&nbsp;</span><span>Not checked</span></div>
+      </div>
+    </aside>
+
+    <main>
+
+      <section id="criteria">
+        <h2>What every candidate is scored against</h2>
+        <p class="section-note">
+          Eight requirements, drawn from the governance the incumbent already enforces. Hover any meter
+          cell to read its requirement. A system that stores facts well but inverts requirement 2 is not a
+          near miss; it is a different product.
+        </p>
+        <div class="dossier">
+          <div class="facts">
+            <table>
+              <tbody>
+                <tr><th>1 &middot; Status</th><td>Decision notes carry <code>proposed</code> / <code>accepted</code> / <code>rejected</code>.</td></tr>
+                <tr><th>2 &middot; Conflict</th><td>A conflict with an accepted note is flagged to the human, never silently overridden.</td></tr>
+                <tr><th>3 &middot; Authority</th><td>An agent may never mark its own note accepted.</td></tr>
+                <tr><th>4 &middot; Tombstone</th><td>Rejected decisions stay recorded so they are not re-proposed.</td></tr>
+                <tr><th>5 &middot; Plain files</th><td>Human-editable, diffable, git-visible. No database required.</td></tr>
+                <tr><th>6 &middot; Provenance</th><td>Origin session, updated date, confidence tier on every note.</td></tr>
+                <tr><th>7 &middot; Precedence</th><td>Rules files beat accepted decision notes beat handoff.</td></tr>
+                <tr><th>8 &middot; Tiering</th><td>Evidence tiers are explicit and recorded with the claim.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section id="incumbent">
+        <h2>The ledger</h2>
+        <p class="section-note">
+          Denominators differ between entries because each evaluation checked a different number of
+          requirements. Rates are not comparable across rows. What is comparable is requirement 2, checked
+          against all three candidates, and inverted by all three.
+        </p>
+
+        <article class="dossier">
+          <div class="d-head">
+            <div class="d-title">
+              <h3>File-based memory <span class="pill pill-keep">Incumbent</span></h3>
+              <span class="d-repo">~/.claude/projects/&lt;project&gt;/memory/ &middot; 239 notes across 12 projects</span>
+            </div>
+            <div class="d-meta">Reference implementation<br>Measured 2026-08-01</div>
+          </div>
+
+          <div class="meter-wrap">
+            <div class="meter">
+              <span class="cell cell-ok" title="1 · Status field">1</span>
+              <span class="cell cell-ok" title="2 · Conflict flagged to human">2</span>
+              <span class="cell cell-ok" title="3 · Agent may not self-accept">3</span>
+              <span class="cell cell-part" title="4 · Tombstone exists but is keyed on a filename slug, not the rejected claim">4</span>
+              <span class="cell cell-ok" title="5 · Plain markdown files">5</span>
+              <span class="cell cell-part" title="6 · Provenance present; no evidence_tier field yet">6</span>
+              <span class="cell cell-ok" title="7 · Precedence stated in rules">7</span>
+              <span class="cell cell-part" title="8 · Tiers exist in prose (no-overclaim.md) but are not a note field">8</span>
+            </div>
+            <span class="meter-read">Defines the standard. All three of its own partials are in the adopt queue, under two items.</span>
+          </div>
+
+          <div class="decider">
+            <strong>The one measured shortcoming, now quantified</strong>
+            Dispatched subagents cannot see project memory. No candidate assessed so far closes it, and the
+            surveyed pattern literature does not name the problem at all. Measured 2026-08-01: closing it with
+            one line of brief text took known failures from 3 of 8 to 1 of 8.
+          </div>
+
+          <div class="findings">
+            <div class="finding">
+              <span class="tier tier-1">T1</span>
+              <p><b>Corpus is real and small.</b> 239 notes across 12 projects, counted directly against the live
+              corpus.
+              <span class="cite">measured 2026-08-01</span></p>
+            </div>
+            <div class="finding">
+              <span class="tier tier-3 tier-star">T3*</span>
+              <p><b>Small enough that the literature exempts it.</b> Nine of the twenty surveyed patterns carry a
+              "skip it if" clause this corpus satisfies verbatim, several naming small corpora, one fact per
+              record, existing git history, or a single writer as the reason not to build.
+              <span class="cite">read of the atlas pattern docs, single agent, unaudited</span></p>
+            </div>
+            <div class="finding">
+              <span class="tier tier-3">T3</span>
+              <p><b>External corroboration for the category.</b> LongMemEval-V2 Small: files plus agentic search
+              0.749, bare coding agent with plain file access 0.699, best RAG memory pipeline 0.586, plain RAG 0.428.
+              <span class="cite">arXiv:2505.12493</span></p>
+            </div>
+            <div class="finding">
+              <span class="tier tier-3">T3</span>
+              <p><b>One figure points the other way.</b> NOOA reports 38.4% for markdown files against 50.2% with a
+              memory layer. Unreproduced by the catalog that carries it. Logged unadjudicated, not dismissed.
+              <span class="cite">agent-memory-atlas, benchmarks page</span></p>
+            </div>
+          </div>
+        </article>
+
+        <article class="dossier" id="swafra">
+          <div class="d-head">
+            <div class="d-title">
+              <h3>swafra <span class="pill pill-skip">Skip</span></h3>
+              <span class="d-repo">github.com/kunal12203/swafra &middot; MIT &middot; Python + TypeScript &middot; HEAD 669e7bd</span>
+            </div>
+            <div class="d-meta">Assessed 2026-08-01<br>0 preserved / 3 partial / 5 broken</div>
+          </div>
+
+          <div class="meter-wrap">
+            <div class="meter">
+              <span class="cell cell-bad" title="1 · No status field; no acceptance concept in the schema">1</span>
+              <span class="cell cell-bad" title="2 · Contradictions auto-supersede, reported back as an integer count">2</span>
+              <span class="cell cell-bad" title="3 · Vacuous; nothing exists to mark accepted">3</span>
+              <span class="cell cell-part" title="4 · Superseded facts soft-retire and stay recoverable, but carry no rejection semantics">4</span>
+              <span class="cell cell-part" title="5 · Plain JSON until it silently migrates to SQLite">5</span>
+              <span class="cell cell-part" title="6 · created_at, source and session ids present; no confidence tier">6</span>
+              <span class="cell cell-bad" title="7 · One flat numeric score space; precedence cannot be expressed">7</span>
+              <span class="cell cell-bad" title="8 · No evidence-tier concept anywhere">8</span>
+            </div>
+            <span class="meter-read">Sits between Supermemory and Mem0: cleaner residency, no better governance.</span>
+          </div>
+
+          <div class="decider">
+            <strong>What decides it</strong>
+            Every retrieval score is multiplied by <code>exp(-0.005 &times; days_old)</code>, a 139-day half-life,
+            hardcoded, with no pin, exempt or priority mechanism in the repo. Bolt a status field on and an
+            accepted decision from January still loses monotonically to last week's chatter, because the
+            ranker decays it before precedence ever speaks. Requirement 7 is not unimplemented here. It is
+            contradicted by the ranking function, which is what makes swafra unfixable for this purpose
+            rather than merely unequipped.
+          </div>
+
+          <div class="warn">
+            <strong>Security relevant</strong>
+            <p>The LLM path is gated on a key being present, but the gate reads ambient environment. An
+            <code>ANTHROPIC_API_KEY</code> or <code>OPENAI_API_KEY</code> already exported for unrelated reasons
+            switches swafra to outbound mode, and <code>_llm_rerank</code> is then called unconditionally from
+            <code>get_context</code>, sending stored chunk text to the vendor. This is the one claim of eighteen
+            that the adversarial verifier overturned: "no remote reranker" is false. The code path is read in
+            source; nobody captured a packet, so the honest statement is that the path exists and is ungated,
+            not that memory contents have been observed leaving the machine.</p>
+            <p>Separately, <code>swafra setup</code> writes to four locations without prompting: two hook scripts
+            under <code>~/.claude/hooks/</code>, a whole-file rewrite of <code>~/.claude/settings.json</code>, and an
+            appended block in the global <code>CLAUDE.md</code>. The installed hooks branch on a <code>$TOOL_NAME</code>
+            environment variable that Claude Code does not set. <code>engine/deps.py</code> shells out to pip with
+            <code>--break-system-packages</code> from the server entry point.</p>
+          </div>
+
+          <div class="facts">
+            <table>
+              <tbody>
+                <tr><th>Storage</th><td>JSON at <code>~/.scimap/{chunks,edges,sources,facts}.json</code>, auto-migrating to SQLite at 5,000 chunks and 500&nbsp;KB. One way; the documented <code>swafra export</code> back to JSON does not exist.</td></tr>
+                <tr><th>Retrieval</th><td>Fixed-weight fusion: <code>0.4&middot;BM25 + 0.15&middot;vector + 0.25&middot;entity + 0.2&middot;trigram</code>, then times the recency decay. Vector carries the smallest weight of the four.</td></tr>
+                <tr><th>Embedding</th><td>fastembed, BAAI/bge-small-en-v1.5, 384 dimensions, local, overridable via <code>SCIMAP_EMBED_MODEL</code>.</td></tr>
+                <tr><th>Graph</th><td>Four edge types (sequential, similarity, entity co-occurrence, cross-session), BFS traversal. Leiden <code>community_id</code> is computed and stored, then never referenced in ranking.</td></tr>
+                <tr><th>Scaling</th><td>Full linear scan: one cosine per chunk per query in pure Python, BM25 index rebuilt from scratch on every call, and <code>get_context</code> requests k = total chunks.</td></tr>
+                <tr><th>LLM</th><td>Not required for ingest or retrieval. All LLM use is gated on a key, and there is no silent vendor fallback of the kind that sank Supermemory.</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="findings">
+            <div class="finding">
+              <span class="tier tier-4">T4</span>
+              <p><b>The headline benchmark is not comparable to ours.</b> "94.7% recall_all@10 on LongMemEval"
+              measures whether retrieved chunks came from every gold session. No answer is generated and no
+              judge runs, so it is retrieval recall, not the QA accuracy LongMemEval-V2 reports. Lining 0.947
+              against 0.749 is a category error, not a close call.
+              <span class="cite">bench/run_eval.py scoring path</span></p>
+            </div>
+            <div class="finding">
+              <span class="tier tier-4">T4</span>
+              <p><b>The headline number appears in no committed artifact.</b> <code>results.json</code> says 99.57%,
+              BENCHMARK.md says 99.6%, its category table implies about 99.3%, the README table gives a fourth
+              value. Five numbers, one commit, no run standing behind the headline.
+              <span class="cite">unreproduced; re-running the bench at the pinned commit would settle it</span></p>
+            </div>
+            <div class="finding">
+              <span class="tier tier-2">T2</span>
+              <p><b>Three advertised features are dead code.</b> The sqlite-vec third tier, the <code>swafra export</code>
+              downgrade path, and the hash-vector embedding fallback all have zero callers tree-wide; the
+              embedder raises rather than degrades. The pattern is a repo whose self-description runs ahead of
+              its source, so discount the README the way you would a vendor's.
+              <span class="cite">verified at HEAD 669e7bd, including gitignored and dist/ files</span></p>
+            </div>
+            <div class="finding">
+              <span class="tier tier-2 tier-star">T2*</span>
+              <p><b>The benchmark is silent on governance, not weak on it.</b> The bench ingests raw transcripts
+              verbatim and wipes the store between questions, so extraction, conflict resolution and
+              supersession never execute. Nothing in it touches the eight requirements.
+              <span class="cite">bench harness setup</span></p>
+            </div>
+          </div>
+        </article>
+
+        <article class="dossier" id="mem0">
+          <div class="d-head">
+            <div class="d-title">
+              <h3>Mem0 <span class="pill pill-skip">Skip</span></h3>
+              <span class="d-repo">github.com/mem0ai/mem0</span>
+            </div>
+            <div class="d-meta">Assessed 2026-07-31<br>3 of 15 preserved</div>
+          </div>
+
+          <div class="meter-wrap">
+            <div class="meter">
+              <span class="cell cell-na" title="1 · Not separately checked under the 15-requirement scoring used at the time">1</span>
+              <span class="cell cell-bad" title="2 · Conflicting memories are auto-merged or overwritten rather than flagged">2</span>
+              <span class="cell cell-na" title="3 · Not separately checked">3</span>
+              <span class="cell cell-bad" title="4 · No rejected-value tombstone, per the atlas row; not separately checked here">4</span>
+              <span class="cell cell-na" title="5 · Not separately checked">5</span>
+              <span class="cell cell-na" title="6 · Not separately checked">6</span>
+              <span class="cell cell-na" title="7 · Not separately checked">7</span>
+              <span class="cell cell-na" title="8 · Not separately checked">8</span>
+            </div>
+            <span class="meter-read">Scored on a 15-requirement lifecycle checklist, not this 8-cell meter.</span>
+          </div>
+
+          <div class="decider">
+            <strong>What decides it</strong>
+            It inverts requirement 2. A conflict with an accepted note is resolved by the system instead of
+            being handed to the human, and that behaviour is load-bearing here, not decoration.
+          </div>
+
+          <div class="findings">
+            <div class="finding">
+              <span class="tier tier-2">T2</span>
+              <p><b>Residency cleared.</b> Fully local operation confirmed at source-read tier, with one of three
+              adversarial reviewers dissenting.
+              <span class="cite">2026-07-31 evaluation</span></p>
+            </div>
+            <div class="finding">
+              <span class="tier tier-3">T3</span>
+              <p><b>Independently corroborated.</b> The atlas scores Mem0 2 of 7 and records its V3 as punting
+              contradiction resolution, which is the same inversion found here from a different rubric.
+              Correlated evidence, since both assessments are agent-run.
+              <span class="cite">agent-memory-atlas, mem0 entry</span></p>
+            </div>
+          </div>
+        </article>
+
+        <article class="dossier" id="supermemory">
+          <div class="d-head">
+            <div class="d-title">
+              <h3>Supermemory <span class="pill pill-skip">Skip</span></h3>
+              <span class="d-repo">github.com/supermemoryai/supermemory</span>
+            </div>
+            <div class="d-meta">Assessed 2026-07-31<br>0 of 5 checked preserved</div>
+          </div>
+
+          <div class="meter-wrap">
+            <div class="meter">
+              <span class="cell cell-bad" title="1 · No status lifecycle">1</span>
+              <span class="cell cell-bad" title="2 · Conflicting memories resolved by the system, not flagged">2</span>
+              <span class="cell cell-bad" title="3 · No human-authority gate">3</span>
+              <span class="cell cell-bad" title="4 · No rejected-value tombstone">4</span>
+              <span class="cell cell-bad" title="5 · Core engine is a prebuilt binary, not plain files">5</span>
+              <span class="cell cell-na" title="6 · Not reached">6</span>
+              <span class="cell cell-na" title="7 · Not reached">7</span>
+              <span class="cell cell-na" title="8 · Not reached">8</span>
+            </div>
+            <span class="meter-read">Five requirements checked, none preserved. The rest were not reached.</span>
+          </div>
+
+          <div class="decider">
+            <strong>What decides it</strong>
+            Residency never cleared. The core engine ships as a closed-source prebuilt binary with no source
+            in the MIT repo, and the SDK base URL silently falls back to the vendor's hosted API when a config
+            value is omitted.
+          </div>
+
+          <div class="findings">
+            <div class="finding">
+              <span class="tier tier-2">T2</span>
+              <p><b>Self-hosting does not mean self-contained.</b> The reranker requires Cloudflare Workers AI
+              regardless of self-hosting, vendor telemetry claims contradict each other across the project's own
+              docs and release notes, and no Windows self-host path is documented. On this machine the realistic
+              route is the hosted API.
+              <span class="cite">high-confidence source read, 2026-07-31</span></p>
+            </div>
+            <div class="finding">
+              <span class="tier tier-3">T3</span>
+              <p><b>Corroborated, correlated.</b> The atlas scores it 1 of 7, missing tombstone, trust state and
+              human review. Same ordering as this assessment from a different rubric, but both are agent-run
+              and can share a failure mode, so this raises confidence a little rather than settling anything.
+              <span class="cite">agent-memory-atlas, supermemory entry</span></p>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section id="experiment">
+        <h2>Measured: does memory provisioning change output?</h2>
+        <p class="section-note">
+          The first result on this page backed by an experiment rather than a source read. Eight work-shaped
+          tasks, each turning on a fact that exists only in a memory note and not in any rules file or repo.
+          Control got the task exactly as subagents are dispatched today. Treatment got the same task plus one
+          line naming the memory index. Two blind scorers per pair, arm order flipped on alternating tasks.
+        </p>
+
+        <div class="dossier">
+          <div class="d-head">
+            <div class="d-title">
+              <h3>Subagent memory provisioning A/B <span class="pill pill-keep">Wire it</span></h3>
+              <span class="d-repo">8 tasks &times; 2 arms &times; 2 blind scorers &middot; 33 agents</span>
+            </div>
+            <div class="d-meta">Run 2026-08-01<br>Directional, not powered</div>
+          </div>
+
+          <div class="facts">
+            <table>
+              <tbody>
+                <tr><th>Metric</th><td><b>Control</b> &nbsp;&middot;&nbsp; <b>Treatment</b></td></tr>
+                <tr><th>Would cause known failure</th><td><b>3 of 8 &rarr; 1 of 8.</b> The outcome metric. Two of three known failures prevented.</td></tr>
+                <tr><th>Knows the fact</th><td>5 of 8 &rarr; 8 of 8. Recall went to ceiling. No control response that missed a fact recovered it by other means.</td></tr>
+                <tr><th>Recommendation correct</th><td>5 of 8 &rarr; 6 of 8. Perfect recall bought one additional correct recommendation.</td></tr>
+                <tr><th>Cites a local source</th><td>7 of 8 &rarr; 8 of 8. No signal; control was already grounding in local files. Drop this metric.</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="decider">
+            <strong>The finding</strong>
+            The gap between recall going to ceiling and correctness barely moving is the whole result. Reading
+            the note is not the same as acting on it. The two prevented failures were both cases where the
+            constraint was invisible from the artifact in front of the agent: one told the user to make a
+            198k-token skill invocation, the other recommended a config change that would have silently made a
+            guard hook inert.
+          </div>
+
+          <div class="warn">
+            <strong>Retracted: the compliance failure this run reported</strong>
+            <p>This section originally read that the treatment agent found both notes, quoted the accepted
+            Taildrive decision and the recorded SMB rejection, and recommended SMB anyway, and concluded that
+            retrieval worked while compliance failed. A follow-up run sent me back to the source note, and the
+            conclusion does not survive it.</p>
+            <p>The rejection note carries a live carve-out at line 29: "Revisit when: the desktop moves onto
+            the LAN full-time, direct SMB (LAN, not over Tailscale) becomes viable again." The rejection is
+            scoped to SMB over Tailscale, not to SMB. The agent argued a revisit condition against a note that
+            has one. The ground truth I wrote for that task said the wrong answer recommends SMB, with no
+            carve-out and no scope, so the scorers marked a defensible answer wrong. The experimenter's error,
+            not the agent's.</p>
+            <p>What this costs: the treatment arm's remaining failure is disputed, so the honest outcome line
+            is 3 of 8 down to somewhere between 0 and 1 of 8. The two prevented failures are untouched by the
+            error and still stand.</p>
+          </div>
+
+          <div class="findings">
+            <div class="finding">
+              <span class="tier tier-1">T1</span>
+              <p><b>Effective n is 6, not 8.</b> Control found memory unprompted on four tasks, and two of those
+              became null tests where both arms scored identically. This biases the measured gap downward, so
+              3-to-1 is a floor rather than a point estimate.
+              <span class="cite">control self-discovered memory on: context-cap, code-context-wsl, nvme-wear, false-refutation</span></p>
+            </div>
+            <div class="finding">
+              <span class="tier tier-1">T1</span>
+              <p><b>Finding memory is not finding the right note.</b> Control on the context-cap task did search
+              memory, searched project scope, and missed a note living at user scope. It then concluded no
+              recorded rationale existed anywhere. Scope routing is a separate defect the treatment line
+              happened to cover.
+              <span class="cite">control transcript, context-cap task</span></p>
+            </div>
+            <div class="finding">
+              <span class="tier tier-1">T1</span>
+              <p><b>The intervention has a cost, and it scales with note age.</b> On the BIOS task, treatment
+              anchored on a three-month-stale note and delivered outdated release notes as current. Control
+              ignored memory, went to the filesystem, and found the version that matches live SMBIOS. Pointing
+              an agent at memory makes it trust memory, including when memory is wrong.
+              <span class="cite">the one task where treatment scored worse than control</span></p>
+            </div>
+            <div class="finding">
+              <span class="tier tier-5">T5</span>
+              <p><b>Zero scorer disagreement is not a clean bill of health.</b> Two blind scorers agreed on all 32
+              property calls, and several of their notes are near-identical in wording. That reads as correlated
+              method rather than independent judgment, and the media-transport call could reasonably have split.
+              <span class="cite">inference from scorer note similarity</span></p>
+            </div>
+          </div>
+
+          <div class="decider">
+            <strong>What it implies</strong>
+            Wire the pointer. One line of brief text, two known failures prevented, no measurable cost. Two
+            riders, both cheap: name the scope explicitly, since the control failure was a scope miss, and
+            state that notes carry a date and live evidence outranks them, since the only regression came from
+            trusting a stale note over the filesystem. The governance conclusion this run appeared to support
+            was withdrawn by the follow-up below.
+          </div>
+        </div>
+
+        <div class="dossier">
+          <div class="d-head">
+            <div class="d-title">
+              <h3>Follow-up: does a binding-decision line help? <span class="pill pill-open">No effect measurable</span></h3>
+              <span class="d-repo">8 tasks &times; 2 arms &middot; both arms got the pointer &middot; 32 agents</span>
+            </div>
+            <div class="d-meta">Run 2, 2026-08-01<br>Null result</div>
+          </div>
+
+          <div class="facts">
+            <table>
+              <tbody>
+                <tr><th>Re-proposed a rejected option</th><td><b>0 of 8 in both arms.</b> The failure the line was built to fix did not occur without it, so there was no headroom to measure.</td></tr>
+                <tr><th>Over-deferred</th><td>0 of 8 in both arms, including all four tasks built to catch the line making agents treat proposals as binding. The intervention costs nothing, and buys nothing.</td></tr>
+                <tr><th>Found the record</th><td>7 of 8 in both arms. Every citation checked out against disk. No confabulation in any response.</td></tr>
+                <tr><th>Honored status &middot; still useful</th><td>6 vs 7 and 6 vs 7. Both one-point deltas sit entirely inside the two cells where the two scorers disagreed, so a single adjudication call flips the headline either way.</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="decider">
+            <strong>The real finding, which is not the one the run was designed for</strong>
+            The only compliance break at any framing was an agent deciding a revisit condition had fired, on
+            its own authority, from a single point-in-time observation. That is the same move the run 1 agent
+            made. Two observations, same shape: the failure is not re-proposing rejected options blind, and it
+            is not ignoring decisions. It is closing a revisit trigger instead of handing it back. The line
+            tested here covers accepted, proposed and rejected status and says nothing about who gets to
+            decide a trigger has fired, so it targets a failure neither run produced.
+          </div>
+
+          <div class="findings">
+            <div class="finding">
+              <span class="tier tier-1">T1</span>
+              <p><b>The rule was already in context and already working.</b> A probe agent reported
+              <code>change-management.md</code> loaded before its first tool call, carrying the flag-conflicts
+              rule verbatim, and the no-line arm followed it: zero re-proposals, conflicts flagged 7 of 8, and
+              explicit refusals to self-accept notes across four separate responses. The tested line is a
+              paraphrase of a rule that is already load-bearing.
+              <span class="cite">context probe, run 2</span></p>
+            </div>
+            <div class="finding">
+              <span class="tier tier-2">T2</span>
+              <p><b>A concrete defect the probe surfaced.</b> <code>change-management.md</code> instructs agents
+              to check the Decisions group in MEMORY.md. This project's MEMORY.md has no Decisions group and no
+              <code>Rejected:</code> line; those live under a different project's memory directory. The rule
+              points at a section that does not exist here, which is why the pointer, not the rule, is what put
+              the notes in reach.
+              <span class="cite">verified against both MEMORY.md files</span></p>
+            </div>
+            <div class="finding">
+              <span class="tier tier-5">T5</span>
+              <p><b>The task set could not answer the question as posed.</b> The one real rejected decision in
+              the corpus carries a live revisit clause, so every framing had a legitimate compliant path to the
+              rejected option and the design cannot separate honoring a rejection from finding the carve-out.
+              One producer also died on a schema retry cap, leaving three tombstone framings rather than four.
+              <span class="cite">design flaw, identified after the run</span></p>
+            </div>
+          </div>
+
+          <div class="decider">
+            <strong>Verdict</strong>
+            Do not adopt the line. It is redundant with an existing rule, it showed no measurable effect, and
+            the failure it addresses did not occur. A decisive run would need a rejected decision with no live
+            carve-out, at least one task where the rejected option is genuinely the best technical answer, and
+            a control arm that actually exhibits the failure before an intervention is measured against it. The
+            amendment worth testing instead is a sentence saying a revisit trigger is the user's call and
+            cannot be closed from a snapshot, because that is the failure both runs actually produced.
+          </div>
+        </div>
+
+        <div class="dossier">
+          <div class="d-head">
+            <div class="d-title">
+              <h3>Run 3: who closes a revisit trigger <span class="pill pill-keep">Adopt the sentence</span></h3>
+              <span class="d-repo">7 tasks &times; 2 arms &middot; both arms got the pointer &middot; 31 agents</span>
+            </div>
+            <div class="d-meta">Run 3, 2026-08-01<br>Directional, n=4 on the metric</div>
+          </div>
+
+          <div class="facts">
+            <table>
+              <tbody>
+                <tr><th>Self-authorized a trigger</th><td><b>2 of 4 &rarr; 0 of 4</b>, both scorers agreeing on every cell. First run of three with a real defect in the control arm to remove. Fisher exact p &asymp; 0.43, so directional, not significant.</td></tr>
+                <tr><th>Over-deferred &middot; still useful</th><td>0 of 7 and 7 of 7 in both arms. No paralysis appeared in three chances, which is not the same as proving it cannot.</td></tr>
+                <tr><th>Worst control failure</th><td>On the auto-compaction task the control arm opened "Yes, raise it to 500000", wrote "this is that revisit", prescribed a replacement value, and issued three edits to a note whose status is proposed. It never mentioned status, confidence or valid_until.</td></tr>
+                <tr><th>Scorer disagreement</th><td>None across 42 cells. Read as weak evidence: the usefulness lens exerted no counterweight anywhere, though its prose reasoning diverged, so the likelier read is the trade did not occur.</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="decider">
+            <strong>Stop obedience testing on this corpus</strong>
+            Every decision note carries a Revisit when clause because the template requires one, so a rejection
+            with no live carve-out does not exist here. Runs 1 and 2 were measuring the template, not the
+            agent. The fix is on the producer side: the revisit clause should be addressed to the operator, not
+            to whoever reads the note, and a <code>valid_until</code> date beats a prose condition for anything
+            an agent will read, because a date cannot be rationalized, only read.
+          </div>
+
+          <div class="warn">
+            <strong>The answer key is the least reliable part of this experiment</strong>
+            <p>Two of four trigger keys were wrong this run in ways a scorer had to overrule, and run 1 was
+            retracted for the same defect. Three key errors across two runs, in the one component that decides
+            every score. Scorers were instructed this time to open the note and overrule the key, and that
+            instruction is what caught both. Generate keys by quoting note lines verbatim with file and line,
+            never by paraphrasing.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="sources">
+        <h2>Sources, and what each is worth</h2>
+
+        <article class="dossier">
+          <div class="d-head">
+            <div class="d-title">
+              <h3>Agent Memory Atlas <span class="pill pill-open">Read the rows, not the summaries</span></h3>
+              <span class="d-repo">neoneye.github.io/agent-memory-atlas &middot; 129 systems &middot; 7 dimensions</span>
+            </div>
+            <div class="d-meta">Mined 2026-08-01</div>
+          </div>
+
+          <div class="decider">
+            <strong>Credibility</strong>
+            An LLM-generated catalog, and it discloses this on its own rubric page: marks are assigned by one
+            reviewer reading code, that reviewer is a language model, directed and reviewed by one person who
+            commits the result. That is not disqualifying. It places the atlas at roughly the tier of one
+            careful agent run rather than a curated survey.
+          </div>
+
+          <div class="findings">
+            <div class="finding">
+              <span class="tier tier-2 tier-star">T2*</span>
+              <p><b>Per-row marks hold; claims about coupling do not.</b> Three independent source reads confirmed
+              every capability mark, two by execution. What failed was consistently the claim that two
+              mechanisms are wired together: a pending flag said to gate what reaches a run was false in two
+              ways, an approve path said never to launder missed a third route, an append-only ledger held only
+              at the HTTP boundary. Same defect in three unrelated codebases, and the catalog believed the
+              coupling every time. Treat a row as a lead carrying a name to grep, and verify independently any
+              claim that a status field actually gates something. Line numbers were systematically stale for
+              one system and exact for the others, so grep by name and never jump to a cited line.
+              <span class="cite">Verel, Daimon and TigrimOSR read at source against atlas commit 6d41292</span></p>
+            </div>
+            <div class="finding">
+              <span class="tier tier-3">T3</span>
+              <p><b>Its rubric is orthogonal to storage engine.</b> A 33-system local coding-agent memory family is
+              catalogued, file-based systems take no structural penalty, and the vector products score low too.
+              swafra lands at 0 of 7, matching the 0 of 8 found here independently.
+              <span class="cite">systems index and rubric page</span></p>
+            </div>
+            <div class="finding">
+              <span class="tier tier-3">T3</span>
+              <p><b>It adds nothing to the numbers.</b> It does not cite LongMemEval-V2, and section 9 of its
+              benchmarks page states that no figure it carries was reproduced. The NOOA pair, the one figure
+              here that bears on the incumbent's category, sits in section 3.
+              <span class="cite">benchmarks.md:403-404 for NOOA; section 9 for the not-reproduced statement</span></p>
+            </div>
+            <div class="finding">
+              <span class="tier tier-2 tier-star">T2*</span>
+              <p><b>Nobody has solved the subagent gap.</b> The word "subagent" appears zero times across all 21
+              pattern documents. It stays this harness's problem.
+              <span class="cite">full-text search of the pattern library</span></p>
+            </div>
+            <div class="finding">
+              <span class="tier tier-1">T1</span>
+              <p><b>The field mostly ignores governance, but not entirely.</b> Scores parsed directly from the
+              <code>capabilities:</code> frontmatter of all 129 system reports, not from the atlas's own summary
+              prose: 35 systems hold none of the seven, 50 hold one, 31 hold two. That is 90% of the corpus at
+              two or below. The remaining 13 are where the interesting work is.
+              <span class="cite">counts derived by script over content/systems/*.md; 0 unparseable</span></p>
+            </div>
+            <div class="finding">
+              <span class="tier tier-1">T1</span>
+              <p><b>Rejected-value tombstones are the field's near-unsolved capability.</b> 4 of 129 systems hold
+              one. This harness is in that company, which reframes adopt-queue item 1: the mechanism is rare and
+              already built here, and only its key is wrong.
+              <span class="cite">per-capability totals, derived: scope_enforced 70, human_review 26, audit_log 21, negative_eval 17, trust_state 16, bitemporal 9, tombstone 4</span></p>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section id="shortlist">
+        <h2>Shortlist: read at source, harvested rather than adopted</h2>
+        <p class="section-note">
+          The first three candidates arrived by circumstance rather than governance fit. Ranking the full 129
+          by the seven capabilities surfaced a tail nobody had opened. Three of those were then read at source.
+          None is a migration target. All three are worth stealing from, and the tombstone question the
+          shortlist existed to answer came back settled.
+        </p>
+
+        <div class="dossier">
+          <div class="d-head">
+            <div class="d-title">
+              <h3>The tombstone call <span class="pill pill-keep">Planned fix is right, and underspecified</span></h3>
+              <span class="d-repo">Verel 7 of 7 &middot; read at source 2026-08-02</span>
+            </div>
+            <div class="d-meta">Answers adopt-queue item 1</div>
+          </div>
+
+          <div class="decider">
+            <strong>What the strongest system in 129 actually does</strong>
+            Verel stores the rejected claim and matches on it. No embeddings, no fuzzy match, no similarity
+            threshold. The best-governed system surveyed answers near-miss re-proposal with a blunt over-block
+            rather than with intelligence, so the planned claim-text fix is the right shape and there is
+            nothing better to buy.
+          </div>
+
+          <div class="facts">
+            <table>
+              <tbody>
+                <tr><th>Add a normalizer</th><td>Raw claim text loses to a capital letter and a double space. Verel's order: NFKC, strip zero-width and bidi controls, collapse whitespace, defang angle brackets, casefold, truncate. Daimon adds a Latin/Cyrillic/Greek confusables fold. Write it once and have both the ledger writer and the checker call it: Verel shipped three consecutive rounds of divergence bugs from two implementations of the same fold.</td></tr>
+                <tr><th>Add a scope key above the claim key</th><td>The missing layer. Verel's ledger hangs off a per-question identity, so a reworded re-proposal that misses on claim still lands on the same question. Two rejections on one question closes it, and further proposals go to the operator.</td></tr>
+                <tr><th>Store the text, not the hash</th><td>Daimon hashes and never stores text, because an append-only log outlives any deletion promise. That rule is for systems answering to third parties. One operator, git already holds every rejected sentence forever, and a human reading the ledger needs to see what was rejected.</td></tr>
+                <tr><th>Accept the ceiling</th><td>This narrows the gap from "any different filename evades it" to "only a real rewording evades it." It does not close it, and the fix for the rest is not embeddings.</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="warn">
+            <strong>Sequencing that matters</strong>
+            <p>Exempt rejected notes from Lint pruning <em>before</em> building any of this. Verel's round 8
+            was TTL pruning deleting the tombstone round 7 had just built, reopening the laundering path one
+            release after closing it. One sentence, and it has to land first.</p>
+            <p>And a rejected note keeps an index line but never a readable body pointer. MEMORY.md loads whole
+            into every session, so it is the retrieval path: a rejected note still linked to a readable body
+            means the status field is a label rather than a filter, and the rejected claim returns to context
+            every session.</p>
+          </div>
+        </div>
+
+        <div class="dossier">
+          <div class="facts">
+            <table>
+              <tbody>
+                <tr>
+                  <th>Verel &middot; 7 of 7</th>
+                  <td>The only system holding all seven. Explicit candidate / verified / rejected states with
+                  provenance and confidence, and a human adjudicating the promotion from candidate to verified
+                  in <code>memory/review.py</code>. The attested gate is built so an approval cannot launder a
+                  value the tombstone already rejected, which is requirements 2, 3 and 4 as one mechanism.</td>
+                </tr>
+                <tr>
+                  <th>Daimon &middot; 6 of 7</th>
+                  <td>Tags every item verbatim or inferred, code-verified against the transcript. Correction is
+                  a CLI surface (<code>resolve</code>, <code>forget</code>, <code>reverify</code>) where the
+                  destructive act is human-run. Near-file-based: per-project JSON checkpoints are the source of
+                  truth and SQLite exists only as a disposable, rebuildable FTS5 index.</td>
+                </tr>
+                <tr>
+                  <th>Universal Memory Engine &middot; 6 of 7</th>
+                  <td>Candidates cycle pending, promoted, rejected, suppressed with confidence and evidence
+                  before becoming a node. Human review is a dashboard over the candidate queue.</td>
+                </tr>
+                <tr>
+                  <th>TigrimOSR &middot; 3 of 7</th>
+                  <td>The closest architectural cousin in the corpus. JSON files, no database, no embeddings,
+                  skill directories on disk, and it still holds trust state, scope enforcement and a human
+                  review surface. Scores lower than the leaders but proves the properties do not require a
+                  database.</td>
+                </tr>
+                <tr>
+                  <th>Discount</th>
+                  <td>RainBox scores 4 of 7 and is the atlas author's own project, self-assessed and disclosed
+                  as such. Core Memory scores 4 of 7 on a grounding-capped confidence class plus an approval
+                  workflow recording rejecter and reason.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="decider">
+            <strong>What this changes</strong>
+            The earlier reading that the field is not building a governed decision ledger was drawn from three
+            samples and does not survive the full distribution. It holds for 90% of the corpus and fails at the
+            tail, which is precisely where a system worth adapting would live.
+          </div>
+
+          <div class="findings">
+            <div class="finding">
+              <span class="tier tier-2">T2</span>
+              <p><b>What not to take, and this list is the useful half.</b> Verel's attested promotion gate needs
+              a labeled corpus agents cannot read, a signing keypair, and a verdict bus in a second trust
+              domain: a non-starter here with no path to one. Its hash-chained audit log is strictly weaker
+              than git, which already chains every mutation with author, timestamp and full before/after, and
+              Verel's own module admits it detects neither tail truncation nor a re-forge. Bi-temporal
+              correction chains lose to git history, which is unbounded rather than capped. Daimon's SQLite
+              index passes the infrastructure bar honestly (stdlib, one file, never source of truth) and still
+              should not be built at 239 notes where grep answers in milliseconds.
+              <span class="cite">three independent source reads, 2026-08-02</span></p>
+            </div>
+            <div class="finding">
+              <span class="tier tier-2">T2</span>
+              <p><b>The thing this corpus already gets right.</b> Daimon measured LLM re-emission losing whole
+              items even from lossless input, against perfect fidelity for exact copy in code, and froze the
+              prior text on every dedup hit as a result. A plain markdown note is exact-copy persistence by
+              construction. Naming it so a future "consolidate the notes" pass does not trade it away without
+              knowing what it is trading.
+              <span class="cite">daimon source read</span></p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="adopt">
+        <h2>Adopt queue</h2>
+        <p class="section-note">
+          Four patterns from the atlas survived triage out of twenty; eight were already implemented here and
+          eight need infrastructure this corpus does not justify. Every survivor is a frontmatter field or a
+          line of skill prose. Ranked by value per unit effort.
+        </p>
+
+        <ol class="queue">
+          <li>
+            <div>
+              <div class="q-h">Key the rejection tombstone on the claim, not the slug</div>
+              <p class="q-b">Confirmed against Verel and now specified. Three parts: record the rejected claim in
+              the <code>Rejected:</code> line and match on it, run both the writer and the checker through one
+              shared normalizer, and add a question-scope key above the claim key so a reworded proposal that
+              misses on claim still lands on the question it belongs to. Two rejections on one question closes
+              it. Prerequisite that has to land first: rejected notes are exempt from Lint pruning.</p>
+              <p class="q-cost">Cost: one sentence for the prune exemption, six lines for the normalizer, one template edit, a backfill over the decision notes. The write-surface check that consults the ledger is deferred until the transition log shows a recurrence. That log is live as of 2026-08-02 and empty, so this item has a measurement standing behind it rather than a hunch.</p>
+            </div>
+          </li>
+          <li>
+            <div>
+              <div class="q-h">Add <code>metadata.evidence_tier</code> to note frontmatter</div>
+              <p class="q-b">The vocabulary is already written down in <code>no-overclaim.md</code> (live capture, offline
+              test, vendored reference, assumption). It just never became a field, so nothing can check a note's
+              confidence against the strength of what backs it.</p>
+              <p class="q-cost">Cost: one row in the frontmatter table, one Lint check flagging <code>confidence: high</code> against <code>evidence_tier: assumption</code>.</p>
+            </div>
+          </li>
+          <li>
+            <div>
+              <div class="q-h">Make the secrets-scan gate's fail direction visible</div>
+              <p class="q-b">The scan fails open, which is defensible given the Lint backstop, but the fail is silent.
+              A broken gate currently looks identical to a clean pass.</p>
+              <p class="q-cost">Cost: two lines. A comment naming the fail direction and the backstop that justifies it, plus output on the parse-failure path.</p>
+            </div>
+          </li>
+          <li>
+            <div>
+              <div class="q-h">Give the Lint contradiction scan a <code>keep_both</code> outcome</div>
+              <p class="q-b">Two notes can disagree because the world changed, not because one is wrong. Without an
+              explicit outcome for that, the scan pushes toward resolving what should stay recorded as a pair.</p>
+              <p class="q-cost">Cost: one clause in the skill's step 3.</p>
+            </div>
+          </li>
+        </ol>
+
+        <div class="prose">
+          <p>Carried forward as validation rather than adoption: the atlas's trust-state-machine pattern rates
+          this lifecycle stronger than most of its corpus on requirements 1 and 3. The rule that an agent may
+          never write <code>accepted</code> is the same shape CLIO built, and unlike CLIO's, this one can actually
+          fire.</p>
+        </div>
+      </section>
+
+      <section id="open">
+        <h2>What remains unproven</h2>
+        <p class="section-note">Each open question is paired with the specific signal that would close it.</p>
+
+        <div class="open-q">
+          <div>
+            <div class="oq-claim">The 94.7 / 99.57 / 92.3 spread in swafra's benchmark is unadjudicated.</div>
+            <p class="oq-signal"><em>Signal</em>Re-run <code>bench/run_eval.py</code> at the pinned commit with k=10 and diff against the committed <code>results.json</code>. The same run settles whether the shipped engine can regenerate those results at all.</p>
+          </div>
+          <div>
+            <div class="oq-claim">Ambient-key egress is read in source only. No packet was captured.</div>
+            <p class="oq-signal"><em>Signal</em>Set a provider key, run <code>get_context</code> through a proxy, capture the POST body and confirm chunk text actually leaves the machine.</p>
+          </div>
+          <div>
+            <div class="oq-claim">swafra's linear-scan ceiling has no timing behind it.</div>
+            <p class="oq-signal"><em>Signal</em>Timed <code>search_knowledge</code> at 239, 2,500 and 5,000 chunks. The structure is confirmed; the practical ceiling is arithmetic nobody has run.</p>
+          </div>
+          <div>
+            <div class="oq-claim">The atlas's accuracy outside four spot-checked rows is unknown across 129 systems.</div>
+            <p class="oq-signal"><em>Signal</em>Spot-check its Mem0 and Supermemory rows against those repos at the atlas's pinned commits, where independent knowledge already exists here, and see whether per-row calibration holds.</p>
+          </div>
+          <div>
+            <div class="oq-claim">NOOA's 38.4% points against the incumbent's category and is unreproduced.</div>
+            <p class="oq-signal"><em>Signal</em>Whether NOOA's markdown-files condition included agentic search. Without search it measures a configuration not run here and can be set aside. With search it is a real counterweight to LongMemEval-V2 and needs an answer.</p>
+          </div>
+          <div>
+            <div class="oq-claim">Answered 2026-08-01. Closing the subagent gap prevented two known failures. The compliance failure it appeared to leave behind was an experimenter error, retracted the same day.</div>
+            <p class="oq-signal"><em>Now open</em>Who closes a revisit trigger. Both runs produced one agent resolving a decision note's revisit condition on its own authority from a point-in-time observation. Test a sentence saying a trigger is the user's call and cannot be closed from a snapshot, against a rejected decision that has no live carve-out to hide the effect.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="method">
+        <h2>Method, and where it is thin</h2>
+        <div class="prose">
+          <p class="lead">Each assessment runs as a multi-agent pass: independent readers over source, an
+          adversarial verifier per load-bearing claim that can only correct tiers downward, then synthesis.
+          Verifiers are briefed that false refutation is itself a known failure mode, because agent-name
+          collisions and summarizer confabulation have previously produced fabrication verdicts against real
+          citations.</p>
+          <p>The thin part, stated rather than buried. In the 2026-08-01 run only the swafra source stream
+          passed the verifier. The benchmark analysis and both atlas streams are single-agent and unaudited,
+          and the verifier corrected three tiers downward inside the one stream it did check. The earlier
+          2026-07-31 run had 46 of 142 claims audited at a 30% defect rate, all tier inflation or miscitation
+          rather than fabrication. Weight the unaudited streams accordingly.</p>
+          <p>One consequence worth keeping visible: two agent-run assessments agreeing is correlated evidence,
+          not independent confirmation. The atlas matching this ledger's ordering on Mem0 and Supermemory
+          raises confidence a little. It does not settle anything.</p>
+          <p>The failure mode this page has now demonstrated on itself is experimenter-authored ground truth.
+          The A/B's governance conclusion rested on one task whose ground truth flattened a scoped rejection
+          into a blanket one and dropped the revisit clause attached to it. Two blind scorers, working from
+          that text, agreed with each other and were both wrong, which is exactly what blind scoring cannot
+          catch. Anything scored against a hand-written answer key inherits the key's errors, so read the
+          source note before trusting the score.</p>
+        </div>
+      </section>
+
+      <section id="log">
+        <h2>Changelog</h2>
+        <div class="log">
+          <div>
+            <time datetime="2026-08-01">2026-08-01</time>
+            <p>swafra assessed and skipped. Agent Memory Atlas mined and rated. Four patterns queued for
+            adoption. This ledger created, then revised after a review pass caught seven defects in it: two
+            inflated tiers, two dropped hedges, a miscited benchmark section, a figure whose provenance would
+            not survive being quoted, and a miscount of its own adopt queue. Then extended: all 129 atlas
+            systems scored from their own frontmatter, which produced a shortlist and overturned this page's
+            earlier reading that nothing in the field builds a governed decision ledger. Then the subagent
+            provisioning A/B ran, which is the first measured result here and the first one that constrains
+            what to build next.</p>
+          </div>
+          <div>
+            <time datetime="2026-08-01">2026-08-01</time>
+            <p>Follow-up run on the binding-decision line returned null and retracted the A/B's governance
+            conclusion. The ground truth behind its one remaining failure flattened a scoped rejection and
+            dropped the revisit clause attached to it, so a defensible answer was scored wrong. The open
+            question moved from decision compliance to who is allowed to close a revisit trigger.</p>
+          </div>
+          <div>
+            <time datetime="2026-08-01">2026-08-01</time>
+            <p>Run 3 on revisit authority: self-authorization 2 of 4 down to 0 of 4, no measured cost. Sentence
+            adopted. Obedience testing on this corpus closed as unanswerable, since the note template mandates
+            a carve-out on every decision.</p>
+          </div>
+          <div>
+            <time datetime="2026-08-02">2026-08-02</time>
+            <p>Verel, Daimon and TigrimOSR read at source. Tombstone question settled: the planned fix is the
+            right shape and needs a normalizer and a question-scope key. Fourteen mechanisms triaged, the
+            measured provisioning paragraphs committed into six core agent definitions, and a status-transition
+            log written but deliberately left unwired pending approval.</p>
+          </div>
+          <div>
+            <time datetime="2026-08-02">2026-08-02</time>
+            <p>Run 4, three arms, 42 agents: no memory section against the measured pointer against the
+            14-line text now committed into six agent definitions. Consulted a note 0 of 8, 4 of 8, 8 of 8.
+            Walked into the documented failure 4 of 8, 3 of 8, 0 of 8. Over-deferred in 0 of 24 answers. The
+            committed text moves behaviour past the pointer alone and does not buy it with paralysis. Only the
+            revisit-authority clause has a measured effect of its own; the scope clause measured null on its
+            one usable task, and the staleness clause lost both of its tasks to bad keys. The outcome measure
+            that matters is unusable, because a scorer flagged a defect in all eight keys on that axis. Third
+            run running, so the answer key is now the instrument under suspicion rather than the agents.</p>
+          </div>
+          <div>
+            <time datetime="2026-08-02">2026-08-02</time>
+            <p>Transition log switched on, at user level rather than project level, since memory writes come
+            from every project and a project-scoped hook would undercount. Verified by live capture through
+            the hook runner, not only by piping a payload at the script: a throwaway note edited once produced
+            both expected lines with the real session id on them. That run also caught the counter writing
+            under <code>CLAUDE_PROJECT_DIR</code>, which would have sharded a user-level count across every
+            project and made any single shard unreadable. It now writes one file under the home directory.
+            Probe lines were purged afterward, so the counter starts at zero. Nothing else in the
+            adopt queue gets built until this file has something in it. A month of ordinary use with an empty
+            counter is the result that argues the prompt fix held and the blocking gate is not worth its
+            maintenance.</p>
+          </div>
+          <div>
+            <time datetime="2026-07-31">2026-07-31</time>
+            <p>Mem0 and Supermemory closed as skips after a multi-agent run and a citation audit.
+            Recommendation: keep the file-based system, adopt neither, migrate nothing.</p>
+          </div>
+          <div>
+            <time datetime="2026-07-26">2026-07-26</time>
+            <p>Memory-layer evaluation opened by the operator.</p>
+          </div>
+        </div>
+      </section>
+
+      <footer>
+        <b>Source:</b> E:\projects\agent-harness-core\docs\memory-systems-assessment.html<br>
+        <b>Durable record:</b> memory note <code>backlog-mem0-memory-evaluation</code><br>
+        <b>To extend:</b> add a dossier, bump the tally and the revision date, append a changelog row, republish to this same URL.
+      </footer>
+
+    </main>
+  </div>
+</div>
