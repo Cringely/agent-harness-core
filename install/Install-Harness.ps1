@@ -83,6 +83,99 @@ function Get-FileHashHex {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
 }
 
+# Claude Code plugins install to ~/.claude/plugins/cache/<marketplace>/<plugin>/ at
+# account/machine scope, outside anything this installer manages. It cannot install one,
+# only detect which are present so a session on this machine knows what to assume.
+function Get-DetectedPlugins {
+    $homeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
+    $pluginsCacheDir = Join-Path $homeDir '.claude/plugins/cache'
+    if (-not (Test-Path -LiteralPath $pluginsCacheDir -PathType Container)) {
+        return @()
+    }
+    # This probe must never fail the install: unreadable/permission-denied cache dirs,
+    # or files sitting where a directory is expected, all degrade to "no plugins found"
+    # rather than propagating under the script's $ErrorActionPreference = 'Stop'.
+    # -ErrorAction SilentlyContinue alone isn't enough here (Test-Path above, or a
+    # non-filesystem provider error, could still throw), so wrap the whole scan.
+    try {
+        $found = New-Object System.Collections.Generic.List[string]
+        Get-ChildItem -LiteralPath $pluginsCacheDir -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            $marketplace = $_.Name
+            Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                $found.Add("$marketplace/$($_.Name)")
+            }
+        }
+        return @($found | Sort-Object)
+    } catch {
+        return @()
+    }
+}
+
+# Output styles are a different mechanism from plugins entirely: markdown files under
+# ~/.claude/output-styles/*.md, plus an active-style pointer in ~/.claude/settings.json's
+# `outputStyle` key. Same detect-only contract as plugins — same never-fail requirement,
+# since a hand-edited settings.json is exactly the malformed-JSON case this has to survive.
+function Get-DetectedOutputStyles {
+    $homeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
+    $found = New-Object System.Collections.Generic.List[string]
+
+    try {
+        $stylesDir = Join-Path $homeDir '.claude/output-styles'
+        if (Test-Path -LiteralPath $stylesDir -PathType Container) {
+            Get-ChildItem -LiteralPath $stylesDir -Filter '*.md' -File -ErrorAction SilentlyContinue | ForEach-Object {
+                $found.Add([System.IO.Path]::GetFileNameWithoutExtension($_.Name))
+            }
+        }
+    } catch { }
+
+    try {
+        $homeSettingsPath = Join-Path $homeDir '.claude/settings.json'
+        if (Test-Path -LiteralPath $homeSettingsPath -PathType Leaf) {
+            $raw = Get-Content -LiteralPath $homeSettingsPath -Raw -ErrorAction Stop
+            if ($raw.Trim()) {
+                $parsed = $raw | ConvertFrom-Json -ErrorAction Stop
+                if ($parsed.PSObject.Properties['outputStyle'] -and $parsed.outputStyle) {
+                    $found.Add([string]$parsed.outputStyle)
+                }
+            }
+        }
+    } catch { }
+
+    return @($found | Sort-Object -Unique)
+}
+
+# MCP servers are configured, not installed as files: the `mcpServers` object in
+# ~/.claude/settings.json (account scope) and/or <Target>/.mcp.json (project scope). Same
+# detect-only, never-fail contract — a broken .mcp.json is the realistic case here, since
+# it's hand-edited far more often than plugins or output styles are.
+function Get-DetectedMcpServers {
+    param([string]$TargetPath)
+    $homeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
+    $found = New-Object System.Collections.Generic.List[string]
+
+    $sources = @(
+        (Join-Path $homeDir '.claude/settings.json'),
+        (Join-Path $TargetPath '.mcp.json')
+    )
+    foreach ($path in $sources) {
+        try {
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+                $raw = Get-Content -LiteralPath $path -Raw -ErrorAction Stop
+                if ($raw.Trim()) {
+                    $parsed = $raw | ConvertFrom-Json -ErrorAction Stop
+                    if ($parsed.PSObject.Properties['mcpServers'] -and $parsed.mcpServers) {
+                        foreach ($name in @($parsed.mcpServers.PSObject.Properties.Name)) {
+                            $found.Add($name)
+                        }
+                    }
+                }
+            }
+        } catch { }
+    }
+
+    return @($found | Sort-Object -Unique)
+}
+
 $manifestPath = Join-Path $claudeDir '.harness-manifest.json'
 $manifest = @{}
 if (Test-Path -LiteralPath $manifestPath) {
@@ -94,6 +187,13 @@ if (Test-Path -LiteralPath $manifestPath) {
 }
 
 $results = New-Object System.Collections.Generic.List[pscustomobject]
+# Wrap the call, not just the function's internal `return @()`: a function's empty-array
+# return crosses the pipeline like any other output, and zero pipeline objects captured
+# into a variable collapse to $null rather than an empty array (same scalar-collapse
+# hazard as the single-element case noted elsewhere in this file, zero-element variant).
+$detectedPlugins = @(Get-DetectedPlugins)
+$detectedOutputStyles = @(Get-DetectedOutputStyles)
+$detectedMcpServers = @(Get-DetectedMcpServers -TargetPath $Target)
 
 if ($Audit) {
     # Map of every file core ships (ceremony files included — if a project installed
@@ -113,7 +213,9 @@ if ($Audit) {
         Write-Host "Files below compare the project's .claude directly against core:"
     }
 
-    $allKeys = @($coreFiles.Keys) + @($manifest.Keys | Where-Object { $coreFiles.Keys -notcontains $_ }) | Select-Object -Unique
+    # stackDetected is a manifest-only record, not a tracked file — never route it
+    # through the hash-based file audit below.
+    $allKeys = @($coreFiles.Keys) + @($manifest.Keys | Where-Object { $coreFiles.Keys -notcontains $_ -and $_ -ne 'stackDetected' }) | Select-Object -Unique
     foreach ($key in $allKeys) {
         # Live-state files are expected to diverge; hash comparison is meaningless.
         if ($key -eq 'ceremony-ledger.json') {
@@ -162,6 +264,47 @@ if ($Audit) {
     else {
         Write-Host "$($attention.Count) file(s) need attention. project-modified/untracked-differs = candidates to promote into core; core-updated/not-installed = re-run installer to pull down."
     }
+
+    # Stack drift: report-only, same as the file audit above — never writes the manifest.
+    # Covers all three stackDetected categories, not just plugins.
+    function Show-StackDrift {
+        param([string]$Label, [string[]]$Detected, [string[]]$Recorded)
+        $added = @($Detected | Where-Object { $Recorded -notcontains $_ })
+        $removed = @($Recorded | Where-Object { $Detected -notcontains $_ })
+        Write-Host "`n$Label detected: $($Detected.Count) (manifest last recorded: $($Recorded.Count))"
+        if ($added.Count -eq 0 -and $removed.Count -eq 0) {
+            Write-Host "No $Label drift since last scan."
+        }
+        else {
+            foreach ($p in $added) { Write-Host "  + $p (newly detected)" }
+            foreach ($p in $removed) { Write-Host "  - $p (no longer detected)" }
+        }
+    }
+
+    # Not `$x = if (...) { @(...) } else { @() }`: an if/else used as an expression
+    # collapses an empty (or single-element) array result the same way a pipeline
+    # capture does. Initialize, then conditionally overwrite, as elsewhere in this file.
+    $recordedStack = @{}
+    if ($manifest.Contains('stackDetected')) { $recordedStack = $manifest['stackDetected'] }
+
+    # A hand-edited manifest can set stackDetected to null or to a non-object value
+    # (string, number, array) — ConvertFrom-Json -AsHashtable passes those through as-is.
+    # .Contains() below assumes a hashtable, so treat anything else as "nothing recorded"
+    # rather than throw. -Audit is report-only and must never abort or rewrite the manifest.
+    if ($recordedStack -isnot [hashtable]) { $recordedStack = @{} }
+
+    $recordedPlugins = @()
+    if ($recordedStack.Contains('plugins')) { $recordedPlugins = @($recordedStack['plugins']) }
+
+    $recordedOutputStyles = @()
+    if ($recordedStack.Contains('outputStyles')) { $recordedOutputStyles = @($recordedStack['outputStyles']) }
+
+    $recordedMcpServers = @()
+    if ($recordedStack.Contains('mcpServers')) { $recordedMcpServers = @($recordedStack['mcpServers']) }
+
+    Show-StackDrift -Label 'Plugins' -Detected $detectedPlugins -Recorded $recordedPlugins
+    Show-StackDrift -Label 'Output styles' -Detected $detectedOutputStyles -Recorded $recordedOutputStyles
+    Show-StackDrift -Label 'MCP servers' -Detected $detectedMcpServers -Recorded $recordedMcpServers
     return
 }
 
@@ -333,6 +476,14 @@ foreach ($eventType in $hooksTemplate.PSObject.Properties.Name) {
     }
     $settings.hooks.$eventType = $existingGroups.ToArray()
 }
+
+$manifest['stackDetected'] = [ordered]@{
+    scannedAt     = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    plugins       = $detectedPlugins
+    outputStyles  = $detectedOutputStyles
+    mcpServers    = $detectedMcpServers
+}
+Write-Host "Plugins detected: $($detectedPlugins.Count); output styles: $($detectedOutputStyles.Count); MCP servers: $($detectedMcpServers.Count)"
 
 $settings | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $settingsPath
 $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
