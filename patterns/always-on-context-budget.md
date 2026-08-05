@@ -30,15 +30,28 @@ while quietly turns into a name with no instructions attached, and nothing annou
 happened. An agent def's `name:` and `description:` load by the same mechanism and for the same
 reason: a dispatcher has to see that an agent exists before it can decide to dispatch it, so every
 def's roster line loads every session regardless of whether that session ends up calling it.
-Measured for this repo's five defs, the roster runs to roughly 650 characters, under 200 tokens,
-which is the actual size of the exception named above. Rounded on purpose: an exact count goes
-stale on the next description edit.
+Measured for this repo's defs, the roster runs to under a thousand characters, a few hundred tokens
+at most, which is the actual size of the exception named above. Deliberately imprecise, and not
+merely rounded: an exact figure measures files this doc does not own and goes stale on the next
+description edit, while the argument here needs only the order of magnitude.
 
 **Hook output.** A hook's returned string, including `additionalContext`, is capped at 10,000
 characters. Past the cap, the overflow gets written to a file and replaced in-context with a preview
 plus the file's path. The cap enforces itself, so a hook that grows too large doesn't leak
 unbounded text, but a hook author who never checks output length can still write one that spends most
 of every session's opening budget on a preview nobody reads before opening the file anyway.
+
+The swap is also silent, which is the worse half. What arrives in context has the shape of the
+guardrails block without being it, and the reading model has no signal that anything was dropped.
+That makes truncation indistinguishable from a short guardrails file, so a hook near the cap should
+measure its own output and, past a threshold it sets below the platform's, print an explicit line
+naming what it cut. The general form applies to any degraded path in this repo: a path that
+degrades says so in its output, and silence is never a valid degraded result. A blank section
+emitted because a query failed reads exactly like a blank section emitted because there was nothing
+to report, and the second one is fine while the first is a broken tool nobody will notice for weeks.
+Chapter 8 of *Building Secure and Reliable Systems* puts the requirement plainly: "As you implement
+graceful degradation, it's important to determine and record levels of system degradation,
+regardless of what set off the problem."
 
 One thing that doesn't help here: `@path` imports don't save anything. An imported file still loads
 in full at launch; the import changes where the text is written, not whether it gets paid for.
@@ -54,11 +67,33 @@ rows.
 
 ## What this changes about where to spend review effort
 
-Reviewing a new agent def for necessity buys little. The def is free until dispatched, and a def
-nobody dispatches costs nothing beyond a line in a directory listing. Reviewing a new unscoped rule,
+Reviewing a new agent def for necessity buys little. Its body is free until dispatched, and what a
+def nobody dispatches still costs is its roster line, the `name:` and `description:` pair that loads
+every session under the second surface above. Reviewing a new unscoped rule,
 a newly-added always-loaded skill, or a hook's output size buys real budget back, because that text
 runs on every turn regardless of relevance. Between adding a fifth agent role and adding three more
 sentences to an unconditionally-loaded rules file, the agent role is the cheap one.
+
+## The cost argument isn't the strongest one
+
+Everything above is an argument from price: standing text is expensive, dispatched text is cheap,
+so put the rule where it costs least. That reasoning has a weakness, which is that it loses the
+moment someone points at a bigger context window. If the budget stops being scarce, the argument
+stops binding.
+
+A second reason survives that. *Building Secure and Reliable Systems*, chapter 6, on centralized
+responsibility: "A reviewer needs to look in only one place in order to understand and validate that
+a security/reliability requirement is implemented correctly." The claim is about verifiability
+rather than cost. A rule copied into four agent definitions cannot be checked, because checking it
+means reading four files and noticing that the fourth has drifted into a paraphrase that no longer
+says the same thing. Nobody notices. Paraphrase drift is invisible precisely because every copy
+still reads as correct on its own.
+
+So the same instruction points two ways at once. Put a requirement in one place because standing
+context is scarce, and put it in one place because one place is the only arrangement where a
+whole-system claim about that requirement can be confirmed at all. When the two reasons disagree,
+which happens when centralizing costs more standing budget than duplicating would, verifiability
+wins. A cheap rule nobody can audit is not a saving.
 
 ## Related
 
@@ -66,3 +101,9 @@ sentences to an unconditionally-loaded rules file, the agent role is the cheap o
 sits inside.
 [`memory-provisioning.md`](memory-provisioning.md): a related but different cost, a subagent's
 one-time dispatch budget rather than a per-turn one paid by every session.
+[`fail-contract.md`](fail-contract.md): the same announce-your-degradation rule applied to a gate's
+error paths instead of a hook's output size.
+
+Quotations are from Adkins, Beyer, Blankinship, Lewandowski, Oprea, and Stubblefield, *Building
+Secure and Reliable Systems* (O'Reilly, 2020), chapters 6 and 8, available under CC BY 4.0 at
+<https://google.github.io/building-secure-and-reliable-systems/raw/toc.html>.
