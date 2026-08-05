@@ -25,7 +25,9 @@ setup, not a willpower failure.
 Everything project-specific lives in this repo, not at the account level, so it stays versioned,
 portable, and reviewable alongside the code it governs.
 
-<!-- guardrails:session-start-end — the SessionStart hook prints everything ABOVE this line. Keep the key just-in-time rules above it, and keep that block short: it lands in every fresh context. -->
+The plugin/skill stack this project assumes (documented below) is recorded per-machine in `.claude/.harness-manifest.json` under `stackDetected`, and a skill you expect may simply be absent here.
+
+<!-- guardrails:session-start-end — the SessionStart hook prints everything ABOVE this line. Keep the key just-in-time rules above it, and keep that block short: it lands in every fresh context. See agent-harness-core's patterns/always-on-context-budget.md for why this and the other unconditionally-loaded surfaces (rules files, skill descriptions) are the real budget, not agent count. -->
 
 ## Example rules
 
@@ -52,7 +54,7 @@ Future maintainers need that reasoning as much as the rule itself.
 ## `core.hooksPath` and other hook managers
 
 The installer points git's `core.hooksPath` at `.claude/hooks` so `pre-commit` (the prose-lint
-gate) fires on every commit, however the file got edited — script-applied patch, agent write, or
+gate) fires on every commit, however the file got edited: script-applied patch, agent write, or
 hand-edit alike. Git reads hooks from exactly one directory per repo, so if this project later
 adopts husky or the `pre-commit` framework, both of which also want `core.hooksPath`, whichever
 tool sets it last wins and the other's hooks stop firing silently. That is inherent to how git
@@ -63,6 +65,52 @@ If hooks stop firing after adding husky or pre-commit-framework, check `git conf
 core.hooksPath` first. Resolution is manual: pick which tool owns the directory, then either
 have its config call the other's script directly, or symlink/copy `.claude/hooks/pre-commit`
 into the winning tool's hook chain.
+
+## Assumed plugin and skill stack
+
+This project's process assumes a specific set of Claude Code plugins and personal skills is
+active. None of that is installed by this project. Plugins live at
+`~/.claude/plugins/cache/<marketplace>/<plugin>/`, account scope, and this installer has no way
+to put one there or take one away. What it can do is record what it actually found on the local
+machine, in `.claude/.harness-manifest.json` under `stackDetected` (`scannedAt` plus `plugins`,
+`outputStyles`, and `mcpServers` lists). Treat that field as the source of truth for this machine,
+and this section as the aspiration everyone is building against. A skill named here that isn't in
+`stackDetected` is missing, not broken; work around its absence rather than assuming a step
+happened that didn't. `mcpServers` matters as much as `plugins`: `code-context`'s absence, for
+example, means search falls back to Grep/Glob per `agent-usage.md`, a real behavior change and
+not a cosmetic gap.
+
+The assumed stack:
+
+- **superpowers** (process skills: brainstorming, planning, TDD, systematic debugging,
+  subagent-driven execution).
+- **caveman** and **ponytail** (output and build discipline). Caveman compresses register: drops
+  articles, filler, hedging. Ponytail pushes toward the smallest working solution and a short,
+  code-first answer.
+- **code-review** (the review skill invoked for pull request and diff review passes).
+- **claude-security** (a multi-phase security scan pipeline: inventory, threat model, sweep, and a
+  three-lens adversarial panel with a code-computed tally). Opened with `/claude-security`, which
+  collects scan settings before running. This overlaps `security-auditor`, an agent definition that
+  lives in the account layer rather than one this harness installs (core holds process roles only,
+  domain specialists moved out; see `CONTRIBUTING.md`). The agent and the plugin aren't
+  interchangeable: one is a single reviewer definition, the other an orchestrated multi-agent run.
+  Reach for the account-layer agent on a diff, the plugin on a codebase.
+- Personal skills at `~/.claude/skills/`: **beautiful_prose** (canonical banned-vocabulary
+  contract for prose deliverables), **prose-lint** (the Vale check this file's own pre-commit hook
+  runs), **memory-system** (write/recall/lint rules for persistent memory notes), and
+  **subagent-prompting** (brief anatomy and per-model prompting notes).
+
+### When two of these disagree
+
+Caveman, ponytail, and `~/.claude/rules/writing-style.md` each specify how output should read, and
+they cover overlapping ground: register, length, banned words, structure. Where they collide on
+output register, `writing-style.md`'s surface-routing table (file-based prose vs. code comments
+and briefs vs. user-facing chat) is the existing arbiter. It names which register applies on which
+surface, and `beautiful_prose` is canonical for the banned-vocabulary list that table mirrors.
+
+For every other kind of overlap between these layers, there is no agreed precedence yet. Don't
+invent one in the moment; note the conflict and ask, or use judgment and flag the call you made so
+it can be settled later.
 
 ## Project-specific rules
 
