@@ -52,6 +52,38 @@ is legitimate there, but the report has to name the reason rather than go quiet 
 tag with a stated reason is honest. A verified claim with no reversion behind it is the overclaim
 this whole check exists to catch.
 
+## A check that examines nothing looks exactly like a check that passes
+
+Ablation asks whether the fix is holding the test up. The mirror question is whether the check read
+anything at all. A comparison that passes proves the comparison did not fail, which is not the same
+as proving it compared something, and from the output the two are identical.
+
+Three sightings in one session, none of which announced itself.
+
+A probe extracted a shared block from every file carrying it and compared the hashes. The extraction
+pattern was wrong and matched nothing, so each file hashed the empty string and all of them agreed
+perfectly. Full agreement across every copy, and not one byte had been read. It surfaced only
+because the digest was the well-known hash of empty input and someone recognized the constant, which
+is a thin thing to rely on.
+
+A drift test was specified to assert an extraction's line count against an expected number. That
+pins a measurement of files the test does not own, so the first legitimate edit to the shared block
+breaks a test that was correct. Comparing the copies against each other, with a floor instead of an
+exact value, keeps the guarantee and removes the constant that goes stale.
+
+A commit sequence ran a test suite, piped the output through `tail`, and chained the commit behind
+`&&`. A pipeline's exit status is its last command's, and `tail` succeeds whatever it is handed, so
+the gate could not fail even in principle. `false | tail -3 && echo reached` prints `reached`.
+`set -o pipefail` restores the propagation.
+
+One rule covers all three. A check asserts its input is non-empty and of plausible shape before it
+compares anything, and a comparison across copies compares them to each other rather than to a
+constant. The assertion belongs inside the check, not in the summary that claims the check ran.
+
+Hashes are only where it showed up here. A grep assertion matching zero lines, a glob matching no
+files, a suite collecting zero tests, and a range expression matching nothing are all the same
+failure, and every one of them reports success.
+
 ## Related
 
 [`parallel-review-orchestration.md`](parallel-review-orchestration.md) verifies findings inside a
