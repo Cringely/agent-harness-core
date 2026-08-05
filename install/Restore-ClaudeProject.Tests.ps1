@@ -217,4 +217,37 @@ Describe "Restore-ClaudeProject" {
         (Get-Item "$script:repo/.claude/hooks/README.md").UnixMode         | Should -Not -Match '^-rwx'
         (Get-Item "$script:repo/.claude/hooks/not-from-bundle.md").UnixMode | Should -Not -Match '^-rwx'
     }
+
+    It "rewrites a bare path followed by ordinary shell punctuation, and still protects a sibling" {
+        # Regression: the first boundary assertion only allowed a separator, quote, whitespace, or
+        # end of string right after $OldHome, so 'cd C:\...\.claude; pwsh ...' -- $OldHome followed
+        # by a semicolon -- silently kept its Windows path on a Linux target. Sweeps every
+        # punctuation character the review flagged; all twenty must terminate the match, while
+        # .claude-backup (a hyphen, which CAN continue an identifier) must still be left alone.
+        $out = Convert-HookCommand "cd C:\Users\me\.claude; pwsh " 'C:\Users\me\.claude' '/home/me/.claude' $false
+        $out | Should -Be "cd /home/me/.claude; pwsh "
+
+        foreach ($c in ';', ',', ')', '&', '|', ':', '=', '>', '<', '?', '*', '#', '!', '}', ']', '%', '@', '+', '~', '^') {
+            $got = Convert-HookCommand "C:\Users\me\.claude$c" 'C:\Users\me\.claude' '/home/me/.claude' $false
+            $got | Should -Be "/home/me/.claude$c" -Because "'$c' should terminate the match, not block it"
+        }
+
+        $sibling = Convert-HookCommand "cat 'C:\Users\me\.claude-backup\hooks\A.ps1'" 'C:\Users\me\.claude' '/home/me/.claude' $false
+        $sibling | Should -Be "cat 'C:\Users\me\.claude-backup\hooks\A.ps1'"
+    }
+
+    It "recognizes a path inside an enclosing quote, not only one adjacent to the opening quote" {
+        # Regression: the quoted-branch required $OldHome to sit immediately after the opening
+        # quote character, so a path merely inside a wider quoted string -- sh -c 'pwsh C:\...\My
+        # Hooks\run.ps1', where 'pwsh ' sits between the quote and the path -- fell through to the
+        # bare-path branch and lost its separators after the first space, same failure as before.
+        $out = Convert-HookCommand "sh -c 'pwsh C:\Users\me\.claude\My Hooks\run.ps1'" 'C:\Users\me\.claude' '/home/me/.claude' $false
+        $out | Should -Be "sh -c 'pwsh /home/me/.claude/My Hooks/run.ps1'"
+
+        # A quote that already closed before the path must not be mistaken for an enclosing one --
+        # the quoted-region detection pairs opens with closes rather than matching on "some earlier
+        # quote character", which a plain lookbehind can't reliably tell apart from a closed one.
+        $unquoted = Convert-HookCommand "echo hi ''; cat C:\Users\me\.claude\x" 'C:\Users\me\.claude' '/home/me/.claude' $false
+        $unquoted | Should -Be "echo hi ''; cat /home/me/.claude/x"
+    }
 }
