@@ -33,6 +33,15 @@ two shell hooks (`session-start-guardrails.sh`, `wave-close-handoff.sh`). The pr
 wants `vale` and the prose-lint styles kit on the machine; missing either degrades to an advisory
 skip, never a blocked write.
 
+Recommended, not required: the `code-context` MCP server (`@infino-ai/code-context`) gives agents
+ranked hybrid search over a repo instead of grep-crawling it, and its `sql` tool answers counting
+and ranking questions that file tools cannot express. It indexes locally, with local embeddings.
+This installer does not install it; add it as a Claude Code plugin with
+`/plugin marketplace add infino-ai/code-context` then `/plugin install code-context@infino-ai`.
+Nothing here requires it. No hook calls it, `research-scout` reaches for it only when it is
+present, and the installer records whether it found one under `stackDetected` in the manifest.
+Its absence costs search quality, nothing more.
+
 ```
 pwsh install/Install-Harness.ps1 -Target <project-root>
 ```
