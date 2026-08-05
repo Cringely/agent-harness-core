@@ -78,3 +78,39 @@ A def must never instruct dispatching another plugin's agent or workflow.
 recommends the operator run `code-review` directly, and does the single-pass review itself either
 way, size regardless. An orchestration-heavy plugin gets recommended to the operator. It never gets
 invoked from inside a core def.
+
+## Which frontmatter keys grant writes
+
+`tools:` looks like the full account of what a def can touch, and it isn't. Setting `memory:` at any
+scope also turns on Read, Write, and Edit, and that grant overrides a `tools:` allowlist that leaves
+them out. See the persistent-memory section of `code.claude.com/docs/en/sub-agents.md`. So a def
+reading `tools: Read, Grep, Glob` with a `memory:` key below it is write-capable, while every line
+of it says otherwise to a human skimming for the tools list.
+
+One qualification on that grant, from the same page: it applies to sessions that have auto memory
+turned on globally. A def carrying `memory:` in a session without that setting does not pick up the
+extra tools. This matters for how the claim is written down, not for how a def is authored, because
+an author cannot know which sessions will run their def.
+
+The authoring rule that follows is short. A def that has to stay read-only cannot carry `memory:` at
+all. No combination of `tools:` takes the grant back, so leaving the key off is what keeps the
+guarantee.
+
+The worktree gate in `core/claude/hooks/agent-worktree-gate.ts` now treats a `memory:` key as
+write-capable without checking the global setting, which it has no way to read while parsing a file.
+That over-isolates a `memory: user` def, whose writes land outside the checkout anyway. Over-isolating
+is the direction that costs a wasted worktree instead of a collision, and the exceptions list in the
+hook is the escape hatch if a real def ever needs it.
+
+Generalize past this one key, because the next one will be different. A check that concludes
+"read-only" has to read every input that can grant writes, and a check that reads only some of them
+is not a proof of anything. Chapter 6 of *Building Secure and Reliable Systems* makes the same point
+about trusted computing bases: "You can't just draw a dashed line around a component of your system
+and call it a TCB. You have to think about the component's interface, and the ways in which it might
+implicitly trust the rest of the system." The gate's own header already argues for an allowlist over
+a deny-list for this reason. Enumerating write-granting frontmatter keys is that argument applied one
+field across.
+
+Quotation from Adkins, Beyer, Blankinship, Lewandowski, Oprea, and Stubblefield, *Building Secure and
+Reliable Systems* (O'Reilly, 2020), chapter 6, available under CC BY 4.0 at
+<https://google.github.io/building-secure-and-reliable-systems/raw/ch06.html>.
