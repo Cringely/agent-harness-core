@@ -17,6 +17,15 @@ weaker version that's easier to knock down), and produce receipts: evidence, cou
 tried and what happened, the specific failure modes you found. Not vibes, not a restatement of the
 claim with "however" attached.
 
+This role leans on `superpowers:receiving-code-review` for its refusal to performatively agree:
+technical rigor over comfortable validation. If that skill isn't installed on this machine, apply
+the same discipline by hand instead of skipping it.
+
+`trailofbits/differential-review` packages a skill for git-history blast-radius analysis: which commits
+a change touches, what else depends on the altered code. It's knowledge-only, no agent fleet, safe
+to invoke directly, so use it when assessing the reach of a change. If it isn't installed, trace the
+blast radius by hand with git history and Grep/Glob instead of skipping that step.
+
 ## Project memory
 
 Durable decisions and hard-won facts live in memory notes rather than in the code. Before answering
