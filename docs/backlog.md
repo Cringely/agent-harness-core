@@ -351,3 +351,63 @@ Remaining: `-o pipefail` in `session-start-guardrails.sh` and `wave-close-handof
 Worth pairing with item 9. Both are cases where the check written to enforce a rule cannot enforce
 it, and neither would be caught by reading the surrounding prose, which describes the intended
 behavior accurately in both cases.
+
+## 13. Restore-ClaudeProject: five blockers found on its first Linux run
+
+**Status: blocked, draft PR #23.** `feat/restore-claude-project` adds
+`install/Restore-ClaudeProject.ps1`, which moves a project and its Claude Code session history to
+another machine. Its commit carried an honest caveat, "the Linux path has never run on Linux."
+It has now been run there, and the caveat was narrower than the truth.
+
+**The suite does not start on Linux.** `Restore-ClaudeProject.Tests.ps1:21` builds its sandbox from
+`$env:TEMP`, which is unset on Linux, so `Join-Path` throws in `BeforeEach` and all ten tests fail
+before a single test body executes. That takes down the four pure-function tests for slug
+derivation and hook rewriting too, which need no sandbox and fail only because they share the
+fixture. Patching that one line to `[System.IO.Path]::GetTempPath()` and changing nothing else
+takes the suite to 10/10 with the script under test byte-identical, so the assertions were sound
+and only the fixture was wrong. The commit's claim that those transforms are unit-tested is a
+Windows-only claim. Note `install/Install-Harness.Tests.ps1:4` already uses the correct form, so
+the fix has a precedent one directory over.
+
+**Restored repository hooks land non-executable.** The chmod pass at `:217-223` scans only
+`$ClaudeHome/hooks`, and only for `*.sh`. A repository's own `.claude/hooks/pre-commit` misses on
+both counts: it sits in a directory the pass never revisits after the step-1 copy, and it has no
+extension, so `-Filter *.sh` would skip it anyway. Reproduced end to end against a real git
+repository, the hook arrived at 644, git printed "hook was ignored because it's not set as
+executable", and the commit succeeded at exit 0 with the gate skipped. This repository has
+`core.hooksPath` wired to exactly such a hook today. Same shape as item 12, one night later, in a
+different file.
+
+**Three more that return silent wrong answers.** `$out.Replace('\','/')` at `:131` replaces every
+backslash in a hook command rather than only those inside paths, so `sed 's/\n/ /g'` becomes
+`sed 's//n/ /g'` with no warning and exit 0. `Get-ProjectSlug` at `:107-110` omits the 200-char
+truncation branch that Claude Code applies, confirmed against the binary. And `:155` uses
+`Resolve-Path`, which does not resolve symlinks on Linux, while Claude Code slugs
+`realpathSync(cwd)`. The last two both produce the silent empty `--resume` list the script exists
+to prevent, with every verification line printing `[ok]`.
+
+**Also open, not blocking.** The chmod exit code is unchecked and its count line prints regardless.
+`core.hooksPath` survives the move as a source-machine absolute path with no fixup. `-IncludeHooks`
+writes no settings.json at all when `Get-SourceHome` finds no literal drive path, then exits 0
+through the normal verification block. The residual body scan covers only `*.ps1`, `*.sh`, `*.ts`,
+and never inspects the command strings it just wrote. `-WhatIf` reports work it did not do and
+previews the wrong slug for a relative path. The chmod pass mutates pre-existing files it did not
+restore.
+
+**The guard test does not guard what its commit says it does.** The commit records that a
+`'dir\*'` wildcard copy drops `.git` on Windows, and adds a test. Mutating `Copy-Tree` back to the
+`-Force` wildcard leaves that test green at 10/10, because the `-Force` form is not broken on
+Linux. Dropping `-Force` turns it red at 9/10 with that test the sole failure. So the real
+discriminator is the flag, not the platform, and the code comment at `:94-95` attributing the drop
+to Windows is wrong. Whether the test discriminates on Windows is unknown and needs one mutation
+run on a Windows host; if `Copy-Item 'dir\*' -Recurse -Force` includes hidden entries there too,
+the guard is inert on both platforms.
+
+**Untested on either platform.** The whole `-IncludeHooks` settings.json rewrite path at
+`:178-214`. `Get-SourceHome` is not among the functions the test file's AST loader lifts, so
+nothing reaches it directly.
+
+Two structural notes worth keeping. Nothing in the repository would have caught any of this:
+`test/` holds TypeScript only, there is no CI, and no PowerShell suite runs anywhere automatic.
+And the branch is 22 behind `master` with a `README.md` conflict in the repository-layout table,
+where both sides edit different rows and the resolution is to keep both.
