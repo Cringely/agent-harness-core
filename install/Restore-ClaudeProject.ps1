@@ -155,31 +155,60 @@ function Convert-HookCommand {
         return $Command -replace $homePattern, $NewHome.Replace('$', '$$')
     }
 
-    # Rewrite $OldHome and whatever path continues past it (e.g. \hooks\Lint.ps1) in one pass, so
-    # a full source-machine path ends up forward-slashed. The match always starts at the known
-    # $OldHome text, never at a bare backslash, so an unrelated backslash elsewhere in the command
-    # -- e.g. inside a sed expression sharing the string, or a wholly separate Windows path like
+    # Rewrite $OldHome and whatever path continues past it (e.g. \hooks\Lint.ps1) so a full
+    # source-machine path ends up forward-slashed. Every replacement starts at the known $OldHome
+    # text, never at a bare backslash, so an unrelated backslash elsewhere in the command -- e.g.
+    # inside a sed expression sharing the string, or a wholly separate Windows path like
     # C:\tools\foo.exe -- is never touched. That separate path stays backslash-spelled and just as
     # broken on Linux either way, so leaving it alone costs nothing; a blanket backslash-to-slash
-    # replace over the whole command corrupted the sed case for no corresponding gain.
+    # replace over the whole command corrupted the sed case for no corresponding gain. This
+    # description covers the Linux branch only: the Windows branch just above has no boundary or
+    # quote handling at all, since Windows tolerates both separators and that behavior predates
+    # this function.
     #
-    # Two branches, because a path continuation must stop at different places depending on
-    # whether it's quoted: a quoted path (the common case for anything that can contain a space,
-    # e.g. 'My Hooks\run.ps1') runs up to its closing quote and may contain spaces; a bare path
-    # has no quote to bound it and must stop at the first space instead, or it swallows whatever
-    # shell token follows. Either way, a boundary assertion right after $OldHome requires the next
-    # character to be a separator, quote, space, or end of string, so a sibling directory that
+    # A boundary assertion right after $OldHome requires the next character to not be one that
+    # could continue an identifier (letter, digit, underscore, hyphen), so a sibling directory that
     # merely shares $OldHome as a text prefix (.claude-backup next to .claude) is left alone
-    # entirely rather than half-rewritten.
+    # entirely rather than half-rewritten, while ordinary shell punctuation after a bare path
+    # (cd C:\...\.claude; pwsh ...) still terminates the match and gets rewritten.
+    #
+    # How far the path continues past that boundary depends on whether $OldHome sits inside a
+    # quoted region, not just on whether it's immediately preceded by a quote: sh -c 'pwsh
+    # C:\...\My Hooks\run.ps1' has the whole invocation in one quoted string, with $OldHome nowhere
+    # near the opening quote. Quoted regions are found up front by pairing each opening quote with
+    # its matching close, since a lookbehind that only asks "was there some earlier quote of this
+    # type" would also fire past a quote that already closed. A match whose position falls inside
+    # one of those regions has its tail run to that region's closing quote, spaces included; a
+    # match outside any region has its tail stop at the first whitespace, quote, or end of string,
+    # or it would swallow whatever shell token follows.
     $newHomeSlashed = $NewHome.Replace('\', '/')
-    $boundary = '(?=[\\/]|[''"]|\s|$)'
-    $quotedBranch = '(?<=(?<qa>[''"]))' + $homePattern + $boundary + '(?:(?!\k<qa>).)*'
-    $bareBranch = $homePattern + $boundary + '(?:[\\/][^''"\s]*)*'
-    $out = [regex]::Replace($Command, $quotedBranch + '|' + $bareBranch, {
-        param($m)
-        $tail = $m.Value.Substring($OldHome.Length).Replace('\', '/')
-        "$newHomeSlashed$tail"
-    })
+    $boundary = '(?![A-Za-z0-9_-])'
+    $quoteSpans = @([regex]::Matches($Command, "'[^']*'|""[^""]*"""))
+
+    $pieces = @()
+    $pos = 0
+    foreach ($m in [regex]::Matches($Command, $homePattern + $boundary)) {
+        if ($m.Index -lt $pos) { continue }   # already inside a tail an earlier match consumed
+
+        $enclosing = $quoteSpans |
+            Where-Object { $_.Index -lt $m.Index -and ($_.Index + $_.Length) -gt $m.Index } |
+            Select-Object -First 1
+        $tailStart = $m.Index + $m.Length
+        $tailEnd = if ($enclosing) {
+            $enclosing.Index + $enclosing.Length - 1
+        }
+        else {
+            $bare = [regex]::Match($Command.Substring($tailStart), '^(?:[\\/][^''"\s]*)*')
+            $tailStart + $bare.Length
+        }
+
+        $pieces += $Command.Substring($pos, $m.Index - $pos)
+        $pieces += $newHomeSlashed
+        $pieces += $Command.Substring($tailStart, $tailEnd - $tailStart).Replace('\', '/')
+        $pos = $tailEnd
+    }
+    $pieces += $Command.Substring($pos)
+    $out = $pieces -join ''
 
     # '& script.ps1' assumes a PowerShell host. On Linux the hook string goes to /bin/sh,
     # which needs pwsh invoked explicitly.
