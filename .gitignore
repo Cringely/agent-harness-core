@@ -2,3 +2,11 @@ node_modules/
 *.log
 .DS_Store
 .infino/
+
+# Installed harness output, generated from core/ by install/Install-Harness.ps1
+# and tracked per-file by .claude/.harness-manifest.json. Committing it would put
+# a second copy of core/claude/ beside its source in the same repo, and the two
+# drift. Run the installer after cloning to get the hooks and agent defs.
+# Anchored to the repo root: unanchored, this would also ignore a `.claude/`
+# tree inside a test fixture, and the Pester suite already builds such trees.
+/.claude/
