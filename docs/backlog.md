@@ -280,3 +280,74 @@ One dependency. Six inlined copies with no mechanical check will drift again, an
 coordinated six-file edit is precisely the operation that breaks byte identity without anything
 noticing. Sequence the drift test ahead of this item and the edit becomes safe to make; do this one
 first and it is the same hand-verification that let the word go missing in the first place.
+
+---
+
+## 12. Failures that do not propagate: pipefail, and the installer's unchecked git write
+
+**Status:** partially fixed. Both PowerShell sites are closed; the two shell hooks remain open. The
+diagnosis below is a record of what the audit found, written in past tense; the current state is at
+the end of the item.
+**Surfaced:** 2026-08-04, wave-2 review. Audit of `install/` and the shell hooks run while writing
+`patterns/ablation-verification.md`'s empty-check section.
+
+A gate that cannot fail is worse than no gate, because it reports success. Two mechanisms produce
+this, one per language in the repo. The audit found the shell side clean and the PowerShell side
+carrying two live instances, one of which took a second pass to spot.
+
+**Shell: no live instance, one latent gap.** A pipeline's exit status is its last command's, so
+`suite | tail && next-action` runs `next-action` whatever the suite did. Verified directly:
+`false | tail -3 && echo PROCEEDED` prints PROCEEDED, and the same line under `set -o pipefail`
+does not. No script in this repo currently chains a command through a pipeline into a subsequent
+action. The only shell pipelines in the hooks sit inside `--jq` argument strings, where the pipe
+belongs to jq rather than the shell. Pipe characters themselves are common, since `||` appears
+throughout `pre-commit`, `wave-close-handoff.sh`, and `session-start-guardrails.sh`; none of those
+is a pipeline. What is missing is the guard for later: both
+`session-start-guardrails.sh` and `wave-close-handoff.sh` set `-eu` without `-o pipefail`, and
+`set -e` does not catch a pipeline whose last command succeeds. Adding `-o pipefail` to both costs
+one word each and closes the gap before a pipeline exists to fall through it. `pre-commit` is
+outside this: it declines to gate on purpose, says so in its header, and its `exit 0` is the
+documented decision rather than an accident.
+
+**PowerShell: what the audit found.** `$ErrorActionPreference = 'Stop'` does not stop on a native
+command's non-zero exit, which is the trap that looks most like the shell one and is easier to miss
+because the script reads as if it were guarded. Verified: a native call exiting 3 under
+`'Stop'` left `$LASTEXITCODE` at 3 and execution continued to the next statement.
+`install/Install-Harness.ps1` already knew this in two places and checked `$LASTEXITCODE` after its
+`rev-parse` and `config --get` probes. The `git config core.hooksPath` write in the hooks-wiring
+block had no such check, and the statement immediately after it recorded `git:core.hooksPath` with
+an action of "set to ..." into the results table the installer prints, so a failing write was
+reported to the operator as a completed one. That is the same class as a commit made behind a test
+gate that could not fail, and it was the item's actual defect rather than its motivating analogy.
+
+**The full sweep, so the coverage is legible.** `install/Install-Harness.ps1` makes four native
+command invocations and no others. `rev-parse --git-dir` and `config --get core.hooksPath` check
+`$LASTEXITCODE` on the line after the call. `config core.hooksPath` now does too. The fourth is
+`& chmod +x` on the copied `pre-commit` hook, guarded by a non-Windows check and a `Test-Path`,
+and it is now checked as well. Its failure mode was the quietest of the four: the hook file landed,
+the results table said `installed` and nothing further, and git declines to run a hook without the
+executable bit, so the operator got a pre-commit hook that existed and never fired. That table now
+prints a `chmod:hooks/pre-commit` FAILED row next to the `installed` one whenever the chmod fails.
+
+The "low likelihood" reasoning an earlier draft of this item used for that site was wrong.
+Filesystems without POSIX permission bits are the real trigger and they are ordinary on this
+operator's machines: CIFS and SMB shares, exFAT volumes, and WSL DrvFs mounted without `metadata`.
+A checkout owned by a different uid does it as well. The installer having just written the file does
+not help, because on those mounts no process can set the bit. A reviewer demonstrated it rather than
+reasoning about it, shimming a failing `chmod` onto PATH and getting `INSTALLER_EXIT=0`, a
+`hooks/pre-commit  installed` row, and a `-rw-r--r--` file.
+
+**Current state.** Both PowerShell sites are fixed. `git config core.hooksPath` checks
+`$LASTEXITCODE` and prints `FAILED (git exit N) - hook not wired` instead of `set to ...`. The
+`chmod` call checks it too and adds a `chmod:hooks/pre-commit` failure row. Four tests cover the
+pair in `install/Install-Harness.Tests.ps1`: the two failure paths, a success-path check that the
+reported `core.hooksPath` row agrees with what git actually stores, and an assertion that the
+installed hook carries the owner execute bit. That last one exists because the failure tests alone
+passed with the `chmod` retargeted at the hooks directory instead of the hook file, a mutation that
+leaves the file at 0644 and reports nothing wrong. All four were ablated.
+
+Remaining: `-o pipefail` in `session-start-guardrails.sh` and `wave-close-handoff.sh`.
+
+Worth pairing with item 9. Both are cases where the check written to enforce a rule cannot enforce
+it, and neither would be caught by reading the surrounding prose, which describes the intended
+behavior accurately in both cases.

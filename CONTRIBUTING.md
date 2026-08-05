@@ -26,7 +26,9 @@ A domain agent def follows the same rule even when it's well-written and reusabl
 
 ## Change process
 
-Make changes on a branch. Run whatever checks the repo has before committing. Write the commit message so it explains why the change was needed and what alternative was considered and rejected, not just what changed. Merge once it's ready.
+Make changes on a branch. Run both suites before committing. Write the commit message so it explains why the change was needed and what alternative was considered and rejected, not just what changed. Merge once it's ready.
+
+The TypeScript hook tests run under `bun test` from the repo root. The installer tests are Pester, and the invocation matters more than it looks: run them as `pwsh -NoProfile -File install/Install-Harness.Tests.ps1`, which exits non-zero when a test fails. The obvious alternative, `pwsh -Command 'Invoke-Pester install/Install-Harness.Tests.ps1'`, prints `Failed: 1` and still exits 0, so anything chaining off it proceeds on a red run while showing you the failure on screen. Measured on a tree with one deliberately failing test: the `-File` form gave exit 1, the bare `Invoke-Pester` form gave exit 0, and building a configuration with `$c.Run.Exit = $true` gave exit 1.
 
 Projects pick up core changes by re-running the installer. The installer is manifest-tracked: it never silently overwrites a file a project has modified since install. See `install/Install-Harness.ps1` for the exact overwrite behavior.
 
