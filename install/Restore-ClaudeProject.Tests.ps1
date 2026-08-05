@@ -218,36 +218,53 @@ Describe "Restore-ClaudeProject" {
         (Get-Item "$script:repo/.claude/hooks/not-from-bundle.md").UnixMode | Should -Not -Match '^-rwx'
     }
 
-    It "rewrites a bare path followed by ordinary shell punctuation, and still protects a sibling" {
-        # Regression: the first boundary assertion only allowed a separator, quote, whitespace, or
-        # end of string right after $OldHome, so 'cd C:\...\.claude; pwsh ...' -- $OldHome followed
-        # by a semicolon -- silently kept its Windows path on a Linux target. Sweeps every
-        # punctuation character the review flagged; all twenty must terminate the match, while
-        # .claude-backup (a hyphen, which CAN continue an identifier) must still be left alone.
+    It "rewrites a bare path followed by a common shell metacharacter, and still protects a sibling" {
+        # Regression: the original boundary assertion only allowed a separator, quote, whitespace,
+        # or end of string right after $OldHome, so 'cd C:\...\.claude; pwsh ...' -- $OldHome
+        # followed by a semicolon -- silently kept its Windows path on a Linux target. The fix adds
+        # a short, deliberately non-exhaustive allowlist of common shell metacharacters rather than
+        # a denylist of "identifier characters": a denylist was tried and reverted because '.' is
+        # not an identifier character either, and it silently rewrote .claude.bak as though it were
+        # .claude (in addition to still correctly leaving .claude-backup, a hyphen sibling, alone).
         $out = Convert-HookCommand "cd C:\Users\me\.claude; pwsh " 'C:\Users\me\.claude' '/home/me/.claude' $false
         $out | Should -Be "cd /home/me/.claude; pwsh "
 
-        foreach ($c in ';', ',', ')', '&', '|', ':', '=', '>', '<', '?', '*', '#', '!', '}', ']', '%', '@', '+', '~', '^') {
+        foreach ($c in ';', ',', ')', '&', '|', '<', '>') {
             $got = Convert-HookCommand "C:\Users\me\.claude$c" 'C:\Users\me\.claude' '/home/me/.claude' $false
-            $got | Should -Be "/home/me/.claude$c" -Because "'$c' should terminate the match, not block it"
+            $got | Should -Be "/home/me/.claude$c" -Because "'$c' is in the allowlist and should terminate the match"
         }
 
-        $sibling = Convert-HookCommand "cat 'C:\Users\me\.claude-backup\hooks\A.ps1'" 'C:\Users\me\.claude' '/home/me/.claude' $false
-        $sibling | Should -Be "cat 'C:\Users\me\.claude-backup\hooks\A.ps1'"
+        # Punctuation outside that short allowlist is left alone rather than guessed at -- failing
+        # safe with a visible, unconverted Windows path instead of risking another silent wrong one.
+        foreach ($c in ':', '=', '?', '*', '#', '!', '}', ']', '%', '@', '+', '~', '^') {
+            $got = Convert-HookCommand "C:\Users\me\.claude$c" 'C:\Users\me\.claude' '/home/me/.claude' $false
+            $got | Should -Be "C:\Users\me\.claude$c" -Because "'$c' is outside the allowlist and must not be guessed at"
+        }
+
+        $hyphenSibling = Convert-HookCommand "cat 'C:\Users\me\.claude-backup\hooks\A.ps1'" 'C:\Users\me\.claude' '/home/me/.claude' $false
+        $hyphenSibling | Should -Be "cat 'C:\Users\me\.claude-backup\hooks\A.ps1'"
+
+        $dotSibling = Convert-HookCommand "cat 'C:\Users\me\.claude.bak\hooks\A.ps1'" 'C:\Users\me\.claude' '/home/me/.claude' $false
+        $dotSibling | Should -Be "cat 'C:\Users\me\.claude.bak\hooks\A.ps1'"
     }
 
-    It "recognizes a path inside an enclosing quote, not only one adjacent to the opening quote" {
-        # Regression: the quoted-branch required $OldHome to sit immediately after the opening
-        # quote character, so a path merely inside a wider quoted string -- sh -c 'pwsh C:\...\My
-        # Hooks\run.ps1', where 'pwsh ' sits between the quote and the path -- fell through to the
-        # bare-path branch and lost its separators after the first space, same failure as before.
-        $out = Convert-HookCommand "sh -c 'pwsh C:\Users\me\.claude\My Hooks\run.ps1'" 'C:\Users\me\.claude' '/home/me/.claude' $false
-        $out | Should -Be "sh -c 'pwsh /home/me/.claude/My Hooks/run.ps1'"
+    It "does not corrupt an unrelated backslash sharing a wider quoted region with a path" {
+        # This is the guard that would have caught the merge blocker that came back: an earlier
+        # attempt let a match's tail run all the way to its enclosing quote's close, so it could
+        # recognize a path merely inside a wider quote (sh -c 'pwsh C:\...\path'). That also
+        # extended the tail across anything else sharing the same quoted region, so a sed
+        # expression in the same command lost its escape: 's/\n/ /g' became 's//n/ /g'. Reverted in
+        # favor of the narrower, safer rule: only a quote immediately before $OldHome counts.
+        $out = Convert-HookCommand "sh -c ""pwsh C:\Users\me\.claude\a.ps1 && sed 's/\n/ /g'""" 'C:\Users\me\.claude' '/home/me/.claude' $false
+        $out | Should -Be "sh -c ""pwsh /home/me/.claude/a.ps1 && sed 's/\n/ /g'"""
+    }
 
-        # A quote that already closed before the path must not be mistaken for an enclosing one --
-        # the quoted-region detection pairs opens with closes rather than matching on "some earlier
-        # quote character", which a plain lookbehind can't reliably tell apart from a closed one.
-        $unquoted = Convert-HookCommand "echo hi ''; cat C:\Users\me\.claude\x" 'C:\Users\me\.claude' '/home/me/.claude' $false
-        $unquoted | Should -Be "echo hi ''; cat /home/me/.claude/x"
+    It "pins a known, deliberately unfixed limitation: a path inside a wider quote keeps one backslash" {
+        # Not a target for a future fix without also re-solving the corruption above: recognizing
+        # this case needs quote-region tracking, and two attempts at that each traded this mild,
+        # visible defect for the more severe one pinned in the test above. If this assertion ever
+        # needs to change, the sed-corruption guard above needs to still pass afterward.
+        $out = Convert-HookCommand "sh -c 'pwsh C:\Users\me\.claude\My Hooks\run.ps1'" 'C:\Users\me\.claude' '/home/me/.claude' $false
+        $out | Should -Be "sh -c 'pwsh /home/me/.claude/My Hooks\run.ps1'"
     }
 }
