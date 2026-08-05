@@ -366,4 +366,77 @@ Describe "Install-Harness" {
         Test-Path "$script:target/.claude/.harness-manifest.json" | Should -BeFalse
         Test-Path "$script:target/.claude/settings.json" | Should -BeFalse
     }
+
+    It "wires git core.hooksPath and the reported row agrees with git itself" {
+        & git -C $script:target init -q *>&1 | Out-Null
+        $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String
+        $out | Should -Match 'git:core\.hooksPath'
+        $out | Should -Match 'set to '
+        # The results table is the operator's only signal that wiring happened, so the
+        # claim has to agree with the repo's actual config rather than with the fact
+        # that the command was issued.
+        $actual = & git -C $script:target config --get core.hooksPath
+        $LASTEXITCODE | Should -Be 0
+        (Resolve-Path -LiteralPath $actual).Path |
+            Should -Be (Resolve-Path -LiteralPath "$script:target/.claude/hooks").Path
+    }
+
+    It "installs the pre-commit hook with the owner execute bit actually set" -Skip:$IsWindows {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $hook = Get-Item -LiteralPath "$script:target/.claude/hooks/pre-commit"
+        # git skips a hook without the execute bit and says nothing, so the bit is what
+        # makes the hook real rather than merely present. Copy-Item does not carry it and
+        # the source file is 0644 in the repo, so this asserts the installer's chmod landed
+        # on the hook file itself. Asserting only that a chmod failure gets reported would
+        # pass just as happily with the chmod pointed at the wrong path.
+        $hook.UnixMode | Should -Match '^.{3}x'
+    }
+
+    It "reports a failed chmod instead of leaving the pre-commit hook silently non-executable" -Skip:$IsWindows {
+        # The real triggers are filesystems with no POSIX permission bits (CIFS/SMB, exFAT,
+        # WSL DrvFs without `metadata`) and a checkout owned by another uid. None of those
+        # is reproducible in a temp directory, so the call itself is shimmed: a `chmod` that
+        # always fails, placed first on PATH for the duration of this test.
+        $shimDir = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-shim-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $shimDir | Out-Null
+        $shim = Join-Path $shimDir 'chmod'
+        Set-Content -LiteralPath $shim -Value "#!/bin/sh`nexit 1`n"
+        # Absolute path so this call is the real chmod, not the shim being installed.
+        & /bin/chmod +x $shim
+        $prevPath = $env:PATH
+        $env:PATH = $shimDir + [System.IO.Path]::PathSeparator + $prevPath
+        try {
+            $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String
+            $out | Should -Match 'chmod:hooks/pre-commit'
+            $out | Should -Match 'FAILED'
+            # The file still installs; the point is that the table no longer implies it
+            # is runnable when it is not.
+            $out | Should -Match 'hooks/pre-commit\s+installed'
+        }
+        finally {
+            $env:PATH = $prevPath
+            Remove-Item -Recurse -Force $shimDir
+        }
+    }
+
+    It "reports a failed core.hooksPath write as FAILED instead of claiming it was set" -Skip:$IsWindows {
+        & git -C $script:target init -q *>&1 | Out-Null
+        $gitDir = Join-Path $script:target '.git'
+        # git writes config through a lock file created in .git/, so it is the directory's
+        # mode that blocks the write. Making .git/config itself read-only does not: git
+        # replaces the file rather than writing through the existing inode, and the write
+        # succeeds with exit 0. Verified both ways before settling on this.
+        & chmod 0555 $gitDir
+        try {
+            $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String
+            # A native command's non-zero exit does not trip $ErrorActionPreference = 'Stop',
+            # so without an explicit $LASTEXITCODE check this row reads "set to ..." for a
+            # write that never landed.
+            $out | Should -Match 'FAILED'
+            $out | Should -Not -Match 'set to '
+        }
+        finally {
+            & chmod 0755 $gitDir
+        }
+    }
 }

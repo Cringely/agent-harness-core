@@ -379,6 +379,21 @@ if (-not $IsWindows) {
     $preCommitDst = Join-Path $hooksDst 'pre-commit'
     if (Test-Path -LiteralPath $preCommitDst) {
         & chmod +x $preCommitDst
+        # Same trap as the core.hooksPath write below: a native command's non-zero exit
+        # does not trip $ErrorActionPreference = 'Stop'. Failure reports, success stays
+        # silent. The rule behind that, and behind why core.hooksPath reports its success
+        # while this does not: a row reports success only where nothing else reports it.
+        # core.hooksPath has no other row, so it prints one; the chmod is covered by the
+        # hooks/pre-commit row already saying 'installed', so only a failure adds anything,
+        # and it has to, because git skips a hook lacking the executable bit without saying
+        # so. Silence here conflates three states (chmod succeeded, Windows skip above,
+        # no hook file found), which is tolerable only because the one state an operator
+        # can act on is the one that prints.
+        # Real triggers are filesystems with no POSIX permission bits (CIFS/SMB, exFAT,
+        # WSL DrvFs mounted without `metadata`) and a checkout owned by another uid.
+        if ($LASTEXITCODE -ne 0) {
+            $results.Add([pscustomobject]@{ File = 'chmod:hooks/pre-commit'; Action = "FAILED (chmod exit $LASTEXITCODE) - hook not executable" })
+        }
     }
 }
 
@@ -542,7 +557,16 @@ else {
     }
     else {
         & git -C $Target config core.hooksPath $hooksDstAbs
-        $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = "set to $hooksDstAbs" })
+        # A native command's non-zero exit does not trip $ErrorActionPreference = 'Stop',
+        # so this write needs the same explicit check as the rev-parse and config --get
+        # probes above. Without it the row below claims a wiring that never happened, and
+        # that table is the only signal the operator gets.
+        if ($LASTEXITCODE -eq 0) {
+            $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = "set to $hooksDstAbs" })
+        }
+        else {
+            $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = "FAILED (git exit $LASTEXITCODE) - hook not wired" })
+        }
     }
 }
 
