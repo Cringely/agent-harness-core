@@ -27,7 +27,7 @@ portable, and reviewable alongside the code it governs.
 
 The plugin/skill stack this project assumes (documented below) is recorded per-machine in `.claude/.harness-manifest.json` under `stackDetected`, and a skill you expect may simply be absent here.
 
-<!-- guardrails:session-start-end — the SessionStart hook prints everything ABOVE this line. Keep the key just-in-time rules above it, and keep that block short: it lands in every fresh context. -->
+<!-- guardrails:session-start-end — the SessionStart hook prints everything ABOVE this line. Keep the key just-in-time rules above it, and keep that block short: it lands in every fresh context. See agent-harness-core's patterns/always-on-context-budget.md for why this and the other unconditionally-loaded surfaces (rules files, skill descriptions) are the real budget, not agent count. -->
 
 ## Example rules
 
@@ -54,7 +54,7 @@ Future maintainers need that reasoning as much as the rule itself.
 ## `core.hooksPath` and other hook managers
 
 The installer points git's `core.hooksPath` at `.claude/hooks` so `pre-commit` (the prose-lint
-gate) fires on every commit, however the file got edited — script-applied patch, agent write, or
+gate) fires on every commit, however the file got edited: script-applied patch, agent write, or
 hand-edit alike. Git reads hooks from exactly one directory per repo, so if this project later
 adopts husky or the `pre-commit` framework, both of which also want `core.hooksPath`, whichever
 tool sets it last wins and the other's hooks stop firing silently. That is inherent to how git
@@ -90,10 +90,11 @@ The assumed stack:
 - **code-review** (the review skill invoked for pull request and diff review passes).
 - **claude-security** (a multi-phase security scan pipeline: inventory, threat model, sweep, and a
   three-lens adversarial panel with a code-computed tally). Opened with `/claude-security`, which
-  collects scan settings before running. This overlaps the `security-auditor` agent this harness
-  installs, and the two are not interchangeable: the agent is a single reviewer definition, the
-  plugin is an orchestrated multi-agent run. Reach for the agent on a diff, the plugin on a
-  codebase.
+  collects scan settings before running. This overlaps `security-auditor`, an agent definition that
+  lives in the account layer rather than one this harness installs (core holds process roles only,
+  domain specialists moved out; see `CONTRIBUTING.md`). The agent and the plugin aren't
+  interchangeable: one is a single reviewer definition, the other an orchestrated multi-agent run.
+  Reach for the account-layer agent on a diff, the plugin on a codebase.
 - Personal skills at `~/.claude/skills/`: **beautiful_prose** (canonical banned-vocabulary
   contract for prose deliverables), **prose-lint** (the Vale check this file's own pre-commit hook
   runs), **memory-system** (write/recall/lint rules for persistent memory notes), and
