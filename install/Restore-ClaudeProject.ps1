@@ -107,11 +107,17 @@ function Copy-Tree {
 # chars plus a hyphen and a base-36 hash of the untruncated path. Extracted from the r0()/Nat()
 # functions in the installed claude-code bundle (~/.local/share/claude/versions/2.1.222) and
 # cross-checked against that exact algorithm running under node for paths past the 200-char cut;
-# Nat() is a Java-style string hash (h = h*31 + charCode, wrapped to signed 32-bit each step).
+# Nat() is a Java-style string hash: the source is (t<<5)-t+charCode|0, which is (t*31+charCode)
+# wrapped to signed 32-bit each step, since a left-shift by 5 mod 2^32 is multiplication by 32.
+#
+# -creplace, not -replace: PowerShell's -replace is case-insensitive by default, and .NET's
+# IgnoreCase regex folds some non-ASCII characters onto ASCII ones outside the class -- U+212A
+# KELVIN SIGN folds to 'k' -- so '[^A-Za-z0-9]' silently let it through unreplaced. Claude Code's
+# JS regex has no /i flag and is ordinal, so it always replaces such characters.
 function Get-ProjectSlug {
     param([string]$Path)
     $trimmed = $Path.TrimEnd('\', '/')
-    $slug = $trimmed -replace '[^A-Za-z0-9]', '-'
+    $slug = $trimmed -creplace '[^A-Za-z0-9]', '-'
     if ($slug.Length -le 200) { return $slug }
 
     [int64]$hash = 0
@@ -152,11 +158,24 @@ function Convert-HookCommand {
     # Rewrite $OldHome and whatever path continues past it (e.g. \hooks\Lint.ps1) in one pass, so
     # a full source-machine path ends up forward-slashed. The match always starts at the known
     # $OldHome text, never at a bare backslash, so an unrelated backslash elsewhere in the command
-    # -- e.g. inside a sed expression sharing the string -- is never touched. A blanket
-    # backslash-to-slash replace over the whole command did exactly that.
+    # -- e.g. inside a sed expression sharing the string, or a wholly separate Windows path like
+    # C:\tools\foo.exe -- is never touched. That separate path stays backslash-spelled and just as
+    # broken on Linux either way, so leaving it alone costs nothing; a blanket backslash-to-slash
+    # replace over the whole command corrupted the sed case for no corresponding gain.
+    #
+    # Two branches, because a path continuation must stop at different places depending on
+    # whether it's quoted: a quoted path (the common case for anything that can contain a space,
+    # e.g. 'My Hooks\run.ps1') runs up to its closing quote and may contain spaces; a bare path
+    # has no quote to bound it and must stop at the first space instead, or it swallows whatever
+    # shell token follows. Either way, a boundary assertion right after $OldHome requires the next
+    # character to be a separator, quote, space, or end of string, so a sibling directory that
+    # merely shares $OldHome as a text prefix (.claude-backup next to .claude) is left alone
+    # entirely rather than half-rewritten.
     $newHomeSlashed = $NewHome.Replace('\', '/')
-    $continuation = '(?:[\\/][^''"\s]*)*'
-    $out = [regex]::Replace($Command, $homePattern + $continuation, {
+    $boundary = '(?=[\\/]|[''"]|\s|$)'
+    $quotedBranch = '(?<=(?<qa>[''"]))' + $homePattern + $boundary + '(?:(?!\k<qa>).)*'
+    $bareBranch = $homePattern + $boundary + '(?:[\\/][^''"\s]*)*'
+    $out = [regex]::Replace($Command, $quotedBranch + '|' + $bareBranch, {
         param($m)
         $tail = $m.Value.Substring($OldHome.Length).Replace('\', '/')
         "$newHomeSlashed$tail"
@@ -189,12 +208,26 @@ if ($PSCmdlet.ShouldProcess($RepoPath, 'restore repo')) {
 # ...) carry no extension, so this can't reuse the *.sh filter further down either; git silently
 # skips a non-executable hook rather than failing the commit, which is what makes this a producer
 # fix rather than a nice-to-have.
+#
+# Scoped to exactly what the bundle's repo/.claude/hooks holds, not to whatever the destination
+# directory happens to contain: enumerating the destination would also chmod a file left over from
+# an earlier restore that this run never touched. Top-level only, no -Recurse, since git hooks are
+# never nested; filtered to extension-less names or *.sh, since a hook directory can otherwise
+# carry ordinary tracked files (README.md, a .ts hook meant to run through an interpreter, ...)
+# that have no business being marked executable.
 if (-not $onWindows -and (Test-Path $RepoPath)) {
-    $repoHooks = @(Get-ChildItem (Join-Path $RepoPath '.claude/hooks') -Recurse -File -ErrorAction SilentlyContinue)
+    $sourceHooks = Join-Path $Source 'repo/.claude/hooks'
+    $repoHooks = @(Get-ChildItem $sourceHooks -File -ErrorAction SilentlyContinue |
+        Where-Object { -not $_.Extension -or $_.Extension -eq '.sh' })
+    $made = 0
     foreach ($h in $repoHooks) {
-        if ($PSCmdlet.ShouldProcess($h.FullName, 'chmod +x')) { & chmod +x $h.FullName }
+        $dest = Join-Path $RepoPath ".claude/hooks/$($h.Name)"
+        if ((Test-Path $dest) -and $PSCmdlet.ShouldProcess($dest, 'chmod +x')) {
+            & chmod +x $dest
+            if ($LASTEXITCODE -eq 0) { $made++ }
+        }
     }
-    if ($repoHooks) { Write-Host "  made $($repoHooks.Count) repo hook(s) executable" }
+    if ($made) { Write-Host "  made $made repo hook(s) executable" }
 }
 
 # --- 2. sessions -------------------------------------------------------------
@@ -202,16 +235,22 @@ if (-not $onWindows -and (Test-Path $RepoPath)) {
 # does. A symlinked -RepoPath would otherwise land the sessions under a slug nothing will ever
 # read. realpath (coreutils) matches realpathSync exactly, including ancestor symlinks that
 # .NET's ResolveLinkTarget can't reach since it only resolves a path that is itself a reparse
-# point; fall back to Resolve-Path where realpath isn't on PATH.
+# point; fall back to Resolve-Path where realpath isn't on PATH, or where it's on PATH but fails
+# (permission, dangling link mid-chain). An unchecked failure here would leave $resolvedRepo
+# $null, Get-ProjectSlug $null would come back empty, and sessions would land at
+# <ClaudeHome>/projects/ -- silently, at exit 0, which is the exact class of bug this exists to
+# close.
 $realpath = if (-not $onWindows) { Get-Command realpath -ErrorAction SilentlyContinue } else { $null }
 $resolvedRepo = if (-not (Test-Path $RepoPath)) {
     $RepoPath
 }
-elseif ($realpath) {
-    & realpath -- $RepoPath
-}
 else {
-    (Resolve-Path $RepoPath).Path
+    $viaRealpath = $null
+    if ($realpath) {
+        $viaRealpath = & realpath -- $RepoPath 2>$null
+        if ($LASTEXITCODE -ne 0) { $viaRealpath = $null }
+    }
+    if ($viaRealpath) { $viaRealpath } else { (Resolve-Path $RepoPath).Path }
 }
 if (-not $Slug) { $Slug = Get-ProjectSlug $resolvedRepo }
 $projectDir = Join-Path (Join-Path $ClaudeHome 'projects') $Slug
