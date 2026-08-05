@@ -103,10 +103,30 @@ function Copy-Tree {
 
 # Claude Code names a project folder by replacing every non-alphanumeric character in the repo's
 # absolute path with a hyphen. Verified against C--temp-GHAS-GHASalerts, C--Users-user, and
-# E--projects-ONI--onimods-upstream.
+# E--projects-ONI--onimods-upstream. A hyphenated form over 200 characters is truncated to 200
+# chars plus a hyphen and a base-36 hash of the untruncated path. Extracted from the r0()/Nat()
+# functions in the installed claude-code bundle (~/.local/share/claude/versions/2.1.222) and
+# cross-checked against that exact algorithm running under node for paths past the 200-char cut;
+# Nat() is a Java-style string hash (h = h*31 + charCode, wrapped to signed 32-bit each step).
 function Get-ProjectSlug {
     param([string]$Path)
-    return ($Path.TrimEnd('\', '/') -replace '[^A-Za-z0-9]', '-')
+    $trimmed = $Path.TrimEnd('\', '/')
+    $slug = $trimmed -replace '[^A-Za-z0-9]', '-'
+    if ($slug.Length -le 200) { return $slug }
+
+    [int64]$hash = 0
+    foreach ($ch in $trimmed.ToCharArray()) {
+        $hash = ($hash * 31 + [int64][char]$ch) -band 0xFFFFFFFFL
+        if ($hash -ge 0x80000000L) { $hash -= 0x100000000L }
+    }
+    $digits = '0123456789abcdefghijklmnopqrstuvwxyz'
+    $n = [Math]::Abs($hash)
+    $base36 = if ($n -eq 0) { '0' } else { '' }
+    while ($n -gt 0) {
+        $base36 = $digits[$n % 36] + $base36
+        $n = [Math]::Floor($n / 36)
+    }
+    return "$($slug.Substring(0, 200))-$base36"
 }
 
 function Get-SourceHome {
@@ -122,18 +142,30 @@ function Convert-HookCommand {
     param([string]$Command, [string]$OldHome, [string]$NewHome, [bool]$TargetIsWindows)
 
     # Match both C:\Users\me\.claude and C:/Users/me/.claude spellings.
-    $pattern = [regex]::Escape($OldHome) -replace '\\\\', '[\\\\/]'
-    $replacement = if ($TargetIsWindows) { $NewHome } else { $NewHome.Replace('\', '/') }
-    # '$' is a group reference in a -replace replacement string; double it to keep it literal.
-    $out = $Command -replace $pattern, $replacement.Replace('$', '$$')
+    $homePattern = [regex]::Escape($OldHome) -replace '\\\\', '[\\\\/]'
 
-    if (-not $TargetIsWindows) {
-        $out = $out.Replace('\', '/')
-        # '& script.ps1' assumes a PowerShell host. On Linux the hook string goes to /bin/sh,
-        # which needs pwsh invoked explicitly.
-        if ($out -match "^\s*&\s*['""](?<p>[^'""]+\.ps1)['""](?<rest>.*)$") {
-            $out = "pwsh -NoProfile -File '$($Matches.p)'$($Matches.rest)"
-        }
+    if ($TargetIsWindows) {
+        # '$' is a group reference in a -replace replacement string; double it to keep it literal.
+        return $Command -replace $homePattern, $NewHome.Replace('$', '$$')
+    }
+
+    # Rewrite $OldHome and whatever path continues past it (e.g. \hooks\Lint.ps1) in one pass, so
+    # a full source-machine path ends up forward-slashed. The match always starts at the known
+    # $OldHome text, never at a bare backslash, so an unrelated backslash elsewhere in the command
+    # -- e.g. inside a sed expression sharing the string -- is never touched. A blanket
+    # backslash-to-slash replace over the whole command did exactly that.
+    $newHomeSlashed = $NewHome.Replace('\', '/')
+    $continuation = '(?:[\\/][^''"\s]*)*'
+    $out = [regex]::Replace($Command, $homePattern + $continuation, {
+        param($m)
+        $tail = $m.Value.Substring($OldHome.Length).Replace('\', '/')
+        "$newHomeSlashed$tail"
+    })
+
+    # '& script.ps1' assumes a PowerShell host. On Linux the hook string goes to /bin/sh,
+    # which needs pwsh invoked explicitly.
+    if ($out -match "^\s*&\s*['""](?<p>[^'""]+\.ps1)['""](?<rest>.*)$") {
+        $out = "pwsh -NoProfile -File '$($Matches.p)'$($Matches.rest)"
     }
     return $out
 }
@@ -151,8 +183,36 @@ if ($PSCmdlet.ShouldProcess($RepoPath, 'restore repo')) {
     Write-Host "  repo files restored: $n"
 }
 
+# A repo's own .claude/hooks runs on every restore, wired in via core.hooksPath, independent of
+# -IncludeHooks (which only governs the separate ~/.claude/hooks restore in step 5 below). Zip
+# extraction commonly drops the Unix execute bit, and git hook filenames (pre-commit, pre-push,
+# ...) carry no extension, so this can't reuse the *.sh filter further down either; git silently
+# skips a non-executable hook rather than failing the commit, which is what makes this a producer
+# fix rather than a nice-to-have.
+if (-not $onWindows -and (Test-Path $RepoPath)) {
+    $repoHooks = @(Get-ChildItem (Join-Path $RepoPath '.claude/hooks') -Recurse -File -ErrorAction SilentlyContinue)
+    foreach ($h in $repoHooks) {
+        if ($PSCmdlet.ShouldProcess($h.FullName, 'chmod +x')) { & chmod +x $h.FullName }
+    }
+    if ($repoHooks) { Write-Host "  made $($repoHooks.Count) repo hook(s) executable" }
+}
+
 # --- 2. sessions -------------------------------------------------------------
-$resolvedRepo = if (Test-Path $RepoPath) { (Resolve-Path $RepoPath).Path } else { $RepoPath }
+# Resolve-Path does not follow symlinks on Linux, but Claude Code slugs realpathSync(cwd), which
+# does. A symlinked -RepoPath would otherwise land the sessions under a slug nothing will ever
+# read. realpath (coreutils) matches realpathSync exactly, including ancestor symlinks that
+# .NET's ResolveLinkTarget can't reach since it only resolves a path that is itself a reparse
+# point; fall back to Resolve-Path where realpath isn't on PATH.
+$realpath = if (-not $onWindows) { Get-Command realpath -ErrorAction SilentlyContinue } else { $null }
+$resolvedRepo = if (-not (Test-Path $RepoPath)) {
+    $RepoPath
+}
+elseif ($realpath) {
+    & realpath -- $RepoPath
+}
+else {
+    (Resolve-Path $RepoPath).Path
+}
 if (-not $Slug) { $Slug = Get-ProjectSlug $resolvedRepo }
 $projectDir = Join-Path (Join-Path $ClaudeHome 'projects') $Slug
 
