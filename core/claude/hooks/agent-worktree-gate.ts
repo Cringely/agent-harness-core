@@ -50,9 +50,9 @@
 // (An unreadable agent-definition file is NOT a hook error — it resolves to
 // "requires isolation" for that type, see above.)
 //
-// Decision logic lives in the exported pure `decide()` so an offline test
-// suite can exercise it without spawning a process; the stdin/stdout
-// contract is covered separately by spawn tests in the same style.
+// Decision logic lives in the exported pure `decide()`, exercised offline by
+// test/agent-worktree-gate.test.ts without spawning a process. The stdin/stdout
+// contract itself has no spawn-level test.
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -66,7 +66,7 @@ import { join } from "node:path";
  * here bypasses classification entirely, so keep the list short and leave a
  * comment next to each entry explaining why it's safe.
  */
-const PROJECT_EXCEPTIONS: string[] = [];
+export const PROJECT_EXCEPTIONS: string[] = [];
 
 /**
  * Tools that provably cannot write the repo checkout. Anything NOT on this list
@@ -125,7 +125,16 @@ const classificationCache = new Map<string, boolean>();
 function frontmatterRequiresIsolation(text: string): boolean {
   const fm = text.match(/^---\r?\n([\s\S]*?)\r?\n---/)?.[1];
   if (fm === undefined) return true; // no parseable frontmatter → cannot prove read-only
-  const toolsLine = fm.split(/\r?\n/).find((l) => /^tools\s*:/i.test(l));
+  const lines = fm.split(/\r?\n/);
+  // A `memory:` field (any scope) auto-enables Read, Write, and Edit regardless
+  // of what `tools:` grants, per the docs' persistent-memory section.
+  // `memory: user` writes outside the checkout (~/.claude/agent-memory/), so
+  // isolating it is a known false positive, but that is the safe direction and
+  // PROJECT_EXCEPTIONS is the carve-out if a real def ever needs it. Anchored
+  // at line start so a `memory:` substring inside a description value does
+  // not false-positive.
+  if (lines.some((l) => /^memory\s*:\s*\S/i.test(l))) return true;
+  const toolsLine = lines.find((l) => /^tools\s*:/i.test(l));
   if (!toolsLine) return true; // no tools: restriction = all tools
   const tokens = toolsLine
     .replace(/^tools\s*:/i, "")

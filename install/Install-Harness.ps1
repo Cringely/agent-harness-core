@@ -83,6 +83,99 @@ function Get-FileHashHex {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
 }
 
+# Claude Code plugins install to ~/.claude/plugins/cache/<marketplace>/<plugin>/ at
+# account/machine scope, outside anything this installer manages. It cannot install one,
+# only detect which are present so a session on this machine knows what to assume.
+function Get-DetectedPlugins {
+    $homeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
+    $pluginsCacheDir = Join-Path $homeDir '.claude/plugins/cache'
+    if (-not (Test-Path -LiteralPath $pluginsCacheDir -PathType Container)) {
+        return @()
+    }
+    # This probe must never fail the install: unreadable/permission-denied cache dirs,
+    # or files sitting where a directory is expected, all degrade to "no plugins found"
+    # rather than propagating under the script's $ErrorActionPreference = 'Stop'.
+    # -ErrorAction SilentlyContinue alone isn't enough here (Test-Path above, or a
+    # non-filesystem provider error, could still throw), so wrap the whole scan.
+    try {
+        $found = New-Object System.Collections.Generic.List[string]
+        Get-ChildItem -LiteralPath $pluginsCacheDir -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            $marketplace = $_.Name
+            Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                $found.Add("$marketplace/$($_.Name)")
+            }
+        }
+        return @($found | Sort-Object)
+    } catch {
+        return @()
+    }
+}
+
+# Output styles are a different mechanism from plugins entirely: markdown files under
+# ~/.claude/output-styles/*.md, plus an active-style pointer in ~/.claude/settings.json's
+# `outputStyle` key. Same detect-only contract as plugins — same never-fail requirement,
+# since a hand-edited settings.json is exactly the malformed-JSON case this has to survive.
+function Get-DetectedOutputStyles {
+    $homeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
+    $found = New-Object System.Collections.Generic.List[string]
+
+    try {
+        $stylesDir = Join-Path $homeDir '.claude/output-styles'
+        if (Test-Path -LiteralPath $stylesDir -PathType Container) {
+            Get-ChildItem -LiteralPath $stylesDir -Filter '*.md' -File -ErrorAction SilentlyContinue | ForEach-Object {
+                $found.Add([System.IO.Path]::GetFileNameWithoutExtension($_.Name))
+            }
+        }
+    } catch { }
+
+    try {
+        $homeSettingsPath = Join-Path $homeDir '.claude/settings.json'
+        if (Test-Path -LiteralPath $homeSettingsPath -PathType Leaf) {
+            $raw = Get-Content -LiteralPath $homeSettingsPath -Raw -ErrorAction Stop
+            if ($raw.Trim()) {
+                $parsed = $raw | ConvertFrom-Json -ErrorAction Stop
+                if ($parsed.PSObject.Properties['outputStyle'] -and $parsed.outputStyle) {
+                    $found.Add([string]$parsed.outputStyle)
+                }
+            }
+        }
+    } catch { }
+
+    return @($found | Sort-Object -Unique)
+}
+
+# MCP servers are configured, not installed as files: the `mcpServers` object in
+# ~/.claude/settings.json (account scope) and/or <Target>/.mcp.json (project scope). Same
+# detect-only, never-fail contract — a broken .mcp.json is the realistic case here, since
+# it's hand-edited far more often than plugins or output styles are.
+function Get-DetectedMcpServers {
+    param([string]$TargetPath)
+    $homeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
+    $found = New-Object System.Collections.Generic.List[string]
+
+    $sources = @(
+        (Join-Path $homeDir '.claude/settings.json'),
+        (Join-Path $TargetPath '.mcp.json')
+    )
+    foreach ($path in $sources) {
+        try {
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+                $raw = Get-Content -LiteralPath $path -Raw -ErrorAction Stop
+                if ($raw.Trim()) {
+                    $parsed = $raw | ConvertFrom-Json -ErrorAction Stop
+                    if ($parsed.PSObject.Properties['mcpServers'] -and $parsed.mcpServers) {
+                        foreach ($name in @($parsed.mcpServers.PSObject.Properties.Name)) {
+                            $found.Add($name)
+                        }
+                    }
+                }
+            }
+        } catch { }
+    }
+
+    return @($found | Sort-Object -Unique)
+}
+
 $manifestPath = Join-Path $claudeDir '.harness-manifest.json'
 $manifest = @{}
 if (Test-Path -LiteralPath $manifestPath) {
@@ -94,6 +187,13 @@ if (Test-Path -LiteralPath $manifestPath) {
 }
 
 $results = New-Object System.Collections.Generic.List[pscustomobject]
+# Wrap the call, not just the function's internal `return @()`: a function's empty-array
+# return crosses the pipeline like any other output, and zero pipeline objects captured
+# into a variable collapse to $null rather than an empty array (same scalar-collapse
+# hazard as the single-element case noted elsewhere in this file, zero-element variant).
+$detectedPlugins = @(Get-DetectedPlugins)
+$detectedOutputStyles = @(Get-DetectedOutputStyles)
+$detectedMcpServers = @(Get-DetectedMcpServers -TargetPath $Target)
 
 if ($Audit) {
     # Map of every file core ships (ceremony files included — if a project installed
@@ -113,7 +213,9 @@ if ($Audit) {
         Write-Host "Files below compare the project's .claude directly against core:"
     }
 
-    $allKeys = @($coreFiles.Keys) + @($manifest.Keys | Where-Object { $coreFiles.Keys -notcontains $_ }) | Select-Object -Unique
+    # stackDetected is a manifest-only record, not a tracked file — never route it
+    # through the hash-based file audit below.
+    $allKeys = @($coreFiles.Keys) + @($manifest.Keys | Where-Object { $coreFiles.Keys -notcontains $_ -and $_ -ne 'stackDetected' }) | Select-Object -Unique
     foreach ($key in $allKeys) {
         # Live-state files are expected to diverge; hash comparison is meaningless.
         if ($key -eq 'ceremony-ledger.json') {
@@ -162,6 +264,47 @@ if ($Audit) {
     else {
         Write-Host "$($attention.Count) file(s) need attention. project-modified/untracked-differs = candidates to promote into core; core-updated/not-installed = re-run installer to pull down."
     }
+
+    # Stack drift: report-only, same as the file audit above — never writes the manifest.
+    # Covers all three stackDetected categories, not just plugins.
+    function Show-StackDrift {
+        param([string]$Label, [string[]]$Detected, [string[]]$Recorded)
+        $added = @($Detected | Where-Object { $Recorded -notcontains $_ })
+        $removed = @($Recorded | Where-Object { $Detected -notcontains $_ })
+        Write-Host "`n$Label detected: $($Detected.Count) (manifest last recorded: $($Recorded.Count))"
+        if ($added.Count -eq 0 -and $removed.Count -eq 0) {
+            Write-Host "No $Label drift since last scan."
+        }
+        else {
+            foreach ($p in $added) { Write-Host "  + $p (newly detected)" }
+            foreach ($p in $removed) { Write-Host "  - $p (no longer detected)" }
+        }
+    }
+
+    # Not `$x = if (...) { @(...) } else { @() }`: an if/else used as an expression
+    # collapses an empty (or single-element) array result the same way a pipeline
+    # capture does. Initialize, then conditionally overwrite, as elsewhere in this file.
+    $recordedStack = @{}
+    if ($manifest.Contains('stackDetected')) { $recordedStack = $manifest['stackDetected'] }
+
+    # A hand-edited manifest can set stackDetected to null or to a non-object value
+    # (string, number, array) — ConvertFrom-Json -AsHashtable passes those through as-is.
+    # .Contains() below assumes a hashtable, so treat anything else as "nothing recorded"
+    # rather than throw. -Audit is report-only and must never abort or rewrite the manifest.
+    if ($recordedStack -isnot [hashtable]) { $recordedStack = @{} }
+
+    $recordedPlugins = @()
+    if ($recordedStack.Contains('plugins')) { $recordedPlugins = @($recordedStack['plugins']) }
+
+    $recordedOutputStyles = @()
+    if ($recordedStack.Contains('outputStyles')) { $recordedOutputStyles = @($recordedStack['outputStyles']) }
+
+    $recordedMcpServers = @()
+    if ($recordedStack.Contains('mcpServers')) { $recordedMcpServers = @($recordedStack['mcpServers']) }
+
+    Show-StackDrift -Label 'Plugins' -Detected $detectedPlugins -Recorded $recordedPlugins
+    Show-StackDrift -Label 'Output styles' -Detected $detectedOutputStyles -Recorded $recordedOutputStyles
+    Show-StackDrift -Label 'MCP servers' -Detected $detectedMcpServers -Recorded $recordedMcpServers
     return
 }
 
@@ -226,6 +369,32 @@ Get-ChildItem -LiteralPath $agentsSrc -Filter '*.md' -File | ForEach-Object {
 Get-ChildItem -LiteralPath $hooksSrc -File | Where-Object { $_.Name -ne '.gitkeep' } | ForEach-Object {
     if (-not $IncludeCeremonies -and $ceremonyHookNames -contains $_.Name) { return }
     Install-ManagedFile -SourcePath $_.FullName -DestPath (Join-Path $hooksDst $_.Name) -ManifestKey "hooks/$($_.Name)"
+}
+
+# Copy-Item doesn't carry the source executable bit, and a git pre-commit hook
+# git won't invoke without one on a platform that has the concept at all.
+# Windows has none, so this is a no-op there — Git for Windows runs the hook
+# by its shebang regardless of the (meaningless) NTFS permission bits.
+if (-not $IsWindows) {
+    $preCommitDst = Join-Path $hooksDst 'pre-commit'
+    if (Test-Path -LiteralPath $preCommitDst) {
+        & chmod +x $preCommitDst
+        # Same trap as the core.hooksPath write below: a native command's non-zero exit
+        # does not trip $ErrorActionPreference = 'Stop'. Failure reports, success stays
+        # silent. The rule behind that, and behind why core.hooksPath reports its success
+        # while this does not: a row reports success only where nothing else reports it.
+        # core.hooksPath has no other row, so it prints one; the chmod is covered by the
+        # hooks/pre-commit row already saying 'installed', so only a failure adds anything,
+        # and it has to, because git skips a hook lacking the executable bit without saying
+        # so. Silence here conflates three states (chmod succeeded, Windows skip above,
+        # no hook file found), which is tolerable only because the one state an operator
+        # can act on is the one that prints.
+        # Real triggers are filesystems with no POSIX permission bits (CIFS/SMB, exFAT,
+        # WSL DrvFs mounted without `metadata`) and a checkout owned by another uid.
+        if ($LASTEXITCODE -ne 0) {
+            $results.Add([pscustomobject]@{ File = 'chmod:hooks/pre-commit'; Action = "FAILED (chmod exit $LASTEXITCODE) - hook not executable" })
+        }
+    }
 }
 
 # Guardrails
@@ -323,7 +492,82 @@ foreach ($eventType in $hooksTemplate.PSObject.Properties.Name) {
     $settings.hooks.$eventType = $existingGroups.ToArray()
 }
 
+$manifest['stackDetected'] = [ordered]@{
+    scannedAt     = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    plugins       = $detectedPlugins
+    outputStyles  = $detectedOutputStyles
+    mcpServers    = $detectedMcpServers
+}
+Write-Host "Plugins detected: $($detectedPlugins.Count); output styles: $($detectedOutputStyles.Count); MCP servers: $($detectedMcpServers.Count)"
+
 $settings | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $settingsPath
 $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
+
+# Git hooksPath wiring. The Claude Code PostToolUse hooks above only see this
+# session's direct Write/Edit tool calls — a script-applied OLD/NEW patch
+# over Bash, or a hand-edit outside Claude Code entirely, never fires them.
+# core.hooksPath makes .claude/hooks/pre-commit run on every commit no matter
+# how the file got edited. Guarded, because core.hooksPath REPLACES the whole
+# hooks directory for the repo: a project with its own .git/hooks/pre-push
+# would silently stop running it. Only wired when nothing is there to lose.
+$gitDirRaw = $null
+$gitCheck = & git -C $Target rev-parse --git-dir 2>$null
+if ($LASTEXITCODE -eq 0) { $gitDirRaw = $gitCheck }
+
+if (-not $gitDirRaw) {
+    # Not a git repository (or git missing from PATH) — nothing to wire.
+}
+else {
+    $gitDir = if ([System.IO.Path]::IsPathRooted($gitDirRaw)) { $gitDirRaw } else { Join-Path $Target $gitDirRaw }
+    $gitDir = (Resolve-Path -LiteralPath $gitDir).Path
+    $gitHooksDir = Join-Path $gitDir 'hooks'
+
+    $currentHooksPath = $null
+    $chpCheck = & git -C $Target config --get core.hooksPath 2>$null
+    if ($LASTEXITCODE -eq 0) { $currentHooksPath = $chpCheck }
+
+    # Absolute so the value is correct regardless of which subdirectory a
+    # later `git commit` runs from.
+    $hooksDstAbs = (Resolve-Path -LiteralPath $hooksDst).Path
+
+    $alreadyWired = $false
+    if ($currentHooksPath) {
+        $currentResolved = if ([System.IO.Path]::IsPathRooted($currentHooksPath)) { $currentHooksPath } else { Join-Path $Target $currentHooksPath }
+        if (Test-Path -LiteralPath $currentResolved) {
+            $alreadyWired = (Resolve-Path -LiteralPath $currentResolved).Path -ieq $hooksDstAbs
+        }
+    }
+
+    $existingHookFiles = @()
+    if (Test-Path -LiteralPath $gitHooksDir) {
+        $existingHookFiles = @(Get-ChildItem -LiteralPath $gitHooksDir -File | Where-Object { $_.Extension -ne '.sample' })
+    }
+
+    if ($alreadyWired) {
+        $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'unchanged' })
+    }
+    elseif ($currentHooksPath) {
+        Write-Host "Skipping git hooksPath wiring: core.hooksPath is already set to '$currentHooksPath'. To use the harness pre-commit hook instead, run: git -C `"$Target`" config core.hooksPath `"$hooksDstAbs`""
+        $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'skipped-already-set' })
+    }
+    elseif ($existingHookFiles.Count -gt 0) {
+        $names = ($existingHookFiles | Select-Object -ExpandProperty Name) -join ', '
+        Write-Host "Skipping git hooksPath wiring: $gitHooksDir already has hook(s) ($names) that core.hooksPath would replace. To wire the harness pre-commit hook anyway, run: git -C `"$Target`" config core.hooksPath `"$hooksDstAbs`""
+        $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'skipped-existing-hooks' })
+    }
+    else {
+        & git -C $Target config core.hooksPath $hooksDstAbs
+        # A native command's non-zero exit does not trip $ErrorActionPreference = 'Stop',
+        # so this write needs the same explicit check as the rev-parse and config --get
+        # probes above. Without it the row below claims a wiring that never happened, and
+        # that table is the only signal the operator gets.
+        if ($LASTEXITCODE -eq 0) {
+            $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = "set to $hooksDstAbs" })
+        }
+        else {
+            $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = "FAILED (git exit $LASTEXITCODE) - hook not wired" })
+        }
+    }
+}
 
 $results | Format-Table -AutoSize | Out-String | Write-Host
