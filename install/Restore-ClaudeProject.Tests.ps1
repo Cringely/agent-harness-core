@@ -18,7 +18,7 @@ Describe "Restore-ClaudeProject" {
     }
 
     BeforeEach {
-        $script:sandbox = Join-Path $env:TEMP ("restore-test-" + [guid]::NewGuid())
+        $script:sandbox = Join-Path ([System.IO.Path]::GetTempPath()) ("restore-test-" + [guid]::NewGuid())
         $script:bundle = Join-Path $script:sandbox 'bundle'
         $script:repo = Join-Path $script:sandbox 'repo'
         $script:claudeHome = Join-Path $script:sandbox 'claudehome'
@@ -100,5 +100,48 @@ Describe "Restore-ClaudeProject" {
         New-Item -ItemType Directory $empty | Out-Null
         { & $script:restore -Source $empty -RepoPath $script:repo -ClaudeHome $script:claudeHome } |
             Should -Throw -ExpectedMessage "*missing 'repo'*"
+    }
+
+    It "makes a repo's own git hook executable regardless of -IncludeHooks" -Skip:($IsWindows -or $PSVersionTable.PSVersion.Major -lt 6) {
+        # core.hooksPath commonly points at .claude/hooks, and git hook filenames (pre-commit,
+        # pre-push, ...) carry no extension. A restore that only chmod'd *.sh under the separate
+        # ~/.claude/hooks tree would leave this at 644, and git skips a non-executable hook
+        # silently rather than failing the commit -- so this must not depend on -IncludeHooks,
+        # which governs only the ~/.claude/hooks restore, not the repo tree copied in step 1.
+        New-Item -ItemType Directory "$script:bundle/repo/.claude/hooks" -Force | Out-Null
+        "#!/bin/sh`nexit 0" | Set-Content "$script:bundle/repo/.claude/hooks/pre-commit" -NoNewline
+        chmod 644 "$script:bundle/repo/.claude/hooks/pre-commit"
+
+        & $script:restore -Source $script:bundle -RepoPath $script:repo -ClaudeHome $script:claudeHome | Out-Null
+
+        (Get-Item "$script:repo/.claude/hooks/pre-commit").UnixMode | Should -Match '^-rwx'
+    }
+
+    It "does not mangle a non-path backslash while still rewriting a residual Windows path" {
+        # Regression: a blanket backslash-to-slash replace corrupts things like a sed expression
+        # that happens to share the command string with an unrelated Windows path.
+        $out = Convert-HookCommand "sed 's/\n/ /g' C:\Users\me\.claude\x" 'C:\Users\me\.claude' '/home/me/.claude' $false
+        $out | Should -Be "sed 's/\n/ /g' /home/me/.claude/x"
+    }
+
+    It "truncates a slug past 200 characters the way Claude Code does, with a hash suffix" {
+        # Reference value extracted from the installed claude-code bundle's r0()/Nat() functions
+        # and independently reproduced under node for this exact 224-character input.
+        $long = '/home/cringely/projects/' + ('a' * 200)
+        $expected = '-home-cringely-projects-' + ('a' * 176) + '-g1dlmi'
+        Get-ProjectSlug $long | Should -Be $expected
+    }
+
+    It "slugs a symlinked -RepoPath by its resolved target, not the link path" -Skip:($IsWindows -or $PSVersionTable.PSVersion.Major -lt 6) {
+        # Resolve-Path does not follow symlinks on Linux, but Claude Code slugs realpathSync(cwd).
+        # A symlinked -RepoPath would otherwise land sessions under a slug claude never creates.
+        $real = Join-Path $script:sandbox 'real-repo'
+        New-Item -ItemType Directory $real -Force | Out-Null
+        New-Item -ItemType SymbolicLink -Path $script:repo -Target $real | Out-Null
+
+        & $script:restore -Source $script:bundle -RepoPath $script:repo -ClaudeHome $script:claudeHome | Out-Null
+
+        $slug = Get-ProjectSlug $real
+        Test-Path "$script:claudeHome/projects/$slug/abc.jsonl" | Should -BeTrue
     }
 }
