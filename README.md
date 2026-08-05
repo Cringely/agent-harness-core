@@ -15,7 +15,7 @@ The rule that keeps these from drifting into a mess: core is upstream. Projects 
 | `core/claude/agents/` | Self-contained process roles `adversarial-reviewer`, `doc-steward`, `research-scout`, `soc-monitor`, `task-reviewer`. See `patterns/agent-def-shape.md` on why none point at a charter yet |
 | `core/claude/hooks/` | Worktree gate, session guardrails, wave-close handoff, prose-lint-on-write |
 | `core/claude/templates/` | `guardrails.template.md`, a settings fragment, and a ceremony ledger template |
-| `patterns/` | Twelve docs explaining the design behind the above |
+| `patterns/` | The design docs behind the above, listed in [`patterns/INDEX.md`](patterns/INDEX.md) |
 | `install/` | The installer that copies core into a project's `.claude/` |
 
 ## What's deliberately absent
