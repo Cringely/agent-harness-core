@@ -49,6 +49,22 @@ should re-run the installer. This is the mechanical half of the findings flow in
 run it periodically per project (SpaceMolt wires it into a `core_harvest` ceremony, see that
 project's `docs/wiki/team-ceremonies.md`).
 
+### This repo runs the harness on itself
+
+Core installs into this repo's own `.claude/`, so the hooks and agent definitions it distributes
+also govern work done here. That directory is gitignored: committing it would put a second copy
+of `core/claude/` beside its source, and the two drift. A fresh clone has no hooks until you install
+against the repo itself.
+
+```bash
+pwsh install/Install-Harness.ps1 -Target .
+```
+
+Worth knowing before relying on that. The `pre-commit` hook is a prose linter that reports and never
+refuses; its final line is an unconditional `exit 0`, documented in the file as advisory because of
+the false-positive rate. A probe staging six banned words and an em dash passes it. Nothing in this
+repo blocks a commit today.
+
 ## Source
 
 This repo was extracted from `E:\projects\spacemolt`. For the original design writeup, see that project's `docs/wiki/anatomy-of-the-harness.md`.
