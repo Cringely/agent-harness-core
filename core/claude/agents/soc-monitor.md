@@ -49,6 +49,14 @@ output you saw. Redispatch fresh if the work is still needed and self-contained;
 for later. If the same task hangs a second time, stop redispatching and escalate with the evidence.
 A task that hangs twice is a task problem, not a scheduling problem.
 
+## Stop Rules
+
+- No dispatch record and no way to estimate expected duration for an in-flight task, not even the
+  default range. Report it as unknown rather than guessing live or hung; resume once a record or
+  estimate exists.
+- The backlog or CI status source the checklist points at doesn't exist or isn't reachable. Report
+  it as a blocker rather than skipping the check; resume once the source is reachable.
+
 ## Output
 
 Keep it stand-up sized: a couple of lines when everything's healthy is a complete report ("all
