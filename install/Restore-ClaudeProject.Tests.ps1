@@ -144,4 +144,77 @@ Describe "Restore-ClaudeProject" {
         $slug = Get-ProjectSlug $real
         Test-Path "$script:claudeHome/projects/$slug/abc.jsonl" | Should -BeTrue
     }
+
+    It "falls back to Resolve-Path when realpath is on PATH but fails" -Skip:($IsWindows -or $PSVersionTable.PSVersion.Major -lt 6) {
+        # Regression: an unchecked realpath failure left $resolvedRepo $null, Get-ProjectSlug $null
+        # came back empty, and sessions landed at <ClaudeHome>/projects/ -- silently, at exit 0.
+        # A fake realpath earlier on PATH stands in for a real-world failure (permission denied,
+        # a dangling link mid-chain) that the coreutils binary itself would rarely hit here.
+        $fakeBinDir = Join-Path $script:sandbox 'fakebin'
+        New-Item -ItemType Directory $fakeBinDir -Force | Out-Null
+        "#!/bin/sh`nexit 1" | Set-Content "$fakeBinDir/realpath" -NoNewline
+        chmod +x "$fakeBinDir/realpath"
+
+        $oldPath = $env:PATH
+        try {
+            $env:PATH = $fakeBinDir + [System.IO.Path]::PathSeparator + $oldPath
+            & $script:restore -Source $script:bundle -RepoPath $script:repo -ClaudeHome $script:claudeHome | Out-Null
+        }
+        finally {
+            $env:PATH = $oldPath
+        }
+
+        $slug = Get-ProjectSlug (Resolve-Path $script:repo).Path
+        Test-Path "$script:claudeHome/projects/$slug/abc.jsonl" | Should -BeTrue
+    }
+
+    It "keeps a path segment containing a space intact when rewriting a hook command" {
+        # Regression: the continuation regex stopped at the first space, so a quoted path with a
+        # space in it (a very ordinary thing for a Windows path to have) came out half-converted.
+        $out = Convert-HookCommand "pwsh 'C:\Users\me\.claude\My Hooks\run.ps1'" 'C:\Users\me\.claude' '/home/me/.claude' $false
+        $out | Should -Be "pwsh '/home/me/.claude/My Hooks/run.ps1'"
+    }
+
+    It "leaves a sibling directory that merely starts with OldHome untouched" {
+        # Regression: .claude-backup shares the literal text 'C:\Users\me\.claude' as a prefix but
+        # is a different directory. Rewriting just the shared prefix produced mixed separators;
+        # the fix requires a separator/quote/space/end boundary right after OldHome, so this whole
+        # occurrence is left alone instead of half-rewritten.
+        $out = Convert-HookCommand "cat 'C:\Users\me\.claude-backup\hooks\A.ps1'" 'C:\Users\me\.claude' '/home/me/.claude' $false
+        $out | Should -Be "cat 'C:\Users\me\.claude-backup\hooks\A.ps1'"
+    }
+
+    It "replaces a case-folding Unicode character the way JavaScript's ordinal regex would" {
+        # Regression: PowerShell's -replace is case-insensitive by default, and .NET's IgnoreCase
+        # regex folds U+212A KELVIN SIGN onto ASCII 'k', so '[^A-Za-z0-9]' let it through
+        # unreplaced. Claude Code's JS regex carries no /i flag and is ordinal, so it always
+        # replaces it. Reference value cross-checked under node.
+        $kelvin = [char]0x212A
+        Get-ProjectSlug "/tmp/x${kelvin}y" | Should -Be '-tmp-x-y'
+    }
+
+    It "only makes the bundle's own hook files executable, not siblings or pre-existing files" -Skip:($IsWindows -or $PSVersionTable.PSVersion.Major -lt 6) {
+        # Regression: scanning the destination directory recursively with no extension filter also
+        # chmod'd files the bundle never shipped (a .ts hook meant to run through an interpreter,
+        # an unrelated README.md) and files already sitting in the destination from an earlier
+        # restore that this run's Copy-Tree never touched.
+        New-Item -ItemType Directory "$script:bundle/repo/.claude/hooks" -Force | Out-Null
+        "#!/bin/sh`nexit 0" | Set-Content "$script:bundle/repo/.claude/hooks/pre-commit" -NoNewline
+        "console.log(1)"    | Set-Content "$script:bundle/repo/.claude/hooks/lint.ts" -NoNewline
+        "# readme"           | Set-Content "$script:bundle/repo/.claude/hooks/README.md" -NoNewline
+        chmod 644 "$script:bundle/repo/.claude/hooks/pre-commit"
+        chmod 644 "$script:bundle/repo/.claude/hooks/lint.ts"
+        chmod 644 "$script:bundle/repo/.claude/hooks/README.md"
+
+        New-Item -ItemType Directory "$script:repo/.claude/hooks" -Force | Out-Null
+        "old" | Set-Content "$script:repo/.claude/hooks/not-from-bundle.md" -NoNewline
+        chmod 644 "$script:repo/.claude/hooks/not-from-bundle.md"
+
+        & $script:restore -Source $script:bundle -RepoPath $script:repo -ClaudeHome $script:claudeHome -Force | Out-Null
+
+        (Get-Item "$script:repo/.claude/hooks/pre-commit").UnixMode         | Should -Match '^-rwx'
+        (Get-Item "$script:repo/.claude/hooks/lint.ts").UnixMode           | Should -Not -Match '^-rwx'
+        (Get-Item "$script:repo/.claude/hooks/README.md").UnixMode         | Should -Not -Match '^-rwx'
+        (Get-Item "$script:repo/.claude/hooks/not-from-bundle.md").UnixMode | Should -Not -Match '^-rwx'
+    }
 }
