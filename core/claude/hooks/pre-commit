@@ -28,9 +28,18 @@
 # CONFIG RESOLUTION
 # Mirrors lint-doc-prose.ts's project-then-global order (see that file's
 # resolveValeConfig, lines ~85-87): a repo-vendored kit at
-# .claude/tools/prose-lint/.vale.ini first, then the machine-global kit at
-# $HOME/.claude/tools/prose-lint/.vale.ini. No env-var override here — that
-# candidate in lint-doc-prose.ts exists for its own CI callers, not this hook.
+# .claude/tools/prose-lint/.vale.ini first, then the machine-global kit under
+# the user's home. No env-var override here — that candidate in
+# lint-doc-prose.ts exists for its own CI callers, not this hook.
+#
+# HOME ON GIT BASH / WINDOWS
+# Git Bash's $HOME is not the Windows user profile — it can point at a
+# Documents subfolder or wherever /etc/passwd or HOME was set to, while the
+# actual per-user kit lives under the real profile. $USERPROFILE (a Windows
+# env var Git Bash still exports, value like C:\Users\name) is the correct
+# per-user root there. Mixed-slash concatenation (C:\Users\name/.claude/...)
+# resolves fine under MSYS's `test -f`, so no separator conversion is needed
+# — just prefer $USERPROFILE over $HOME when it's set and non-empty.
 #
 # ADVISORY, NEVER A GATE
 # `vale` missing from PATH, or no config reachable, degrades to a silent
@@ -52,13 +61,15 @@ staged_md=$(git -c core.quotePath=false diff --cached --name-only --diff-filter=
 vale_bin=$(command -v vale) || exit 0
 
 project_config="$hook_dir/../tools/prose-lint/.vale.ini"
-global_config="$HOME/.claude/tools/prose-lint/.vale.ini"
+home_dir=${USERPROFILE:-$HOME}
+global_config="$home_dir/.claude/tools/prose-lint/.vale.ini"
 
 if [ -f "$project_config" ]; then
   config="$project_config"
 elif [ -f "$global_config" ]; then
   config="$global_config"
 else
+  echo "pre-commit: no Vale config found (checked $project_config and $global_config) — skipping prose lint" >&2
   exit 0
 fi
 
