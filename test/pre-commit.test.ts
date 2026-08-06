@@ -199,20 +199,51 @@ describe("pre-commit hook — vale binary and config availability", () => {
     expect(result.stderr.toString()).toBe("");
   });
 
-  test("no Vale config reachable: exits 0, no output", () => {
+  test("no Vale config reachable: exits 0, names where it looked on stderr", () => {
     const dir = initRepo();
     const stubDir = installValeStub();
-    // No installValeConfig() call — no project config, and HOME is pointed
-    // at an empty dir so the global-kit fallback also misses.
+    // No installValeConfig() call — no project config. Both HOME and
+    // USERPROFILE point at an empty dir so the global-kit fallback misses
+    // regardless of which one the hook prefers.
     const fakeHome = mkdtempSync(join(tmpdir(), "precommit-home-"));
     tempDirs.push(fakeHome);
     writeFileSync(join(dir, "docs.md"), "Let's delve into this topic.\n");
     git(["add", "docs.md"], dir);
 
-    const result = runHook(dir, { ...process.env, PATH: pathWithStubFirst(stubDir), HOME: fakeHome });
+    const result = runHook(dir, {
+      ...process.env,
+      PATH: pathWithStubFirst(stubDir),
+      HOME: fakeHome,
+      USERPROFILE: fakeHome,
+    });
     expect(result.exitCode).toBe(0);
     expect(result.stdout.toString()).toBe("");
-    expect(result.stderr.toString()).toBe("");
+    expect(result.stderr.toString()).toContain("no Vale config found");
+  });
+
+  test("USERPROFILE (Windows profile) wins over a HOME that doesn't hold the kit", () => {
+    const dir = initRepo();
+    const stubDir = installValeStub();
+    // Simulates Git Bash on Windows, where $HOME can resolve to a Documents
+    // subfolder while $USERPROFILE is the real profile holding the kit.
+    const fakeUserProfile = mkdtempSync(join(tmpdir(), "precommit-userprofile-"));
+    tempDirs.push(fakeUserProfile);
+    const fakeHome = mkdtempSync(join(tmpdir(), "precommit-home-"));
+    tempDirs.push(fakeHome);
+    installValeConfig(fakeUserProfile);
+    writeFileSync(join(dir, "docs.md"), "Let's delve into this topic.\n");
+    git(["add", "docs.md"], dir);
+
+    const result = runHook(dir, {
+      ...process.env,
+      PATH: pathWithStubFirst(stubDir),
+      HOME: fakeHome,
+      USERPROFILE: fakeUserProfile,
+    });
+    expect(result.exitCode).toBe(0);
+    const stderr = result.stderr.toString();
+    expect(stderr).toContain("docs.md");
+    expect(stderr).toContain("Stub.Finding");
   });
 });
 
