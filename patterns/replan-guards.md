@@ -7,8 +7,9 @@ is not the same as "rarely enough to afford." A single failure mode, a planner t
 out, a step that keeps failing the same way, an agent circling without making real headway, can
 each drive the wake condition to fire on almost every tick. One guard rarely covers every failure
 shape, so this pattern stacks four guards, checked in order before a replan is allowed to happen.
-The fourth is really two separate mechanisms, because "frozen" and "busy but going nowhere" are
-different failure shapes that need different detectors.
+The fourth is really three separate mechanisms, because "frozen," "busy but going nowhere," and
+"blocked by something no available action can change" are different failure shapes that need
+different detectors.
 
 ## 1. Exponential backoff on planner failure
 
@@ -49,10 +50,10 @@ failure shapes share one counter without one masking the other.
 
 **Reset:** a wake carrying a different reason or detail breaks the streak and clears the counter.
 
-## 4. No-progress guards: two separate mechanisms
+## 4. No-progress guards: three separate mechanisms
 
-"The agent is stuck" turns out to mean two different things, on two different timescales, and this
-pattern uses two independent mechanisms rather than one, because collapsing them loses real
+"The agent is stuck" turns out to mean three different things, on three different timescales, and
+this pattern uses three independent mechanisms rather than one, because collapsing them loses real
 distinctions: which one owns an episode, what it does about it, and how fast it fires.
 
 ### 4a. State-fingerprint freeze detector
@@ -100,16 +101,83 @@ summing a continuously-rising raw value instead of its discrete level, which mas
 baseline and restarts the window from scratch. A drop means state changed, so the agent is not
 frozen.
 
-**How 4a and 4b relate:** the steward never arms the planner backoff and never marks the agent
-stuck on its own, it only re-steers and alerts, and it deliberately stands down for the whole
-duration of a 4a freeze episode so the two never act on the same tick. 4a catches a short, hard
-freeze in raw state; 4b catches a longer, softer failure to accomplish anything even while state
-keeps changing.
+### 4c. Terminal-condition detector
 
-**Hazard, stated once:** both mechanisms transfer between projects; the specific list of counters
-that count as progress does not. Every project has to name its own set, and getting that list wrong
-(leaving out a legitimate productive counter, or letting a passive counter that increments on its
-own sneak in) breaks the steward's aim without breaking its code.
+**Prevents:** both mechanisms above, and guard 2 above them, assume the agent could get somewhere if
+it replanned better or replanned less often. Against a condition that no currently available action
+can change, guard 2 is the wrong instrument. A rolling ceiling bounds spend per window and never ends
+the episode, so capping the rate does not bound the waste, it spreads the same futile spend evenly
+across forever. What is missing is a stop condition, not a slower clock.
+
+**Trigger:** a conjunction over raw state fields, read fresh on the tick, where every conjunct has to
+hold and the conjunction together means "no available action changes this." The source project ANDed
+four conjuncts: the cheap automatic remedy is unavailable in the current context, the monitored
+resource sits under a percentage warning floor, the agent is not already in the state where the remedy
+would apply, and a count of consecutive refusals has crossed a threshold. Read the first three alone
+and they say "low, and no remedy at this location," which is a hazard and not a terminal state. The
+fourth conjunct was carrying the whole distinction between "low but still able to act" and "prevented
+from acting by the floor," and it is also the one conjunct that cannot stay: a count of refused
+attempts stops advancing the moment a well-steered agent stops attempting, which is enough on its own
+to keep the predicate from closing on exactly the agent it exists to catch.
+[`state-based-safety-predicates.md`](state-based-safety-predicates.md) covers that hole.
+
+So a state-only rewrite is not just a deletion. Whatever replaces the counter has to make the standing
+conjunction sufficient for "no available action changes this" by itself, which usually means tying the
+resource conjunct to the cost of acting rather than to a warning percentage: the resource sits below
+what the cheapest action that could reach the remedy would consume. Drop the counter and keep the
+warning floor and the detector fires on an agent that is merely low and still able to act, which is a
+false terminal call, gating everything in the Response below on a subject that had a way out. Keep the
+predicate a pure function over inputs the caller has already computed, so the threshold boundary is
+testable on its own without standing up an agent.
+
+**Response:** the detector ends the episode where a throttle only slows it. It owns that episode,
+checked ahead of the rolling ceiling and the thrash damper, and it consumes the tick: inside its
+window every tick returns without the normal replan instead of letting a capped rate carry on. Once
+per window it fires the remedy action itself rather than only instructing the planner to fire it,
+because an instruction has to survive a planner call that the same wake pressure can starve. It
+raises one operator alert per window. Last, an optional escape hatch, config-gated and off by
+default, for the destructive remedy that trades assets for a working state: it fires only after a
+longer multiple of the window, and it latches on the attempt rather than on success, since retrying
+a fee-incurring destructive action every tick is worse than the stall it means to end.
+
+**Reset:** the predicate going false, nothing else. Recovery needs a real change in external state or
+an operator instruction. Elapsed time alone never clears it. That inverts guard 2's rolling window,
+and it is why this subsection exists.
+
+**Precedence:** stands down entirely while 4a owns a freeze episode, stays suppressed by an active
+guard-1 backoff, and sits ahead of guards 2 and 3. It has to sit ahead of them because its re-steer
+is instruction-class and bypasses both, which leaves the once-per-window timestamp latch as the only
+bound on its burn.
+
+**Built, and not built:** everything above is described from code and unit tests, and no part of it
+from a live episode. The source project built and tested the predicate's truth table one conjunct at a
+time, along with the ownership order, the tick consumption, and the once-per-window latch. All of that
+then went out behind a predicate that never closed, so no terminal episode ever reached any of it in
+production. The destructive escape is a further layer down: off by default, on top of a gate that
+never opened. What was never built at all is the response that motivated writing this up, dropping
+the loop to a heartbeat-only cadence for the duration of the episode. Consuming the tick inside the
+window reaches the same spend reduction without a second cadence mode to reason about, so the
+heartbeat idea is recorded as considered and set aside, not as prior art. One project is behind all
+of 4c so far.
+
+**How the three relate:** ownership runs 4a, then 4c, then 4b. A hard freeze in raw state is the most
+specific reading of "stuck" and claims the episode first. A terminal condition comes next, because it
+is a specific diagnosis with a specific remedy, and letting 4b own it would mean re-steering a
+blocked agent forever with advice it has no way to act on. 4b takes what is left, the long soft
+failure to accomplish anything while state keeps changing. The steward never arms the planner backoff
+and never marks the agent stuck on its own, it only re-steers and alerts, and it deliberately stands
+down for the whole duration of a 4a freeze episode so those two never act on the same tick.
+
+**Hazard, stated once:** all three mechanisms transfer between projects. Neither the list of counters
+that count as productive nor the terminal predicate's conjuncts transfer with them, and both go wrong
+the same silent way, breaking a detector's aim without breaking its code. Every project has to name
+its own counters, and getting that list wrong (leaving out a legitimate productive counter, or
+letting a passive counter that increments on its own sneak in) is enough to blind the steward. The
+terminal conjuncts are exposed in both directions: too loose and the detector suppresses replans that
+would have helped, too strict and a real terminal state runs forever with nothing flagging it. Prefer
+under-firing, since a false terminal call takes away the agent's only route out. That preference has
+a bill attached. Tuned tight enough, a predicate that never closes looks exactly like a quiet one,
+which is how the source project's hole survived unnoticed.
 
 ## Recovery taxonomy
 
@@ -133,3 +201,11 @@ in the "wrong execution" tier until something indicates the plan itself is the p
 plan resolves things. Surfacing the situation to an operator, rather than looping indefinitely
 through the first two tiers, is itself part of the design: a guard with no stopping point is not a
 guard.
+
+## Related
+
+[`state-based-safety-predicates.md`](state-based-safety-predicates.md): how to define the terminal
+predicate in 4c so it can fire at all. The guards above decide when to hold off a replan, and every
+one of them keys off a replan boundary or a wake. A standing hazard predicate runs on a different
+clock, since it has to become true for an agent that has stopped acting entirely, which is precisely
+the tick where no boundary arrives.
