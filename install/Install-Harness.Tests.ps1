@@ -14,7 +14,10 @@ Describe "Install-Harness" {
         # Scratch drop box: the directory must exist and carry the self-ignoring rule, or agent
         # working files land in the project's commits.
         Test-Path "$script:target/.claude/scratch" -PathType Container | Should -BeTrue
-        Get-Content "$script:target/.claude/scratch/.gitignore" -Raw | Should -Match '(?m)^\*$'
+        # \r? before the anchor: the template is LF in the index and core.autocrlf=true
+        # checks it out as CRLF, so in -Raw text `$` sits behind a carriage return and a
+        # bare `^\*$` never matches on Windows.
+        Get-Content "$script:target/.claude/scratch/.gitignore" -Raw | Should -Match '(?m)^\*\r?$'
     }
 
     It "merges hook registrations into existing settings.json without clobbering" {

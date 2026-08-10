@@ -90,3 +90,7 @@ failure, and every one of them reports success.
 review fan-out, a different lifecycle: that pass checks whether a reported finding is real before
 it reaches the author. This pass checks whether a fix the author already merged is actually
 holding up the behavior it claims to fix.
+
+[`test-falsifiability.md`](test-falsifiability.md) asks the question underneath this one, whether the
+test could have failed at all, since an ablation whose test could not fail either way returns a green
+that says nothing.

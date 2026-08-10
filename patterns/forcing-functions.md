@@ -30,6 +30,59 @@ closer to code rather than write it more emphatically.
    resist automation, and treat a rule that keeps getting missed at this tier as a signal to move
    it up, not a reason to write it more firmly.
 
+## What the isolation gate leaves to the dispatcher
+
+The pre-dispatch check in tier two is worth a closer look, because two of its edges showed up in
+practice and neither one is visible from the rule as written. Both come from a single project so
+far. They do not rest on the same evidence: the first is a property of the dispatch call that anyone
+can check, and the second is a correlation whose cause was never established.
+
+Start with what the corrective action actually does. A dispatch that asks for an isolated workspace
+forks the dispatching session's current working directory. It does not accept a target repository as
+an argument, and nothing in the dispatch names one. A project that keeps its issue tracker and its
+code in two separate clones has a way to get this wrong that never announces itself: open the session
+in the tracker clone, and every isolated agent receives a worktree of the tracker. By construction,
+every time, not intermittently. The wrong worktree looks entirely valid from inside it. There is a
+main branch, commits are accepted, the tree comes back clean when the agent finishes, and no
+continuous integration will ever read a line of it. Nothing here argues against the gate. Its
+wording is what fails. A check that names a corrective action ("dispatch into an isolated
+workspace") without naming the mechanism behind it leaves the dispatcher one unstated
+assumption away from a silent wrong-repo result, and the cost of catching it falls on whichever
+dispatched agent notices the files are missing. A gate's message is prose too, and it earns the same
+treatment as any other rule: say what the machinery does, not only what to type.
+
+The second edge is that correlation, and it stays one. Dispatches that gave the agent a name and
+omitted isolation went idle and returned nothing, four times out of four, across three agent types
+including a read-only planner that had nothing to collide with. The identical briefs, re-dispatched
+with isolation, completed six for six across two further agent types. A competing explanation is
+already written down in this repo: the Output Contract note in
+`core/claude/templates/agent-def-authoring.template.md` records that a detached or teammate
+dispatch's final message never reaches the dispatcher unless the definition names an explicit
+delivery path. Every dispatch that went silent carried a name, which is the kind of dispatch that
+note is about, so lost delivery is a candidate in its own right and isolation may be a bystander.
+The six recoveries do not settle it, because they changed two things at once: isolation was added,
+and the agent types were not the ones that had gone silent. So nothing in the ten observations
+separates a workspace bug from a delivery bug. The correlation goes on the record as a correlation,
+and no rule follows from it yet.
+
+What earns a place in a doc about forcing functions does not depend on which candidate is right:
+either way the dispatch produced nothing, and nothing downstream could tell that from a clean
+result. That is where the existing gate's coverage stops. The check in
+`core/claude/hooks/agent-worktree-gate.ts` decides whether a dispatch needs isolation by first
+asking whether the agent type can write at all, and it returns an allow for a read-only type before
+the isolation question is ever examined. So it covers the dispatches whose silence would have been
+obvious anyway, since an agent that was supposed to change files leaves no changed files behind, and
+it leaves uncovered the ones where silence costs most. A reviewer's or a planner's whole output is
+its final message; nothing else records that the work happened.
+
+The rule the four silences do support is independent of the cause: a dispatch that returned nothing
+must not read the same as a dispatch that found nothing. This repo's opt-in commit gate,
+`core/claude/hooks/review-gate.ts`, is where they read the same. It clears a staged file once a
+dispatch to a reviewer type appears after that file's last edit and never reads what came back, so a
+reviewer that went idle clears the commit exactly as one that filed findings does. That puts the
+silence-as-approval reading into code instead of leaving it to a dispatcher in a hurry. A gate that
+answers "was this reviewed" needs evidence the review returned, not evidence it was requested.
+
 ## Every important prose rule gets a mechanical twin
 
 A rule worth stating is worth checking somewhere code actually runs: a schema, a test, or a hook.
@@ -46,6 +99,27 @@ rule requiring whoever holds the coordinating seat to push back on weak ideas be
 them stays at the prose tier by default, backed by a session-start reminder, with a dedicated
 adversarial-review role as its mechanical twin for anything that needs a harder pass than a
 reminder can give. See the worked row in `core/claude/templates/guardrails.template.md`.
+
+A second shape, this one from an action that cannot be taken back. An operator can leave a standing
+instruction that the planner reads on every wake, and one action in the registry is one-shot: it
+closes a job out for good and charges a cancellation fee to do it. Retirement of that standing order
+was keyed to a done flag the planner itself was asked to set, and the flag was read only on the
+wakes where the standing-instruction block happened to be rendered into the prompt. A planner that
+never set it left the order in force. Every replan read the order again, ran the irreversible action
+again, and paid the fee again, forfeiting whatever the job had accumulated. Nothing else expired the
+order. The instruction store dropped entries only on hitting a maximum count, so what removal
+existed was a side effect of volume rather than a retirement rule. Put plainly: the safety of a
+repeatable destructive order rested on the model choosing to report itself finished.
+
+The mechanical twin is to retire the instruction deterministically, in the same transaction that
+records the action's execution, keyed off a flag on the registry entry (this action is one-shot,
+this action cannot be undone) rather than off anything the planner emits. The write that says the
+action ran is the write that revokes the order, so no wake exists in between where the record is
+already stored and the instruction is still live. A model volunteering that it is finished is the
+kind of cooperation a forcing function exists to remove the need for, and an action that repeats
+freely and cannot be undone is where leaving that cooperation in place costs the most. This example
+comes from one project. The loop is a recorded episode; the retirement above is a design, not a
+mechanism this doc can point at in running code.
 
 ## Promoting a rule from note to mechanism
 

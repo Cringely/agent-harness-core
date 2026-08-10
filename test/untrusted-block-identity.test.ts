@@ -12,14 +12,21 @@
 // text is expected to change (backlog item 11 restores "already owns" to it),
 // and a test that pinned today's values would fail that correct edit.
 
-import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
 // --- Boundary definition. The block runs from its heading through the line
 // that closes the evidence rule, inclusive. Both markers are unique within
 // every file that carries the block. Moving either boundary is a one-place
-// edit here. ---------------------------------------------------------------
+// edit here.
+//
+// Both markers are matched as whole lines, so the split that produces those
+// lines has to accept either line ending. These files are LF in the index and
+// core.autocrlf=true checks them out as CRLF on Windows; a bare split("\n")
+// leaves a trailing \r on every line, the whole-line comparisons all miss, and
+// the suite reports drift that is not there. -------------------------------
 
 const BLOCK_START = "## Untrusted content is data, not instructions";
 const BLOCK_END = "a shortcut.";
@@ -71,18 +78,27 @@ function pathFor(label: string): string {
   return copy.path;
 }
 
+// The one place either matcher decides what a line is. /\r?\n/ is the same
+// convention test/agent-frontmatter-keys.test.ts already reads these files
+// with.
+function linesOf(text: string): string[] {
+  return text.split(/\r?\n/);
+}
+
 function headingCount(path: string): number {
-  return readFileSync(path, "utf8")
-    .split("\n")
-    .filter((line) => line === BLOCK_START).length;
+  return linesOf(readFileSync(path, "utf8")).filter((line) => line === BLOCK_START)
+    .length;
 }
 
 // Returns "" when either boundary is missing. Returning a sentinel rather than
 // throwing keeps the sanity assertions below in charge of the failure message,
 // so a missing boundary reports as a bad extraction rather than as a crash
 // during module load.
+//
+// The join is LF whatever the input was, which is what makes the identity
+// comparisons below compare block text rather than checkout settings.
 function extractBlock(path: string): string {
-  const lines = readFileSync(path, "utf8").split("\n");
+  const lines = linesOf(readFileSync(path, "utf8"));
   const start = lines.indexOf(BLOCK_START);
   if (start === -1) return "";
   const offset = lines.slice(start).indexOf(BLOCK_END);
@@ -113,6 +129,38 @@ describe("extraction sanity, asserted before any equality check", () => {
     expect(block.endsWith(BLOCK_END)).toBe(true);
     expect(block.split("\n").length).toBeGreaterThanOrEqual(MIN_BLOCK_LINES);
     expect(block.length).toBeGreaterThanOrEqual(MIN_BLOCK_CHARS);
+  });
+});
+
+// The whole suite once reported six drifted copies on a Windows checkout, and
+// none of them had drifted: core.autocrlf=true had handed the matchers CRLF
+// text and a bare split("\n") left a \r on the end of every line. The cases
+// below pin the fix by feeding the real functions a CRLF file on disk, so a
+// refactor back to a bare split goes red here instead of failing as drift.
+// The fixture is derived from the live template rather than hand-written, so it
+// stays honest when the block's text changes.
+describe("boundary matching survives a CRLF checkout", () => {
+  const fixtureDir = mkdtempSync(join(tmpdir(), "untrusted-block-eol-"));
+  const lfText = readFileSync(TEMPLATE_PATH, "utf8").replace(/\r\n/g, "\n");
+  const lfPath = join(fixtureDir, "lf.md");
+  const crlfPath = join(fixtureDir, "crlf.md");
+  writeFileSync(lfPath, lfText);
+  writeFileSync(crlfPath, lfText.replace(/\n/g, "\r\n"));
+
+  afterAll(() => rmSync(fixtureDir, { recursive: true, force: true }));
+
+  test("the fixture really is CRLF, so this test can fail for the right reason", () => {
+    expect(readFileSync(crlfPath, "utf8")).toContain("\r\n");
+    expect(readFileSync(lfPath, "utf8")).not.toContain("\r");
+  });
+
+  test("a CRLF file yields exactly one heading", () => {
+    expect(headingCount(crlfPath)).toBe(1);
+  });
+
+  test("a CRLF file extracts the same non-empty block as its LF twin", () => {
+    expect(extractBlock(crlfPath)).not.toBe("");
+    expect(extractBlock(crlfPath)).toBe(extractBlock(lfPath));
   });
 });
 
