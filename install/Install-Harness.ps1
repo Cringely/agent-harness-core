@@ -13,7 +13,11 @@
     The manifest is v2: installed-file hashes live under `files`, deliberate project
     forks pinned with -Accept live under `accepted`, and `coreRepo`/`coreCommit`
     record where this layer came from. A v1 manifest (a flat path-to-hash map) is
-    migrated on load, preserving every hash under `files`.
+    migrated on load, preserving every hash under `files`. Migration also carries any
+    `accepted` pins through unchanged, since only -Accept can write one and nothing on
+    disk can recompute it. The record keys stay at top level either way: they are not
+    tracked files, and one folded in under `files` becomes an audit row for a file
+    that does not exist.
 
     Ceremony components (wave-close-handoff.sh hook, soc-monitor.md agent,
     ceremony-ledger.json and their hook registrations) assume wave/standup ceremony
@@ -222,9 +226,10 @@ function Get-CoreCommit {
 # script already writes the manifest, which is why -Audit still writes nothing.
 #
 # Hand-edited manifests in the wild are the reason this is a function with a shape check
-# rather than three inline assignments. Three cases it has to survive without losing data:
+# rather than three inline assignments. Four cases it has to survive without losing data:
 # a v1 map with no stackDetected, a v1 map carrying a stray `files` key from something else,
-# and a v2 map whose `accepted` was hand-edited to a non-map.
+# a v2 map whose `accepted` was hand-edited to a non-map, and a map carrying pins under
+# `accepted` whose `files` is missing or the wrong shape, which the check below reads as v1.
 function ConvertTo-ManifestV2 {
     param($Loaded)
 
@@ -244,9 +249,14 @@ function ConvertTo-ManifestV2 {
     $isV2 = $m.Contains('files') -and $m['files'] -is [System.Collections.IDictionary]
 
     if (-not $isV2) {
+        # The four skipped keys are manifest records rather than tracked files. Folding any of
+        # them into `files` buys it a row in the audit table for a file that does not exist,
+        # which is the same false alarm the pin mechanism exists to remove. Only two need
+        # carrying: coreRepo and coreCommit are rewritten from the current checkout at the
+        # bottom of this block, so their stale values are meant to be dropped here.
         $files = @{}
         foreach ($key in @($m.Keys)) {
-            if ($key -eq 'stackDetected') { continue }
+            if ($key -in @('stackDetected', 'accepted', 'coreRepo', 'coreCommit')) { continue }
             $files[$key] = $m[$key]
         }
 
@@ -257,8 +267,16 @@ function ConvertTo-ManifestV2 {
         $hadStack = $m.Contains('stackDetected')
         if ($hadStack) { $stack = $m['stackDetected'] }
 
+        # accepted rides through for the same reason and a stronger one: a pin is an operator
+        # decision that nothing on disk can recompute, so a manifest reaching here with pins but
+        # no usable `files` must not have them rebuilt away. Carried unconditionally rather than
+        # behind its own shape test like $hadStack, because the degrade below already replaces a
+        # non-map with an empty one, exactly as it does for a manifest that was already v2.
+        $accepted = $m['accepted']
+
         $m = @{ files = $files }
         if ($hadStack) { $m['stackDetected'] = $stack }
+        $m['accepted'] = $accepted
         $m['coreRepo'] = $script:repoRoot
         $m['coreCommit'] = Get-CoreCommit
     }

@@ -504,6 +504,67 @@ Describe "Install-Harness" {
         $m['files']['agents/retired-agent.md'] | Should -Be 'DEADBEEF'
     }
 
+    It "preserves accepted pins when migrating a manifest whose files map is missing" {
+        # A pin is the one manifest value nothing on disk can recompute: an install rebuilds
+        # `files` from the source hashes, and only -Accept ever writes `accepted`. Shape
+        # detection keys off `files`, so a manifest holding pins but no usable files map is
+        # read as v1 and rebuilt, and every pin goes with it. The operator is left with a
+        # permanent audit warning and no record of why the fork was ever accepted.
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        'project fork body' | Set-Content "$script:target/.claude/agents/project-only.md"
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Accept 'agents/project-only.md' | Out-Null
+
+        $manifestPath = "$script:target/.claude/.harness-manifest.json"
+        $m = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+        $pin = $m['accepted']['agents/project-only.md']
+        $pin | Should -Not -BeNullOrEmpty
+
+        $m.Remove('files')
+        $m | ConvertTo-Json -Depth 20 | Set-Content $manifestPath
+
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+
+        $after = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+        $after['accepted']['agents/project-only.md'] | Should -Be $pin
+        # Folded under files instead, the pin map reads as a single orphaned row named
+        # 'accepted' and no key in it is a pin any more, so assert it did not ride along there.
+        $after['files'].Contains('accepted') | Should -BeFalse
+        # The operator-visible half: a dropped pin does not merely change the manifest, it
+        # takes the overlay's row out of the audit table entirely.
+        $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $audit | Should -Match 'agents/project-only\.md\s+overlay \(accepted\)'
+    }
+
+    It "keeps coreRepo and coreCommit out of files when migrating a manifest whose files map is missing" {
+        # Same fold-in as the pin case, different damage. Neither value is lost, both are
+        # rewritten from the current checkout, but folded under `files` they become tracked
+        # keys for paths that were never files, and the audit then carries a permanent
+        # orphaned row for each. Two junk rows train the operator to skim the table.
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $manifestPath = "$script:target/.claude/.harness-manifest.json"
+        $before = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+        $before['coreRepo'] | Should -Not -BeNullOrEmpty
+
+        $before.Remove('files')
+        $before | ConvertTo-Json -Depth 20 | Set-Content $manifestPath
+
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+
+        $after = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+        $after['files'].Contains('coreRepo') | Should -BeFalse
+        $after['files'].Contains('coreCommit') | Should -BeFalse
+        # Skipped in the fold, still recorded: the keys belong at top level, not nowhere.
+        $after['coreRepo'] | Should -Be $before['coreRepo']
+        $after.Contains('coreCommit') | Should -BeTrue
+        $after['coreCommit'] | Should -Be $before['coreCommit']
+
+        # A tracked key with no core source and no file on disk is reported orphaned, so that
+        # is the row shape this guards against.
+        $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $audit | Should -Not -Match 'coreRepo\s+orphaned'
+        $audit | Should -Not -Match 'coreCommit\s+orphaned'
+    }
+
     It "-Accept pins an overlay that the audit reports as accepted and leaves out of the attention count" {
         # -IncludeCeremonies for the baseline: a default install leaves the two ceremony files
         # permanently 'not-installed', so the attention count is never zero without it and the
