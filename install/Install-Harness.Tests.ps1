@@ -106,8 +106,8 @@ Describe "Install-Harness" {
         $dst = "$script:target/.claude/agents/task-reviewer.md"
         "OLD CORE VERSION" | Set-Content $dst
         $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
-        $m['agents/task-reviewer.md'] = (Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash
-        $m | ConvertTo-Json -Depth 5 | Set-Content "$script:target/.claude/.harness-manifest.json"
+        $m['files']['agents/task-reviewer.md'] = (Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash
+        $m | ConvertTo-Json -Depth 20 | Set-Content "$script:target/.claude/.harness-manifest.json"
         $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String
         $out | Should -Match "agents/task-reviewer\.md\s+core-updated"
     }
@@ -116,8 +116,8 @@ Describe "Install-Harness" {
         & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
         Remove-Item "$script:target/.claude/agents/task-reviewer.md"
         $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
-        $m['agents/retired-agent.md'] = 'DEADBEEF'
-        $m | ConvertTo-Json -Depth 5 | Set-Content "$script:target/.claude/.harness-manifest.json"
+        $m['files']['agents/retired-agent.md'] = 'DEADBEEF'
+        $m | ConvertTo-Json -Depth 20 | Set-Content "$script:target/.claude/.harness-manifest.json"
         $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String
         $out | Should -Match "agents/task-reviewer\.md\s+missing"
         $out | Should -Match "agents/retired-agent\.md\s+orphaned"
@@ -128,9 +128,9 @@ Describe "Install-Harness" {
         Copy-Item "$PSScriptRoot/../core/claude/agents/task-reviewer.md" "$script:target/.claude/agents/"
         & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
         $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
-        $m['agents/task-reviewer.md'] | Should -Not -BeNullOrEmpty
+        $m['files']['agents/task-reviewer.md'] | Should -Not -BeNullOrEmpty
         $src = (Get-FileHash "$PSScriptRoot/../core/claude/agents/task-reviewer.md" -Algorithm SHA256).Hash
-        $m['agents/task-reviewer.md'] | Should -Be $src
+        $m['files']['agents/task-reviewer.md'] | Should -Be $src
     }
 
     It "records an empty stackDetected.plugins array when the plugin cache dir is missing, without throwing" {
@@ -257,8 +257,8 @@ Describe "Install-Harness" {
     It "gains stackDetected without losing existing manifest keys, and drops the old pluginsDetected key" {
         & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
         $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
-        $m.Contains('guardrails.md') | Should -BeTrue
-        $m.Contains('agents/task-reviewer.md') | Should -BeTrue
+        $m['files'].Contains('guardrails.md') | Should -BeTrue
+        $m['files'].Contains('agents/task-reviewer.md') | Should -BeTrue
         $m.Contains('pluginsDetected') | Should -BeFalse
         $m.Contains('stackDetected') | Should -BeTrue
         $m['stackDetected'].Contains('scannedAt') | Should -BeTrue
@@ -420,6 +420,226 @@ Describe "Install-Harness" {
             $env:PATH = $prevPath
             Remove-Item -Recurse -Force $shimDir
         }
+    }
+
+    It "migrates a v1 flat manifest to v2, preserving the recorded hashes under files" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $manifestPath = "$script:target/.claude/.harness-manifest.json"
+        $v2 = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+        $trackedHash = $v2['files']['agents/task-reviewer.md']
+        $trackedHash | Should -Not -BeNullOrEmpty
+
+        # Rewrite the manifest into the v1 shape an already-installed project carries: a flat
+        # path-to-hash map plus stackDetected, with none of the v2 siblings.
+        $v1 = [ordered]@{}
+        foreach ($k in $v2['files'].Keys) { $v1[$k] = $v2['files'][$k] }
+        # An entry core no longer ships is what makes this test ablation-proof. Every other
+        # hash here would be recomputed to the same value by the install itself, so dropping
+        # the whole v1 map would still leave them looking correct. This one cannot be
+        # recomputed from anything on disk; it survives only if the migration carried it.
+        $v1['agents/retired-agent.md'] = 'DEADBEEF'
+        $v1['stackDetected'] = $v2['stackDetected']
+        $v1 | ConvertTo-Json -Depth 20 | Set-Content $manifestPath
+
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+
+        $raw = Get-Content $manifestPath -Raw
+        # Raw JSON, not only the deserialized value: an empty accepted map has to reach disk
+        # as an object rather than collapsing away, and the v1 keys must no longer sit at the
+        # top level where every audit lookup would miss them.
+        $raw | Should -Match '"files":\s*\{'
+        $raw | Should -Match '"accepted":\s*\{'
+        $m = $raw | ConvertFrom-Json -AsHashtable
+        $m['files']['agents/retired-agent.md'] | Should -Be 'DEADBEEF'
+        $m['files']['agents/task-reviewer.md'] | Should -Be $trackedHash
+        $m.Contains('agents/task-reviewer.md') | Should -BeFalse
+        # stackDetected stays a sibling of files, never a tracked file inside it.
+        $m.Contains('stackDetected') | Should -BeTrue
+        $m['files'].Contains('stackDetected') | Should -BeFalse
+        $m.Contains('coreRepo') | Should -BeTrue
+        $m.Contains('coreCommit') | Should -BeTrue
+    }
+
+    It "migrates hand-edited manifest shapes without throwing or dropping recorded hashes" {
+        # Three shapes a manifest already installed in the wild can actually be in. The
+        # migration has to survive all three, because the alternative is an installer that
+        # throws on a file the operator cannot easily reconstruct.
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $manifestPath = "$script:target/.claude/.harness-manifest.json"
+        $trackedHash = (Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable)['files']['agents/task-reviewer.md']
+
+        # A v1 map hand-edited down to file hashes alone, with no stackDetected to carry over.
+        $flat = [ordered]@{
+            'agents/task-reviewer.md'  = $trackedHash
+            'agents/retired-agent.md'  = 'DEADBEEF'
+        }
+        $flat | ConvertTo-Json -Depth 20 | Set-Content $manifestPath
+        { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target } | Should -Not -Throw
+        $m = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+        $m['files']['agents/retired-agent.md'] | Should -Be 'DEADBEEF'
+        $m['files']['agents/task-reviewer.md'] | Should -Be $trackedHash
+
+        # A v1 map carrying a stray 'files' key that is not a map. Detection goes by shape, so
+        # this migrates instead of being mistaken for v2, and the stray value rides along under
+        # files where the audit will show it as an orphaned row rather than vanishing.
+        $stray = [ordered]@{
+            'files'                   = 'not-a-map'
+            'agents/retired-agent.md' = 'DEADBEEF'
+        }
+        $stray | ConvertTo-Json -Depth 20 | Set-Content $manifestPath
+        { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target } | Should -Not -Throw
+        $m = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+        $m['files']['files'] | Should -Be 'not-a-map'
+        $m['files']['agents/retired-agent.md'] | Should -Be 'DEADBEEF'
+
+        # A v2 manifest whose accepted was hand-edited to a scalar. An int has no Contains
+        # method at all, which is the shape that actually throws (String and Object[] both
+        # answer Contains and would quietly return $false instead).
+        $m['accepted'] = 42
+        $m | ConvertTo-Json -Depth 20 | Set-Content $manifestPath
+        { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target } | Should -Not -Throw
+        $raw = Get-Content $manifestPath -Raw
+        $raw | Should -Match '"accepted":\s*\{'
+        $m = $raw | ConvertFrom-Json -AsHashtable
+        $m['files']['agents/retired-agent.md'] | Should -Be 'DEADBEEF'
+    }
+
+    It "-Accept pins an overlay that the audit reports as accepted and leaves out of the attention count" {
+        # -IncludeCeremonies for the baseline: a default install leaves the two ceremony files
+        # permanently 'not-installed', so the attention count is never zero without it and the
+        # exclusion assertion below would have nothing clean to read.
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -IncludeCeremonies
+        'project fork body' | Set-Content "$script:target/.claude/agents/project-only.md"
+
+        $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Accept 'agents/project-only.md' *>&1 | Out-String -Width 500
+        $out | Should -Match "Accepted overlay 'agents/project-only\.md' pinned at [0-9A-Fa-f]{64}"
+
+        $raw = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw
+        $raw | Should -Match '"accepted":\s*\{[^}]*"agents/project-only\.md"'
+
+        $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $audit | Should -Match 'agents/project-only\.md\s+overlay \(accepted\)'
+        # The pin is worth nothing if the row still counts as drift, so assert the count
+        # itself and not just the status string.
+        $audit | Should -Match 'All managed files in sync with core\.'
+    }
+
+    It "-Accept throws on a file that does not exist" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Accept 'agents/no-such-agent.md' } |
+            Should -Throw -ExpectedMessage '*file does not exist*'
+    }
+
+    It "-Accept throws on a file already tracked in the manifest's files map" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Accept 'agents/task-reviewer.md' } |
+            Should -Throw -ExpectedMessage '*already tracked*'
+    }
+
+    It "-Accept throws on a path that resolves outside the .claude directory" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        # A real file, so the throw under test is the containment check and not the
+        # file-does-not-exist guard standing in for it.
+        'outside the layer' | Set-Content "$script:target/outside.md"
+        $manifestPath = "$script:target/.claude/.harness-manifest.json"
+        $manifestBefore = Get-Content $manifestPath -Raw
+
+        { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Accept '../outside.md' } |
+            Should -Throw -ExpectedMessage '*outside the project*'
+        # Absolute paths take a separate guard: Join-Path with a rooted second argument does not
+        # replace the base, so on Linux '/etc/passwd' would otherwise land back inside the
+        # containment check as a contained path and pin a file no install manages.
+        $absolute = (Resolve-Path -LiteralPath "$script:target/outside.md").Path
+        { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Accept $absolute } |
+            Should -Throw -ExpectedMessage '*absolute paths are not accepted*'
+
+        # Neither rejection may leave a pin behind, and the key must not reach the file at all.
+        $raw = Get-Content $manifestPath -Raw
+        $raw | Should -Be $manifestBefore
+        $raw | Should -Not -Match 'outside\.md'
+    }
+
+    It "audit over a v1 manifest migrates in memory only, leaving the file on disk untouched" {
+        # The other writes-nothing assertions all run against a manifest that is already v2, and
+        # a v2 manifest round-trips byte-identical, so those comparisons cannot tell a write from
+        # a no-write. Migration-on-load is the case where an audit-time persist would be visible,
+        # and it is the case where it would matter: the operator asked for a report and would get
+        # their manifest silently rewritten into a new shape.
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $manifestPath = "$script:target/.claude/.harness-manifest.json"
+        $v2 = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+
+        $v1 = [ordered]@{}
+        foreach ($k in $v2['files'].Keys) { $v1[$k] = $v2['files'][$k] }
+        $v1['stackDetected'] = $v2['stackDetected']
+        $v1 | ConvertTo-Json -Depth 20 | Set-Content $manifestPath
+        $manifestBefore = Get-Content $manifestPath -Raw
+
+        $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String -Width 500
+        # The migration still has to have happened in memory, or the audit reads every tracked
+        # file as untracked and the byte compare below passes for the wrong reason.
+        $out | Should -Match 'agents/task-reviewer\.md\s+in-sync'
+
+        $raw = Get-Content $manifestPath -Raw
+        $raw | Should -Be $manifestBefore
+        # Raw JSON, because the v1 shape is what proves nothing was written: a migrated manifest
+        # would carry a files map, and this one must still be the flat map that went in.
+        $raw | Should -Not -Match '"files":\s*\{'
+        $raw | Should -Not -Match '"accepted":'
+    }
+
+    It "audit reports overlay (changed) once an accepted overlay is edited again" {
+        # -IncludeCeremonies so the attention count below is the changed overlay alone.
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -IncludeCeremonies
+        'project fork body' | Set-Content "$script:target/.claude/agents/project-only.md"
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Accept 'agents/project-only.md' | Out-Null
+
+        'LATER EDIT' | Add-Content "$script:target/.claude/agents/project-only.md"
+        $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $audit | Should -Match 'agents/project-only\.md\s+overlay \(changed\)'
+        $audit | Should -Match '1 file\(s\) need attention'
+    }
+
+    It "-Accept re-pins an already-accepted overlay to its current hash" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $overlay = "$script:target/.claude/agents/project-only.md"
+        'project fork body' | Set-Content $overlay
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Accept 'agents/project-only.md' | Out-Null
+        $firstPin = (Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable)['accepted']['agents/project-only.md']
+
+        'REVIEWED AND KEPT' | Add-Content $overlay
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Accept 'agents/project-only.md' | Out-Null
+
+        $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+        $secondPin = $m['accepted']['agents/project-only.md']
+        $secondPin | Should -Not -Be $firstPin
+        $secondPin | Should -Be (Get-FileHash -LiteralPath $overlay -Algorithm SHA256).Hash
+        $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $audit | Should -Match 'agents/project-only\.md\s+overlay \(accepted\)'
+    }
+
+    It "names -Accept in the warning it prints when it skips a project-modified file" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        "PROJECT EDIT" | Add-Content "$script:target/.claude/agents/task-reviewer.md"
+        # -Width, because Out-String otherwise folds at the host width and can break the
+        # flag name across a line boundary where the match would then miss it.
+        $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500
+        $out | Should -Match "Skipping 'agents/task-reviewer\.md'"
+        $out | Should -Match '-Accept'
+    }
+
+    It "keeps an accepted key core never shipped visible in the audit table" {
+        # Guards the allKeys union. An accepted overlay core does not ship matches nothing in
+        # coreFiles and nothing in files, so a union built from those two alone drops the row
+        # entirely: the operator reads the overlay as absent rather than as accepted, which is
+        # a worse failure than the noise the pin was meant to remove.
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        'local convention notes' | Set-Content "$script:target/.claude/project-overlay.md"
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Accept 'project-overlay.md' | Out-Null
+
+        $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $audit | Should -Match 'project-overlay\.md\s+overlay \(accepted\)'
+        $audit | Should -Not -Match 'project-overlay\.md\s+orphaned'
     }
 
     It "reports a failed core.hooksPath write as FAILED instead of claiming it was set" -Skip:$IsWindows {
