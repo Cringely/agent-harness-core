@@ -3,12 +3,12 @@ Describe "Restore-ClaudeProject" {
     BeforeAll {
         $script:restore = "$PSScriptRoot/Restore-ClaudeProject.ps1"
 
-        # The two interesting functions are pure, but they live inside a script that takes
-        # mandatory parameters, so dot-sourcing would prompt. Lift them out via the AST instead.
+        # These functions are pure, but they live inside a script that takes mandatory parameters,
+        # so dot-sourcing would prompt. Lift them out via the AST instead.
         $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:restore, [ref]$null, [ref]$null)
         $defs = $ast.FindAll(
             { param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
-        foreach ($name in 'Get-ProjectSlug', 'Convert-HookCommand') {
+        foreach ($name in 'Get-ProjectSlug', 'Convert-HookCommand', 'Test-ResidualWindowsPath') {
             $fn = $defs | Where-Object { $_.Name -eq $name } | Select-Object -First 1
             # Without this, a rename in the script leaves the function simply undefined and every
             # unit test fails with "not recognized" rather than pointing at the real cause.
@@ -266,5 +266,155 @@ Describe "Restore-ClaudeProject" {
         # needs to change, the sed-corruption guard above needs to still pass afterward.
         $out = Convert-HookCommand "sh -c 'pwsh C:\Users\me\.claude\My Hooks\run.ps1'" 'C:\Users\me\.claude' '/home/me/.claude' $false
         $out | Should -Be "sh -c 'pwsh /home/me/.claude/My Hooks\run.ps1'"
+    }
+
+    It "previews the slug for the absolute repo path when -RepoPath is relative" {
+        # Regression: step 1's copy is ShouldProcess-gated, so under -WhatIf the destination is
+        # never created and the slug fell through to the raw relative string. The preview then
+        # named a session folder no real run would ever create, which defeats the point of -WhatIf.
+        Push-Location $script:sandbox
+        try {
+            $expected = Get-ProjectSlug (Join-Path (Get-Location).Path 'relrepo')
+            $out = & $script:restore -Source $script:bundle -RepoPath 'relrepo' `
+                -ClaudeHome $script:claudeHome -WhatIf 6>&1 | Out-String
+        }
+        finally { Pop-Location }
+
+        $out | Should -Match ([regex]::Escape("Session folder  : $expected"))
+        $out | Should -Not -Match 'Session folder  : relrepo'
+    }
+
+    It "treats a leftover Windows path in a rewritten command as still needing hands" {
+        # Regression: step 6 scanned hook script files only, so a command string that
+        # Convert-HookCommand left half-converted (a second, unrelated Windows path sharing the
+        # command) came out of a run with nothing reported anywhere.
+        Test-ResidualWindowsPath "pwsh -NoProfile -File '/home/me/.claude/hooks/Lint.ps1'" | Should -BeFalse
+        Test-ResidualWindowsPath 'pwsh /home/me/.claude/x.ps1 && C:\tools\foo.exe'          | Should -BeTrue
+        Test-ResidualWindowsPath 'sh -c "$USERPROFILE/.claude/x.sh"'                        | Should -BeTrue
+        Test-ResidualWindowsPath ''                                                         | Should -BeFalse
+    }
+
+    It "names a settings.json command that still carries a Windows path, at its real JSON path" {
+        # Windows-target runs are excluded from the whole step 6 scan, since a C:\ path is correct
+        # there, so this asserts against a Linux target. -TargetIsWindows drives that from whatever
+        # host runs the suite; this case used to be -Skip'd on Windows and no Linux CI exists, so
+        # it had never executed anywhere and the branch it covers was shipping untested.
+        #
+        # The fixture puts two hooks under one matcher and then a second matcher on purpose. A
+        # single matcher holding a single hook is the one shape where a flat per-event counter and
+        # a real matcher index agree, so a fixture built that way passes against either spelling
+        # and measures nothing.
+        $exported = @{
+            hooks = @{
+                PreToolUse = @(
+                    @{ matcher = 'Bash'; hooks = @(
+                            @{ type = 'command'; command = "pwsh 'C:\Users\me\.claude\hooks\Lint.ps1' && C:\tools\foo.exe" }
+                            @{ type = 'command'; command = "pwsh 'C:\Users\me\.claude\hooks\Guard.ps1' && C:\tools\bar.exe" }) }
+                    @{ matcher = 'Write'; hooks = @(
+                            @{ type = 'command'; command = "pwsh 'C:\Users\me\.claude\hooks\Sync.ps1' && C:\tools\baz.exe" }) })
+            }
+        }
+        $exported | ConvertTo-Json -Depth 20 | Set-Content "$script:bundle/claude-global/settings.json.exported"
+
+        $out = & $script:restore -Source $script:bundle -RepoPath $script:repo `
+            -ClaudeHome $script:claudeHome -IncludeHooks -TargetIsWindows:$false 3>&1 6>&1 | Out-String
+
+        $out | Should -Match ([regex]::Escape('hooks.PreToolUse[0].hooks[0].command'))
+        $out | Should -Match ([regex]::Escape('hooks.PreToolUse[0].hooks[1].command'))
+        $out | Should -Match ([regex]::Escape('hooks.PreToolUse[1].hooks[0].command'))
+
+        # The flat spelling rendered these as hooks.PreToolUse[0..2].command, so an index sitting
+        # directly before '.command' is the tell, and [2] names a matcher the file does not have.
+        $out | Should -Not -Match 'hooks\.PreToolUse\[\d+\]\.command'
+        $out | Should -Not -Match 'hooks\.PreToolUse\[2\]'
+    }
+
+    It "reports settings.json as not rewritten when the source home cannot be detected" {
+        # Regression: -IncludeHooks against an exported settings.json carrying no drive path warned
+        # once, skipped the rewrite, then exited 0 through a verification table that never
+        # mentioned settings.json, so the run read as clean.
+        '{ "hooks": {} }' | Set-Content "$script:bundle/claude-global/settings.json.exported"
+
+        $out = & $script:restore -Source $script:bundle -RepoPath $script:repo `
+            -ClaudeHome $script:claudeHome -IncludeHooks -WarningAction SilentlyContinue 6>&1 | Out-String
+
+        $out | Should -Match '\[--\] settings\.json rewritten'
+    }
+
+    It "reports settings.json as rewritten only when -IncludeHooks asked for one" {
+        $exported = @{
+            hooks = @{
+                PreToolUse = @(
+                    @{ matcher = ''; hooks = @(
+                            @{ type = 'command'; command = "& 'C:\Users\me\.claude\hooks\Lint.ps1'" }) })
+            }
+        }
+        $exported | ConvertTo-Json -Depth 20 | Set-Content "$script:bundle/claude-global/settings.json.exported"
+
+        $withHooks = & $script:restore -Source $script:bundle -RepoPath $script:repo `
+            -ClaudeHome $script:claudeHome -IncludeHooks 6>&1 | Out-String
+        $withHooks | Should -Match '\[ok\] settings\.json rewritten'
+
+        # Without -IncludeHooks no rewrite was ever asked for, so the row would be noise.
+        $plain = & $script:restore -Source $script:bundle -RepoPath (Join-Path $script:sandbox 'repo2') `
+            -ClaudeHome $script:claudeHome 6>&1 | Out-String
+        $plain | Should -Not -Match 'settings\.json rewritten'
+    }
+
+    It "repoints core.hooksPath when it names a source-machine directory that is now missing" {
+        # Regression: .git/config is copied byte for byte, so core.hooksPath survived the move
+        # pointing at the source machine. Git skips a hooks directory that does not exist without
+        # a word, so the repo's pre-commit hook stops running and nothing says why.
+        $stale = Join-Path $script:sandbox 'gone/.claude/hooks'
+        New-Item -ItemType Directory "$script:bundle/repo/.claude/hooks" -Force | Out-Null
+        'hook' | Set-Content "$script:bundle/repo/.claude/hooks/pre-commit"
+        & git init -q "$script:bundle/repo" 2>&1 | Out-Null
+        $LASTEXITCODE | Should -Be 0
+        & git -C "$script:bundle/repo" config core.hooksPath $stale
+        $LASTEXITCODE | Should -Be 0
+
+        & $script:restore -Source $script:bundle -RepoPath $script:repo -ClaudeHome $script:claudeHome | Out-Null
+
+        $got = & git -C $script:repo config --get core.hooksPath
+        $LASTEXITCODE | Should -Be 0
+        $got | Should -Be (Resolve-Path "$script:repo/.claude/hooks").Path
+    }
+
+    It "leaves core.hooksPath alone when the directory it names still exists" {
+        # The rewrite must not steal a repo that deliberately points core.hooksPath elsewhere.
+        # This one is spelled as a .claude/hooks path too, so only the existence check separates it
+        # from the case above.
+        $keep = Join-Path $script:sandbox 'other/.claude/hooks'
+        New-Item -ItemType Directory $keep -Force | Out-Null
+        New-Item -ItemType Directory "$script:bundle/repo/.claude/hooks" -Force | Out-Null
+        & git init -q "$script:bundle/repo" 2>&1 | Out-Null
+        & git -C "$script:bundle/repo" config core.hooksPath $keep
+        $LASTEXITCODE | Should -Be 0
+
+        & $script:restore -Source $script:bundle -RepoPath $script:repo -ClaudeHome $script:claudeHome | Out-Null
+
+        (& git -C $script:repo config --get core.hooksPath) | Should -Be $keep
+    }
+
+    It "keeps the test seam named-only, and pins the positional mapping it nearly changed" {
+        # PowerShell hands out positional slots in declaration order to every non-switch parameter
+        # that does not declare one. That is how -TargetIsWindows became slot 5 the moment it was
+        # added: a sixth positional argument stopped being a binding error and started choosing the
+        # target platform, with the script then running to a wrong answer at exit 0. Explicit
+        # Position values on the real parameters turn the auto-assignment off, so anything without
+        # one is named-only. Assert the whole table, because the failure mode is a parameter added
+        # later quietly picking up slot 5 again.
+        $params = (Get-Command $script:restore).Parameters
+        $positional = $params.Values |
+            Where-Object { $_.Attributes.Position -ge 0 } |
+            ForEach-Object { "$($_.Name)=$(($_.Attributes | Where-Object Position -ge 0).Position)" } |
+            Sort-Object
+
+        ($positional -join ',') | Should -Be 'ClaudeHome=4,RepoPath=1,Slug=2,Source=0,SourceHome=3'
+
+        # Named-only, and still bindable by name, which the Linux-branch tests depend on.
+        $params['TargetIsWindows'].Attributes.Position | Should -Be ([int]::MinValue)
+        { & $script:restore -Source $script:bundle -RepoPath $script:repo `
+                -ClaudeHome $script:claudeHome -TargetIsWindows $false -WhatIf } | Should -Not -Throw
     }
 }
