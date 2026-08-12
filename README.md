@@ -49,12 +49,28 @@ pwsh install/Install-Harness.ps1 -Target <project-root>
 `-IncludeCeremonies` also installs the ceremony components (the `soc-monitor` agent, the
 `wave-close-handoff` hook, and the ceremony ledger), opt-in because they assume a project already
 runs standup/wave ceremonies. `-Force` overwrites files the project has modified since install; the
-default is to skip a modified file and warn, tracked via a SHA256 manifest of what was installed.
+default is to skip a modified file and warn.
+
+The `.harness-manifest.json` behind that is a record of two different things, not one. `files` maps
+each installed path to the SHA256 it had at install time, which is what makes a project edit
+detectable. `accepted` maps a path to the hash of the project's own fork, pinned deliberately, and
+says the divergence is the intended state. Alongside them sit `coreRepo` and `coreCommit`, recording
+where the layer came from so a hook can find core without an environment variable. A manifest
+written before this shape existed, a flat path-to-hash map, is migrated on the next run with every
+hash preserved under `files`.
+
+`-Accept <relpath>` writes the second kind of entry. Point it at a path relative to the project's
+`.claude` and it pins that file's current hash, which turns a permanent audit warning into a silent
+`overlay (accepted)` row. It touches the manifest and nothing else. Run it again after reviewing a
+change to the fork to re-pin at the new hash. A path resolving outside `.claude` is refused rather
+than pinned, and so is one already tracked in `files`, which is an installed file rather than an
+overlay.
 
 `-Audit` writes nothing and reports drift in both directions, using a three-way compare of core
 source, the manifest hash, and the installed file: `project-modified` and `untracked (differs from
 core)` files are candidates to promote upstream, `core-updated` and `not-installed` mean the project
-should re-run the installer. This is the mechanical half of the findings flow in CONTRIBUTING.md;
+should re-run the installer, and `overlay (changed)` means a pinned fork has moved since it was
+pinned and wants re-reviewing. This is the mechanical half of the findings flow in CONTRIBUTING.md;
 run it periodically per project (SpaceMolt wires it into a `core_harvest` ceremony, see that
 project's `docs/wiki/team-ceremonies.md`).
 
