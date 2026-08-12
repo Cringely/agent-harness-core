@@ -13,7 +13,7 @@ The rule that keeps these from drifting into a mess: core is upstream. Projects 
 | Path | Contents |
 |---|---|
 | `core/claude/agents/` | Self-contained process roles `adversarial-reviewer`, `doc-steward`, `research-scout`, `soc-monitor`, `task-reviewer`. See `patterns/agent-def-shape.md` on why none point at a charter yet |
-| `core/claude/hooks/` | Worktree gate, session guardrails, wave-close handoff, prose-lint-on-write |
+| `core/claude/hooks/` | Worktree gate, write-scope gate, model-tier gate, session guardrails, wave-close handoff, prose-lint-on-write. `core/claude/templates/settings.hooks.json` is the list that actually gets wired; this row goes stale, that file does not |
 | `core/claude/templates/` | `guardrails.template.md`, a settings fragment, and a ceremony ledger template |
 | `patterns/` | The design docs behind the above, listed in [`patterns/INDEX.md`](patterns/INDEX.md) |
 | `install/` | The installer that copies core into a project's `.claude/`, plus `Restore-ClaudeProject.ps1` for moving a project and its session history to another machine |
@@ -26,8 +26,8 @@ Skills already global in `~/.claude` (prose review, prose linting, council revie
 
 ## Install
 
-Prerequisites: PowerShell 7 (`pwsh`); `bun` on PATH for the TypeScript hooks (`agent-worktree-gate.ts`,
-`lint-doc-prose.ts`), without it the gates stop enforcing and Claude Code surfaces an error notice on
+Prerequisites: PowerShell 7 (`pwsh`); `bun` on PATH for the TypeScript hooks (every wired hook except
+the two `sh` ones), without it the gates stop enforcing and Claude Code surfaces an error notice on
 stderr per dispatch; Git Bash or another POSIX `sh` on Windows for the
 two shell hooks (`session-start-guardrails.sh`, `wave-close-handoff.sh`). The prose-lint hook also
 wants `vale` and the prose-lint styles kit on the machine; missing either degrades to an advisory
