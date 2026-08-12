@@ -27,11 +27,14 @@ Skills already global in `~/.claude` (prose review, prose linting, council revie
 ## Install
 
 Prerequisites: PowerShell 7 (`pwsh`); `bun` on PATH for the TypeScript hooks (every wired hook except
-the two `sh` ones), without it the gates stop enforcing and Claude Code surfaces an error notice on
+the three `sh` ones), without it the gates stop enforcing and Claude Code surfaces an error notice on
 stderr per dispatch; Git Bash or another POSIX `sh` on Windows for the
-two shell hooks (`session-start-guardrails.sh`, `wave-close-handoff.sh`). The prose-lint hook also
+three shell hooks (`session-start-guardrails.sh`, `session-start-drift-check.sh`,
+`wave-close-handoff.sh`). The prose-lint hook also
 wants `vale` and the prose-lint styles kit on the machine; missing either degrades to an advisory
-skip, never a blocked write.
+skip, never a blocked write. `session-start-drift-check.sh` additionally wants `sed`, `tr` and `awk`
+(Git Bash ships all three) plus a reachable core checkout; missing any of them makes it print
+nothing, which is also what it does when the project has no drift.
 
 Recommended, not required: the `code-context` MCP server (`@infino-ai/code-context`) gives agents
 ranked hybrid search over a repo instead of grep-crawling it, and its `sql` tool answers counting

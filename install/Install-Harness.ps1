@@ -59,6 +59,18 @@
       orphaned           in manifest but no longer shipped by core
       overlay (accepted) pinned fork, still at the hash it was pinned at
       overlay (changed)  pinned fork has moved since pinning — re-review, re-pin
+      not-installed (ceremony-gated)
+                         shipped by core but held back by the -IncludeCeremonies gate and
+                         never installed here. Listed, deliberately not counted as drift:
+                         the gate working is not a fault, and the response is to re-run with
+                         -IncludeCeremonies if this project wants ceremonies at all.
+
+.PARAMETER Quiet
+    Audit only. Drops every human-facing line of the report — the no-manifest notice, the
+    status table, the in-sync/attention summary, and the three stack-drift blocks — and
+    prints one row per file needing attention instead, as `<status><TAB><relative path>`.
+    Prints nothing at all when nothing needs attention. For hook consumption:
+    core/claude/hooks/session-start-drift-check.sh counts those rows by status.
 #>
 [CmdletBinding()]
 param(
@@ -73,10 +85,20 @@ param(
 
     [string]$Unaccept,
 
-    [switch]$Audit
+    [switch]$Audit,
+
+    [switch]$Quiet
 )
 
 $ErrorActionPreference = 'Stop'
+
+# -Quiet reaches nothing outside the -Audit block, so on an install run it is a switch that
+# silently does nothing. Rejected the simpler alternative of ignoring it: an operator who typed
+# it on an install would read the ordinary flood of install output as a broken flag rather than
+# as a misused one, and go looking in the wrong place.
+if ($Quiet -and -not $Audit) {
+    throw "-Quiet applies to -Audit only. Re-run with -Audit -Quiet for the machine-readable drift report, or drop -Quiet."
+}
 
 if (-not (Test-Path -LiteralPath $Target -PathType Container)) {
     throw "Target path does not exist or is not a directory: $Target"
@@ -110,6 +132,12 @@ if (-not $Audit -and -not $Accept -and -not $Unaccept) {
 $ceremonyAgentNames = @('soc-monitor.md')
 $ceremonyHookNames = @('wave-close-handoff.sh')
 $ceremonyCommandPattern = 'wave-close-handoff\.sh'
+
+# The same gate expressed as manifest keys, for the audit. Derived from the two lists above
+# rather than written out a third time: a separate literal list is one rename away from
+# disagreeing with the copy the install path uses, and the disagreement would be silent.
+$ceremonyKeys = @($ceremonyAgentNames | ForEach-Object { "agents/$_" }) +
+    @($ceremonyHookNames | ForEach-Object { "hooks/$_" })
 
 function Get-FileHashHex {
     param([string]$Path)
@@ -460,7 +488,7 @@ if ($Audit) {
     $coreFiles['guardrails.md'] = Join-Path $templatesSrc 'guardrails.template.md'
     $coreFiles['scratch/.gitignore'] = Join-Path $templatesSrc 'scratch.gitignore'
 
-    if (-not (Test-Path -LiteralPath $manifestPath)) {
+    if (-not $Quiet -and -not (Test-Path -LiteralPath $manifestPath)) {
         Write-Host "No .harness-manifest.json in $claudeDir — harness was never installed here via the installer."
         Write-Host "Files below compare the project's .claude directly against core:"
     }
@@ -511,7 +539,18 @@ if ($Audit) {
 
         $srcHash = Get-FileHashHex -Path $srcPath
         if (-not $dstExists) {
-            $status = if ($inManifest) { 'missing' } else { 'not-installed' }
+            # A ceremony-gated file core ships and this project never installed is the gate
+            # doing its job, not drift. Classified apart from plain 'not-installed' because
+            # the two take opposite responses: a re-run pulls a genuinely new core file down,
+            # and a re-run deliberately skips this one, so a shared status sends the operator
+            # at a command that will not change anything. Left in the table rather than
+            # dropped from it: absent-and-available is worth seeing, and the response is to
+            # re-run with -IncludeCeremonies if the project wants ceremonies.
+            # 'missing' still wins the tracked case: a ceremony file recorded in `files` was
+            # installed and then lost, which a re-run with that switch really does repair.
+            $status = if ($inManifest) { 'missing' }
+            elseif ($ceremonyKeys -contains $key) { 'not-installed (ceremony-gated)' }
+            else { 'not-installed' }
             $results.Add([pscustomobject]@{ File = $key; Status = $status })
             continue
         }
@@ -531,12 +570,31 @@ if ($Audit) {
         $results.Add([pscustomobject]@{ File = $key; Status = $status })
     }
 
-    $results | Format-Table -AutoSize | Out-String | Write-Host
+    if (-not $Quiet) { $results | Format-Table -AutoSize | Out-String | Write-Host }
 
     # 'overlay (accepted)' is silent by design: the pin exists precisely so a deliberate fork
     # stops counting as drift. 'overlay (changed)' is not on this list, because a fork that
     # moved since pinning is exactly what the operator asked to be told about.
-    $attention = @($results | Where-Object { $_.Status -notin @('in-sync', 'stateful (not audited)', 'overlay (accepted)') })
+    # 'not-installed (ceremony-gated)' joins them for the same reason and a sharper one: it is
+    # the one class no command clears, since a re-run skips the file by design and -Accept
+    # refuses a file that does not exist. Counted, it would put two permanent rows in front of
+    # every default install forever, which is the decoration CONTRIBUTING.md's drift gate names.
+    $attention = @($results | Where-Object { $_.Status -notin @('in-sync', 'stateful (not audited)', 'overlay (accepted)', 'not-installed (ceremony-gated)') })
+
+    # -Quiet returns here rather than guarding each Write-Host below it. Everything past this
+    # point prints on a clean run: the summary line, and then a header plus a
+    # "No <label> drift since last scan." line from each of the three Show-StackDrift calls at
+    # the bottom of this block. Suppressing only the table would still open every session with
+    # that block, which is the flood the flag exists to prevent.
+    # Status first, tab-separated: a status carries spaces ('untracked (differs from core)')
+    # and a manifest key cannot carry a tab, so one split on the tab is unambiguous either way
+    # round. Rejected reprinting the table for the hook to parse: its column padding moves with
+    # the longest path on the run, so there is no stable column to split on.
+    if ($Quiet) {
+        foreach ($row in $attention) { Write-Host "$($row.Status)`t$($row.File)" }
+        return
+    }
+
     if ($attention.Count -eq 0) {
         Write-Host 'All managed files in sync with core.'
     }
