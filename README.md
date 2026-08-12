@@ -66,11 +66,19 @@ change to the fork to re-pin at the new hash. A path resolving outside `.claude`
 than pinned, and so is one already tracked in `files`, which is an installed file rather than an
 overlay.
 
+`-Unaccept <relpath>` drops a pin again, and takes the manifest key as readily as a path that
+resolves to one, so a pin written by an older installer or carried in from another machine is still
+droppable. It does not require the file to still be there, which is the point: a deleted overlay is
+one of the reasons a pin outlives its usefulness. It refuses a key that is not pinned, and it never
+touches the file itself.
+
 `-Audit` writes nothing and reports drift in both directions, using a three-way compare of core
 source, the manifest hash, and the installed file: `project-modified` and `untracked (differs from
 core)` files are candidates to promote upstream, `core-updated` and `not-installed` mean the project
 should re-run the installer, and `overlay (changed)` means a pinned fork has moved since it was
-pinned and wants re-reviewing. This is the mechanical half of the findings flow in CONTRIBUTING.md;
+pinned and wants re-reviewing. `missing` splits: a tracked file that was deleted comes back with a
+re-run, while a deleted overlay exists only in the project's own history, so it is restored from
+there or the pin goes with `-Unaccept`. Nothing automatic ever recreates the second kind. This is the mechanical half of the findings flow in CONTRIBUTING.md;
 run it periodically per project (SpaceMolt wires it into a `core_harvest` ceremony, see that
 project's `docs/wiki/team-ceremonies.md`).
 
