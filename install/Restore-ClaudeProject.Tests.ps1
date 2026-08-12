@@ -95,6 +95,18 @@ Describe "Restore-ClaudeProject" {
         Test-Path "$script:claudeHome/settings.json" | Should -BeFalse
     }
 
+    It "restores account-layer rules into ClaudeHome even without -IncludeHooks" {
+        # The account-scope write path, pinned. Step 3 copies claude-global/<dir> into
+        # <ClaudeHome>/<dir> for every name in $globalDirs, and only 'hooks' is appended to
+        # that array behind -IncludeHooks, so rules land on a bare invocation. Repo docs and
+        # two issues have asserted core has no account-scope write path at all. A prose
+        # citation for the correction goes stale the next time this script is refactored and
+        # says nothing when it does; an assertion follows the behavior. That is the whole
+        # reason this is a test and not a third prose citation.
+        & $script:restore -Source $script:bundle -RepoPath $script:repo -ClaudeHome $script:claudeHome | Out-Null
+        Test-Path "$script:claudeHome/rules/style.md" | Should -BeTrue
+    }
+
     It "rejects a source folder that is not an export bundle" {
         $empty = Join-Path $script:sandbox 'empty'
         New-Item -ItemType Directory $empty | Out-Null
