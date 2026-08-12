@@ -168,6 +168,50 @@ Describe "Restore-ClaudeProject" {
         Test-Path "$script:claudeHome/projects/$slug/abc.jsonl" | Should -BeTrue
     }
 
+    It "falls back to Resolve-Path when realpath answers with more than one line" {
+        # Regression: the result was consumed without a shape check, and PowerShell hands back a
+        # bare string for one output line but an object array for more than one. The array then
+        # bound to Get-ProjectSlug's [string] parameter as its elements joined by a space, so a
+        # two-line answer produced the session folder '-fake-one--fake-two' -- a plausible-looking
+        # wrong slug at exit 0, which is the same silent failure the exit-code check next to it
+        # already guards against. Reproduced against the unguarded script before the fix.
+        #
+        # The stand-in stands for a non-coreutils realpath on PATH: a busybox applet, or a wrapper
+        # script that prints a notice line ahead of the answer. Coreutils given one operand answers
+        # in one line, so nothing on a healthy box reaches this.
+        $fakeBinDir = Join-Path $script:sandbox 'fakebin-multiline'
+        New-Item -ItemType Directory $fakeBinDir -Force | Out-Null
+        if ($IsWindows -or $PSVersionTable.PSVersion.Major -lt 6) {
+            # -TargetIsWindows:$false drives the Linux branch from a Windows host, and Get-Command
+            # resolves a .cmd through PATHEXT, so this case actually executes here rather than
+            # joining the -Skip'd ones. A .sh stand-in would need chmod and could not run.
+            "@echo off`r`necho /fake/one`r`necho /fake/two`r`nexit /b 0" |
+                Set-Content "$fakeBinDir/realpath.cmd"
+        }
+        else {
+            "#!/bin/sh`nprintf '%s\n' /fake/one /fake/two`nexit 0" |
+                Set-Content "$fakeBinDir/realpath" -NoNewline
+            chmod +x "$fakeBinDir/realpath"
+        }
+
+        $oldPath = $env:PATH
+        try {
+            $env:PATH = $fakeBinDir + [System.IO.Path]::PathSeparator + $oldPath
+            $out = & $script:restore -Source $script:bundle -RepoPath $script:repo `
+                -ClaudeHome $script:claudeHome -TargetIsWindows:$false 6>&1 | Out-String
+        }
+        finally {
+            $env:PATH = $oldPath
+        }
+
+        # First, because it names the defect directly: the space-joined slug is the whole tell, and
+        # a runner that stops the case at its first failed assertion should report that one.
+        $out | Should -Not -Match 'Session folder  : -fake-one--fake-two'
+
+        $slug = Get-ProjectSlug (Resolve-Path $script:repo).Path
+        Test-Path "$script:claudeHome/projects/$slug/abc.jsonl" | Should -BeTrue
+    }
+
     It "keeps a path segment containing a space intact when rewriting a hook command" {
         # Regression: the continuation regex stopped at the first space, so a quoted path with a
         # space in it (a very ordinary thing for a Windows path to have) came out half-converted.

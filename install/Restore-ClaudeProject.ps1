@@ -338,11 +338,11 @@ if ($gitCmd -and (Test-Path $RepoPath)) {
 # does. A symlinked -RepoPath would otherwise land the sessions under a slug nothing will ever
 # read. realpath (coreutils) matches realpathSync exactly, including ancestor symlinks that
 # .NET's ResolveLinkTarget can't reach since it only resolves a path that is itself a reparse
-# point; fall back to Resolve-Path where realpath isn't on PATH, or where it's on PATH but fails
-# (permission, dangling link mid-chain). An unchecked failure here would leave $resolvedRepo
-# $null, Get-ProjectSlug $null would come back empty, and sessions would land at
-# <ClaudeHome>/projects/ -- silently, at exit 0, which is the exact class of bug this exists to
-# close.
+# point; fall back to Resolve-Path where realpath isn't on PATH, where it's on PATH but fails
+# (permission, dangling link mid-chain), or where it answers in any shape other than a single
+# line. An unchecked failure here would leave $resolvedRepo $null, Get-ProjectSlug $null would come
+# back empty, and sessions would land at <ClaudeHome>/projects/ -- silently, at exit 0, which is
+# the exact class of bug this exists to close.
 $realpath = if (-not $onWindows) { Get-Command realpath -ErrorAction SilentlyContinue } else { $null }
 $resolvedRepo = if (-not (Test-Path $RepoPath)) {
     $RepoPath
@@ -350,8 +350,18 @@ $resolvedRepo = if (-not (Test-Path $RepoPath)) {
 else {
     $viaRealpath = $null
     if ($realpath) {
-        $viaRealpath = & realpath -- $RepoPath 2>$null
-        if ($LASTEXITCODE -ne 0) { $viaRealpath = $null }
+        # @() because PowerShell hands back a bare string for one output line and an object array
+        # for more than one, and only one line is a resolved path. A two-line result binds to
+        # Get-ProjectSlug's [string] parameter as its elements joined by a space, which produced
+        # the slug '-fake-one--fake-two' from a two-line stand-in: a plausible-looking wrong
+        # session folder at exit 0, the same silent-wrong-slug failure the exit-code check above
+        # exists to close. Whatever put a non-coreutils realpath on PATH (a busybox applet, a
+        # wrapper script printing a notice line ahead of the answer) is exactly the case where the
+        # symlink resolution cannot be trusted, so fall back rather than reading line one and
+        # hoping -- indexing [0] was the simpler alternative, and it accepts the malformed result
+        # instead of rejecting it. Same shape and same reasoning as the core.hooksPath probe above.
+        $lines = @(& realpath -- $RepoPath 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $lines.Count -eq 1) { $viaRealpath = "$($lines[0])".TrimEnd() }
     }
     if ($viaRealpath) { $viaRealpath } else { (Resolve-Path $RepoPath).Path }
 }
