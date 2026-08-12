@@ -39,6 +39,13 @@
     relative to the project's .claude directory; a path resolving outside that directory
     is rejected, as is one already tracked in `files`. Writes the manifest and nothing else.
 
+.PARAMETER Unaccept
+    Drop an accepted-overlay pin, removing the key from the manifest's `accepted` map. Takes
+    the manifest key, or a path relative to the project's .claude directory that resolves to
+    one; the file itself need not still exist, since a pin outliving its file is one of the
+    reasons to drop one. Throws when the key is not pinned. Writes the manifest and nothing
+    else, and never restores or deletes a file.
+
 .PARAMETER Audit
     Report-only drift check; writes nothing. Three-way compare (core source vs
     manifest hash vs installed file) classifies every managed file:
@@ -64,6 +71,8 @@ param(
 
     [string]$Accept,
 
+    [string]$Unaccept,
+
     [switch]$Audit
 )
 
@@ -84,10 +93,11 @@ $agentsDst = Join-Path $claudeDir 'agents'
 $hooksDst = Join-Path $claudeDir 'hooks'
 $scratchDst = Join-Path $claudeDir 'scratch'
 
-# -Accept is a standalone action on an existing layer, not an install: it must not
-# conjure a .claude tree. A missing directory there is the "file does not exist" case
-# its own guard reports, and reporting that beats silently creating an empty layout.
-if (-not $Audit -and -not $Accept) {
+# -Accept and -Unaccept are standalone actions on an existing layer, not installs: neither may
+# conjure a .claude tree. A missing directory there is the "file does not exist" / "nothing is
+# pinned" case each one's own guard reports, and reporting that beats silently creating an empty
+# layout.
+if (-not $Audit -and -not $Accept -and -not $Unaccept) {
     foreach ($dir in @($claudeDir, $agentsDst, $hooksDst, $scratchDst)) {
         if (-not (Test-Path -LiteralPath $dir)) {
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
@@ -104,6 +114,60 @@ $ceremonyCommandPattern = 'wave-close-handoff\.sh'
 function Get-FileHashHex {
     param([string]$Path)
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+}
+
+# One resolver for -Accept and -Unaccept rather than the obvious copy of the block into the second
+# flag: containment is the security-relevant half of both, and two copies rot apart the first time
+# one of them is fixed. Returns the canonical full path beside the key because -Accept needs the
+# path to hash the file and to say where a rejected argument actually landed.
+#
+# Both flags document their argument as relative to .claude, and everything downstream depends on
+# that holding: the manifest key is matched against audit rows built from that directory, and a pin
+# only means anything for a file inside the layer this installer manages. Without the containment
+# check an operator typo pins a file no install will ever touch, and the audit then carries a row
+# for a path outside the project's .claude forever.
+function Resolve-LayerPath {
+    param(
+        [string]$RelativePath,
+        [string]$LayerDir,
+        [string]$Flag
+    )
+
+    # Join-Path with a rooted second argument produces a nonsense path rather than replacing the
+    # base, which is why the rooted case is rejected here instead of being left to the check below.
+    if ([System.IO.Path]::IsPathRooted($RelativePath)) {
+        throw "$Flag '$RelativePath': absolute paths are not accepted. Pass a path relative to the project's .claude directory."
+    }
+
+    # PowerShell's location and [Environment]::CurrentDirectory are separate values, so
+    # [System.IO.Path]::GetFullPath would canonicalize a relative -Target against the wrong base;
+    # GetUnresolvedProviderPathFromPSPath uses PowerShell's own location, and unlike Resolve-Path
+    # it does not require the path to exist. Missing files are each caller's business, and the
+    # callers say something more useful than a resolver error would.
+    $layerFull = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($LayerDir)
+    $fullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath((Join-Path $LayerDir $RelativePath))
+
+    # GetRelativePath rather than a string prefix compare, because it applies the platform's own
+    # path comparison rules: it will not miss a case-variant escape on Windows, and it will not
+    # reject a legitimately case-distinct sibling on Linux. It also returns a rooted path when
+    # the two sit on different volumes, which the same test catches.
+    $relative = [System.IO.Path]::GetRelativePath($layerFull, $fullPath)
+    $escapes = [System.IO.Path]::IsPathRooted($relative) -or
+        $relative -eq '..' -or
+        $relative.StartsWith('..' + [System.IO.Path]::DirectorySeparatorChar)
+    if ($escapes) {
+        throw "$Flag '$RelativePath': resolves to '$fullPath', outside the project's .claude directory. Pass a path relative to that directory."
+    }
+
+    # Manifest keys are written with forward slashes. A path tab-completed on Windows arrives with
+    # backslashes and would otherwise name a key that never matches an audit row. Taking the key
+    # from the canonical relative path also collapses an interior '..' segment, so
+    # 'agents/../guardrails.md' names the key the audit already uses for that same file rather
+    # than a second key naming it a different way.
+    return [pscustomobject]@{
+        Key      = ($relative -replace '\\', '/')
+        FullPath = $fullPath
+    }
 }
 
 # Claude Code plugins install to ~/.claude/plugins/cache/<marketplace>/<plugin>/ at
@@ -301,48 +365,35 @@ if (Test-Path -LiteralPath $manifestPath) {
 }
 $manifest = ConvertTo-ManifestV2 -Loaded $manifest
 
+# The target's other piece of pre-existing state, read here beside the manifest because every mode
+# has to know what is already on disk before it decides anything. Invariant: the target's
+# settings.json parses before the first file is copied into the layer. A parse failure is recorded
+# rather than thrown here, because -Audit is report-only and -Accept/-Unaccept touch the manifest
+# alone; the install path turns the recorded failure into a throw above the agents loop, ahead of
+# every copy. Reading once also removes the second parse the merge below used to do, which is where
+# the raw ConvertFrom-Json exception used to escape.
+# `-and $rawSettings` before .Trim(): Get-Content -Raw yields $null for a zero-byte file, and a
+# method call on $null inside this try would report an empty file as a parse error, which it is not.
+$settingsPath = Join-Path $claudeDir 'settings.json'
+$settings = [pscustomobject]@{}
+$settingsParseError = $null
+if (Test-Path -LiteralPath $settingsPath -PathType Leaf) {
+    try {
+        $rawSettings = Get-Content -LiteralPath $settingsPath -Raw
+        if ($rawSettings -and $rawSettings.Trim()) { $settings = $rawSettings | ConvertFrom-Json }
+    }
+    catch {
+        $settingsParseError = $_.Exception.Message
+    }
+}
+
 # -Accept: a standalone action, deliberately not composed with an install. Pinning a fork and
 # copying core files over the project are opposite intentions, and running an install to get a
 # pin would mean the pin arrives alongside overwrites the operator did not ask for.
 if ($Accept) {
-    # The argument is documented as relative to .claude, and everything downstream depends on
-    # that holding: the manifest key is matched against audit rows built from that directory, and
-    # a pin only means anything for a file inside the layer this installer manages. So the path
-    # is canonicalized and checked for containment before anything else happens. Without this an
-    # operator typo pins a file no install will ever touch, and the audit then carries a row for
-    # a path outside the project's .claude forever.
-    if ([System.IO.Path]::IsPathRooted($Accept)) {
-        throw "-Accept '$Accept': absolute paths are not accepted. Pass a path relative to the project's .claude directory."
-    }
-
-    # Join-Path with a rooted second argument produces a nonsense path rather than replacing the
-    # base, which is why the rooted case is rejected above instead of being left to the check
-    # below. PowerShell's location and [Environment]::CurrentDirectory are separate values, so
-    # [System.IO.Path]::GetFullPath would canonicalize a relative -Target against the wrong base;
-    # GetUnresolvedProviderPathFromPSPath uses PowerShell's own location, and unlike Resolve-Path
-    # it does not require the path to exist. Missing files are reported by their own guard below,
-    # which says something more useful than a resolver error would.
-    $claudeFull = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($claudeDir)
-    $acceptPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath((Join-Path $claudeDir $Accept))
-
-    # GetRelativePath rather than a string prefix compare, because it applies the platform's own
-    # path comparison rules: it will not miss a case-variant escape on Windows, and it will not
-    # reject a legitimately case-distinct sibling on Linux. It also returns a rooted path when
-    # the two sit on different volumes, which the same test catches.
-    $relative = [System.IO.Path]::GetRelativePath($claudeFull, $acceptPath)
-    $escapes = [System.IO.Path]::IsPathRooted($relative) -or
-        $relative -eq '..' -or
-        $relative.StartsWith('..' + [System.IO.Path]::DirectorySeparatorChar)
-    if ($escapes) {
-        throw "-Accept '$Accept': resolves to '$acceptPath', outside the project's .claude directory. Pass a path relative to that directory."
-    }
-
-    # Manifest keys are written with forward slashes. A path tab-completed on Windows arrives
-    # with backslashes and would otherwise pin a key that never matches an audit row. Taking the
-    # key from the canonical relative path also collapses an interior '..' segment, so
-    # 'agents/../guardrails.md' pins the key the audit already uses for that same file rather
-    # than a second key naming it a different way.
-    $acceptKey = $relative -replace '\\', '/'
+    $resolvedAccept = Resolve-LayerPath -RelativePath $Accept -LayerDir $claudeDir -Flag '-Accept'
+    $acceptKey = $resolvedAccept.Key
+    $acceptPath = $resolvedAccept.FullPath
 
     if (-not (Test-Path -LiteralPath $acceptPath -PathType Leaf)) {
         throw "-Accept '$Accept': file does not exist at $acceptPath. Pass a path relative to the project's .claude directory."
@@ -355,6 +406,35 @@ if ($Accept) {
     $manifest['accepted'][$acceptKey] = Get-FileHashHex -Path $acceptPath
     $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
     Write-Host "Accepted overlay '$acceptKey' pinned at $($manifest['accepted'][$acceptKey])."
+    return
+}
+
+# -Unaccept: the inverse of -Accept, standalone for the same reason. A pin outlives its reason
+# routinely (the fork gets promoted into core, the file gets deleted, the overlay turns out to be
+# a mistake), and without an inverse the only way to drop one is to hand-edit the manifest, which
+# is the file the manifest mechanism exists to keep hands off.
+if ($Unaccept) {
+    # Literal key first, canonicalized second. -Accept writes whatever key canonicalization
+    # produced at pin time, and a pin can outlive the path resolving that way at all: a manifest
+    # hand-edited, carried in from another machine, or written by an older installer. Resolving
+    # first would then miss a key sitting in plain sight in the map, leaving it undroppable by
+    # any supported command. There is deliberately no Test-Path leaf guard either, unlike -Accept:
+    # un-pinning a file that is already gone is the main thing this flag is for.
+    $unacceptKey = $null
+    if ($manifest['accepted'].Contains($Unaccept)) {
+        $unacceptKey = $Unaccept
+    }
+    else {
+        $unacceptKey = (Resolve-LayerPath -RelativePath $Unaccept -LayerDir $claudeDir -Flag '-Unaccept').Key
+    }
+
+    if (-not $manifest['accepted'].Contains($unacceptKey)) {
+        throw "-Unaccept '$unacceptKey': not pinned as an accepted overlay, so there is nothing to drop. Run -Audit to see which files are pinned."
+    }
+
+    $manifest['accepted'].Remove($unacceptKey)
+    $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
+    Write-Host "Dropped the accepted-overlay pin on '$unacceptKey'. The file itself was left alone; the audit now judges it against core again."
     return
 }
 
@@ -461,7 +541,14 @@ if ($Audit) {
         Write-Host 'All managed files in sync with core.'
     }
     else {
-        Write-Host "$($attention.Count) file(s) need attention. project-modified/untracked-differs = candidates to promote into core; core-updated/not-installed = re-run installer to pull down; overlay-changed = re-review the fork, then re-pin with -Accept."
+        # 'missing' takes two answers because one status covers two different losses. A tracked
+        # file that was deleted is restored by a re-run, safely, because core still holds it. A
+        # pinned overlay that was deleted is a file only the project ever had: no re-run can bring
+        # it back, and anything that tried would be inventing content. So the hint names the
+        # recovery for one and the pin-drop for the other rather than sending both to the
+        # installer. (CONTRIBUTING.md's drift-detection gate: every class the audit reports needs
+        # a standing response, and the classes that must never be auto-repaired are named as such.)
+        Write-Host "$($attention.Count) file(s) need attention. project-modified/untracked-differs = candidates to promote into core; core-updated/not-installed = re-run installer to pull down; overlay-changed = re-review the fork, then re-pin with -Accept; missing = re-run the installer if the row is a tracked file, but a missing pinned overlay exists only in the project's own history, so restore it from there or drop the pin with -Unaccept."
     }
 
     # Stack drift: report-only, same as the file audit above — never writes the manifest.
@@ -554,15 +641,44 @@ function Install-ManagedFile {
         return
     }
 
-    # The -Accept hint currently names a path -Accept's own guard rejects: a skipped-modified
-    # file is by definition tracked in `files`, and -Accept throws on anything tracked there
-    # (the spec's literal wording). Flagged rather than papered over, because reinterpreting
-    # the guard here would decide issue #7, which is deferred with three live options: relax
-    # the guard, move the key from files to accepted, or point the hint somewhere else.
-    # The hint still earns its place: it names the mechanism the operator wants and the issue
-    # tracks how they reach it.
-    Write-Warning "Skipping '$ManifestKey': modified since install. Use -Force to overwrite, or -Accept '$ManifestKey' to pin the fork as an accepted overlay so the audit stops flagging it."
-    $script:results.Add([pscustomobject]@{ File = $ManifestKey; Action = 'skipped-modified' })
+    # Three states reach this point and each takes a different remedy, so one message for all
+    # three sends two thirds of operators at a command that will refuse them: -Accept throws on
+    # any key tracked in `files` (the guard in the -Accept block above), which is exactly what a
+    # file skipped after a prior install is.
+    $acceptedHash = $script:manifest['accepted'][$ManifestKey]
+
+    if ($acceptedHash -and $acceptedHash -eq $currentHash) {
+        # Already pinned, and still at the hash it was pinned at. The operator settled this file
+        # once; core's version is deliberately not copied over it and there is nothing to act on,
+        # which is why this is the one branch on the normal stream rather than a warning.
+        Write-Host "Keeping '$ManifestKey': accepted overlay, still at the hash it was pinned at. Core's version was not copied over it."
+        $script:results.Add([pscustomobject]@{ File = $ManifestKey; Action = 'skipped-pinned' })
+        return
+    }
+
+    if ($recordedHash) {
+        # Tracked in `files`, so -Accept is not available and naming it would be a dead end.
+        # Promotion is named before -Force on purpose: this line ships into every project that
+        # installs the harness, and -Force replaces the project's own edit with core's version.
+        Write-Warning "Skipping '$ManifestKey': tracked as an installed file and modified since install. Promote the change into core, or re-run with -Force to overwrite it with core's version."
+        $script:results.Add([pscustomobject]@{ File = $ManifestKey; Action = 'skipped-modified' })
+        return
+    }
+
+    # Untracked overlay: a project file core also ships, never installed through the manifest, or
+    # a pin whose file has moved since it was pinned. -Accept takes both, and re-pinning is what
+    # the moved-pin case wants, so one branch covers them.
+    Write-Warning "Skipping '$ManifestKey': differs from core and is not tracked as an installed file. Pin it with -Accept '$ManifestKey' to keep the fork and stop the audit flagging it, or re-run with -Force to replace it with core's version."
+    $script:results.Add([pscustomobject]@{ File = $ManifestKey; Action = 'skipped-untracked' })
+}
+
+# Refused above the first copy, not at the settings merge further down. By the time the merge runs,
+# every agent, every hook, guardrails.md and the scratch box are already on disk and the manifest
+# that records them has not been written yet, so a throw down there leaves a layer the next -Audit
+# reads as untracked top to bottom. Improving the message at the merge site would have left that
+# damage exactly where it was.
+if ($settingsParseError) {
+    throw "Target settings.json does not parse as JSON: $settingsPath. Merging the hook registrations into it would destroy whatever it holds, so nothing was copied and the manifest was not written. Fix or move that file, then re-run. Parser reported: $settingsParseError"
 }
 
 # Agents
@@ -631,16 +747,10 @@ if ($IncludeCeremonies) {
     }
 }
 
-# Settings merge
-$settingsPath = Join-Path $claudeDir 'settings.json'
-$settings = if (Test-Path -LiteralPath $settingsPath) {
-    $raw = Get-Content -LiteralPath $settingsPath -Raw
-    if ($raw.Trim()) { $raw | ConvertFrom-Json } else { [pscustomobject]@{} }
-}
-else {
-    [pscustomobject]@{}
-}
-
+# Settings merge. $settingsPath and $settings come from the parse at the top of the script, which
+# is also what the guard above the agents loop checked, so the shape merged here is the shape that
+# was approved before anything was copied. Nothing this run writes touches settings.json between
+# the two points.
 if (-not $settings.PSObject.Properties['hooks']) {
     $settings | Add-Member -NotePropertyName hooks -NotePropertyValue ([pscustomobject]@{})
 }

@@ -679,14 +679,149 @@ Describe "Install-Harness" {
         $audit | Should -Match 'agents/project-only\.md\s+overlay \(accepted\)'
     }
 
-    It "names -Accept in the warning it prints when it skips a project-modified file" {
-        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
-        "PROJECT EDIT" | Add-Content "$script:target/.claude/agents/task-reviewer.md"
+    It "names -Accept in the skip warning for an untracked overlay of a file core also ships" {
+        # The untracked overlay is the one branch where -Accept is a live option, since -Accept
+        # refuses any key tracked in `files`. Built before the first install so the fork never
+        # enters that map: a file planted afterwards would be tracked and take a different branch.
+        New-Item -ItemType Directory -Path "$script:target/.claude/agents" -Force | Out-Null
+        'project fork of a core agent' | Set-Content "$script:target/.claude/agents/task-reviewer.md"
         # -Width, because Out-String otherwise folds at the host width and can break the
         # flag name across a line boundary where the match would then miss it.
         $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500
+        $out | Should -Match "-Accept 'agents/task-reviewer\.md'"
         $out | Should -Match "Skipping 'agents/task-reviewer\.md'"
-        $out | Should -Match '-Accept'
+        # The hint is only worth printing if the command it names runs. Asserting the string
+        # alone is what let the old wording ship pointing at a guard that rejects it.
+        { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Accept 'agents/task-reviewer.md' } |
+            Should -Not -Throw
+    }
+
+    It "sends a modified installed file to promotion before -Force, and never to -Accept" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        "PROJECT EDIT" | Add-Content "$script:target/.claude/agents/task-reviewer.md"
+        $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500
+
+        # First, because it is the assertion the old single warning failed: a key tracked in
+        # `files` is exactly what -Accept throws on, so naming it here is a dead end.
+        $out | Should -Not -Match '-Accept'
+        $out | Should -Match "Skipping 'agents/task-reviewer\.md'"
+        # Order, not just presence. This text ships into every project that installs the harness,
+        # and the first remedy an operator reads must not be the one that overwrites their edit.
+        $promoteAt = $out.IndexOf('Promote the change into core')
+        $forceAt = $out.IndexOf('-Force')
+        $promoteAt | Should -BeGreaterThan -1
+        $forceAt | Should -BeGreaterThan $promoteAt
+        # The branch's own premise, asserted rather than assumed.
+        { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Accept 'agents/task-reviewer.md' } |
+            Should -Throw -ExpectedMessage '*already tracked*'
+    }
+
+    It "reports an already-pinned overlay as needing no action instead of warning about it" {
+        New-Item -ItemType Directory -Path "$script:target/.claude/agents" -Force | Out-Null
+        'project fork of a core agent' | Set-Content "$script:target/.claude/agents/task-reviewer.md"
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-Null
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Accept 'agents/task-reviewer.md' | Out-Null
+
+        $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500
+        # The operator already settled this file, so a run that re-offers -Accept or -Force is
+        # asking them to decide it a second time.
+        $out | Should -Not -Match '-Accept'
+        $out | Should -Not -Match '-Force'
+        $out | Should -Not -Match 'WARNING'
+        $out | Should -Match "Keeping 'agents/task-reviewer\.md'"
+        # The pin still holds: no branch of this may end with core's version on disk.
+        (Get-Content "$script:target/.claude/agents/task-reviewer.md" -Raw) | Should -Match 'project fork of a core agent'
+    }
+
+    It "refuses a malformed target settings.json before copying anything" {
+        New-Item -ItemType Directory -Path "$script:target/.claude" -Force | Out-Null
+        '{ "hooks": ' | Set-Content "$script:target/.claude/settings.json"
+
+        $err = $null
+        try { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target | Out-Null }
+        catch { $err = $_ }
+
+        # Placement first, message second. A guard at the settings merge throws just as loudly
+        # with every agent, every hook, guardrails.md and the scratch box already copied and no
+        # manifest recording any of them, which the next audit reads as untracked top to bottom.
+        # A case asserting only the throw passes under that patch too.
+        Test-Path "$script:target/.claude/.harness-manifest.json" | Should -BeFalse
+        Test-Path "$script:target/.claude/agents/task-reviewer.md" | Should -BeFalse
+        Test-Path "$script:target/.claude/guardrails.md" | Should -BeFalse
+        # The fixture's own settings.json and nothing else. Counting rather than naming files
+        # keeps this from asserting how many files core happens to ship today.
+        @(Get-ChildItem -LiteralPath "$script:target/.claude" -Recurse -File).Count | Should -Be 1
+        $err | Should -Not -BeNullOrEmpty
+        "$err" | Should -Match 'does not parse as JSON'
+        # The operator's own file is left byte-for-byte alone, not rewritten into something
+        # that parses.
+        (Get-Content "$script:target/.claude/settings.json" -Raw) | Should -Match '"hooks":'
+    }
+
+    It "-Unaccept drops a pin whose file is already gone, and refuses a key that is not pinned" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $overlay = "$script:target/.claude/agents/project-only.md"
+        'project fork body' | Set-Content $overlay
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Accept 'agents/project-only.md' | Out-Null
+
+        # A pin outliving its file is the case a straight mirror of -Accept would have blocked:
+        # -Accept refuses a path with no file behind it, and un-pinning has to work anyway, since
+        # a deleted overlay is one of the two reasons a pin stops being wanted.
+        Remove-Item -LiteralPath $overlay
+        $manifestPath = "$script:target/.claude/.harness-manifest.json"
+        $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Unaccept 'agents/project-only.md' *>&1 | Out-String -Width 500
+
+        $m = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+        $m['accepted'].Contains('agents/project-only.md') | Should -BeFalse
+        # The rest of the manifest survives the rewrite: a drop that rebuilt the file would take
+        # the tracked hashes and the stack record with it.
+        $m['files'].Contains('agents/task-reviewer.md') | Should -BeTrue
+        $m.Contains('stackDetected') | Should -BeTrue
+        $out | Should -Match "Dropped the accepted-overlay pin on 'agents/project-only\.md'"
+
+        { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Unaccept 'agents/project-only.md' } |
+            Should -Throw -ExpectedMessage '*not pinned*'
+    }
+
+    It "-Unaccept takes a literal manifest key that canonicalization would not reproduce" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $manifestPath = "$script:target/.claude/.harness-manifest.json"
+        $m = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+        # A pin whose stored key no longer canonicalizes to itself: hand-edited, carried in from
+        # another machine, or written by an older installer. Canonicalizing before the lookup
+        # turns this into 'agents/project-only.md' and reports a pin sitting in plain sight as
+        # absent, leaving it droppable only by hand-editing the file.
+        $m['accepted'] = @{ 'agents/retired/../project-only.md' = 'DEADBEEF' }
+        $m | ConvertTo-Json -Depth 20 | Set-Content $manifestPath
+
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Unaccept 'agents/retired/../project-only.md' | Out-Null
+
+        $after = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+        $after['accepted'].Contains('agents/retired/../project-only.md') | Should -BeFalse
+    }
+
+    It "audit after -Unaccept falls back to not-installed, and the missing hint names both repairs" {
+        # Hand-built fork of a file core also ships, planted before the first install so it is
+        # never tracked in `files` and -Accept will take it.
+        New-Item -ItemType Directory -Path "$script:target/.claude/agents" -Force | Out-Null
+        'project fork of a core agent' | Set-Content "$script:target/.claude/agents/task-reviewer.md"
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-Null
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Accept 'agents/task-reviewer.md' | Out-Null
+        Remove-Item "$script:target/.claude/agents/task-reviewer.md"
+
+        $auditPinned = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $auditPinned | Should -Match 'agents/task-reviewer\.md\s+missing'
+        # One status, two repairs, and only one of them is a re-run. Told to re-run, an operator
+        # with a deleted overlay gets core's version silently standing in for their own file.
+        $auditPinned | Should -Match 'missing = re-run the installer if the row is a tracked file'
+        $auditPinned | Should -Match 'drop the pin with -Unaccept'
+
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Unaccept 'agents/task-reviewer.md' | Out-Null
+        $auditDropped = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String -Width 500
+        # Core ships this path, so dropping the pin does not take the row away with it: the key
+        # falls back to the class core's own copy earns, which with no file on disk is
+        # not-installed. A test asserting the row vanished would be asserting a bug.
+        $auditDropped | Should -Match 'agents/task-reviewer\.md\s+not-installed'
     }
 
     It "keeps an accepted key core never shipped visible in the audit table" {
