@@ -566,10 +566,10 @@ Describe "Install-Harness" {
     }
 
     It "-Accept pins an overlay that the audit reports as accepted and leaves out of the attention count" {
-        # -IncludeCeremonies for the baseline: a default install leaves the two ceremony files
-        # permanently 'not-installed', so the attention count is never zero without it and the
-        # exclusion assertion below would have nothing clean to read.
-        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -IncludeCeremonies
+        # A plain install is a clean baseline: the two ceremony-gated files report under their
+        # own status and stay out of the attention count, so the exclusion assertion below has
+        # only the pin to read.
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
         'project fork body' | Set-Content "$script:target/.claude/agents/project-only.md"
 
         $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Accept 'agents/project-only.md' *>&1 | Out-String -Width 500
@@ -650,8 +650,9 @@ Describe "Install-Harness" {
     }
 
     It "audit reports overlay (changed) once an accepted overlay is edited again" {
-        # -IncludeCeremonies so the attention count below is the changed overlay alone.
-        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -IncludeCeremonies
+        # A plain install leaves the attention count at zero, so the count below is the
+        # changed overlay alone.
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
         'project fork body' | Set-Content "$script:target/.claude/agents/project-only.md"
         & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Accept 'agents/project-only.md' | Out-Null
 
@@ -857,5 +858,80 @@ Describe "Install-Harness" {
         finally {
             & chmod 0755 $gitDir
         }
+    }
+
+    It "leaves a default install with nothing needing attention, and the gated rows still visible" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-Null
+
+        $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String -Width 500
+        # First, because it is the whole point: without the ceremony-gated class every default
+        # install carries two permanent attention rows that no command clears. A re-run skips
+        # those files by design and -Accept refuses a file that does not exist, so the count
+        # would never reach zero and the SessionStart hook would print at every session start
+        # forever. That is the "rows map to no response" failure CONTRIBUTING.md:45 names.
+        $audit | Should -Match 'All managed files in sync with core\.'
+        $audit | Should -Not -Match 'file\(s\) need attention'
+        # Out of the count, still in the table: absent-and-available is worth seeing, and an
+        # assertion that the rows vanished would be asserting a different bug.
+        $audit | Should -Match 'agents/soc-monitor\.md\s+not-installed \(ceremony-gated\)'
+        $audit | Should -Match 'hooks/wave-close-handoff\.sh\s+not-installed \(ceremony-gated\)'
+    }
+
+    It "still counts a ceremony file that was installed and then deleted" {
+        # The exclusion must not swallow a real loss. Tracked in `files`, the file is 'missing'
+        # rather than gated, and a re-run with -IncludeCeremonies genuinely restores it.
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -IncludeCeremonies *>&1 | Out-Null
+        Remove-Item "$script:target/.claude/agents/soc-monitor.md"
+
+        $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $audit | Should -Match 'agents/soc-monitor\.md\s+missing'
+        $audit | Should -Match '1 file\(s\) need attention'
+    }
+
+    It "-Quiet prints nothing when nothing needs attention" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-Null
+        'project fork body' | Set-Content "$script:target/.claude/project-overlay.md"
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Accept 'project-overlay.md' | Out-Null
+
+        $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit -Quiet *>&1 | Out-String -Width 500
+        # Nothing at all, not "no table": on a clean run the summary line and the three
+        # stack-drift blocks below it all print, so a half-quiet audit would still open every
+        # session with that block.
+        [string]$out | Should -BeNullOrEmpty
+    }
+
+    It "-Quiet prints one tab-separated row per file needing attention and nothing else" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-Null
+        "PROJECT EDIT" | Add-Content "$script:target/.claude/agents/task-reviewer.md"
+
+        $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit -Quiet *>&1 | Out-String -Width 500
+        $out | Should -Match 'project-modified\tagents/task-reviewer\.md'
+        # Every human-facing line the hook would otherwise have to parse around.
+        $out | Should -Not -Match 'file\(s\) need attention'
+        $out | Should -Not -Match 'All managed files in sync'
+        $out | Should -Not -Match 'never installed here'
+        $out | Should -Not -Match 'Plugins detected'
+        $out | Should -Not -Match 'drift since last scan'
+        $out | Should -Not -Match 'Status'
+        # \r? because Out-String renders host lines with the platform's own ending, and a
+        # bare \n split leaves a stray \r that reads as a non-empty second line on Windows.
+        @($out -split '\r?\n' | Where-Object { $_.Trim() }).Count | Should -Be 1
+    }
+
+    It "-Quiet suppresses the no-manifest notice but still reports the rows" {
+        New-Item -ItemType Directory -Path "$script:target/.claude/agents" -Force | Out-Null
+        Copy-Item "$PSScriptRoot/../core/claude/agents/task-reviewer.md" "$script:target/.claude/agents/"
+
+        $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit -Quiet *>&1 | Out-String -Width 500
+        $out | Should -Not -Match 'No \.harness-manifest\.json'
+        $out | Should -Not -Match 'compare the project'
+        # The rows still print, or a suppression bug would be indistinguishable from the
+        # audit never having run.
+        $out | Should -Match 'untracked \(matches core\)\tagents/task-reviewer\.md'
+    }
+
+    It "-Quiet without -Audit throws instead of silently doing nothing" {
+        { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Quiet } |
+            Should -Throw -ExpectedMessage '*-Quiet applies to -Audit only*'
     }
 }
