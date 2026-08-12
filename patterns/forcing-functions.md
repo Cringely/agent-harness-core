@@ -178,6 +178,17 @@ describe the identical shape for infrastructure work: "when the same class of fa
 than once across sessions, promote it from an incident note... to a permanent rule." Same pattern,
 different domain. The trigger is always the second occurrence, never the first.
 
+What does not get promoted matters as much as what does, and the same source carries that half.
+Promote everything that recurs and the mechanism layer fills with checks nobody can act on, which
+costs more than the notes did. Three kinds stay notes however often they come back. A one-time
+migration step is history rather than a constraint, and belongs in the change record. A value tuned
+to one system, a threshold, a timeout, a path, belongs in that system's own documentation, because
+promoting it exports a number that is wrong everywhere else. A bug already fixed upstream needs no
+local mechanism; the promotion candidate there is the version pin, if anything at all. One test
+covers all three: read the promoted form back and ask whether it states a constraint something
+could check. "Be careful with X" fails that, and so does any rule whose real subject is a single
+machine.
+
 ## Ceremony ledgers: making a scheduled check idempotent
 
 A recurring check (a standup summary, a periodic strategy review) needs to know whether it's due
