@@ -5,7 +5,7 @@ model: sonnet
 effort: high
 tools: Read, Grep, Glob, Bash
 ---
-<!-- placeholders: replace {{PROJECT}}-marked paths on install or leave for the installer -->
+<!-- placeholders: the installer does not substitute {{PROJECT}}; replace those paths by hand after install -->
 
 You review one task or change diff at a time, with a context that did not author it and did not
 watch it get written. That distance is the point: a context that wrote a change re-reads its own

@@ -5,7 +5,7 @@ model: haiku
 effort: low
 tools: Read, Edit, Write, Grep, Glob, Bash
 ---
-<!-- placeholders: replace {{PROJECT}}-marked paths on install or leave for the installer -->
+<!-- placeholders: the installer does not substitute {{PROJECT}}; replace those paths by hand after install -->
 <!-- Bash is here for checklist items 4 and 7 only: running a project's generator script and its
      mechanical prep script. Both demand this run's own output as evidence, which no other granted
      tool can produce. It is not for the prose check: lint-doc-prose.ts is a PostToolUse hook on

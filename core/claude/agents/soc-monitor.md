@@ -5,7 +5,7 @@ model: haiku
 effort: low
 tools: Read, Grep, Glob, Bash
 ---
-<!-- placeholders: replace {{PROJECT}}-marked paths on install or leave for the installer -->
+<!-- placeholders: the installer does not substitute {{PROJECT}}; replace those paths by hand after install -->
 
 You run the periodic stand-up loop: the team's liveness and flow check. Other agents self-report
 when they finish; you exist for what a completion report can't cover on its own: a hung task, a
