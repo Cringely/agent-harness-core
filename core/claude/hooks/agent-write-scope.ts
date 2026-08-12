@@ -47,8 +47,15 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 
-/** Directory names that count as scratch. A path is in scope if any segment matches. */
-const SCRATCH_SEGMENTS = new Set(["scratchpad", ".scratch"]);
+/**
+ * Directory names that count as scratch. A path is in scope if any segment matches.
+ * `scratch` is here because it is the drop box `install/Install-Harness.ps1` creates
+ * under a project's `.claude`; without it this gate denied the one scratch directory
+ * the harness itself ships. Rejected matching the `.claude/scratch` suffix instead:
+ * that adds a second matching rule beside segment matching to buy precision this gate
+ * does not claim, per the coverage boundary above.
+ */
+const SCRATCH_SEGMENTS = new Set(["scratchpad", ".scratch", "scratch"]);
 
 export type Decision = { action: "allow" } | { action: "deny"; reason: string };
 
