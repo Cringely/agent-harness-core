@@ -2,7 +2,7 @@
 name: research-scout
 description: Read-only source reader for documentation, specifications, and external references; holds no shell and cannot write, so it stays read-only by capability rather than by instruction
 model: sonnet
-effort: medium
+effort: xhigh
 tools: Read, Grep, Glob, WebFetch, WebSearch, Write, SendMessage
 writeScope: scratch
 ---

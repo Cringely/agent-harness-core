@@ -24,7 +24,18 @@ closer to code rather than write it more emphatically.
    stopped being enough.
 3. **Re-inject just in time.** Surface the rule into view right when it's needed, not once at the
    start of a session where it scrolls out of context within a few turns. Example: a session-start
-   hook that reprints the top of a project's rule catalog into every fresh context.
+   hook that reprints the top of a project's rule catalog into every fresh context. A second example
+   runs at the same moment on a different payload. A session-start hook asks the issue tracker for
+   open items automation filed under a known label and prints a short banner annotated with each
+   item's age, capped at a few rows with a line naming the real count when there are more, and
+   prints nothing at all when the query fails or comes back empty. Items a machine filed land
+   outside whatever ordering a person actually reads, so they stay unseen on the sessions that would
+   have acted on them. One thing about that second shape is worth recording whether or not anyone
+   builds it: it needs a filer, not a ledger. Installed where no automation ever opens an issue, it
+   queries once a session and prints nothing, permanently, so the gate it wants is keyed on whether
+   some component files work items under a known label, which is narrower than whether the project
+   runs recurring ceremonies. Nothing in this repo files issues, so that axis has nothing to read
+   yet, and the mechanism stays described here rather than installed.
 4. **Prose, backed by review.** This is the weakest tier, written down and enforced only by a
    human or a reviewing agent noticing a violation. Reserve it for judgment calls that actually
    resist automation, and treat a rule that keeps getting missed at this tier as a signal to move
@@ -32,14 +43,17 @@ closer to code rather than write it more emphatically.
 
 ## What the isolation gate leaves to the dispatcher
 
-The pre-dispatch check in tier two is worth a closer look, because two of its edges showed up in
-practice and neither one is visible from the rule as written. Both come from a single project so
-far. They do not rest on the same evidence: the first is a property of the dispatch call that anyone
-can check, and the second is a correlation whose cause was never established.
+The pre-dispatch check in tier two is worth a closer look, because three of its edges showed up in
+practice and none of them is visible from the rule as written. They do not rest on the same
+evidence. The first is a property of the dispatch call that anyone can check, and the third is a
+correlation whose cause was never established; both come from a single project so far. The second
+sits between them, a setting nobody has captured a value for, with one observation in each direction
+from two different projects.
 
-Start with what the corrective action actually does. A dispatch that asks for an isolated workspace
-forks the dispatching session's current working directory. It does not accept a target repository as
-an argument, and nothing in the dispatch names one. A project that keeps its issue tracker and its
+Start with what the corrective action actually does, and with what it leaves open. A dispatch that
+asks for an isolated workspace forks the dispatching session's current working directory. That
+settles which clone the agent gets, and not which commit inside it. It does not accept a target
+repository as an argument, and nothing in it names one. A project that keeps its issue tracker and its
 code in two separate clones has a way to get this wrong that never announces itself: open the session
 in the tracker clone, and every isolated agent receives a worktree of the tracker. By construction,
 every time, not intermittently. The wrong worktree looks entirely valid from inside it. There is a
@@ -51,7 +65,35 @@ assumption away from a silent wrong-repo result, and the cost of catching it fal
 dispatched agent notices the files are missing. A gate's message is prose too, and it earns the same
 treatment as any other rule: say what the machinery does, not only what to type.
 
-The second edge is that correlation, and it stays one. Dispatches that gave the agent a name and
+The commit is the second edge, and it is open in a way the clone is not. The worktree tooling
+documents a setting for the base it branches from, `worktree.baseRef`, with two values and a stated
+default: one takes the remote's default branch, the other takes the local HEAD the caller is sitting
+on. Whether that setting reaches a workspace an agent dispatch creates, rather than only one a
+session opens for itself, is unconfirmed. This repo's templates set neither value, and neither of
+the incidents below was checked at the time for the value it came up under, so the base a project
+gets today is documented and never captured. Two incidents, in two different projects, broke in
+opposite directions. In one, the dispatcher sat on a feature branch and the agent came up on the
+default branch, holding code where the file and line anchors in its brief did not exist. In the
+other, the worktree came up on the branch the dispatcher happened to be working on rather than on
+the clean default branch its brief assumed. Both cannot be true of one fixed behavior, so an unset
+two-valued setting is the likeliest reading of the pair, and a reading is all it is until someone
+captures a value. A single capture settles both questions: dispatch an isolated agent from a
+non-default branch and have it report the sha its worktree came up on, once with the setting absent
+and once with each value written in.
+
+The rule worth taking from this holds whichever value turns out to be the default, which is the
+reason to write it down now rather than wait for that capture. The dispatch states the sha the work
+is meant to start from, the agent compares that against the worktree's HEAD before it reads or
+writes a file, and a mismatch aborts the task instead of being worked around. Pinning the setting
+fixes one direction and quietly breaks whoever assumed the other; the assertion is correct under
+both, and it stays correct if the default ever moves. Prose alone will not carry the assertion. A
+step-0 instruction to reset and check, written at the top of a brief in one of those incidents, was
+skipped by the agent that received it, which then rewrote the wrong document at length. The tiers
+above say where that leaves it: the gate can require the dispatch to carry the sha, because a check
+running before the tool call cannot inspect a worktree that does not exist yet, and only the agent
+inside the worktree can confirm the sha it came up on.
+
+The third edge is that correlation, and it stays one. Dispatches that gave the agent a name and
 omitted isolation went idle and returned nothing, four times out of four, across three agent types
 including a read-only planner that had nothing to collide with. The identical briefs, re-dispatched
 with isolation, completed six for six across two further agent types. A competing explanation is
@@ -135,6 +177,17 @@ This lifecycle isn't specific to coding agents. A homelab operator's own change-
 describe the identical shape for infrastructure work: "when the same class of failure appears more
 than once across sessions, promote it from an incident note... to a permanent rule." Same pattern,
 different domain. The trigger is always the second occurrence, never the first.
+
+What does not get promoted matters as much as what does, and the same source carries that half.
+Promote everything that recurs and the mechanism layer fills with checks nobody can act on, which
+costs more than the notes did. Three kinds stay notes however often they come back. A one-time
+migration step is history rather than a constraint, and belongs in the change record. A value tuned
+to one system, a threshold, a timeout, a path, belongs in that system's own documentation, because
+promoting it exports a number that is wrong everywhere else. A bug already fixed upstream needs no
+local mechanism; the promotion candidate there is the version pin, if anything at all. One test
+covers all three: read the promoted form back and ask whether it states a constraint something
+could check. "Be careful with X" fails that, and so does any rule whose real subject is a single
+machine.
 
 ## Ceremony ledgers: making a scheduled check idempotent
 

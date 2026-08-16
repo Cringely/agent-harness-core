@@ -31,7 +31,7 @@ The plugin/skill stack this project assumes (documented below) is recorded per-m
 
 ## Example rules
 
-These four rows are worked examples, not a starter set to keep verbatim. Replace them with the
+The rows below are worked examples, not a starter set to keep verbatim. Replace them with the
 project's own recurring misses; delete any that don't apply. A rule whose Mechanism column names
 JIT re-injection must have its one-line statement placed above the
 `guardrails:session-start-end` marker; the session-start hook only prints what comes before that
@@ -42,6 +42,7 @@ marker, so a JIT rule left below it never gets printed.
 | **Worktree isolation for repo-writing dispatches** | A repo-writing agent dispatched into the shared checkout collides with whatever the dispatcher is editing. | `PreToolUse` hook on the agent-dispatch tool denies the call unless isolation is set or a written override is given. | gate |
 | **Doc-size discipline** | Living docs (a status doc, a decision log) drift from a concise summary into essay-length entries, one plausible addition at a time. | A size check runs in CI or as a pre-commit step, fails on the offending entry, and names it. | automate |
 | **Independent review, never self-review** | A context that wrote a change re-reads its own assumptions as facts, so the author is a poor reviewer of it. | Session-start reminder, plus the reviewer role's own definition states the precondition explicitly. | JIT + convention |
+| **Every dispatch names its model tier** | An agent dispatched with no `model` inherits the session model, so the expensive tier becomes the default for work that never needed it, and a `sonnet` agent that does not also state `effort: "xhigh"` throws away the reason sonnet was picked. | `PreToolUse` hook on the agent-dispatch tool denies a dispatch naming no tier or an unrecognized one, without judging whether the tier chosen is right. It reads a workflow script's `agent()` call sites the same way, on a workflow tool name that is inferred rather than confirmed against a captured payload. Write `MODEL-OVERRIDE: <reason>` in the prompt or the script to dispatch without choosing. | gate |
 | **Challenge mandate** | Whoever holds the coordinating seat (orchestrator, planning agent, or council chair) is required to question the human and challenge low-value ideas before executing them: one clear challenge, then commit the decision and move on. Applies to weak agent findings the same way it applies to human requests. | Session-start reminder carries the prose rule; the adversarial-reviewer role is the mechanical twin for anything that needs a harder, structured pass than a reminder can give. | prose + gate (adversarial-reviewer) |
 
 ## Why only a few hooks, not many

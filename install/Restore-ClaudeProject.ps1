@@ -55,6 +55,12 @@
     Also restore the hooks directory and produce a rewritten settings.json. Off by default,
     because most hooks need hand-editing before they work on a new machine.
 
+.PARAMETER TargetIsWindows
+    Which platform the restore is being prepared for. Defaults to the platform actually running,
+    and a real run should never pass it. It exists so the tests can reach the Linux-only branches
+    from a Windows host. Test-only, and named-only: it holds no position, so it can never be set by
+    a stray extra positional argument.
+
 .EXAMPLE
     ./Restore-ClaudeProject.ps1 -Source ~/Downloads/export -RepoPath C:\temp\myproject -WhatIf
 
@@ -63,20 +69,48 @@
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [Parameter(Mandatory)][string]$Source,
-    [Parameter(Mandatory)][string]$RepoPath,
-    [string]$Slug,
-    [string]$SourceHome,
-    [string]$ClaudeHome,
+    # Positions are declared explicitly, and that is load-bearing rather than cosmetic. PowerShell
+    # auto-assigns a position to every non-switch parameter that lacks one, in declaration order, so
+    # the $TargetIsWindows test seam below silently became positional slot 5. A sixth positional
+    # argument used to be a binding error; it would instead have set the target platform and let the
+    # script run to a wrong result at exit 0. Naming positions here stops the auto-assignment for
+    # every parameter that does not declare one, which makes the seam named-only. The values below
+    # reproduce the pre-seam mapping exactly. Do not use PositionalBinding=$false instead: that would
+    # make -Source and -RepoPath named-only and break existing callers.
+    [Parameter(Mandatory, Position = 0)][string]$Source,
+    [Parameter(Mandatory, Position = 1)][string]$RepoPath,
+    [Parameter(Position = 2)][string]$Slug,
+    [Parameter(Position = 3)][string]$SourceHome,
+    [Parameter(Position = 4)][string]$ClaudeHome,
     [switch]$IncludeHooks,
-    [switch]$Force
+    [switch]$Force,
+
+    # Test seam. Everything platform-specific below reads this rather than $IsWindows directly, so
+    # a test on a Windows host can drive the Linux branches. It defaults to the running platform,
+    # so a real run behaves exactly as it did before this parameter existed. Without the seam the
+    # residual-path report in step 6 was unreachable from any test on Windows and the repo runs no
+    # Linux CI, which left that whole branch shipping with nothing exercising it.
+    #
+    # $IsWindows is undefined on Windows PowerShell 5.1, where the answer is always Windows.
+    [bool]$TargetIsWindows = $(if ($PSVersionTable.PSVersion.Major -lt 6) { $true } else { $IsWindows })
 )
 
 $ErrorActionPreference = 'Stop'
 
-# $IsWindows is undefined on Windows PowerShell 5.1, where the answer is always Windows.
-$onWindows = if ($PSVersionTable.PSVersion.Major -lt 6) { $true } else { $IsWindows }
+$onWindows = $TargetIsWindows
 if (-not $ClaudeHome) { $ClaudeHome = Join-Path $HOME '.claude' }
+
+# Resolve -RepoPath to an absolute path before anything reads it. Step 1's copy is
+# ShouldProcess-gated, so under -WhatIf the directory is never created, and the step 2 branch that
+# handles a not-yet-existing destination fell through to whatever string was passed in. A relative
+# one then produced a preview slug derived from 'myrepo' instead of from where the repo would
+# actually land, which is the one thing -WhatIf exists to show.
+#
+# GetUnresolvedProviderPathFromPSPath rather than [System.IO.Path]::GetFullPath: it expands '~',
+# which the ~/myproject example in the header relies on, and it resolves a relative path against
+# PowerShell's current location, which Set-Location moves and the process working directory that
+# GetFullPath reads does not.
+$RepoPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($RepoPath)
 
 $Source = (Resolve-Path $Source).Path
 foreach ($required in 'repo', 'claude-project', 'claude-global') {
@@ -142,6 +176,14 @@ function Get-SourceHome {
     $m = [regex]::Match($raw, '(?<h>[A-Za-z]:(?:\\\\|/)(?:[^"\\/]+(?:\\\\|/))*?\.claude)')
     if ($m.Success) { return $m.Groups['h'].Value -replace '\\\\', '\' }
     return $null
+}
+
+# One definition of "this string still names a source-machine path", shared by the hook script-body
+# scan and the settings.json command scan in step 6, so the two cannot drift apart.
+function Test-ResidualWindowsPath {
+    param([string]$Text)
+    if (-not $Text) { return $false }
+    return ($Text -match '[A-Za-z]:[\\/]') -or ($Text -match 'USERPROFILE')
 }
 
 function Convert-HookCommand {
@@ -247,16 +289,60 @@ if (-not $onWindows -and (Test-Path $RepoPath)) {
     if ($made) { Write-Host "  made $made repo hook(s) executable" }
 }
 
+# --- 1b. git core.hooksPath --------------------------------------------------
+# .git/config is copied byte for byte, so core.hooksPath still names the source machine's
+# .claude/hooks. Git skips a hooks directory that does not exist without saying anything, so the
+# symptom is a repo whose pre-commit hook stops running after the move and nothing reports why.
+# Like the chmod pass above, this concerns the repo's own hooks and runs on every restore,
+# independent of -IncludeHooks.
+#
+# Repointed only when the recorded directory has gone missing and this repo carries a .claude/hooks
+# of its own, so a project that deliberately points core.hooksPath at something else that still
+# exists keeps it. Mirrors the wiring block in Install-Harness.ps1.
+$gitCmd = Get-Command git -ErrorAction SilentlyContinue
+if ($gitCmd -and (Test-Path $RepoPath)) {
+    $repoHooksDir = Join-Path $RepoPath '.claude/hooks'
+
+    # git exits non-zero both for "not a repository" and for "key not set", and a native command's
+    # non-zero exit does not trip $ErrorActionPreference = 'Stop', so the exit code is read
+    # explicitly. @() because a single output line comes back as a bare string: the shape check
+    # wants a countable collection, and anything other than exactly one line is not a path worth
+    # acting on.
+    $chpLines = @(& git -C $RepoPath config --get core.hooksPath 2>$null)
+    $recordedHooksPath = if ($LASTEXITCODE -eq 0 -and $chpLines.Count -eq 1) { "$($chpLines[0])".TrimEnd() } else { $null }
+
+    if ($recordedHooksPath -and (Test-Path $repoHooksDir)) {
+        $recordedAbs = if ([System.IO.Path]::IsPathRooted($recordedHooksPath)) {
+            $recordedHooksPath
+        }
+        else {
+            Join-Path $RepoPath $recordedHooksPath
+        }
+        if (($recordedHooksPath -match '[\\/]\.claude[\\/]hooks[\\/]?$') -and -not (Test-Path $recordedAbs)) {
+            $repoHooksAbs = (Resolve-Path $repoHooksDir).Path
+            if ($PSCmdlet.ShouldProcess($RepoPath, "repoint core.hooksPath to $repoHooksAbs")) {
+                & git -C $RepoPath config core.hooksPath $repoHooksAbs
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Host "  core.hooksPath repointed to $repoHooksAbs"
+                }
+                else {
+                    Write-Warning "core.hooksPath still names the missing '$recordedHooksPath' (git exit $LASTEXITCODE). Repo hooks will not run until it is corrected."
+                }
+            }
+        }
+    }
+}
+
 # --- 2. sessions -------------------------------------------------------------
 # Resolve-Path does not follow symlinks on Linux, but Claude Code slugs realpathSync(cwd), which
 # does. A symlinked -RepoPath would otherwise land the sessions under a slug nothing will ever
 # read. realpath (coreutils) matches realpathSync exactly, including ancestor symlinks that
 # .NET's ResolveLinkTarget can't reach since it only resolves a path that is itself a reparse
-# point; fall back to Resolve-Path where realpath isn't on PATH, or where it's on PATH but fails
-# (permission, dangling link mid-chain). An unchecked failure here would leave $resolvedRepo
-# $null, Get-ProjectSlug $null would come back empty, and sessions would land at
-# <ClaudeHome>/projects/ -- silently, at exit 0, which is the exact class of bug this exists to
-# close.
+# point; fall back to Resolve-Path where realpath isn't on PATH, where it's on PATH but fails
+# (permission, dangling link mid-chain), or where it answers in any shape other than a single
+# line. An unchecked failure here would leave $resolvedRepo $null, Get-ProjectSlug $null would come
+# back empty, and sessions would land at <ClaudeHome>/projects/ -- silently, at exit 0, which is
+# the exact class of bug this exists to close.
 $realpath = if (-not $onWindows) { Get-Command realpath -ErrorAction SilentlyContinue } else { $null }
 $resolvedRepo = if (-not (Test-Path $RepoPath)) {
     $RepoPath
@@ -264,8 +350,18 @@ $resolvedRepo = if (-not (Test-Path $RepoPath)) {
 else {
     $viaRealpath = $null
     if ($realpath) {
-        $viaRealpath = & realpath -- $RepoPath 2>$null
-        if ($LASTEXITCODE -ne 0) { $viaRealpath = $null }
+        # @() because PowerShell hands back a bare string for one output line and an object array
+        # for more than one, and only one line is a resolved path. A two-line result binds to
+        # Get-ProjectSlug's [string] parameter as its elements joined by a space, which produced
+        # the slug '-fake-one--fake-two' from a two-line stand-in: a plausible-looking wrong
+        # session folder at exit 0, the same silent-wrong-slug failure the exit-code check above
+        # exists to close. Whatever put a non-coreutils realpath on PATH (a busybox applet, a
+        # wrapper script printing a notice line ahead of the answer) is exactly the case where the
+        # symlink resolution cannot be trusted, so fall back rather than reading line one and
+        # hoping -- indexing [0] was the simpler alternative, and it accepts the malformed result
+        # instead of rejecting it. Same shape and same reasoning as the core.hooksPath probe above.
+        $lines = @(& realpath -- $RepoPath 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $lines.Count -eq 1) { $viaRealpath = "$($lines[0])".TrimEnd() }
     }
     if ($viaRealpath) { $viaRealpath } else { (Resolve-Path $RepoPath).Path }
 }
@@ -291,6 +387,11 @@ foreach ($d in $globalDirs) {
 }
 
 # --- 4. settings.json --------------------------------------------------------
+# Declared out here because steps 6 and 7 read them. Both stay at their initial value on any path
+# that skips the rewrite, which is the state step 7 has to be able to report on.
+$rewrittenCommands = [System.Collections.Generic.List[object]]::new()
+$settingsTarget = $null
+
 if ($IncludeHooks) {
     $exported = Join-Path $Source 'claude-global/settings.json.exported'
     if (Test-Path $exported) {
@@ -302,16 +403,34 @@ if ($IncludeHooks) {
             Write-Host "Source home     : $SourceHome"
             $settings = Get-Content $exported -Raw | ConvertFrom-Json
 
+            # Two counters, not one. The label's only job is to send a person to the exact string
+            # that still needs hands, so it has to spell the location the way settings.json is
+            # actually shaped: a matcher index, then a hook index that restarts inside each matcher.
+            # A single counter incrementing per hook but printed in matcher-index notation agrees
+            # with the file only while every matcher holds exactly one hook, and names a position
+            # that does not exist the moment one holds two.
             foreach ($event in $settings.hooks.PSObject.Properties) {
-                foreach ($matcher in $event.Value) {
-                    foreach ($hook in $matcher.hooks) {
+                $matcherIndex = 0
+                foreach ($matcher in @($event.Value)) {
+                    $hookIndex = 0
+                    foreach ($hook in @($matcher.hooks)) {
                         $hook.command = Convert-HookCommand $hook.command $SourceHome $ClaudeHome $onWindows
+                        $rewrittenCommands.Add([pscustomobject]@{
+                                Label   = "hooks.$($event.Name)[$matcherIndex].hooks[$hookIndex].command"
+                                Command = $hook.command
+                            })
+                        $hookIndex++
                     }
+                    $matcherIndex++
                 }
             }
             if ($settings.statusLine.command) {
                 $settings.statusLine.command =
                     Convert-HookCommand $settings.statusLine.command $SourceHome $ClaudeHome $onWindows
+                $rewrittenCommands.Add([pscustomobject]@{
+                        Label   = 'statusLine.command'
+                        Command = $settings.statusLine.command
+                    })
             }
             if (-not $onWindows -and $settings.env.CLAUDE_CODE_USE_POWERSHELL_TOOL) {
                 $settings.env.PSObject.Properties.Remove('CLAUDE_CODE_USE_POWERSHELL_TOOL')
@@ -322,6 +441,7 @@ if ($IncludeHooks) {
             $target = if (Test-Path $live) { "$live.restored" } else { $live }
             if ($PSCmdlet.ShouldProcess($target, 'write rewritten settings')) {
                 $settings | ConvertTo-Json -Depth 20 | Set-Content $target -Encoding utf8
+                $settingsTarget = $target
                 Write-Host "  settings written to: $target"
                 if ($target -ne $live) { Write-Host '  existing settings.json left untouched; merge by hand' }
             }
@@ -344,14 +464,21 @@ if ($IncludeHooks -and -not $onWindows) {
     $stillBroken = @(
         Get-ChildItem $hookDir -Recurse -File -Include *.ps1, *.sh, *.ts -ErrorAction SilentlyContinue |
             Where-Object {
-                $t = Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue
-                $t -match '[A-Za-z]:[\\/]' -or $t -match 'USERPROFILE'
+                Test-ResidualWindowsPath (Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue)
             }
     )
-    if ($stillBroken) {
+
+    # The scan above reads hook script files and never saw the command strings step 4 rewrote.
+    # Convert-HookCommand only touches what it recognizes as the source home, so a command carrying
+    # a second, unrelated Windows path comes back out of step 4 still broken, and a run that left
+    # one behind reported nothing at all.
+    $brokenCommands = @($rewrittenCommands | Where-Object { Test-ResidualWindowsPath $_.Command })
+
+    if ($stillBroken -or $brokenCommands) {
         Write-Host ''
-        Write-Warning 'These hooks carry Windows paths inside the script body. Rewriting settings.json does not reach them; edit each one before it will run:'
-        $stillBroken | ForEach-Object { Write-Host "    $($_.Name)" }
+        Write-Warning 'These still carry Windows paths after the rewrite. Edit each one before it will run:'
+        foreach ($f in $stillBroken) { Write-Host "    $($f.Name) (inside the script body; no settings rewrite reaches it)" }
+        foreach ($c in $brokenCommands) { Write-Host "    $($c.Label) (command string in settings.json)" }
     }
 }
 
@@ -365,8 +492,16 @@ $checks = [ordered]@{
     'sessions/memory' = Join-Path $projectDir 'memory'
     'rules'           = Join-Path $ClaudeHome 'rules'
 }
+
+# A run given -IncludeHooks whose source home could not be detected warns once, skips the rewrite
+# entirely, and then exits 0 through a table that never mentioned settings.json, so the whole run
+# read as clean. The row appears whenever -IncludeHooks was asked for, not only when the write
+# happened, which is what makes the skip visible. $settingsTarget stays $null on every path that
+# skipped it, and -and short-circuits before Test-Path sees a null.
+if ($IncludeHooks) { $checks['settings.json rewritten'] = $settingsTarget }
+
 foreach ($c in $checks.GetEnumerator()) {
-    $ok = Test-Path $c.Value
+    $ok = $c.Value -and (Test-Path $c.Value)
     Write-Host ("  [{0}] {1}" -f $(if ($ok) { 'ok' } else { '--' }), $c.Key)
 }
 $transcripts = @(Get-ChildItem $projectDir -Filter *.jsonl -File -ErrorAction SilentlyContinue).Count

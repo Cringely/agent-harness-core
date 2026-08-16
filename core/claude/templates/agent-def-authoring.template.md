@@ -59,9 +59,8 @@ a checklist.
 ## Inputs
 
 What this agent needs handed to it at dispatch time: files, paths, a diff, a work order. If the
-dispatcher may hand over a scratch-file path instead of pasting material inline, say so and name
-where that scratch directory lives (`{{PROJECT}}/.claude/scratch/` is the repo convention, see
-"Working files" in `task-reviewer.md`).
+dispatcher may hand over a scratch-file path instead of pasting material inline, say so, and say
+how the agent treats what it finds there (see "Working files" in `task-reviewer.md`).
 
 ## Constraints: what this agent must NOT do
 

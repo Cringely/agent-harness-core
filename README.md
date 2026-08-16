@@ -13,7 +13,7 @@ The rule that keeps these from drifting into a mess: core is upstream. Projects 
 | Path | Contents |
 |---|---|
 | `core/claude/agents/` | Self-contained process roles `adversarial-reviewer`, `doc-steward`, `research-scout`, `soc-monitor`, `task-reviewer`. See `patterns/agent-def-shape.md` on why none point at a charter yet |
-| `core/claude/hooks/` | Worktree gate, session guardrails, wave-close handoff, prose-lint-on-write |
+| `core/claude/hooks/` | Worktree gate, write-scope gate, model-tier gate, session guardrails, wave-close handoff, prose-lint-on-write. `core/claude/templates/settings.hooks.json` is the list that actually gets wired; this row goes stale, that file does not |
 | `core/claude/templates/` | `guardrails.template.md`, a settings fragment, and a ceremony ledger template |
 | `patterns/` | The design docs behind the above, listed in [`patterns/INDEX.md`](patterns/INDEX.md) |
 | `install/` | The installer that copies core into a project's `.claude/`, plus `Restore-ClaudeProject.ps1` for moving a project and its session history to another machine |
@@ -26,12 +26,15 @@ Skills already global in `~/.claude` (prose review, prose linting, council revie
 
 ## Install
 
-Prerequisites: PowerShell 7 (`pwsh`); `bun` on PATH for the TypeScript hooks (`agent-worktree-gate.ts`,
-`lint-doc-prose.ts`), without it the gates stop enforcing and Claude Code surfaces an error notice on
+Prerequisites: PowerShell 7 (`pwsh`); `bun` on PATH for the TypeScript hooks (every wired hook except
+the three `sh` ones), without it the gates stop enforcing and Claude Code surfaces an error notice on
 stderr per dispatch; Git Bash or another POSIX `sh` on Windows for the
-two shell hooks (`session-start-guardrails.sh`, `wave-close-handoff.sh`). The prose-lint hook also
+three shell hooks (`session-start-guardrails.sh`, `session-start-drift-check.sh`,
+`wave-close-handoff.sh`). The prose-lint hook also
 wants `vale` and the prose-lint styles kit on the machine; missing either degrades to an advisory
-skip, never a blocked write.
+skip, never a blocked write. `session-start-drift-check.sh` additionally wants `sed`, `tr` and `awk`
+(Git Bash ships all three) plus a reachable core checkout; missing any of them makes it print
+nothing, which is also what it does when the project has no drift.
 
 Recommended, not required: the `code-context` MCP server (`@infino-ai/code-context`) gives agents
 ranked hybrid search over a repo instead of grep-crawling it, and its `sql` tool answers counting
@@ -49,12 +52,36 @@ pwsh install/Install-Harness.ps1 -Target <project-root>
 `-IncludeCeremonies` also installs the ceremony components (the `soc-monitor` agent, the
 `wave-close-handoff` hook, and the ceremony ledger), opt-in because they assume a project already
 runs standup/wave ceremonies. `-Force` overwrites files the project has modified since install; the
-default is to skip a modified file and warn, tracked via a SHA256 manifest of what was installed.
+default is to skip a modified file and warn.
+
+The `.harness-manifest.json` behind that is a record of two different things, not one. `files` maps
+each installed path to the SHA256 it had at install time, which is what makes a project edit
+detectable. `accepted` maps a path to the hash of the project's own fork, pinned deliberately, and
+says the divergence is the intended state. Alongside them sit `coreRepo` and `coreCommit`, recording
+where the layer came from so a hook can find core without an environment variable. A manifest
+written before this shape existed, a flat path-to-hash map, is migrated on the next run with every
+hash preserved under `files`.
+
+`-Accept <relpath>` writes the second kind of entry. Point it at a path relative to the project's
+`.claude` and it pins that file's current hash, which turns a permanent audit warning into a silent
+`overlay (accepted)` row. It touches the manifest and nothing else. Run it again after reviewing a
+change to the fork to re-pin at the new hash. A path resolving outside `.claude` is refused rather
+than pinned, and so is one already tracked in `files`, which is an installed file rather than an
+overlay.
+
+`-Unaccept <relpath>` drops a pin again, and takes the manifest key as readily as a path that
+resolves to one, so a pin written by an older installer or carried in from another machine is still
+droppable. It does not require the file to still be there, which is the point: a deleted overlay is
+one of the reasons a pin outlives its usefulness. It refuses a key that is not pinned, and it never
+touches the file itself.
 
 `-Audit` writes nothing and reports drift in both directions, using a three-way compare of core
 source, the manifest hash, and the installed file: `project-modified` and `untracked (differs from
 core)` files are candidates to promote upstream, `core-updated` and `not-installed` mean the project
-should re-run the installer. This is the mechanical half of the findings flow in CONTRIBUTING.md;
+should re-run the installer, and `overlay (changed)` means a pinned fork has moved since it was
+pinned and wants re-reviewing. `missing` splits: a tracked file that was deleted comes back with a
+re-run, while a deleted overlay exists only in the project's own history, so it is restored from
+there or the pin goes with `-Unaccept`. Nothing automatic ever recreates the second kind. This is the mechanical half of the findings flow in CONTRIBUTING.md;
 run it periodically per project (SpaceMolt wires it into a `core_harvest` ceremony, see that
 project's `docs/wiki/team-ceremonies.md`).
 
