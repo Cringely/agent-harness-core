@@ -52,6 +52,27 @@ Decide whether this reconciliation should:
 - (c) be baked into `guardrails.template.md` so every installed project inherits the
   session-state-vs-delegate boundary.
 
+One premise in that framing is wrong, and it has been re-derived more than once. Core does have an
+account-scope write path. In its global-config step, `install/Restore-ClaudeProject.ps1` copies
+`claude-global/rules`, `agents`, `skills`, `plugins`, and `tools` out of an export bundle into
+`<ClaudeHome>/<dir>`, and the step after it writes `<ClaudeHome>/settings.json`. Only the `hooks`
+entry and the settings rewrite sit behind `-IncludeHooks`; the rules copy runs on a bare
+invocation, against the real `~/.claude` unless `-ClaudeHome` redirects it. The step before it
+moves sessions and memory notes into `<ClaudeHome>/projects/<slug>`, also on a bare invocation.
+`install/Restore-ClaudeProject.Tests.ps1` now asserts the rules copy, in the case named "restores
+account-layer rules into ClaudeHome even without -IncludeHooks". It is a test rather than a fourth
+prose citation because an assertion keeps tracking the behavior through a refactor that moves the
+code, and a line number stops being true at that moment without saying so.
+
+What that path does not do is make core the owner of the rules files. It moves an account layer
+between machines, from a bundle the operator exported, and core keeps no canonical copy of its
+own. `Install-Harness.ps1` reads the account layer in three places, recording detected plugins,
+output styles, and MCP servers into the manifest's `stackDetected`, and writes nothing to it. The
+other half of the move is manual too: `install/` holds the restore script and no exporter, so the
+bundle it reads gets assembled by hand. So (a), (b), and (c) all stay open. What changes is which
+argument is available against them. "Core cannot reach the account layer" is false and should not
+be used again. Ownership and update cadence are the real grounds.
+
 An advisory Stop hook, `dispatch-audit.ts`, was since written to mechanize this rule; it installs
 opt-in (not wired by `settings.hooks.json`; see its header for the registration snippet), which
 partly answers (b)/(c) and narrows what's actually open to whether the installer should wire it in
@@ -351,3 +372,117 @@ Remaining: `-o pipefail` in `session-start-guardrails.sh` and `wave-close-handof
 Worth pairing with item 9. Both are cases where the check written to enforce a rule cannot enforce
 it, and neither would be caught by reading the surrounding prose, which describes the intended
 behavior accurately in both cases.
+
+---
+
+## 13. Account rules against the installed set: the coverage table
+
+**Status:** proposed. The table is the deliverable issue #21 asked for; what to do about the rows
+is the open part.
+**Surfaced:** 2026-08-12, answering the final section of issue #21, which asked for a full
+comparison of the account-level process rules against what the installer copies, to establish
+whether the two gaps that issue found were unusual or ordinary.
+
+They are ordinary, and one structural fact explains more of the table than a separate omission per
+row would: the installed set is smaller than core. Every account rule carrying a real process claim
+is at least partly present in an installed project; most are partly present rather than fully, and
+only one is absent outright.
+
+`install/Install-Harness.ps1` copies `core/claude/agents/*` and `core/claude/hooks/*` (minus the
+two ceremony-gated files), the guardrails template as `.claude/guardrails.md`, the scratch drop
+box's `.gitignore`, optionally `ceremony-ledger.json`, and merges `settings.hooks.json` into the
+project's `settings.json`. It copies `patterns/` nowhere; the string does not appear in the
+installer at all. That matters because `patterns/` is where core keeps its process reasoning. A
+pattern doc answers a gap for whoever opens this repository and answers nothing for a project that
+only ran the installer. Issue #21 read "in core" and "installed" as one question, so its two gaps
+looked like two omissions instead of one boundary.
+
+Rows below name the account file at `~/.claude/rules/`. "Installed" means reachable from a project
+that ran the installer and nothing else.
+
+| Account rule | Carried by the installed set | Verdict |
+|---|---|---|
+| `agent-usage.md` | `hooks/model-tier-gate.ts`, wired, plus `guardrails.md`'s model-tier and independent-review rows; `hooks/agent-worktree-gate.ts` and `hooks/agent-write-scope.ts`, both wired; `hooks/dispatch-audit.ts` and `hooks/review-gate.ts`, installed opt-in | partial, item 1 owns the rest |
+| `challenge-mandate.md` | `guardrails.md` worked row, prose plus adversarial-reviewer as its mechanical twin | covered |
+| `change-management.md` | nothing installed; invariant promotion lives in `patterns/forcing-functions.md` | gap (#21 Gap 1) |
+| `fix-quality.md` | `agents/task-reviewer.md` carries producer-side and invariant language | partial, no action proposed |
+| `harness-core.md` | not applicable, it points at this repository | account-only by construction |
+| `no-overclaim.md` | `agents/task-reviewer.md`; the argument sits in `patterns/ablation-verification.md` | partial, no mechanism |
+| `obsidian.md` | not applicable, names a machine's sync hook and vault path | account-only by construction |
+| `security.md` | untrusted-content boundary block, inlined in the installed agent defs | partial by design |
+| `ssh.md` | not applicable, machine and host configuration | account-only by construction |
+| `subagent-prompting.md` | the sonnet effort mandate, through `model-tier-gate.ts` and `guardrails.md`; brief anatomy, nothing | partial, gap on brief anatomy |
+| `writing-style.md` | `hooks/lint-doc-prose.ts` and `hooks/pre-commit`, both installed and wired | covered, with a caveat |
+
+Four rows need a clause the table cannot hold.
+
+**`agent-usage.md`.** Most of what this file says about a single dispatch installs, and what it
+says about how a session is run does not. Model-tier discipline arrives as a gate:
+`model-tier-gate.ts` is copied like every other hook, wired by `settings.hooks.json` on
+`Agent|Task|Workflow`, and denies both a dispatch that names no tier and a `sonnet` dispatch
+missing `effort: "xhigh"`. The guardrails template carries the same rule as prose in its worked-row
+table, so the project gets the reasoning next to the gate. Review-is-delegated arrives twice over,
+as another worked row and as `review-gate.ts`, which installs but stays unwired by its own header's
+decision. Write-is-delegated arrives as `dispatch-audit.ts`, opt-in on the same terms. The scratch
+return channel arrives as infrastructure rather than as a rule: the installer creates the drop box
+and `agent-write-scope.ts` confines a `writeScope: scratch` agent to it, but nothing requires a
+brief to name a return path. What reaches an installed project through nothing at all is the
+call-count threshold that decides whether to delegate in the first place. That is the piece item 1
+already owns, and it is a stance about a whole session rather than a property of one dispatch a
+`PreToolUse` hook can read.
+
+**`change-management.md`.** Its invariant-promotion half is written up in
+`patterns/forcing-functions.md`, so #21's Gap 1 is answered for a reader of this repository and
+still open for an installed project. The rest of that file, risky-operation confirmations, backup
+gates, commit identity, is homelab operations, and `CONTRIBUTING.md`'s process-versus-domain test
+excludes it from core on purpose.
+
+**`subagent-prompting.md`.** One of its resident traps installs and the rest does not. The effort
+mandate is enforced by `model-tier-gate.ts` and stated in the guardrails row beside it, so a
+project that ran the installer cannot dispatch a sonnet agent at inherited effort without being
+told. The other half of that trap, that the frontmatter key is `effort` and a misspelling is
+ignored without error, is checked by `test/agent-frontmatter-keys.test.ts`, which guards this
+repository's own defs and installs nowhere. Brief anatomy is the real gap:
+`patterns/agent-def-shape.md` covers part of it and does not install, and
+`core/claude/templates/agent-def-authoring.template.md` covers more of it and is copied by no
+installer path, which is item 3.
+
+**`writing-style.md`.** The best-covered rule, and the caveat is worth reading before treating it
+as a model. Both hooks resolve a Vale configuration, the project's own
+`.claude/tools/prose-lint/.vale.ini` first and then the kit under the user's home;
+`lint-doc-prose.ts` also honors an explicit `PROSE_LINT_VALE_CONFIG` ahead of both, which
+`pre-commit` deliberately does not. The installer copies no `tools/prose-lint`. On a machine without the
+account-layer kit, both hooks find no configuration and skip, advisory by design and easy to miss.
+The mechanism installs; the data it needs does not.
+
+### The requirement issue #21 called Gap 2
+
+Spec-and-plan-before-development is absent from the table because it is absent from the account
+rules too, so it is not a portability gap. It is an unwritten requirement everywhere. State it as a
+claim about artifacts and it survives any later change to the tooling:
+
+> Development work begins with a brainstorm, produces a written spec, and proceeds from a written
+> plan. The spec and the plan exist as artifacts before implementation starts.
+
+Written that way it holds on a machine with no plugins at all, where the same two artifacts get
+written by hand. Where the superpowers plugin is present, its `brainstorming` and `writing-plans`
+skills are the vehicle for the first two steps and `subagent-driven-development` for executing the
+result. `guardrails.template.md` already lists superpowers under its assumed stack and warns that
+an assumed skill may simply be absent, so a project must not read the vehicle as the requirement.
+The nearest existing rule, `agent-usage.md`'s "Plan Execution Is Always Subagent-Driven", governs
+how a plan gets executed and never requires one to exist.
+
+### What is open
+
+The table is a finding, not a decision. Three questions follow from it, and none should be answered
+by adding prose:
+
+- Does `patterns/` become installable, or does core accept that its process reasoning is
+  repository-only and stop citing pattern docs as though a project could read them?
+- Do the two clear gaps, `change-management.md`'s promotion lifecycle and
+  `subagent-prompting.md`'s brief anatomy, graduate on this evidence, or wait for the second
+  project named in `CONTRIBUTING.md`? That question is already blocked behind the graduation-bar
+  decision note.
+- Does the spec-and-plan requirement belong in `guardrails.template.md`, which every installed
+  project receives, or does it stay an account-layer convention that this table has now shown to
+  be the same shape as the gaps it was filed alongside?
