@@ -15,11 +15,20 @@
 // agent addresses or waves off in the PR body. A deny would block a
 // state-freshness update on a style nit — wrong tradeoff for a handoff file.
 //
-// Scope (shouldLint): the CHANGED file only, and only living-doc prose — root
-// README.md or anything under docs/ — MINUS generated and vendored paths
-// (SKIP_PATHS below; projects extend it for their own generated docs). The
-// project's own .claude/, node_modules, etc. are not under docs/ so the
-// allowlist already excludes them.
+// Scope (shouldLint): the CHANGED file only, and only living-doc prose — a
+// README.md at ANY depth, or anything under a docs/ directory — MINUS
+// generated, vendored and internal-traffic paths (SKIP_PATHS below; projects
+// extend it for their own generated docs).
+//
+// Two claims this comment used to make were wrong, and both are corrected in
+// the comment rather than the code, because the code's behaviour is the one
+// wanted. (1) "root README.md": the regex is (^|/)README\.md$, so
+// packages/foo/README.md lints too — a package README is as much a deliverable
+// as the root one, so the any-depth match stays. (2) "the project's own
+// .claude/ ... not under docs/ so the allowlist already excludes them": false.
+// .claude/docs/notes.md satisfies the docs/ arm and .claude/README.md
+// satisfies the README arm; both linted. Excluding internal traffic is the
+// skip list's job, not the allowlist's, and that is where it now happens.
 //
 // Degrade gracefully (planLint): zero new runtime dependencies — Vale is an
 // external tool a clone or CI runner may not have, and the styles kit may be
@@ -42,18 +51,46 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 /**
- * Generated or vendored paths under docs/ that are not ours to restyle.
+ * Paths dropped even when the allowlist above admits them. Two kinds: generated
+ * or vendored trees that are not ours to restyle, and internal agent traffic —
+ * memory notes, handoffs, scratch, council transcripts, and the project's own
+ * .claude/ tree MINUS .claude/worktrees/, which holds full repo checkouts whose
+ * README.md and docs/ are deliverables. Internal traffic is written in the
+ * compressed register (dropped articles, fragments, bare paths and identifiers)
+ * that the reader-facing prose rules flag wholesale, so linting it yields noise
+ * and never a deliverable improvement.
+ *
+ * Evaluated after the allowlist, but the combination is `allowed && !skipped`,
+ * so a deny wins from either position and the order is a readability choice,
+ * not a behavioural one. A path can and does satisfy both: .claude/docs/*.md
+ * takes the docs/ arm and .claude/README.md takes the README arm.
+ *
+ * Every entry is anchored on a path SEPARATOR, never a substring, so
+ * docs/memory-system.md and docs/claude-setup.md keep linting.
+ *
  * Projects extend this with their own generated docs (e.g. a script-built
  * backlog.md or vendored upstream reference docs).
  */
 const SKIP_PATHS = [
   /(^|\/)docs\/assets\//i, // generated / binary assets
+  // harness config, agent defs, installed hooks and their docs; worktrees are
+  // real checkouts, not traffic. .claude/worktrees/<name>/ holds a full repo, so
+  // its README.md and docs/ are deliverables and the lookahead lets them through.
+  // A nested .claude/ or memory/ INSIDE a worktree still matches, on the later
+  // segment or on its own rule.
+  /(^|\/)\.claude\/(?!worktrees\/)/i,
+  /(^|\/)memory\//i, // memory notes
+  /(^|\/)handoffs\//i, // session handoffs
+  /(^|\/)scratchpad\//i, // agent scratch
+  /(^|\/)\.scratch\//i, // agent scratch, dot variant
+  /(^|\/)council-transcripts\//i, // council run transcripts
 ];
 
 /**
- * Is `filePath` a living-doc prose file this hook should lint? Root README.md or
- * anything under docs/, ending .md/.markdown, that is not a generated or vendored
- * path. Accepts absolute or relative paths, any slash style.
+ * Is `filePath` a living-doc prose file this hook should lint? A README.md at
+ * any depth, or anything under a docs/ directory, ending .md/.markdown, that is
+ * not a generated, vendored or internal-traffic path. Accepts absolute or
+ * relative paths, any slash style.
  */
 export function shouldLint(filePath: string | undefined): boolean {
   if (typeof filePath !== "string" || filePath === "") return false;
@@ -61,7 +98,9 @@ export function shouldLint(filePath: string | undefined): boolean {
 
   if (!/\.(md|markdown)$/i.test(norm)) return false;
 
-  // Living-doc allowlist: root README.md, or anything under a docs/ directory.
+  // Living-doc allowlist: a README.md at any depth, or anything under a docs/
+  // directory. Deliberately admits .claude/docs/ and .claude/README.md; the
+  // skip list below is what removes them.
   const isReadme = /(^|\/)README\.md$/i.test(norm);
   const inDocs = /(^|\/)docs\//i.test(norm);
   if (!isReadme && !inDocs) return false;
