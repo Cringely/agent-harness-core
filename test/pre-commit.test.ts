@@ -305,6 +305,61 @@ describe("pre-commit hook — lints the staged blob, not the working tree", () =
   });
 });
 
+/** Write `relPath` (creating parents) and stage exactly that path. */
+function stageMarkdown(dir: string, relPath: string, body: string) {
+  const abs = join(dir, relPath);
+  mkdirSync(dirname(abs), { recursive: true });
+  writeFileSync(abs, body);
+  git(["add", "--", relPath], dir);
+}
+
+const FLAGGED_BODY = `Let's ${FLAG_TOKEN} this topic.\n`;
+
+// The account-layer exemption, mirrored here so a project inherits the same
+// answer from both hooks. Every file staged below CONTAINS the flag token, so
+// empty stderr can only mean the path was excluded — a clean file would prove
+// nothing. Keyed on the repo-relative path, the only path this hook has: the
+// blob it actually lints sits at "$scratch_dir/$f" under a mktemp root, so no
+// absolute-prefix exclusion could ever match here.
+describe("pre-commit hook — internal agent traffic is exempt", () => {
+  test.each([
+    ".claude/notes.md",
+    ".claude/docs/notes.md",
+    "memory/note.md",
+    "handoffs/2026-08-10-session.md",
+    "docs/handoffs/2026-08-10-session.md",
+    "scratchpad/plan.md",
+    ".scratch/probe.md",
+    "council-transcripts/2026-08-01-scope.md",
+  ])("staged %s is not linted", (relPath) => {
+    const dir = initRepo();
+    installValeConfig(dir);
+    const stubDir = installValeStub();
+    stageMarkdown(dir, relPath, FLAGGED_BODY);
+
+    const result = runHook(dir, { ...process.env, PATH: pathWithStubFirst(stubDir) });
+    expect(result.stderr.toString()).toBe("");
+  });
+});
+
+// The other half. A deliverable whose name merely contains an exempt word, and
+// a path outside docs/ entirely, both still lint — the second because this hook
+// has no allowlist and must not grow one by accident.
+describe("pre-commit hook — the exemption is segment-anchored, not substring", () => {
+  test.each(["docs/guide.md", "docs/memory-system.md", "docs/claude-setup.md", "notes/scratch.md"])(
+    "staged %s is still linted",
+    (relPath) => {
+      const dir = initRepo();
+      installValeConfig(dir);
+      const stubDir = installValeStub();
+      stageMarkdown(dir, relPath, FLAGGED_BODY);
+
+      const result = runHook(dir, { ...process.env, PATH: pathWithStubFirst(stubDir) });
+      expect(result.stderr.toString()).toContain(relPath);
+    },
+  );
+});
+
 describe("pre-commit hook — staged filenames that need core.quotePath=false", () => {
   test("non-ASCII staged filename is linted, not mangled into a quoted literal", () => {
     const dir = initRepo();

@@ -16,9 +16,17 @@
 # hook doesn't.
 #
 # SCOPE
-# Only staged markdown (git diff --cached --diff-filter=ACM -- '*.md'). No
-# staged markdown is the common case and must stay fast: exit 0 before
-# touching Vale at all.
+# Only staged markdown (git diff --cached --diff-filter=ACM -- '*.md'), minus
+# internal agent traffic (is_internal_traffic below). No staged markdown is
+# the common case and must stay fast: exit 0 before touching Vale at all.
+#
+# Note the scope here is WIDER than lint-doc-prose.ts's. That hook runs an
+# allowlist (README.md or docs/) because it fires on every single Write; this
+# one runs on a commit, where a staged .md anywhere is usually something
+# somebody meant to publish. Keeping the exclusion — and only the exclusion —
+# in common is deliberate: an operator who exempts internal traffic gets the
+# same answer from both hooks, without this hook silently acquiring an
+# allowlist it never had.
 #
 # CONTENT LINTED IS THE STAGED BLOB, NOT THE WORKING TREE
 # A file staged and then further edited must lint as staged, not as it now
@@ -76,11 +84,37 @@ fi
 scratch_dir=$(mktemp -d) || exit 0
 trap 'rm -rf "$scratch_dir"' EXIT
 
+# Internal agent traffic: memory notes, handoffs, scratch, council transcripts
+# and the project's own .claude/ tree. Written in the compressed register the
+# reader-facing prose rules flag wholesale, so linting it is noise.
+#
+# Keyed on the REPO-RELATIVE path git handed us, which is the only path
+# available here. The blob under test lives at "$scratch_dir/$f" (an absolute
+# machine path under a mktemp root), so an absolute-prefix exclusion — e.g.
+# somebody's AppData scratchpad — could never match; the repo-relative tail is
+# the whole of what a project can key on.
+#
+# Two arms per name because a POSIX `case` glob is anchored at both ends:
+# ".claude/*" catches it at the repo root and "*/.claude/*" catches it nested.
+# `*` does cross "/", so the nested arm needs no depth enumeration.
+is_internal_traffic() {
+  case "$1" in
+    .claude/*|memory/*|handoffs/*|scratchpad/*|.scratch/*|council-transcripts/*) return 0 ;;
+    */.claude/*|*/memory/*|*/handoffs/*|*/scratchpad/*|*/.scratch/*|*/council-transcripts/*) return 0 ;;
+  esac
+  return 1
+}
+
 # Here-doc, not a pipe into `while` — a pipe puts the loop in a subshell in
 # some /bin/sh implementations, which would silently drop any state the loop
 # tries to keep.
 while IFS= read -r f; do
   [ -n "$f" ] || continue
+  # Before the blob extraction, not just before vale: an excluded path costs
+  # nothing but the glob match.
+  if is_internal_traffic "$f"; then
+    continue
+  fi
   staged_file="$scratch_dir/$f"
   mkdir -p "$(dirname -- "$staged_file")"
   git show ":$f" >"$staged_file" 2>/dev/null || continue
