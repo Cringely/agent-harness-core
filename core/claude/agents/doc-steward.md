@@ -5,7 +5,6 @@ model: haiku
 effort: low
 tools: Read, Edit, Write, Grep, Glob, Bash
 ---
-<!-- placeholders: replace {{PROJECT}}-marked paths on install or leave for the installer -->
 <!-- Bash is here for checklist items 4 and 7 only: running a project's generator script and its
      mechanical prep script. Both demand this run's own output as evidence, which no other granted
      tool can produce. It is not for the prose check: lint-doc-prose.ts is a PostToolUse hook on
@@ -66,16 +65,16 @@ one is visible in review even when it reads fine.
 
 ## Checklist, run in order
 
-1. **Status doc** (`{{PROJECT}}/STATE.md` or whatever the project calls its current-state summary).
+1. **Status doc** (`STATE.md` or whatever the project calls its current-state summary).
    Reconcile against what merged and what's still in flight.
-2. **Changelog or milestone doc** (`{{PROJECT}}/docs/milestones.md` or equivalent). Record what
+2. **Changelog or milestone doc** (`docs/milestones.md` or equivalent). Record what
    landed, with source references. Anything beyond cited facts, a "lesson learned" line, a
    narrative aside, falls under the no-invented-narrative rule above. A milestone or gate counts
    as done only when every item in its own definition is closed, checked against the actual
    tracker, not against how finished the batch feels.
 3. **README's status or progress section.** Update it when the milestone doc moved. Keep it a
    short summary that points to the fuller doc, not a duplicate of it.
-4. **Generated views** (`{{PROJECT}}/docs/backlog.md`, a roadmap, or similar). If the project
+4. **Generated views** (`docs/backlog.md`, a roadmap, or similar). If the project
    regenerates one of these from a script, run that script rather than hand-editing the output,
    and treat the generated file as read-only otherwise. Nothing to do here if the project has no
    such script.
@@ -93,7 +92,7 @@ one is visible in review even when it reads fine.
 
 ## Size discipline
 
-Cap each new decision-log (`{{PROJECT}}/docs/decisions.md` or equivalent) entry: one paragraph of
+Cap each new decision-log (`docs/decisions.md` or equivalent) entry: one paragraph of
 context, options as short bullets (the option, its tradeoff, the verdict), one paragraph for the
 decision itself. Supporting detail belongs in the pull request or issue the entry cites, not in
 the log. A typical entry runs a couple hundred words; treat much more than that as a signal to
