@@ -22,11 +22,26 @@ This is the actual shape this repo's agent defs use. Read one before deviating f
 ---
 name: {{kebab-case-name, matches the filename without .md}}
 description: {{one sentence, third person, states what the agent is for and when to reach for it}}
-model: {{haiku | sonnet | inherit}}
-effort: {{low | medium | high | xhigh}}
+model: {{haiku | sonnet | opus | fable}}
+effort: {{low | medium | high | xhigh; sonnet forces xhigh}}
 tools: {{comma-separated tool list; omit the field entirely only if the agent needs every tool}}
 ---
 ```
+
+The `model` and `effort` keys are not independent picks. Sonnet gets chosen for work that needs
+real reasoning below Opus prices, so `model: sonnet` takes `effort: xhigh` and nothing else; on
+the normal dispatch path, the model-tier gate denies a sonnet dispatch at any other effort. This
+repo's haiku defs carry `effort: low` by convention, though whether haiku honors the key at all
+is an open question on issue #11. The authority on the coupling is the "Every dispatch names its
+model tier" row in `core/claude/templates/guardrails.template.md`, backed by
+`core/claude/hooks/model-tier-gate.ts`; defer to it instead of copying its rules here, because a
+rule written down twice drifts.
+
+Every def in this repo names a real tier: `test/agent-frontmatter-keys.test.ts` asserts the
+`model` value is one of the four aliases, so a def that omits the key or writes `inherit` turns a
+green suite red. Whatever tier you write is a default, not a guarantee; the per-invocation
+`model` parameter outranks frontmatter, so a dispatcher can move this agent to another tier
+without touching the file.
 
 The `effort` key is not `reasoning_effort`. That typo is silently ignored, not rejected, so a
 misspelled key runs the agent at whatever effort the dispatching session inherited, forever, with
