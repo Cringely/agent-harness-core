@@ -506,8 +506,37 @@ evidence hierarchy rather than the assumption tier where an unsourced model answ
 
 A `notebooklm` MCP server is configured at the `C:/Users/jcgam` project scope in `~/.claude.json`:
 `npx notebooklm-mcp@latest` over stdio, empty `env`. It is not active in this repository's
-sessions, and nothing in this repo references it. Whether it works, what tools it exposes, and how
-it reaches a Google account are all unknown; nobody has run it.
+sessions, and nothing in this repo references it.
+
+It is also broken. Google renamed the product to Gemini Notebook, and the configured package has
+not been republished since. Measured against the npm registry on 2026-09-03: `notebooklm-mcp` is
+at 2.0.0, last modified 2026-05-01, repository `PleasePrompto/notebooklm-mcp`. Because the entry
+resolves `@latest` rather than a pin, the breakage arrived without a config change, which is the
+failure mode `security.md`'s pinning rule exists to prevent.
+
+### Replacement candidates, measured not endorsed
+
+Four packages published after the rename. None has been run, and the table records provenance
+only.
+
+| Package | Version | Published | Repository |
+|---|---|---|---|
+| `@charlie.act7/gemini-notebook-mcp` | 2.3.11 | 2026-08-20 | `CharlieCardenasToledo/gemini-notebook-mcp` |
+| `@pan-sec/notebooklm-mcp` | 2026.5.0 | 2026-08-29 | `Pantheon-Security/notebooklm-mcp-secure` |
+| `notebooklm-mcp-server` | 4.0.2 | 2026-08-22 | `moodRobotics/notebooklm-mcp-server` |
+| `@roomi-fields/notebooklm-mcp` | 3.1.2 | 2026-08-21 | `roomi-fields/notebooklm-mcp` |
+
+The first is the closest match by description, which reads almost word for word like the
+configured package's and names the rename directly, so it is probably a fork. Its repository owner
+differs from `PleasePrompto`, so it is a fork or a reimplementation rather than a maintainer
+handover, and that distinction matters when the package holds a Google session.
+
+Every one of them is MIT, single-maintainer, published under a personal email address, and
+unofficial. Swapping one for another fixes the breakage and leaves the shape unchanged: an
+unreviewed dependency brokering an authenticated Google account. `security.md`'s supply-chain
+section rules against exactly this, so the replacement gets a security review and a version pin
+before it is wired anywhere, and the review decides the choice rather than the version number
+deciding it. `appsec-sme` is the right reviewer.
 
 ### What the investigation has to answer
 
@@ -516,13 +545,13 @@ Adoption turns on three questions, in this order, and the first two can kill it 
 The access question comes first. NotebookLM has no official public API, so an MCP server for it is
 presumably driving the product's own interface with a user's credentials. That needs to be
 established rather than assumed, because it decides whether this is a supported integration or a
-dependency that breaks whenever Google ships a change. `@latest` on an unofficial package holding
+dependency that breaks whenever Google changes the product. `@latest` on an unofficial package holding
 a Google session is the least pinned, highest privilege component that would exist in this stack,
 and `security.md` requires a pinned version and a scoped grant before any real use.
 
 The value question comes second. The stack already answers domain questions three ways:
 `code-context` for this repository's code, Context7 for library documentation, and web search for
-everything else. A notebook earns its place only where a curated corpus beats all three, which
+everything else. A notebook is worth adding only where a curated corpus beats all three, which
 means a bounded body of source material that changes slowly and that the open web indexes badly.
 Name one such domain and test against it rather than reasoning about the category.
 
