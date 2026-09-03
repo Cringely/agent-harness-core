@@ -486,3 +486,52 @@ by adding prose:
 - Does the spec-and-plan requirement belong in `guardrails.template.md`, which every installed
   project receives, or does it stay an account-layer convention that this table has now shown to
   be the same shape as the gaps it was filed alongside?
+
+---
+
+## 14. NotebookLM as a corpus-bounded knowledge agent
+
+**Status:** proposed, investigation only. No commitment to adopt.
+**Surfaced:** 2026-09-03, operator request during the account-layer portability session.
+
+### The idea
+
+Use a NotebookLM notebook as a narrow, high-trust oracle for one knowledge domain at a time: load
+a curated corpus, then interrogate it from a session instead of searching the open web or building
+a retrieval layer. The property worth having is that answers stay inside the corpus and cite the
+passage they came from, which places them at the vendored-reference tier of `no-overclaim.md`'s
+evidence hierarchy rather than the assumption tier where an unsourced model answer sits.
+
+### What already exists here
+
+A `notebooklm` MCP server is configured at the `C:/Users/user` project scope in `~/.claude.json`:
+`npx notebooklm-mcp@latest` over stdio, empty `env`. It is not active in this repository's
+sessions, and nothing in this repo references it. Whether it works, what tools it exposes, and how
+it reaches a Google account are all unknown; nobody has run it.
+
+### What the investigation has to answer
+
+Adoption turns on three questions, in this order, and the first two can kill it on their own.
+
+The access question comes first. NotebookLM has no official public API, so an MCP server for it is
+presumably driving the product's own interface with a user's credentials. That needs to be
+established rather than assumed, because it decides whether this is a supported integration or a
+dependency that breaks whenever Google ships a change. `@latest` on an unofficial package holding
+a Google session is the least pinned, highest privilege component that would exist in this stack,
+and `security.md` requires a pinned version and a scoped grant before any real use.
+
+The value question comes second. The stack already answers domain questions three ways:
+`code-context` for this repository's code, Context7 for library documentation, and web search for
+everything else. A notebook earns its place only where a curated corpus beats all three, which
+means a bounded body of source material that changes slowly and that the open web indexes badly.
+Name one such domain and test against it rather than reasoning about the category.
+
+The routing question comes last, and only if the first two clear. Adoption would mean a new row in
+`agent-usage.md` saying when a domain question goes to a notebook instead of to search, alongside
+the cost of maintaining a corpus that goes stale silently.
+
+### Promotion
+
+This is an account-layer tool question, not a core process one, so it does not sit behind
+`CONTRIBUTING.md`'s two-occurrences bar. It enters core only if it produces a routing rule, and a
+routing rule is exactly the kind of finding that bar governs.
