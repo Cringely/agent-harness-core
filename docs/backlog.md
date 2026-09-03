@@ -538,6 +538,36 @@ section rules against exactly this, so the replacement gets a security review an
 before it is wired anywhere, and the review decides the choice rather than the version number
 deciding it. `appsec-sme` is the right reviewer.
 
+### What the assessment has to cover
+
+An assessment with no stated criteria gets rubber-stamped, so these are the questions, and the
+first one governs the rest.
+
+- **Authentication.** OAuth with a scoped grant, or a full Google session cookie lifted from a
+  browser profile, or a headless browser driving the product interface. This decides whether the
+  access can be scoped and revoked independently of the operator's whole Google account.
+- **Credential storage.** Where on disk, under what permissions, in plaintext or not, and whether
+  a second account is kept beside the first. `@roomi-fields/notebooklm-mcp` is the one to read
+  first here: it ships `setup-auth`, `de-auth` and `accounts` CLI entry points, so it clearly
+  stores credentials and manages more than one.
+- **Network egress.** Any endpoint that is not Google's, reached at any point including start-up
+  telemetry.
+- **Dependency provenance.** Direct counts are small, 4 to 9 across the four candidates, so the
+  transitive tree is worth walking rather than sampling.
+- **Publisher signals.** npm two-factor, provenance attestation, repository activity, whether
+  anyone answers an issue.
+- **Containment.** Whether it runs without broad host filesystem access, and what the revocation
+  path is once it holds a credential.
+
+One preliminary result, measured 2026-09-03: none of the five packages, the configured one
+included, declares a `preinstall` or `postinstall` script. That clears the usual supply-chain
+vector and says nothing about the six questions above.
+
+The assessment has to be able to come out against all four. If the only authentication any of
+them offers is a harvested full-account session cookie, then the finding is that none gets wired,
+and a curated notebook stays something the operator queries by hand. An assessment that can only
+return a ranking is not measuring anything.
+
 ### What the investigation has to answer
 
 Adoption turns on three questions, in this order, and the first two can kill it on their own.
