@@ -52,8 +52,6 @@
 .EXAMPLE
     pwsh -NoProfile -File install/Export-Account.ps1
 #>
-# UNWIRED until Task 13 of docs/superpowers/plans/2026-09-03-account-layer-portability.md adds
-# its README and rules/harness-core.md registration. Invoke: pwsh -NoProfile -File install/Export-Account.ps1
 #
 # Moved below the comment-based help block rather than above it: PowerShell only recognises
 # help text that begins at the top of the file (or right after param()), so a notice placed

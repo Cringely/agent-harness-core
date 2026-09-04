@@ -652,7 +652,7 @@ working as designed. The second is this item.
 
 ## 16. Export-Account and Install-Account ship unwired until Task 13
 
-**Status:** open. Closes when Task 13 of `docs/superpowers/plans/2026-09-03-account-layer-portability.md` lands.
+**Status:** closed 2026-09-04. Both scripts are registered in `README.md` and `~/.claude/rules/harness-core.md`, and both header notices are gone.
 **Surfaced:** 2026-09-03, account layer portability work.
 
 Both scripts carry the Gate 1 header notice. Neither is named by `README.md` or by
