@@ -130,32 +130,57 @@ Describe "Account hooks" {
         }
     }
 
-    It "blocks an in-scope path when HOME cannot be resolved, but not an out-of-scope one" {
+    # IMPROVE-1: an unresolvable HOME falls through to the content scan for an in-scope
+    # path instead of blocking outright, since the scan needs no roots either. Three
+    # independent rows, each its own It: Pester aborts an It at the first failing Should,
+    # so folding these into one block would let an earlier row mask a later one going red.
+    It "blocks an in-scope secret when HOME cannot be resolved" {
         foreach ($root in $script:hookRoots) {
             $sandbox = New-HookSandbox
             try {
                 $hook = Join-Path $root 'Scan-MemorySecrets.ps1'
                 $unresolvable = @{ USERPROFILE = ''; HOME = ''; HOMEDRIVE = ''; HOMEPATH = '' }
-
-                $inScope = @{ tool_input = @{
+                $json = @{ tool_input = @{
                         file_path = 'C:/Users/user/.claude/projects/X/memory/note.md'
                         content   = 'AKIAIOSFODNN7EXAMPLE'
                     } } | ConvertTo-Json -Depth 5 -Compress
-                $r1 = Invoke-HookWithHome `
-                    -HookPath $hook -SandboxHome $sandbox -StdinJson $inScope -Env $unresolvable
-                $r1.ExitCode | Should -Be 2 -Because "$root must fail closed on an in-scope path when HOME is unresolvable"
-                $r1.Output | Should -Match 'BLOCKED'
+                $r = Invoke-HookWithHome -HookPath $hook -SandboxHome $sandbox -StdinJson $json -Env $unresolvable
+                $r.ExitCode | Should -Be 2 -Because "$root must scan and block an in-scope secret even when HOME is unresolvable"
+                $r.Output | Should -Match 'BLOCKED'
+            }
+            finally { Remove-Item -Recurse -Force $sandbox -ErrorAction SilentlyContinue }
+        }
+    }
 
-                # NEW-1: this hook is registered on every Write and Edit with no path filter,
-                # so a guard that blocks unconditionally on an unresolvable HOME also blocks
-                # ordinary source writes that were never in its scope.
-                $outOfScope = @{ tool_input = @{
+    It "allows a clean in-scope write when HOME cannot be resolved" {
+        foreach ($root in $script:hookRoots) {
+            $sandbox = New-HookSandbox
+            try {
+                $hook = Join-Path $root 'Scan-MemorySecrets.ps1'
+                $unresolvable = @{ USERPROFILE = ''; HOME = ''; HOMEDRIVE = ''; HOMEPATH = '' }
+                $json = @{ tool_input = @{
+                        file_path = 'C:/Users/user/.claude/projects/X/memory/note.md'
+                        content   = 'A plain note with no credentials in it.'
+                    } } | ConvertTo-Json -Depth 5 -Compress
+                $r = Invoke-HookWithHome -HookPath $hook -SandboxHome $sandbox -StdinJson $json -Env $unresolvable
+                $r.ExitCode | Should -Be 0 -Because "$root must scan rather than block outright when HOME is unresolvable"
+            }
+            finally { Remove-Item -Recurse -Force $sandbox -ErrorAction SilentlyContinue }
+        }
+    }
+
+    It "allows an out-of-scope write when HOME cannot be resolved" {
+        foreach ($root in $script:hookRoots) {
+            $sandbox = New-HookSandbox
+            try {
+                $hook = Join-Path $root 'Scan-MemorySecrets.ps1'
+                $unresolvable = @{ USERPROFILE = ''; HOME = ''; HOMEDRIVE = ''; HOMEPATH = '' }
+                $json = @{ tool_input = @{
                         file_path = 'C:/Users/user/src/app.ts'
                         content   = 'AKIAIOSFODNN7EXAMPLE'
                     } } | ConvertTo-Json -Depth 5 -Compress
-                $r2 = Invoke-HookWithHome `
-                    -HookPath $hook -SandboxHome $sandbox -StdinJson $outOfScope -Env $unresolvable
-                $r2.ExitCode | Should -Be 0 -Because "$root must not block an out-of-scope write just because HOME is unresolvable"
+                $r = Invoke-HookWithHome -HookPath $hook -SandboxHome $sandbox -StdinJson $json -Env $unresolvable
+                $r.ExitCode | Should -Be 0 -Because "$root must not scan or block an out-of-scope write just because HOME is unresolvable"
             }
             finally { Remove-Item -Recurse -Force $sandbox -ErrorAction SilentlyContinue }
         }
