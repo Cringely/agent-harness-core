@@ -150,6 +150,15 @@ documents at L46-50 and declares at L84, for real runs and not only tests); `-Cl
 same for `~/.claude.json`; `-OutputRoot` overrides the destination, which defaults to the running
 clone's `account/claude/`.
 
+The rest are test seams, each with a real default. `-CoreRepo` (the main checkout, from
+`git rev-parse --git-common-dir`), `-NpmGlobal` (`npm root -g`), `-VaultPath`
+(`$env:CLAUDE_OBSIDIAN_VAULT`, then the Documents path), `-HomeSlug` (`Get-ProjectSlug $HOME`),
+and the `-SkipSettings` and `-SkipMcp` switches. Without them a test would have to shell out to
+`git` and `npm` and read the operator's live vault to reach a branch, and a child `pwsh` takes
+`$HOME` from `USERPROFILE` rather than `$env:HOME`, so a stand-in home cannot be steered from
+outside. `Restore-ClaudeProject.ps1:88-95` is the precedent: it added `-TargetIsWindows` for the
+same reason and records that the branch was otherwise unreachable from any test on a Windows host.
+
 The copy works from an allowlist, never a denylist. The allowlist is the tree above and nothing
 else under `~/.claude/` is looked at, so a new runtime directory appearing there is excluded by
 default rather than swept into the repo. Export mirrors rather than overlays: each allowlisted
@@ -193,8 +202,13 @@ usable review of what changed in the account layer.
 
 Runs on any workstation from a clone, as `pwsh -NoProfile -File install/Install-Account.ps1`,
 with `-ClaudeHome` and a `[bool]` `-TargetIsWindows` defaulted from `$IsWindows` as Restore L95
-does. Both scripts declare `[CmdletBinding(PositionalBinding=$false)]`; Restore L71-95 records
-that a new parameter otherwise turns positional without warning. Content directories are copied
+does. Alongside those: `-ClaudeJson`, `-PayloadRoot`, `-CoreRepo`, `-NpmGlobal`, `-VaultPath`,
+`-HomeSlug` and the `-SkipPreflight` switch, on the same test-seam reasoning as the exporter's.
+`-VaultPath` and `-HomeSlug` are not optional extras: expansion of `{{OBSIDIAN_VAULT}}` and
+`{{HOME_SLUG}}` has no other source, and derived internally they would take the runner's real
+`$HOME`, which makes the export-install-export round trip untestable. Both scripts declare
+`[CmdletBinding(PositionalBinding=$false)]`; Restore L71-95 records that a new parameter
+otherwise turns positional without warning. Content directories are copied
 over the top of `~/.claude/`. The copy cannot do four things on its own.
 
 **Placeholder expansion.** The five placeholders expand as listed under Payload. If `npm` is
@@ -233,10 +247,15 @@ wrapped in `@()`, per `install/Install-Harness.ps1:826`.
 `pwsh` 7, `node`, `bash` (Git Bash on Windows) or `uvx` is missing; `jq` joins the list on Linux
 when the npm-absent branch points at `statusline-command.sh`, which calls it three times. Every consumer fails open,
 so without the warning the kit goes silently dead on a fresh box. After expansion, every hook,
-`statusLine` and `mcpServers` command runs through `Test-ResidualWindowsPath` (Restore L183-187,
-matching `[A-Za-z]:[\\/]` or `USERPROFILE`) and each hit is printed. That report names `1password`
-and `code-context` by design; anything else it names is an exporter bug. The install still
-completes.
+`statusLine` and `mcpServers` command is tested for "carries an absolute path that does not exist
+on this machine", and each hit is printed. `Test-ResidualWindowsPath` (Restore L183-187, matching
+`[A-Za-z]:[\\/]` or `USERPROFILE`) is kept as the classifier printed beside each hit, telling the
+operator whether a dead path is Windows-shaped, and not as the filter. It cannot be the filter and
+still meet the criterion below: on a Windows receiver every correctly expanded command carries a
+drive letter, so it names all of them, and it never fires on `code-context`'s
+`wsl -e /home/prior/code-context-mcp.sh`, which has neither a drive letter nor `USERPROFILE`. The
+report names `1password` and `code-context` by design; anything else it names is an exporter bug.
+The install still completes.
 
 ## Bugs fixed in transit
 
@@ -255,10 +274,13 @@ rewrite, mirrored by install-time expansion.
    else. `change-management.md` already names the family, a scope filter that resolves empty
    must fail closed, and this one fails open. Fix: derive both roots from `$HOME`, and push them
    through the same normalisation the incoming path gets. L28 does `$np = $path -replace '/', '\'`
-   before the `StartsWith`, so a root built as `Join-Path $HOME '.claude' 'projects'` comes out
-   forward-slashed on Linux, never matches, and leaves the hook exiting 0 exactly as today. The
-   smallest form is `$memRoot = ((Join-Path $HOME '.claude' 'projects') -replace '/', '\') + '\'`,
-   trailing separator kept, and the same for the council root.
+   before the `StartsWith`, so a root built as `Join-Path (Join-Path $HOME '.claude') 'projects'`
+   comes out forward-slashed on Linux, never matches, and leaves the hook exiting 0 exactly as
+   today. The smallest form is
+   `$memRoot = ((Join-Path (Join-Path $HOME '.claude') 'projects') -replace '/', '\') + '\'`,
+   trailing separator kept, and the same for the council root. Nested two-argument calls, never a
+   three-argument one: Windows PowerShell 5.1 rejects the third positional argument with "A
+   positional parameter cannot be found that accepts argument", measured on 5.1.26100.9278.
 2. `hooks/Sync-MemoryToObsidian.ps1`, six sites, not one. L14 hardcodes the vault, L17 the
    council root, L56 the memory root, L47 a regex anchored on `^C:\\Users\\user\\\.claude\\`,
    and L39 and L49 the slug literal `'C--Users-user'`. An environment variable for the vault
@@ -267,16 +289,21 @@ rewrite, mirrored by install-time expansion.
    normalises the incoming path the same way, and build L47's regex source from that normalised
    root, escaped; derive the slug with the `-creplace` from `Get-ProjectSlug`, inlined; read the
    vault from `$env:CLAUDE_OBSIDIAN_VAULT`, falling back to
-   `Join-Path $HOME 'Documents' 'Obsidian Vault' 'Claude Code'`, the current path here, so
-   another box never mints a foreign username's directory tree.
+   `Join-Path (Join-Path (Join-Path $HOME 'Documents') 'Obsidian Vault') 'Claude Code'`, the
+   current path here, so another box never mints a foreign username's directory tree.
 3. `hooks/Lint-DocumentProse.ps1:71` builds the kit path as
    `Join-Path $HOME '.claude\tools\prose-lint\.vale.ini'`. Backslashes are not separators on
-   Linux, so the path never resolves and the kit never loads. Fix: multi-segment `Join-Path`.
+   Linux, so the path never resolves and the kit never loads. Fix: nested two-argument
+   `Join-Path`, one segment per call. Not the three-argument form: this file declares
+   `#Requires -Version 5.1` at line 1, and 5.1 rejects a third positional argument (measured on
+   5.1.26100.9278).
 4. `hooks/Guard-SkillSize.ps1:34-35` reads `$env:USERPROFILE` twice, undefined on Linux, and
-   L218's `if (-not $dir) { exit 0 }` fails open when no root resolves. Fix: multi-segment
-   `Join-Path` from `$HOME` (`"$HOME\.claude\skills"` would repeat bug 3). L36's
-   `$env:LOCALAPPDATA` is also undefined there, but `Get-SkillDirectory` already skips a root
-   that fails `Test-Path`, so that line is cosmetic and changes nothing.
+   L218's `if (-not $dir) { exit 0 }` fails open when no root resolves. Fix: nested two-argument
+   `Join-Path` from `$HOME`, same 5.1 constraint as bug 3 (`"$HOME\.claude\skills"` would repeat
+   bug 3). L36's `$env:LOCALAPPDATA` is also undefined there. In the interpolated form that line
+   is cosmetic, because `Get-SkillDirectory` skips a root that fails `Test-Path`. Converted to
+   `Join-Path` it stops being cosmetic: an empty first argument throws rather than producing a
+   path that fails `Test-Path`, so the bundled root goes inside `if ($env:LOCALAPPDATA)`.
 5. `hooks/harness-core-reminder.sh:18` hardcodes `E:\projects\agent-harness-core` twice in its
    heredoc. Export-time `{{CORE_REPO}}`.
 6. `rules/harness-core.md:3,10`, the same literal. Export-time `{{CORE_REPO}}`.
@@ -317,9 +344,14 @@ declines to build.
 ## Still unresolved
 
 - Which host runs `"shell": "powershell"` on a Windows receiver. `Lint-DocumentProse.ps1:1`
-  says `#Requires -Version 5.1`, but `Sync-MemoryToObsidian.ps1:24,41,49,67` use three-argument
-  `Join-Path`, which is pwsh 7 only. If the host is Windows PowerShell 5.1, that hook fails on
-  every Windows receiver without pwsh on PATH.
+  says `#Requires -Version 5.1`, but `Sync-MemoryToObsidian.ps1:24,41,49,67` use three- and
+  five-argument `Join-Path`, which is pwsh 7 only. If the host is Windows PowerShell 5.1, that
+  hook fails on every Windows receiver without pwsh on PATH.
+
+  This work narrows the question without answering it. Every path build it writes uses nested
+  two-argument `Join-Path`, valid on both hosts, so nothing added here depends on the answer.
+  Those four sites in `Sync-MemoryToObsidian.ps1` are pre-existing and sit outside the six sites
+  bug 2 touches; they keep the question open and are not this work's to close.
 - The Linux location of bundled skills for `Guard-SkillSize.ps1:36`.
 - Whether plugins repopulate from settings alone (above).
 - Whether Claude Code sends `tool_name: "Workflow"` to the model-tier gate (Problem, above).
