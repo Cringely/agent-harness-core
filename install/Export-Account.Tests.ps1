@@ -233,4 +233,115 @@ exit 0
             Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue
         }
     }
+
+    # C2: [System.IO.Path]::GetFullPath resolves a relative path against the .NET process
+    # current directory, which Set-Location does not move; Remove-Item and Copy-Item resolve a
+    # relative path against $PWD instead. Set-Location from this repo (E:) into a stand-in under
+    # %TEMP% (C:) reproduces the divergence: crossing drives is what leaves the two apart in this
+    # environment. Both Its restore the starting location in `finally`, before removing the
+    # stand-in, so a later test never runs from a moved location.
+    #
+    # -ExpectedMessage pins the throw to the C1/C2 guard's own text. Without it these two tests
+    # cannot tell a real guard refusal apart from an unrelated incidental throw: under the
+    # process-CWD divergence a broken resolution lands on this repo's own root, which the I1
+    # marker guard below then refuses on its own ("already exists, is not empty, and carries no
+    # marker"), a different failure that would otherwise make Should -Throw pass for the wrong
+    # reason and hide a C2 regression the same way an unrelated Copy-Item self-copy error did in
+    # fix round 1.
+
+    It "refuses -OutputRoot equal to -ClaudeHome when the session location and the process CWD have diverged" {
+        $stand = New-StandInHome
+        $claude = Join-Path $stand '.claude'
+        $startLocation = Get-Location
+        try {
+            Set-Location -LiteralPath $claude
+            { & $script:export -ClaudeHome $claude -OutputRoot '.' `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp } |
+                Should -Throw -ExpectedMessage '*must not be the account home*'
+            Test-Path -LiteralPath (Join-Path $claude 'rules/security.md') | Should -BeTrue
+            Test-Path -LiteralPath (Join-Path $claude 'agents/appsec-sme.md') | Should -BeTrue
+        }
+        finally {
+            Set-Location -LiteralPath $startLocation
+            Remove-Item -Recurse -Force $stand -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "refuses a relative -OutputRoot nested inside -ClaudeHome when the session location and the process CWD have diverged" {
+        $stand = New-StandInHome
+        $claude = Join-Path $stand '.claude'
+        $startLocation = Get-Location
+        try {
+            Set-Location -LiteralPath $claude
+            { & $script:export -ClaudeHome $claude -OutputRoot './evil-nested' `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp } |
+                Should -Throw -ExpectedMessage '*must not be the account home*'
+            Test-Path -LiteralPath (Join-Path $claude 'rules/security.md') | Should -BeTrue
+            Test-Path -LiteralPath (Join-Path $claude 'agents/appsec-sme.md') | Should -BeTrue
+        }
+        finally {
+            Set-Location -LiteralPath $startLocation
+            Remove-Item -Recurse -Force $stand -ErrorAction SilentlyContinue
+        }
+    }
+
+    # I1: the equality/nesting guard above only covers -OutputRoot landing on the account home
+    # itself. -OutputRoot aimed at some unrelated tree that happens to hold files under an
+    # allowlisted directory name (rules/, hooks/, ...) is still silently destructive without a
+    # second, independent check.
+
+    It "gains a marker file after a fresh export" {
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            & $script:export -ClaudeHome (Join-Path $stand '.claude') -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipSettings -SkipMcp | Out-Null
+            Test-Path -LiteralPath (Join-Path $out '.export-account-marker') | Should -BeTrue
+        }
+        finally {
+            Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "exports again over its own marked output without -Force" {
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        $claude = Join-Path $stand '.claude'
+        try {
+            & $script:export -ClaudeHome $claude -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipSettings -SkipMcp | Out-Null
+            { & $script:export -ClaudeHome $claude -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp } | Should -Not -Throw
+            Test-Path -LiteralPath (Join-Path $out 'rules/security.md') | Should -BeTrue
+        }
+        finally {
+            Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "refuses an unrelated non-empty -OutputRoot with no marker, and deletes nothing" {
+        $stand = New-StandInHome
+        $victim = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-victim-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path (Join-Path $victim 'rules') -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $victim 'hooks') -Force | Out-Null
+        'my rule notes' | Set-Content (Join-Path $victim 'rules/my-notes.md')
+        'my hook'        | Set-Content (Join-Path $victim 'hooks/my-hook.ps1')
+        'unrelated'      | Set-Content (Join-Path $victim 'readme.txt')
+        try {
+            { & $script:export -ClaudeHome (Join-Path $stand '.claude') -OutputRoot $victim `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp } | Should -Throw
+            Test-Path -LiteralPath (Join-Path $victim 'rules/my-notes.md') | Should -BeTrue
+            Test-Path -LiteralPath (Join-Path $victim 'hooks/my-hook.ps1') | Should -BeTrue
+            Test-Path -LiteralPath (Join-Path $victim 'readme.txt') | Should -BeTrue
+        }
+        finally {
+            Remove-Item -Recurse -Force $stand, $victim -ErrorAction SilentlyContinue
+        }
+    }
 }
