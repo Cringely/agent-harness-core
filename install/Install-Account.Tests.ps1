@@ -7,7 +7,12 @@ Describe "Install-Account" {
         # A payload shaped like account/claude, planted rather than exported, so these tests
         # never depend on Task 14 having run and never read the operator's live ~/.claude.
         function New-StandInPayload {
-            $p = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-payload-" + [guid]::NewGuid())
+            # -Path is round 3's addition: every caller before now took the auto-generated guid
+            # path, so a caller that needs the payload's content at a specific directory (the
+            # $sep sibling-name test, the containment-guard canonicalisation test) can still get
+            # the same file set without duplicating it.
+            param([string]$Path)
+            $p = if ($Path) { $Path } else { Join-Path ([System.IO.Path]::GetTempPath()) ("acct-payload-" + [guid]::NewGuid()) }
             foreach ($d in 'rules', 'agents', 'hooks', 'skills/prose-lint', 'tools/prose-lint') {
                 New-Item -ItemType Directory -Path (Join-Path $p $d) -Force | Out-Null
             }
@@ -244,6 +249,58 @@ Describe "Install-Account" {
         finally { Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue }
     }
 
+    # Round 3, item B: $sep anchors the StartsWith comparisons above so a raw name-prefix match
+    # ('.claude-backup' textually starts with '.claude') is not mistaken for real nesting. Two
+    # sibling directories under one parent, sharing a name prefix without either containing the
+    # other, pin that the guard accepts the pair rather than only asserting it rejects genuine
+    # nesting. Both orderings, since either could be the one that regresses.
+    It "accepts '.claude' and '.claude-backup' as siblings when -PayloadRoot is '.claude'" {
+        $parent = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-sep-" + [guid]::NewGuid())
+        $claudeDir = Join-Path $parent '.claude'
+        $backupDir = Join-Path $parent '.claude-backup'
+        New-StandInPayload -Path $claudeDir | Out-Null
+        New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+        try {
+            & $script:install -PayloadRoot $claudeDir -ClaudeHome $backupDir `
+                -ClaudeJson (Join-Path $backupDir 'claude.json') -SkipPreflight | Out-Null
+            Test-Path -LiteralPath (Join-Path $backupDir 'rules/security.md') | Should -BeTrue
+        }
+        finally { Remove-Item -Recurse -Force $parent -ErrorAction SilentlyContinue }
+    }
+
+    It "accepts '.claude' and '.claude-backup' as siblings when -PayloadRoot is '.claude-backup'" {
+        $parent = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-sep-" + [guid]::NewGuid())
+        $claudeDir = Join-Path $parent '.claude'
+        $backupDir = Join-Path $parent '.claude-backup'
+        New-StandInPayload -Path $backupDir | Out-Null
+        New-Item -ItemType Directory -Path $claudeDir -Force | Out-Null
+        try {
+            & $script:install -PayloadRoot $backupDir -ClaudeHome $claudeDir `
+                -ClaudeJson (Join-Path $claudeDir 'claude.json') -SkipPreflight | Out-Null
+            Test-Path -LiteralPath (Join-Path $claudeDir 'rules/security.md') | Should -BeTrue
+        }
+        finally { Remove-Item -Recurse -Force $parent -ErrorAction SilentlyContinue }
+    }
+
+    # Round 3, item C: the containment guard reads $ClaudeHome/$PayloadRoot only after both are
+    # canonicalised at the top of the script. That dependency is already pinned for
+    # Copy-PayloadTree by the relative-path tests above; this pins it for the guard itself, since
+    # a guard reading the raw, uncanonicalised parameters would compare '.' against an absolute
+    # string and never catch a relative -ClaudeHome equal to an absolute -PayloadRoot.
+    It "recognizes a relative -ClaudeHome and its absolute -PayloadRoot as the same directory" {
+        $shared = New-StandInClaudeHome
+        $savedLoc = Get-Location
+        try {
+            Set-Location $shared
+            { & $script:install -PayloadRoot $shared -ClaudeHome '.' -SkipPreflight } |
+                Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
+        }
+        finally {
+            Set-Location $savedLoc
+            Remove-Item -Recurse -Force $shared -ErrorAction SilentlyContinue
+        }
+    }
+
     # Review round 1, item 2: an explicitly empty or $null -ClaudeHome used to fall through to
     # the live $HOME/.claude default, since `if (-not $ClaudeHome)` cannot tell "the caller did
     # not ask" from "the caller asked for nothing". This never touches the live account layer:
@@ -270,6 +327,35 @@ Describe "Install-Account" {
             & $script:install -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -WhatIf | Out-Null
             Test-Path -LiteralPath (Join-Path $h 'rules/security.md') | Should -BeFalse
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Round 3, item A: `& $chmod.Source` is a native call, not a cmdlet, so it does not honour
+    # $WhatIfPreference on its own. A dry run used to chmod real hooks on an already-installed
+    # target anyway, the one write -WhatIf did not actually prevent. Pre-populating
+    # ClaudeHome's hooks with a real .sh file, simulating a re-run against an existing install
+    # (the only shape that gives the chmod loop something to find), makes the invocation
+    # observable through the same logging stub used elsewhere.
+    It "does not invoke chmod under -WhatIf, even against an already-installed target" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        New-Item -ItemType Directory -Path (Join-Path $h 'hooks') -Force | Out-Null
+        'existing hook' | Set-Content (Join-Path $h 'hooks/existing-hook.sh')
+        $stubBin = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-chmodstub-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $stubBin -Force | Out-Null
+        $log = Join-Path $stubBin 'invoked.log'
+        Set-Content (Join-Path $stubBin 'chmod.cmd') "@echo off`r`necho called %* >> `"$log`"`r`nexit /b 0"
+        $savedPath = $env:PATH
+        $logExisted = $false
+        try {
+            $env:PATH = "$stubBin;$savedPath"
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -TargetIsWindows:$false -WhatIf | Out-Null
+            $logExisted = Test-Path -LiteralPath $log
+        }
+        finally { $env:PATH = $savedPath; Remove-Item -Recurse -Force $stubBin -EA SilentlyContinue }
+        try {
+            $logExisted | Should -BeFalse
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
@@ -525,5 +611,53 @@ Describe "Install-Account" {
             $logContent | Should -Match 'harness-core-reminder\.sh'
         }
         finally { Remove-Item -Recurse -Force $p, $hParent -ErrorAction SilentlyContinue }
+    }
+
+    # Round 3, item D: the two tests above only assert that a hook's filename reaches the log,
+    # not what mode string chmod was called with. A typo turning +x into -x, or dropping it,
+    # would pass both of them silently.
+    It "passes +x as the chmod mode argument, not some other string" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        $stubBin = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-chmodstub-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $stubBin -Force | Out-Null
+        $log = Join-Path $stubBin 'invoked.log'
+        Set-Content (Join-Path $stubBin 'chmod.cmd') "@echo off`r`necho called %* >> `"$log`"`r`nexit /b 0"
+        $savedPath = $env:PATH
+        $logContent = $null
+        try {
+            $env:PATH = "$stubBin;$savedPath"
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -TargetIsWindows:$false | Out-Null
+            if (Test-Path -LiteralPath $log) { $logContent = Get-Content -Raw $log }
+        }
+        finally { $env:PATH = $savedPath; Remove-Item -Recurse -Force $stubBin -EA SilentlyContinue }
+        try {
+            $logContent | Should -Match 'called \+x '
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Round 3, item D: -Filter *.sh is asserted only by omission elsewhere, never by a payload
+    # that actually carries a non-.sh file under hooks/ to prove it gets skipped.
+    It "does not chmod a non-.sh file under hooks/" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        'not a shell hook' | Set-Content (Join-Path $p 'hooks/reference-notes.txt')
+        $stubBin = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-chmodstub-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $stubBin -Force | Out-Null
+        $log = Join-Path $stubBin 'invoked.log'
+        Set-Content (Join-Path $stubBin 'chmod.cmd') "@echo off`r`necho called %* >> `"$log`"`r`nexit /b 0"
+        $savedPath = $env:PATH
+        $logContent = ''
+        try {
+            $env:PATH = "$stubBin;$savedPath"
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -TargetIsWindows:$false | Out-Null
+            if (Test-Path -LiteralPath $log) { $logContent = Get-Content -Raw $log }
+        }
+        finally { $env:PATH = $savedPath; Remove-Item -Recurse -Force $stubBin -EA SilentlyContinue }
+        try {
+            $logContent | Should -Not -Match 'reference-notes\.txt'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
 }

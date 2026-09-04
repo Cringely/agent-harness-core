@@ -10,8 +10,9 @@
     payload, so the repo holds one copy of it. A preflight warns about every prerequisite tool
     absent from PATH without gating the install. On a Linux target every .sh hook under
     hooks/ is chmod +x'd; the operator gets the same warning either way if chmod is missing or
-    if it runs and fails. Supports -WhatIf: every write is a built-in cmdlet that honours
-    $WhatIfPreference on its own, with no manual ShouldProcess wrap needed.
+    if it runs and fails. Supports -WhatIf: every file write is a built-in cmdlet that honours
+    $WhatIfPreference on its own, and the one write that is not, the chmod call, is wrapped in
+    its own $PSCmdlet.ShouldProcess check so a dry run does not mark hooks executable either.
 
     -PayloadRoot and -ClaudeHome are canonicalised and refused if they are the same directory
     or nested inside each other, since the copy reads recursively from one while writing into
@@ -114,7 +115,12 @@ $PayloadRoot = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFrom
 # mirror deletes each allowlisted directory before recopying, so containment would delete the
 # live account layer; here it would make the copy read from inside its own destination).
 # Compares the canonical paths resolved just above, not the raw parameter strings, so a
-# relative '.' or a trailing separator cannot slip past.
+# relative '.' or a trailing separator cannot slip past. This is a string comparison, not a
+# filesystem resolution: it does not see through an NTFS junction, a symlink, an 8.3 short
+# name, or a \\?\-prefixed path, so a -PayloadRoot that reaches -ClaudeHome through one of
+# those is not caught here. Filed as a backlog item (a shared reparse-point-aware helper in
+# AccountShared.ps1, since Export-Account.ps1 has the identical gap in its own guard) rather
+# than fixed in this pass.
 $onWindowsHost = ($PSVersionTable.PSVersion.Major -lt 6) -or $IsWindows
 $pathComparison = if ($onWindowsHost) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
 $sep = [System.IO.Path]::DirectorySeparatorChar
@@ -247,12 +253,19 @@ try {
     # as a silent semantics change for every native call in this file.
     $chmodWarning = 'chmod not on PATH: .sh hooks are not marked executable. Run `chmod +x ~/.claude/hooks/*.sh` on the target.'
     if (-not $TargetIsWindows -and $chmod) {
-        $chmodFailed = $false
-        foreach ($s in @(Get-ChildItem -LiteralPath (Join-Path $ClaudeHome 'hooks') -Recurse -File -Filter *.sh -Force -ErrorAction SilentlyContinue)) {
-            & $chmod.Source +x $s.FullName
-            if ($LASTEXITCODE -ne 0) { $chmodFailed = $true }
+        # Round 3: `& $chmod.Source` is a native executable, not a cmdlet, so it does not read
+        # $WhatIfPreference on its own the way New-Item and Copy-Item above do. A dry run used to
+        # chmod the real target's hooks anyway, the one write in this script -WhatIf did not
+        # actually prevent. Gated the same way Export-Account.ps1:346 gates its own plain-script-
+        # logic step that isn't a self-aware cmdlet either.
+        if ($PSCmdlet.ShouldProcess($ClaudeHome, 'chmod +x .sh hooks')) {
+            $chmodFailed = $false
+            foreach ($s in @(Get-ChildItem -LiteralPath (Join-Path $ClaudeHome 'hooks') -Recurse -File -Filter *.sh -Force -ErrorAction SilentlyContinue)) {
+                & $chmod.Source +x $s.FullName
+                if ($LASTEXITCODE -ne 0) { $chmodFailed = $true }
+            }
+            if ($chmodFailed) { Write-Warning $chmodWarning }
         }
-        if ($chmodFailed) { Write-Warning $chmodWarning }
     }
     elseif (-not $TargetIsWindows) {
         Write-Warning $chmodWarning
