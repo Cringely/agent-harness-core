@@ -203,13 +203,26 @@ try {
     # whenever a test drives the Linux branch: `& chmod` with no chmod on PATH is terminating,
     # so the round-trip test in Task 12 would die here rather than assert on the installed tree.
     $chmod = Get-Command chmod -ErrorAction SilentlyContinue
+    # Same message either way: an operator does not need to know whether chmod was missing or
+    # failed, only that they need to run it themselves. Review round 1, item 7: at this
+    # process's $PSNativeCommandUseErrorActionPreference default (false), a chmod that exits
+    # non-zero does not throw, so a failure here used to print raw stderr and nothing else,
+    # while the absent case got this same sentence. Checking $LASTEXITCODE and reusing the
+    # warning closes that gap without touching the preference itself, which Export-Account.ps1's
+    # npm probe already relies on staying false (it checks $LASTEXITCODE explicitly too, rather
+    # than letting a non-zero exit throw), and which the next two tasks would otherwise inherit
+    # as a silent semantics change for every native call in this file.
+    $chmodWarning = 'chmod not on PATH: .sh hooks are not marked executable. Run `chmod +x ~/.claude/hooks/*.sh` on the target.'
     if (-not $TargetIsWindows -and $chmod) {
+        $chmodFailed = $false
         foreach ($s in @(Get-ChildItem (Join-Path $ClaudeHome 'hooks') -Recurse -File -Filter *.sh -ErrorAction SilentlyContinue)) {
             & $chmod.Source +x $s.FullName
+            if ($LASTEXITCODE -ne 0) { $chmodFailed = $true }
         }
+        if ($chmodFailed) { Write-Warning $chmodWarning }
     }
     elseif (-not $TargetIsWindows) {
-        Write-Warning 'chmod not on PATH: .sh hooks are not marked executable. Run `chmod +x ~/.claude/hooks/*.sh` on the target.'
+        Write-Warning $chmodWarning
     }
 }
 catch {
