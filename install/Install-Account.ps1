@@ -21,8 +21,10 @@
     copy here is an unconditional overwrite and safe to repeat.
 
     Placeholder expansion, the Linux invocation rewrite, and a settings.json merge that does not
-    clobber what Claude Code writes into that file itself are all here (Tasks 9 and 10). A
-    residual-path report is not; Tasks 11 and 12 add it to this same script.
+    clobber what Claude Code writes into that file itself are all here (Tasks 9 and 10). An
+    mcpServers add-if-missing merge into ~/.claude.json and a residual-path report naming what no
+    settings rewrite can reach (a Store path with an embedded version, a WSL launcher into
+    another user's home) are here too (Task 11). Task 12 follows.
 
     The update path is `git pull` then re-run this script. Install overwrites;
     settings.local.json is the per-machine escape hatch. Removal does not propagate to a
@@ -90,12 +92,13 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path $PSScriptRoot -Parent
 
 # An explicitly passed empty string or $null is a caller error, not "no preference": falling
-# through to the default here would silently target the operator's live ~/.claude (-ClaudeHome)
-# or this clone's own payload (-PayloadRoot) for a caller that meant to supply a real path and
-# got an empty one from an unset environment variable or a failed lookup. ContainsKey
-# distinguishes "passed empty" from "omitted", the same test -NpmGlobal already uses below for
-# the opposite reason: there, an explicit empty is a real request rather than an error.
-foreach ($n in 'ClaudeHome', 'PayloadRoot') {
+# through to the default here would silently target the operator's live ~/.claude (-ClaudeHome),
+# this clone's own payload (-PayloadRoot), or the operator's live ~/.claude.json (-ClaudeJson,
+# Task 11) for a caller that meant to supply a real path and got an empty one from an unset
+# environment variable or a failed lookup. ContainsKey distinguishes "passed empty" from
+# "omitted", the same test -NpmGlobal already uses below for the opposite reason: there, an
+# explicit empty is a real request rather than an error.
+foreach ($n in 'ClaudeHome', 'PayloadRoot', 'ClaudeJson') {
     if ($PSBoundParameters.ContainsKey($n) -and -not $PSBoundParameters[$n]) {
         throw "-$n was passed empty. Omit it to take the default, or pass a real path."
     }
@@ -116,6 +119,18 @@ if (-not $PayloadRoot) { $PayloadRoot = Join-Path (Join-Path $repoRoot 'account'
 # success and exited 0.
 $ClaudeHome  = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ClaudeHome).TrimEnd('\', '/')
 $PayloadRoot = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PayloadRoot).TrimEnd('\', '/')
+# Task 11: -ClaudeJson gets the same canonicalisation for consistency with the two paths above,
+# though the reason differs. Every consumer of -ClaudeJson (Test-Path, Get-Content, Set-Content
+# in Merge-McpServer and the residual report below) is a cmdlet that already resolves a relative
+# path against $PWD correctly on its own, and this script never calls Set-Location, so a relative
+# -ClaudeJson works correctly either way; ablating this line changes no test's outcome. It is
+# kept because -ClaudeHome and -PayloadRoot need it for a real reason (Copy-PayloadTree's string-
+# prefix arithmetic below cannot use a relative path), and a caller comparing all three -- or a
+# future consumer of -ClaudeJson that does string work instead of cmdlet-based I/O -- should not
+# find the third one alone left relative. GetUnresolvedProviderPathFromPSPath resolves a path
+# that does not exist yet on disk (confirmed against a fresh -ClaudeJson under a not-yet-created
+# -ClaudeHome), so this is safe to do unconditionally, same as the other two.
+$ClaudeJson  = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ClaudeJson)
 
 # Review round 2 addendum: -PayloadRoot and -ClaudeHome must not be the same directory, or
 # nested inside each other. Copy-PayloadTree reads recursively from -PayloadRoot while writing
@@ -669,3 +684,185 @@ if (Test-Path -LiteralPath $settingsSrc) {
         throw
     }
 }
+
+# --- mcpServers --------------------------------------------------------------
+# Add-if-missing, receiver wins on an existing entry. Payload-wins would loop with shipping
+# 1password and code-context as-is: the receiver hand-fixes those two, the next pull reverts
+# them, and settings.local.json cannot reach ~/.claude.json to hold the fix. Nothing else in
+# that file is touched.
+# Expansion is its own pass over every server, run before the merge. Doing it inside the merge
+# loop would expand only the servers that get added, because the loop skips the ones the
+# receiver already has, and the residual report below reads the same object: an unexpanded
+# {{CLAUDE_HOME}} would then be reported as a source-machine path on every receiver that
+# already had that server.
+function Expand-McpServer {
+    param([pscustomobject]$Servers, [hashtable]$Tokens)
+    if (-not $Servers) { return $Servers }
+    foreach ($name in @($Servers.PSObject.Properties.Name | Where-Object { $_ })) {
+        $srv = $Servers.$name
+        if ($srv.command) { $srv.command = Expand-AccountToken -Text $srv.command -Tokens $Tokens }
+        if ($null -ne $srv.args) {
+            $srv.args = @(@($srv.args) | ForEach-Object { Expand-AccountToken -Text $_ -Tokens $Tokens })
+        }
+        if ($srv.env) {
+            # Where-Object { $_ }: an mcpServers entry with "env": {} (every fixture below ships
+            # one) makes .PSObject.Properties.Name $null, and @($null) is a ONE-element array
+            # holding $null, not an empty one. Unfiltered, the loop ran once with $k = $null and
+            # $srv.env.$null = ... is a property SET with a null name, which throws
+            # (SetValueInvocationException: "the value of argument 'name' is not valid"),
+            # terminating the whole install on the first server carrying an empty env object.
+            # Reproduced against this exact shape before adding the filter.
+            foreach ($k in @($srv.env.PSObject.Properties.Name | Where-Object { $_ })) {
+                $srv.env.$k = Expand-AccountToken -Text $srv.env.$k -Tokens $Tokens
+            }
+        }
+    }
+    return $Servers
+}
+
+function Merge-McpServer {
+    param([pscustomobject]$PayloadServers, [string]$ClaudeJsonPath)
+    $added = @()
+    if (-not $PayloadServers) { return $added }
+
+    $doc = if (Test-Path -LiteralPath $ClaudeJsonPath) {
+        Get-Content -LiteralPath $ClaudeJsonPath -Raw | ConvertFrom-Json
+    }
+    else { [pscustomobject]@{} }
+    if (-not $doc.PSObject.Properties['mcpServers']) {
+        $doc | Add-Member -NotePropertyName mcpServers -NotePropertyValue ([pscustomobject]@{}) -Force
+    }
+
+    foreach ($name in @($PayloadServers.PSObject.Properties.Name | Where-Object { $_ })) {
+        if ($doc.mcpServers.PSObject.Properties[$name]) { continue }
+        $doc.mcpServers | Add-Member -NotePropertyName $name -NotePropertyValue $PayloadServers.$name -Force
+        $added += $name
+    }
+
+    $doc | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $ClaudeJsonPath -Encoding utf8
+    return @($added)
+}
+
+$mcpSrc = Join-Path $PayloadRoot 'mcp-servers.json'
+if (Test-Path -LiteralPath $mcpSrc) {
+    # Same reasoning and placement as the settings-merge try/catch above: this writes
+    # -ClaudeJson after the tree copy and settings merge have already run, so a failure here
+    # leaves $ClaudeHome (and now -ClaudeJson) in the same mixed state, just later in the run.
+    try {
+        $payloadServers = Expand-McpServer -Tokens $tokens `
+            -Servers ((Get-Content -LiteralPath $mcpSrc -Raw | ConvertFrom-Json).mcpServers)
+        $added = @(Merge-McpServer -PayloadServers $payloadServers -ClaudeJsonPath $ClaudeJson)
+        Write-Host "  mcpServers: $($added.Count) added$(if ($added.Count) { " ($($added -join ', '))" })"
+    }
+    catch {
+        Write-Warning $mixedStateWarning
+        throw
+    }
+}
+
+# --- residual report ---------------------------------------------------------
+# No settings rewrite can reach a path baked into a Store filename or a WSL user's home, so the
+# honest move is to name them rather than pretend a placeholder covers them.
+#
+# The test is "carries an absolute path that does not exist here", not Test-ResidualWindowsPath
+# alone. That function answers a different question, and the design's own acceptance criterion
+# ("names 1password and code-context; anything else it names is an exporter bug") cannot hold
+# under it in either direction. On a Windows receiver every correctly expanded command carries a
+# drive letter, so a drive-letter rule reports all of them and the report stops meaning
+# anything. And it never fires on code-context's `wsl -e /home/prior/code-context-mcp.sh`, which
+# has no drive letter and no USERPROFILE, so one of the two entries the report exists to name is
+# invisible to it. Test-ResidualWindowsPath is kept as the classifier on the printed line, which
+# is what tells the operator whether a dead path is Windows-shaped.
+function Get-UnresolvedPath {
+    param([string]$Text)
+    $out = @()
+    if (-not $Text) { return $out }
+    # A drive-letter path or a POSIX-rooted one, stopping at a quote or whitespace. Flags like
+    # -NoProfile and bare command names carry no leading separator and are never matched.
+    foreach ($m in [regex]::Matches($Text, '(?:[A-Za-z]:[\\/]|/)[^"''\s]*')) {
+        $p = $m.Value.TrimEnd(',', ';', ')')
+        if ($p -and -not (Test-Path -LiteralPath $p)) { $out += $p }
+    }
+    return @($out)
+}
+
+function Get-ResidualCommand {
+    param([pscustomobject]$Settings, [pscustomobject]$Servers)
+    $found = @()
+
+    function Add-IfDead {
+        param([string]$Where, [string]$Command, [System.Collections.IList]$Into)
+        $dead = @(Get-UnresolvedPath -Text $Command)
+        if ($dead.Count -eq 0) { return }
+        $shape = if (Test-ResidualWindowsPath $Command) { 'Windows-shaped' } else { 'POSIX-shaped' }
+        $Into.Add([pscustomobject]@{
+                Where = $Where; Command = $Command; Dead = ($dead -join ', '); Shape = $shape
+            })
+    }
+
+    $list = New-Object System.Collections.Generic.List[pscustomobject]
+    # Where-Object { $_ } at all three levels, matching Convert-SettingsForTarget's identical
+    # walk over $Settings.hooks above: an empty hooks object (every fixture that reaches this
+    # function ships one) makes .PSObject.Properties.Name $null and @($null) a one-element
+    # array holding $null. Currently harmless here specifically because Add-IfDead's own
+    # Get-UnresolvedPath returns @() for a falsy $Command, so the phantom iteration this produced
+    # unfiltered was a silent no-op rather than a wrong report line -- verified by removing the
+    # filters and re-running rather than assumed. Filtered anyway, so a future change to either
+    # of those two functions cannot turn a currently-inert phantom iteration into a live bug.
+    foreach ($event in @($Settings.hooks.PSObject.Properties.Name | Where-Object { $_ })) {
+        foreach ($g in @(@($Settings.hooks.$event) | Where-Object { $_ })) {
+            foreach ($x in @(@($g.hooks) | Where-Object { $_ })) { Add-IfDead -Where "hooks.$event" -Command $x.command -Into $list }
+        }
+    }
+    if ($Settings.statusLine.command) {
+        Add-IfDead -Where 'statusLine' -Command $Settings.statusLine.command -Into $list
+    }
+    foreach ($name in @($Servers.PSObject.Properties.Name | Where-Object { $_ })) {
+        $srv = $Servers.$name
+        # One line per server, not one per string: two dead args on one entry are one problem.
+        $joined = (@($srv.command) + @($srv.args)) -join ' '
+        Add-IfDead -Where "mcpServers.$name" -Command $joined -Into $list
+    }
+    $found = @($list.ToArray())
+    return $found
+}
+
+# Both halves of this report read the INSTALLED state, never the payload: settings.json as it
+# now sits under $ClaudeHome, and mcpServers as they now sit in -ClaudeJson. One source, so the
+# report says what is on this machine rather than half of that and half of what shipped.
+# Reading the payload's servers instead would re-name 1password and code-context on every
+# install after the receiver hand-fixed them, and preserving that hand-fix is the whole reason
+# the merge above is add-if-missing.
+#
+# Both reads are wrapped: under -WhatIf a pre-existing, unparseable settings.json is left
+# exactly as it was, since Set-Content's own ShouldProcess check skips the write that would
+# otherwise have replaced it (Backup-BrokenSettings already warned about the same file during
+# the merge above). Reproduced: "under -WhatIf, does not claim a backup it never made" crashed
+# here with a raw JsonReaderException before this try/catch existed, reading the same malformed
+# text a second time. Scanning malformed JSON for residual paths is not a meaning that exists,
+# so this falls back to "nothing to scan" instead of taking the whole dry run down with it.
+$liveForReport = Join-Path $ClaudeHome 'settings.json'
+$reportSettings = [pscustomobject]@{ hooks = [pscustomobject]@{} }
+if (Test-Path -LiteralPath $liveForReport) {
+    try { $reportSettings = Get-Content -LiteralPath $liveForReport -Raw | ConvertFrom-Json }
+    catch { }
+}
+
+$reportServers = $null
+if (Test-Path -LiteralPath $ClaudeJson) {
+    try { $reportServers = (Get-Content -LiteralPath $ClaudeJson -Raw | ConvertFrom-Json).mcpServers }
+    catch { }
+}
+
+$residuals = @(Get-ResidualCommand -Settings $reportSettings -Servers $reportServers)
+if ($residuals.Count -gt 0) {
+    Write-Host ''
+    Write-Host 'Still carrying a source-machine path, and no settings rewrite can reach them:'
+    foreach ($r in $residuals) {
+        Write-Host "  $($r.Where) [$($r.Shape)]: $($r.Command)"
+        Write-Host "    does not exist here: $($r.Dead)"
+    }
+    Write-Host 'Expected here: mcpServers.1password (a Store path with an embedded version) and mcpServers.code-context (a WSL launcher into another user home). Anything else on this list is an exporter bug.'
+}
+Write-Host ''
+Write-Host 'Install complete. Restart Claude Code to pick up the new settings.'
