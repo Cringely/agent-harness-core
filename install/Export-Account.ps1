@@ -40,6 +40,11 @@
 .PARAMETER SkipMcp
     Skip the mcp-servers.json lift. Test seam.
 
+.PARAMETER Force
+    Overwrite a non-empty -OutputRoot that carries no marker from a previous export. Does not
+    bypass the refusal on -OutputRoot equal to, or inside, -ClaudeHome; that refusal is
+    unconditional.
+
 .EXAMPLE
     pwsh -NoProfile -File install/Export-Account.ps1
 #>
@@ -72,7 +77,8 @@ param(
     [string]$NpmGlobal,
     [string]$VaultPath,
     [switch]$SkipSettings,
-    [switch]$SkipMcp
+    [switch]$SkipMcp,
+    [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
@@ -106,8 +112,18 @@ if (-not (Test-Path -LiteralPath $ClaudeHome)) { throw "No account layer at '$Cl
 # account layer instead of the export destination. Refuse before anything is touched. Compare
 # canonical absolute paths, not the raw parameter strings, so a relative '.' or a trailing slash
 # cannot slip past the check.
-$claudeHomeFull = [System.IO.Path]::GetFullPath($ClaudeHome).TrimEnd('\', '/')
-$outputRootFull = [System.IO.Path]::GetFullPath($OutputRoot).TrimEnd('\', '/')
+#
+# GetUnresolvedProviderPathFromPSPath, not [System.IO.Path]::GetFullPath: GetFullPath resolves a
+# relative path against the .NET process current directory, which Set-Location does not move, so
+# once a session's location and process CWD diverge, GetFullPath silently compares different
+# paths than the ones Remove-Item and Copy-Item actually act on (they resolve against $PWD).
+# Measured destroying a stand-in this way: absolute -ClaudeHome plus -OutputRoot '.' with the
+# location diverged took a 7-file stand-in to 2, no refusal. Resolve-Path and Convert-Path are
+# not substitutes; both throw on -OutputRoot, which usually does not exist yet.
+# GetUnresolvedProviderPathFromPSPath resolves against the session's actual location and accepts
+# a path that is not there yet.
+$claudeHomeFull = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ClaudeHome).TrimEnd('\', '/')
+$outputRootFull = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputRoot).TrimEnd('\', '/')
 # Windows paths are case-insensitive; Linux paths are not. $IsWindows is undefined on Windows
 # PowerShell 5.1, where the answer is always Windows -- the same platform line
 # Restore-ClaudeProject.ps1's $TargetIsWindows default draws.
@@ -118,6 +134,23 @@ if ($outputRootFull.Equals($claudeHomeFull, $pathComparison) -or
     $outputRootFull.StartsWith("$claudeHomeFull$sep", $pathComparison)) {
     throw "-OutputRoot ('$outputRootFull') must not be the account home or a path inside it " +
         "('$claudeHomeFull'); the mirror deletes each allowlisted directory before recopying."
+}
+
+# The guard above closes -OutputRoot landing on the account home itself. It does not cover
+# -OutputRoot aimed at some unrelated tree that happens to hold files under an allowlisted name
+# (rules/, agents/, skills/, hooks/, tools/prose-lint/): Copy-AccountTree would delete those
+# without ever noticing they belong to something else. Same shape Restore-ClaudeProject.ps1:247
+# uses for -RepoPath: refuse a non-empty destination unless it carries the marker a previous
+# export leaves behind, or the operator overrides with -Force. -Force reaches only this check;
+# the equality/nesting guard above is unconditional and -Force does not touch it.
+$exportMarker = Join-Path $outputRootFull '.export-account-marker'
+if ((Test-Path -LiteralPath $outputRootFull) -and
+    @(Get-ChildItem -LiteralPath $outputRootFull -Force -ErrorAction SilentlyContinue) -and
+    -not (Test-Path -LiteralPath $exportMarker) -and
+    -not $Force) {
+    throw "-OutputRoot ('$outputRootFull') already exists, is not empty, and carries no marker " +
+        "from a previous export. Re-run with -Force if overwriting it is intentional, or pick a " +
+        "different -OutputRoot."
 }
 
 Write-Host "Account home : $ClaudeHome"
@@ -172,3 +205,13 @@ foreach ($f in $script:AccountRootFiles) {
     }
     else { Write-Warning "absent, skipping: $src" }
 }
+
+# Written only after every copy above completes without throwing, so its presence means this
+# -OutputRoot really was produced by a prior export and the non-empty-destination refusal above
+# can trust it next time. Sits at the output root rather than inside an allowlisted directory, so
+# Copy-AccountTree's per-directory remove-and-recreate never touches it. Set-Content is itself
+# ShouldProcess-aware, so under -WhatIf it does not write, matching every other step here.
+Set-Content -LiteralPath $exportMarker -Value (
+    "Written by Export-Account.ps1. Marks this directory as a known export destination so a " +
+    "repeat export does not need -Force. Delete this file (or the whole directory) to require " +
+    "-Force again.")
