@@ -1083,6 +1083,43 @@ Describe "Install-Account" {
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
 
+    # Task 10 review round 2: deny replacing wholesale would silently drop a restriction an
+    # operator deliberately added on their own machine, the dangerous direction to fail in.
+    # Unioned the same way allow already is.
+    It "unions permissions.deny instead of replacing a receiver's own entry" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            '{"permissions":{"deny":["Bash(curl:*)"]}}' | Set-Content (Join-Path $h 'settings.json')
+            @{ permissions = @{ deny = @('Bash(rm:*)') } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -SkipPreflight | Out-Null
+
+            $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
+            @($s.permissions.deny) | Should -Be @('Bash(curl:*)', 'Bash(rm:*)')
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "does not insert a blank entry into permissions.deny when the existing permissions object is empty" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            '{"permissions":{}}' | Set-Content (Join-Path $h 'settings.json')
+            @{ permissions = @{ deny = @('Bash(rm:*)') } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -SkipPreflight | Out-Null
+
+            $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
+            @($s.permissions.deny) | Should -Be @('Bash(rm:*)')
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
     # Task 10 review, finding 1: "hooks": null and "permissions": null at the top of an existing
     # settings.json crashed the merge with "Cannot index into a null array", since the hooks and
     # permissions branches assume $ev has properties to look up. A receiver-only key alongside
@@ -1232,6 +1269,42 @@ Describe "Install-Account" {
 
             $out | Should -Not -Match 'Backed up to'
             @(Get-ChildItem -LiteralPath $h -Filter 'settings.json.bak.*').Count | Should -Be 0
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Task 10 review round 2, finding D: the residual-token scan used to run over the merged
+    # output, so a receiver's own {{TOKEN}}-shaped content (their own convention, or
+    # coincidence) tripped a warning claiming this install left a hook command broken, when the
+    # install never touched that content and had no substitution for it. Scanning the payload
+    # alone instead.
+    It "does not warn about a receiver's own placeholder-shaped content in settings.json" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            '{"env":{"X":"{{MYSTERY}}"}}' | Set-Content (Join-Path $h 'settings.json')
+            @{ effortLevel = 'xhigh' } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -SkipPreflight *>&1 | Out-String
+
+            $out | Should -Not -Match 'Unexpanded placeholder'
+            $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
+            $s.env.X | Should -Be '{{MYSTERY}}'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "still warns when the payload's own settings carry an unexpanded placeholder" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            @{ env = @{ X = '{{MYSTERY}}' } } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -SkipPreflight *>&1 | Out-String
+
+            $out | Should -Match 'Unexpanded placeholder\(s\) in settings\.json: \{\{MYSTERY\}\}'
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
