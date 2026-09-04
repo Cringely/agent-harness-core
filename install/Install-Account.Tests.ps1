@@ -670,4 +670,149 @@ Describe "Install-Account" {
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
+
+    It "expands all five tokens in the files that carry them" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            foreach ($d in 'skills/handoff', 'skills/council', 'skills/subagent-prompting') {
+                New-Item -ItemType Directory -Path (Join-Path $p $d) -Force | Out-Null
+            }
+            'write to {{OBSIDIAN_VAULT}}/Handoffs/<slug>/handoff-latest.md' |
+                Set-Content (Join-Path $p 'skills/handoff/SKILL.md')
+            'home maps to {{HOME_SLUG}}' | Set-Content (Join-Path $p 'skills/council/SKILL.md')
+            '~/.claude/projects/{{HOME_SLUG}}/memory and {{OBSIDIAN_VAULT}}/Handoffs' |
+                Set-Content (Join-Path $p 'skills/subagent-prompting/SKILL.md')
+            @{ hooks = @{ PreToolUse = @( @{ matcher = 'Skill'; hooks = @(
+                                @{ type = 'command'
+                                    command = 'node {{NPM_GLOBAL}}/ccstatusline/dist/ccstatusline.js --hook' }) }) } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -NpmGlobal 'C:/npm/node_modules' -SkipPreflight | Out-Null
+
+            $expectedHome = $h -replace '\\', '/'
+            $expectedSlug = $HOME.TrimEnd('\', '/') -creplace '[^A-Za-z0-9]', '-'
+            (Get-Content (Join-Path $h 'rules/harness-core.md') -Raw) |
+                Should -Match ([regex]::Escape('E:/projects/agent-harness-core'))
+            (Get-Content (Join-Path $h 'hooks/harness-core-reminder.sh') -Raw) |
+                Should -Match ([regex]::Escape('E:/projects/agent-harness-core'))
+            (Get-Content (Join-Path $h 'skills/prose-lint/SKILL.md') -Raw) |
+                Should -Match ([regex]::Escape("$expectedHome/tools/prose-lint/.vale.ini"))
+            (Get-Content (Join-Path $h 'skills/council/SKILL.md') -Raw) |
+                Should -Match ([regex]::Escape($expectedSlug))
+            $sub = Get-Content (Join-Path $h 'skills/subagent-prompting/SKILL.md') -Raw
+            $sub | Should -Match ([regex]::Escape($expectedSlug))
+            $sub | Should -Not -Match '\{\{'
+
+            $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
+            @($s.hooks.PreToolUse)[0].hooks[0].command |
+                Should -Be 'node C:/npm/node_modules/ccstatusline/dist/ccstatusline.js --hook'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "rewrites a PowerShell hook entry for Linux and removes its shell key" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            @{
+                env = @{ CLAUDE_CODE_USE_POWERSHELL_TOOL = '1'; ENABLE_TOOL_SEARCH = 'auto:5' }
+                hooks = @{ PreToolUse = @( @{ matcher = 'Write|Edit'; hooks = @(
+                                @{ type = 'command'
+                                    command = "& '{{CLAUDE_HOME}}/hooks/Scan-MemorySecrets.ps1'"
+                                    shell = 'powershell'; timeout = 5 }) }) }
+            } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -NpmGlobal '/usr/lib/node_modules' -TargetIsWindows:$false -SkipPreflight | Out-Null
+
+            $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
+            $hook = @(@($s.hooks.PreToolUse)[0].hooks)[0]
+            $hook.command | Should -Be "pwsh -NoProfile -File '$($h -replace '\\', '/')/hooks/Scan-MemorySecrets.ps1'"
+            # Without the removal the command string still goes to a PowerShell host and the
+            # pwsh rewrite is pointless.
+            $hook.PSObject.Properties.Name | Should -Not -Contain 'shell'
+            $s.env.PSObject.Properties.Name | Should -Not -Contain 'CLAUDE_CODE_USE_POWERSHELL_TOOL'
+            $s.env.ENABLE_TOOL_SEARCH | Should -Be 'auto:5'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "leaves the invocation form, the shell key and the env var alone on Windows" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            @{
+                env = @{ CLAUDE_CODE_USE_POWERSHELL_TOOL = '1' }
+                hooks = @{ PreToolUse = @( @{ matcher = 'Write|Edit'; hooks = @(
+                                @{ type = 'command'
+                                    command = "& '{{CLAUDE_HOME}}/hooks/Scan-MemorySecrets.ps1'"
+                                    shell = 'powershell' }) }) }
+            } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -NpmGlobal 'C:/npm' -TargetIsWindows:$true -SkipPreflight | Out-Null
+
+            $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
+            $hook = @(@($s.hooks.PreToolUse)[0].hooks)[0]
+            $hook.command | Should -Be "& '$($h -replace '\\', '/')/hooks/Scan-MemorySecrets.ps1'"
+            $hook.shell | Should -Be 'powershell'
+            $s.env.CLAUDE_CODE_USE_POWERSHELL_TOOL | Should -Be '1'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "drops the ccstatusline entries and repoints statusLine when npm is absent" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            @{
+                hooks = @{
+                    PreToolUse = @( @{ matcher = 'Skill'; hooks = @(
+                                @{ type = 'command'; command = "& '{{CLAUDE_HOME}}/hooks/Guard-SkillSize.ps1'"
+                                    shell = 'powershell' }
+                                @{ type = 'command'
+                                    command = 'node {{NPM_GLOBAL}}/ccstatusline/dist/ccstatusline.js --hook' }) })
+                    UserPromptSubmit = @( @{ hooks = @(
+                                @{ type = 'command'
+                                    command = 'node {{NPM_GLOBAL}}/ccstatusline/dist/ccstatusline.js --hook' }) })
+                }
+                statusLine = @{ type = 'command'
+                    command = 'node {{NPM_GLOBAL}}/ccstatusline/dist/ccstatusline.js'; padding = 0 }
+            } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -NpmGlobal '' -TargetIsWindows:$true -SkipPreflight *>&1 | Out-String
+
+            $raw = Get-Content (Join-Path $h 'settings.json') -Raw
+            $raw | Should -Not -Match 'ccstatusline'
+            $raw | Should -Not -Match '\{\{NPM_GLOBAL\}\}'
+            $s = $raw | ConvertFrom-Json
+            $s.statusLine.command | Should -Be "pwsh -NoProfile -File '$($h -replace '\\', '/')/statusline-command.ps1'"
+            # The Guard-SkillSize entry in the same matcher group must survive: the branch drops
+            # two commands, not a whole group.
+            @(@($s.hooks.PreToolUse)[0].hooks).Count | Should -Be 1
+            # A UserPromptSubmit group left with no hooks must go, not serialise as an empty
+            # array Claude Code then has to skip.
+            $s.hooks.PSObject.Properties.Name | Should -Not -Contain 'UserPromptSubmit'
+            $out | Should -Match 'npm'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "points the statusline fallback at the shell script on Linux" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            @{ hooks = @{}; statusLine = @{ type = 'command'
+                    command = 'node {{NPM_GLOBAL}}/ccstatusline/dist/ccstatusline.js' } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -NpmGlobal '' -TargetIsWindows:$false -SkipPreflight | Out-Null
+            $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
+            $s.statusLine.command | Should -Be "bash '$($h -replace '\\', '/')/statusline-command.sh'"
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
 }
