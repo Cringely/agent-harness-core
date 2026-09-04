@@ -594,3 +594,56 @@ the cost of maintaining a corpus that goes stale silently.
 This is an account-layer tool question, not a core process one, so it does not sit behind
 `CONTRIBUTING.md`'s two-occurrences bar. It enters core only if it produces a routing rule, and a
 routing rule is exactly the kind of finding that bar governs.
+
+---
+
+## 15. The model-tier gate's sonnet branch is unsatisfiable on the Agent tool
+
+**Status:** proposed. Found in use, 2026-09-03, on the first two real dispatches after the gate
+was wired at account scope.
+**Surfaced:** 2026-09-03, account-layer portability session.
+
+### What happened
+
+`model-tier-gate.ts` was registered in `~/.claude/settings.json` as a `PreToolUse` hook on
+`Agent|Task|Workflow`. It worked immediately: the first dispatch omitted `model` and was denied,
+correctly, because a dispatch that names no tier inherits the session model.
+
+The second dispatch passed `model: "sonnet"` and was denied again, this time for omitting
+`effort: "xhigh"`. That denial cannot be satisfied. The Agent tool on this surface accepts
+`description`, `isolation`, `mode`, `model`, `name`, `prompt`, `subagent_type` and `team_name`.
+There is no `effort` parameter, so no sonnet dispatch through this tool can ever carry the field
+the gate demands.
+
+The agent in question was `senior-developer`, whose definition already carries `effort: xhigh`
+beside `model: sonnet`. It would have run at the mandated effort. The gate denied it because the
+gate reads the dispatch and cannot see the definition.
+
+### Why this matters more than it looks
+
+The gate ships a documented escape hatch, `MODEL-OVERRIDE: <reason>`, and its header argues that
+the safeguard is the override being written down and visible rather than a regex grading it. That
+reasoning holds for an override used occasionally. It does not hold when one branch of the gate
+can only ever be passed by overriding it. Every sonnet dispatch on this surface now requires the
+operator to write an override, which trains the reflex the gate exists to prevent, and an override
+written reflexively is a muted gate that still looks armed.
+
+### What to decide
+
+Three candidate responses, and the first two are the real ones.
+
+- Resolve `subagent_type` to its definition and read `effort` and `model` from the frontmatter
+  before denying. This is the accurate fix: the gate's premise is that an unstated tier is an
+  inherited tier, and that premise is false when a definition states it.
+- Deny only on a stated tier that is wrong, rather than on an absent field that the caller has no
+  way to supply. Narrower, and it gives up catching a definition that omits `effort`.
+- Leave it and document the override as the expected path for sonnet. Cheapest, and it accepts the
+  reflex problem above.
+
+Worth checking whether the same shape affects the `Workflow` branch, where `agent()` calls do take
+an `opts.effort`, so the field is suppliable there and the branch is probably sound.
+
+### Evidence
+
+Both denials were live, on real dispatches, with the gate's own stderr. The first is the gate
+working as designed. The second is this item.
