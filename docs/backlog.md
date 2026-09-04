@@ -647,3 +647,17 @@ an `opts.effort`, so the field is suppliable there and the branch is probably so
 
 Both denials were live, on real dispatches, with the gate's own stderr. The first is the gate
 working as designed. The second is this item.
+
+---
+
+## 16. Export-Account and Install-Account ship unwired until Task 13
+
+**Status:** open. Closes when Task 13 of `docs/superpowers/plans/2026-09-03-account-layer-portability.md` lands.
+**Surfaced:** 2026-09-03, account layer portability work.
+
+Both scripts carry the Gate 1 header notice. Neither is named by `README.md` or by
+`~/.claude/rules/harness-core.md`, so nothing tells an operator they exist. Task 13 adds both
+registrations and removes both notices; this item is the tracker Gate 1 asks for in the meantime.
+
+Owner: whoever executes Task 13 of that plan. If the plan is abandoned before Task 13, the two
+scripts and their test files come out rather than staying as unwired files that read as installed.
