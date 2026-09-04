@@ -253,4 +253,158 @@ Describe "Account hooks" {
             finally { Remove-Item -Recurse -Force $sandbox -ErrorAction SilentlyContinue }
         }
     }
+
+    # Sync-MemoryToObsidian.ps1 has the same claudeHome -> memRoot/councilRoot derivation
+    # shape as Scan-MemorySecrets.ps1 above, so it gets the same POSIX-join check: a second
+    # Join-Path off an already-normalised $claudeHome re-inserts the platform separator, and
+    # only re-normalising after THAT join catches it. Task 1's suite never ran this check
+    # against a hook's real lines and stayed green through a fix that was a no-op on POSIX.
+    It "derives separator-clean roots for Sync-MemoryToObsidian under a POSIX HOME" {
+        foreach ($root in $script:hookRoots) {
+            $hook = Join-Path $root 'Sync-MemoryToObsidian.ps1'
+            $code = Get-VariableAssignmentText -ScriptPath $hook -Names @('claudeHome', 'memRoot', 'councilRoot')
+            $result = Invoke-UnderPosixJoin -HomeValue '/home/alice' `
+                -Expression ($code + "`n@{ claudeHome = `$claudeHome; memRoot = `$memRoot; councilRoot = `$councilRoot }")
+            $result.claudeHome | Should -Not -Match '/' -Because "$root must not leave a POSIX separator inside claudeHome"
+            $result.memRoot | Should -Not -Match '/' -Because "$root must not leave a POSIX separator inside memRoot"
+            $result.councilRoot | Should -Not -Match '/' -Because "$root must not leave a POSIX separator inside councilRoot"
+        }
+    }
+
+    It "copies a memory write into a vault named by CLAUDE_OBSIDIAN_VAULT" {
+        foreach ($root in $script:hookRoots) {
+            $sandbox = New-HookSandbox
+            try {
+                $vault = Join-Path $sandbox 'vault'
+                $dir = Join-Path (Join-Path (Join-Path (Join-Path $sandbox '.claude') 'projects') 'E--projects-demo') 'memory'
+                New-Item -ItemType Directory -Path $dir -Force | Out-Null
+                $src = Join-Path $dir 'MEMORY.md'
+                'note' | Set-Content -LiteralPath $src
+                $json = @{ tool_input = @{ file_path = ($src -replace '\\', '/') } } |
+                    ConvertTo-Json -Depth 5 -Compress
+                $r = Invoke-HookWithHome `
+                    -HookPath (Join-Path $root 'Sync-MemoryToObsidian.ps1') `
+                    -SandboxHome $sandbox -StdinJson $json `
+                    -Env @{ CLAUDE_OBSIDIAN_VAULT = $vault }
+                $r.ExitCode | Should -Be 0
+                $landed = Join-Path (Join-Path (Join-Path $vault 'E--projects-demo') 'Memory') 'MEMORY.md'
+                Test-Path -LiteralPath $landed |
+                    Should -BeTrue -Because "$root must find a memory root under any HOME"
+            }
+            finally { Remove-Item -Recurse -Force $sandbox -ErrorAction SilentlyContinue }
+        }
+    }
+
+    # The brief's own ablation for the paired test below names $proj = 'C--Users-user' (the
+    # docs/superpowers/{plans,specs} branch), but that branch is unreachable from a bare
+    # ~/.claude/specs write: only the global-.claude branch below it runs there, and that one
+    # carries a second, distinct slug literal at its own $dest line. Restoring the
+    # docs/superpowers branch's literal alone left all 13 tests green, proving it, so this
+    # test exists to give that site an ablation target of its own.
+    It "routes a docs/superpowers spec write under .claude to the slug of the running HOME" {
+        foreach ($root in $script:hookRoots) {
+            $sandbox = New-HookSandbox
+            try {
+                $vault = Join-Path $sandbox 'vault'
+                $dir = Join-Path (Join-Path (Join-Path (Join-Path $sandbox '.claude') 'docs') 'superpowers') 'specs'
+                New-Item -ItemType Directory -Path $dir -Force | Out-Null
+                $src = Join-Path $dir 'design.md'
+                'spec' | Set-Content -LiteralPath $src
+                $json = @{ tool_input = @{ file_path = ($src -replace '\\', '/') } } |
+                    ConvertTo-Json -Depth 5 -Compress
+                $r = Invoke-HookWithHome `
+                    -HookPath (Join-Path $root 'Sync-MemoryToObsidian.ps1') `
+                    -SandboxHome $sandbox -StdinJson $json `
+                    -Env @{ CLAUDE_OBSIDIAN_VAULT = $vault }
+                $r.ExitCode | Should -Be 0
+                $slug = $sandbox.TrimEnd('\', '/') -creplace '[^A-Za-z0-9]', '-'
+                $landed = Join-Path (Join-Path (Join-Path $vault $slug) 'Specs') 'design.md'
+                Test-Path -LiteralPath $landed |
+                    Should -BeTrue -Because "$root must slug the running HOME when the repo root is .claude itself"
+                Test-Path -LiteralPath (Join-Path $vault 'C--Users-user') |
+                    Should -BeFalse -Because "no receiver may mint this workstation's slug"
+            }
+            finally { Remove-Item -Recurse -Force $sandbox -ErrorAction SilentlyContinue }
+        }
+    }
+
+    It "routes a global spec write to the slug of the running HOME, not to C--Users-user" {
+        # The sharpest of the four: it fails unless lines 47 and 49 both moved off the
+        # workstation literals. A fix that changed only the vault would put the file under
+        # <vault>/C--Users-user/Specs on a receiver, a foreign username's tree.
+        foreach ($root in $script:hookRoots) {
+            $sandbox = New-HookSandbox
+            try {
+                $vault = Join-Path $sandbox 'vault'
+                $dir = Join-Path (Join-Path $sandbox '.claude') 'specs'
+                New-Item -ItemType Directory -Path $dir -Force | Out-Null
+                $src = Join-Path $dir 'design.md'
+                'spec' | Set-Content -LiteralPath $src
+                $json = @{ tool_input = @{ file_path = ($src -replace '\\', '/') } } |
+                    ConvertTo-Json -Depth 5 -Compress
+                $r = Invoke-HookWithHome `
+                    -HookPath (Join-Path $root 'Sync-MemoryToObsidian.ps1') `
+                    -SandboxHome $sandbox -StdinJson $json `
+                    -Env @{ CLAUDE_OBSIDIAN_VAULT = $vault }
+                $r.ExitCode | Should -Be 0
+                $slug = $sandbox.TrimEnd('\', '/') -creplace '[^A-Za-z0-9]', '-'
+                $landed = Join-Path (Join-Path (Join-Path $vault $slug) 'Specs') 'design.md'
+                Test-Path -LiteralPath $landed |
+                    Should -BeTrue -Because "$root must slug the running HOME"
+                Test-Path -LiteralPath (Join-Path $vault 'C--Users-user') |
+                    Should -BeFalse -Because "no receiver may mint this workstation's slug"
+            }
+            finally { Remove-Item -Recurse -Force $sandbox -ErrorAction SilentlyContinue }
+        }
+    }
+
+    It "copies a council transcript into the vault under the project's Council folder" {
+        foreach ($root in $script:hookRoots) {
+            $sandbox = New-HookSandbox
+            try {
+                $vault = Join-Path $sandbox 'vault'
+                $dir = Join-Path (Join-Path (Join-Path $sandbox '.claude') 'council-transcripts') 'E--projects-demo'
+                New-Item -ItemType Directory -Path $dir -Force | Out-Null
+                $src = Join-Path $dir 'round-1.md'
+                'transcript' | Set-Content -LiteralPath $src
+                $json = @{ tool_input = @{ file_path = ($src -replace '\\', '/') } } |
+                    ConvertTo-Json -Depth 5 -Compress
+                $r = Invoke-HookWithHome `
+                    -HookPath (Join-Path $root 'Sync-MemoryToObsidian.ps1') `
+                    -SandboxHome $sandbox -StdinJson $json `
+                    -Env @{ CLAUDE_OBSIDIAN_VAULT = $vault }
+                $r.ExitCode | Should -Be 0
+                $landed = Join-Path (Join-Path (Join-Path $vault 'E--projects-demo') 'Council') 'round-1.md'
+                Test-Path -LiteralPath $landed |
+                    Should -BeTrue -Because "$root must find a council root under any HOME"
+            }
+            finally { Remove-Item -Recurse -Force $sandbox -ErrorAction SilentlyContinue }
+        }
+    }
+
+    It "falls back to Documents/Obsidian Vault/Claude Code under HOME when the env var is unset" {
+        foreach ($root in $script:hookRoots) {
+            $sandbox = New-HookSandbox
+            try {
+                $dir = Join-Path (Join-Path (Join-Path (Join-Path $sandbox '.claude') 'projects') 'P') 'memory'
+                New-Item -ItemType Directory -Path $dir -Force | Out-Null
+                $src = Join-Path $dir 'MEMORY.md'
+                'note' | Set-Content -LiteralPath $src
+                $json = @{ tool_input = @{ file_path = ($src -replace '\\', '/') } } |
+                    ConvertTo-Json -Depth 5 -Compress
+                # Empty string, not absent: Invoke-HookWithHome restores whatever the runner
+                # had, and the operator's own session may well have this variable set.
+                $r = Invoke-HookWithHome `
+                    -HookPath (Join-Path $root 'Sync-MemoryToObsidian.ps1') `
+                    -SandboxHome $sandbox -StdinJson $json `
+                    -Env @{ CLAUDE_OBSIDIAN_VAULT = '' }
+                $r.ExitCode | Should -Be 0
+                $docs = Join-Path (Join-Path (Join-Path $sandbox 'Documents') 'Obsidian Vault') 'Claude Code'
+                $landed = Join-Path (Join-Path (Join-Path $docs 'P') 'Memory') 'MEMORY.md'
+                Test-Path -LiteralPath $landed |
+                    Should -BeTrue -Because "$root's fallback must sit under the running HOME"
+            }
+            finally { Remove-Item -Recurse -Force $sandbox -ErrorAction SilentlyContinue }
+        }
+    }
 }
