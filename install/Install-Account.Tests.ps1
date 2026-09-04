@@ -1664,3 +1664,173 @@ Describe "Install-Account" {
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
 }
+
+Describe "Account layer round trip" {
+    BeforeAll {
+        $script:export = "$PSScriptRoot/Export-Account.ps1"
+        $script:install = "$PSScriptRoot/Install-Account.ps1"
+        $script:repoRoot = Split-Path $PSScriptRoot -Parent
+
+        # A stand-in canonical workstation: a ~/.claude carrying one file of each shape that
+        # gets folded, plus a settings.json in all three quoting forms.
+        function New-CanonicalHome {
+            $canonHome = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-canon-" + [guid]::NewGuid())
+            $ch = Join-Path $canonHome '.claude'
+            foreach ($d in 'rules', 'agents', 'hooks', 'tools/prose-lint',
+                'skills/prose-lint', 'skills/handoff', 'skills/council', 'skills/subagent-prompting') {
+                New-Item -ItemType Directory -Path (Join-Path $ch $d) -Force | Out-Null
+            }
+            $chBack = $ch -replace '/', '\'
+            $core = 'E:\projects\agent-harness-core'
+            $vault = Join-Path $canonHome 'Documents\Obsidian Vault\Claude Code'
+            $slug = $canonHome.TrimEnd('\', '/') -creplace '[^A-Za-z0-9]', '-'
+
+            'plain rule'                                     | Set-Content (Join-Path $ch 'rules/security.md')
+            "Core repo: $core"                               | Set-Content (Join-Path $ch 'rules/harness-core.md')
+            'agent def'                                      | Set-Content (Join-Path $ch 'agents/appsec-sme.md')
+            "the core at $core"                              | Set-Content (Join-Path $ch 'hooks/harness-core-reminder.sh')
+            'StylesPath = styles'                            | Set-Content (Join-Path $ch 'tools/prose-lint/.vale.ini')
+
+            # A real $patterns block, not a stub. The exporter's secret gate lifts this table by
+            # AST out of the stand-in hook and throws when the assignment is absent, so 'exit 0'
+            # here would fail the export before either round-trip case reached an assertion.
+            # Same two rows as the Export-Account fixture, for the same reason.
+            @'
+$patterns = @(
+    @{ Name = 'API token (tk_/sk_/ak_)'; Regex = '(?<![a-zA-Z0-9_])(tk_|sk_|ak_)[a-zA-Z0-9]{10,}' }
+    @{ Name = 'AWS-style key';           Regex = 'AKIA[0-9A-Z]{16}' }
+)
+exit 0
+'@ | Set-Content (Join-Path $ch 'hooks/Scan-MemorySecrets.ps1')
+            "vale --config `"$chBack\tools\prose-lint\.vale.ini`"" | Set-Content (Join-Path $ch 'skills/prose-lint/SKILL.md')
+            "write to $vault\Handoffs\x.md"                  | Set-Content (Join-Path $ch 'skills/handoff/SKILL.md')
+            "home folder is $slug"                           | Set-Content (Join-Path $ch 'skills/council/SKILL.md')
+            "$slug and $vault\Handoffs"                      | Set-Content (Join-Path $ch 'skills/subagent-prompting/SKILL.md')
+            'ps statusline'                                  | Set-Content (Join-Path $ch 'statusline-command.ps1')
+            'sh statusline'                                  | Set-Content (Join-Path $ch 'statusline-command.sh')
+
+            @{
+                env = @{ CLAUDE_CODE_USE_POWERSHELL_TOOL = '1' }
+                permissions = @{ allow = @('mcp__code-context'); defaultMode = 'auto' }
+                hooks = @{ PreToolUse = @( @{ matcher = 'Write|Edit'; hooks = @(
+                                @{ type = 'command'; command = "& '$chBack\hooks\Scan-MemorySecrets.ps1'"
+                                    shell = 'powershell'; timeout = 5 }) }) }
+                statusLine = @{ type = 'command'
+                    command = 'node C:/npm/node_modules/ccstatusline/dist/ccstatusline.js'; padding = 0 }
+            } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $ch 'settings.json')
+
+            @{ mcpServers = @{ garmin = @{ type = 'stdio'; command = 'uvx'
+                        args = @('garmin-mcp'); env = @{} } } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $canonHome '.claude.json')
+
+            return $canonHome
+        }
+
+        $script:exportArgs = {
+            param($canonHome, $out)
+            @{
+                ClaudeHome = (Join-Path $canonHome '.claude')
+                ClaudeJson = (Join-Path $canonHome '.claude.json')
+                OutputRoot = $out
+                CoreRepo = 'E:\projects\agent-harness-core'
+                NpmGlobal = 'C:/npm/node_modules'
+                VaultPath = (Join-Path $canonHome 'Documents\Obsidian Vault\Claude Code')
+                HomeSlug = ($canonHome.TrimEnd('\', '/') -creplace '[^A-Za-z0-9]', '-')
+            }
+        }
+    }
+
+    It "install then export reproduces the payload byte for byte" {
+        # The claim this checks: running the installer on the canonical box is safe, because the
+        # next export folds the literals back to exactly the tokens they came from. If a fold
+        # matched only one separator spelling this would fail, since install writes
+        # forward-slash form and the originals here are backslashed.
+        $canonHome = New-CanonicalHome
+        $out1 = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-rt1-" + [guid]::NewGuid())
+        $out2 = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-rt2-" + [guid]::NewGuid())
+        try {
+            $a = & $script:exportArgs $canonHome $out1
+            & $script:export @a | Out-Null
+
+            # -VaultPath and -HomeSlug are what make this a round trip. Without them the
+            # installer derives both from the runner's real $HOME, expands {{OBSIDIAN_VAULT}}
+            # and {{HOME_SLUG}} to values the canonical fixture never contained, and the second
+            # export has nothing to fold back: the two payloads then differ on three files for
+            # a reason that has nothing to do with the separator handling under test.
+            & $script:install -PayloadRoot $out1 -ClaudeHome (Join-Path $canonHome '.claude') `
+                -ClaudeJson (Join-Path $canonHome '.claude.json') `
+                -CoreRepo 'E:\projects\agent-harness-core' -NpmGlobal 'C:/npm/node_modules' `
+                -VaultPath $a.VaultPath -HomeSlug $a.HomeSlug `
+                -TargetIsWindows:$true -SkipPreflight | Out-Null
+
+            $b = & $script:exportArgs $canonHome $out2
+            & $script:export @b | Out-Null
+
+            foreach ($rel in 'rules/harness-core.md', 'hooks/harness-core-reminder.sh',
+                'skills/prose-lint/SKILL.md', 'skills/handoff/SKILL.md',
+                'skills/council/SKILL.md', 'skills/subagent-prompting/SKILL.md') {
+                (Get-Content (Join-Path $out2 $rel) -Raw) |
+                    Should -Be (Get-Content (Join-Path $out1 $rel) -Raw) -Because "$rel must fold back"
+            }
+            $s1 = Get-Content (Join-Path $out1 'settings.account.json') -Raw | ConvertFrom-Json
+            $s2 = Get-Content (Join-Path $out2 'settings.account.json') -Raw | ConvertFrom-Json
+            @(@($s2.hooks.PreToolUse)[0].hooks)[0].command |
+                Should -Be @(@($s1.hooks.PreToolUse)[0].hooks)[0].command
+            $s2.statusLine.command | Should -Be $s1.statusLine.command
+        }
+        finally { Remove-Item -Recurse -Force $canonHome, $out1, $out2 -ErrorAction SilentlyContinue }
+    }
+
+    It "an install into an empty home leaves every hook command pointing at a real file" {
+        $canonHome = New-CanonicalHome
+        $out = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-rt3-" + [guid]::NewGuid())
+        $fresh = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-fresh-" + [guid]::NewGuid())
+        try {
+            $a = & $script:exportArgs $canonHome $out
+            & $script:export @a | Out-Null
+
+            $freshClaude = Join-Path $fresh '.claude'
+            & $script:install -PayloadRoot $out -ClaudeHome $freshClaude `
+                -ClaudeJson (Join-Path $fresh '.claude.json') `
+                -CoreRepo $script:repoRoot -NpmGlobal 'C:/npm/node_modules' `
+                -TargetIsWindows:$true -SkipPreflight | Out-Null
+
+            $s = Get-Content (Join-Path $freshClaude 'settings.json') -Raw | ConvertFrom-Json
+            $cmd = @(@($s.hooks.PreToolUse)[0].hooks)[0].command
+            $cmd | Should -Not -Match '\{\{'
+            # Pull the quoted path out of "& 'path'" and confirm the file is there. A command
+            # that expands to a plausible path over nothing is the failure mode this catches,
+            # and it is invisible until a hook silently stops firing.
+            #
+            # [regex]::Match, not Should -Match plus $Matches. Pester 5.7.1 evaluates the match
+            # inside its own scope, so $Matches is null by the time the next line reads it and
+            # $Matches.p yields $null: Test-Path -LiteralPath $null then throws a parameter
+            # binding error rather than failing an assertion, which reads as a broken test
+            # rather than a broken install.
+            $m = [regex]::Match($cmd, "^& '(?<p>[^']+)'$")
+            $m.Success | Should -BeTrue -Because "the expanded command must still be a quoted call"
+            Test-Path -LiteralPath $m.Groups['p'].Value | Should -BeTrue
+
+            Test-Path -LiteralPath (Join-Path $freshClaude 'hooks/model-tier-gate.ts') | Should -BeTrue
+            # -CoreRepo here is $script:repoRoot, so the expected literal is derived from it
+            # rather than hardcoded. A hardcoded E:/projects/agent-harness-core would pass on
+            # this workstation for the wrong reason and fail on any other clone.
+            #
+            # $(...) around the -replace, not the bare expression the brief supplied: a static
+            # method call's argument list splits on every top-level comma, so
+            # Escape($script:repoRoot -replace '\\', '/') parses as TWO arguments to Escape (the
+            # -replace with no substitution, then '/'), not one -replace with two operands.
+            # Measured: "Cannot find an overload for `"Escape`" and the argument count: `"2`"."
+            # The subexpression's parens are not the method call's parens, so the comma inside
+            # is no longer top-level and the whole -replace evaluates to one string first.
+            $repoSlashed = $(($script:repoRoot -replace '\\', '/'))
+            (Get-Content (Join-Path $freshClaude 'rules/harness-core.md') -Raw) |
+                Should -Match ([regex]::Escape($repoSlashed))
+            (Get-Content (Join-Path $freshClaude 'skills/subagent-prompting/SKILL.md') -Raw) |
+                Should -Not -Match '\{\{'
+            (Get-Content (Join-Path $fresh '.claude.json') -Raw | ConvertFrom-Json).mcpServers.garmin.command |
+                Should -Be 'uvx'
+        }
+        finally { Remove-Item -Recurse -Force $canonHome, $out, $fresh -ErrorAction SilentlyContinue }
+    }
+}
