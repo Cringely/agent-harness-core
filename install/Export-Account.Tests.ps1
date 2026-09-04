@@ -547,4 +547,156 @@ exit 0
         }
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
     }
+
+    It "folds each templated file with only the tokens its table row names" {
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            $core = 'E:\projects\agent-harness-core'
+            $vault = 'C:\Users\user\Documents\Obsidian Vault\Claude Code'
+            $slug = $stand.TrimEnd('\', '/') -creplace '[^A-Za-z0-9]', '-'
+            foreach ($d in 'skills/handoff', 'skills/council', 'skills/subagent-prompting') {
+                New-Item -ItemType Directory -Path (Join-Path $ch $d) -Force | Out-Null
+            }
+            "Core repo: ``$core``. Run pwsh $core\install\Install-Harness.ps1" |
+                Set-Content (Join-Path $ch 'rules/harness-core.md')
+            "The core repo at $core is the baseline. Run $core\install\Install-Harness.ps1" |
+                Set-Content (Join-Path $ch 'hooks/harness-core-reminder.sh')
+            "vale --config `"$ch\tools\prose-lint\.vale.ini`" --output=line" |
+                Set-Content (Join-Path $ch 'skills/prose-lint/SKILL.md')
+            "write to $vault\Handoffs\<slug>\handoff-latest.md" |
+                Set-Content (Join-Path $ch 'skills/handoff/SKILL.md')
+            "home directory maps to project folder $slug" |
+                Set-Content (Join-Path $ch 'skills/council/SKILL.md')
+            "~/.claude/projects/$slug/memory/MEMORY.md and $vault\Handoffs\handoff-latest.md" |
+                Set-Content (Join-Path $ch 'skills/subagent-prompting/SKILL.md')
+
+            # rules/ssh.md and rules/change-management.md are NOT in the table and describe this
+            # machine on purpose. Plant one carrying a foldable literal and prove it survives.
+            "SSH config is at $ch\..\.ssh\config and the core repo is $core" |
+                Set-Content (Join-Path $ch 'rules/ssh.md')
+
+            & $script:export -ClaudeHome $ch -OutputRoot $out -CoreRepo $core `
+                -NpmGlobal 'C:/npm' -VaultPath $vault -HomeSlug $slug -SkipSettings -SkipMcp | Out-Null
+
+            (Get-Content (Join-Path $out 'rules/harness-core.md') -Raw) |
+                Should -Match '\{\{CORE_REPO\}\}/install/Install-Harness\.ps1'
+            (Get-Content (Join-Path $out 'hooks/harness-core-reminder.sh') -Raw) |
+                Should -Match '\{\{CORE_REPO\}\}/install/Install-Harness\.ps1'
+            (Get-Content (Join-Path $out 'skills/prose-lint/SKILL.md') -Raw) |
+                Should -Match '\{\{CLAUDE_HOME\}\}/tools/prose-lint/\.vale\.ini'
+            (Get-Content (Join-Path $out 'skills/handoff/SKILL.md') -Raw) |
+                Should -Match '\{\{OBSIDIAN_VAULT\}\}/Handoffs/'
+            (Get-Content (Join-Path $out 'skills/council/SKILL.md') -Raw) |
+                Should -Match '\{\{HOME_SLUG\}\}'
+            $sub = Get-Content (Join-Path $out 'skills/subagent-prompting/SKILL.md') -Raw
+            $sub | Should -Match '\{\{HOME_SLUG\}\}'
+            $sub | Should -Match '\{\{OBSIDIAN_VAULT\}\}/Handoffs/handoff-latest\.md'
+
+            # The allowlist half. ssh.md is outside the table, so both literals stay.
+            $ssh = Get-Content (Join-Path $out 'rules/ssh.md') -Raw
+            $ssh | Should -Not -Match '\{\{'
+            $ssh | Should -Match ([regex]::Escape($core))
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "leaves a token unfolded in a file whose table row does not name it" {
+        # The table row's token list has no falsifying input in the fixture above: none of the
+        # six files there carries a literal for a token outside its own row, so setting
+        # $rowFolds = @($folds) (every file gets every token) leaves every assertion in that It
+        # green -- measured directly, not assumed. rules/harness-core.md's row is @('CORE_REPO')
+        # only; planting the CLAUDE_HOME literal in its text and asserting it survives is what
+        # actually exercises the per-row $wanted filter rather than only the file-level allowlist
+        # ssh.md already covers.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            $core = 'E:\projects\agent-harness-core'
+            "Core repo: $core. Account home is $ch, which this row does not list." |
+                Set-Content (Join-Path $ch 'rules/harness-core.md')
+
+            & $script:export -ClaudeHome $ch -OutputRoot $out -CoreRepo $core `
+                -NpmGlobal 'C:/npm' -VaultPath 'C:/vault' -SkipSettings -SkipMcp | Out-Null
+
+            $t = Get-Content (Join-Path $out 'rules/harness-core.md') -Raw
+            $t | Should -Match '\{\{CORE_REPO\}\}'
+            $t | Should -Not -Match '\{\{CLAUDE_HOME\}\}'
+            $t | Should -Match ([regex]::Escape($ch)) `
+                -Because "CLAUDE_HOME is not in this file's table row, so its literal must survive"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "folds a literal written with either separator spelling" {
+        # Install writes forward-slash form, so after an install on the canonical box
+        # harness-core.md reads E:/projects/agent-harness-core. A backslash-only fold would
+        # leave that literal and break the round trip.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            "backslash E:\projects\agent-harness-core\install and slash E:/projects/agent-harness-core/install" |
+                Set-Content (Join-Path $ch 'rules/harness-core.md')
+            & $script:export -ClaudeHome $ch -OutputRoot $out `
+                -CoreRepo 'E:\projects\agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipSettings -SkipMcp | Out-Null
+            $t = Get-Content (Join-Path $out 'rules/harness-core.md') -Raw
+            $t | Should -Not -Match 'agent-harness-core'
+            @([regex]::Matches($t, '\{\{CORE_REPO\}\}/install')).Count | Should -Be 2
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "folds a forward-slashed literal against backslashed text" {
+        # The case that owns the real export. Get-MainCheckout returns a forward-slashed path,
+        # and both live {{CORE_REPO}} source files spell it with backslashes, so this is the
+        # exact combination a default `pwsh -NoProfile -File install/Export-Account.ps1` runs.
+        # Every other folding test here passes -CoreRepo backslashed and cannot see it: with the
+        # pattern built straight from the literal, [regex]::Escape leaves '/' alone, the
+        # both-separator substitution has nothing to rewrite, and the fold silently no-ops while
+        # the whole suite stays green.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            "Core repo: E:\projects\agent-harness-core\install\Install-Harness.ps1" |
+                Set-Content (Join-Path $ch 'rules/harness-core.md')
+            "the core at E:\projects\agent-harness-core" |
+                Set-Content (Join-Path $ch 'hooks/harness-core-reminder.sh')
+            & $script:export -ClaudeHome $ch -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipSettings -SkipMcp | Out-Null
+
+            $t = Get-Content (Join-Path $out 'rules/harness-core.md') -Raw
+            $t | Should -Match '\{\{CORE_REPO\}\}/install/Install-Harness\.ps1'
+            $t | Should -Not -Match 'agent-harness-core'
+            (Get-Content (Join-Path $out 'hooks/harness-core-reminder.sh') -Raw) |
+                Should -Not -Match 'agent-harness-core'
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "throws when a table row names a file the payload does not carry" {
+        # A silent skip here is how a fold quietly stops happening: the file gets renamed
+        # upstream, the row goes stale, and the payload ships a machine path with nothing
+        # reporting it. The exporter must say so.
+        #
+        # $AccountTemplatedFiles is [ordered] and rules/harness-core.md is iterated first, so
+        # the row removed here has to be that one for the message to name it. Removing a later
+        # row would throw about the first absent file rather than the one under test.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            Remove-Item -LiteralPath (Join-Path $ch 'rules/harness-core.md')
+            { & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp } |
+                Should -Throw -ExpectedMessage '*rules/harness-core.md*'
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
 }
