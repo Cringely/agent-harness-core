@@ -661,3 +661,20 @@ registrations and removes both notices; this item is the tracker Gate 1 asks for
 
 Owner: whoever executes Task 13 of that plan. If the plan is abandoned before Task 13, the two
 scripts and their test files come out rather than staying as unwired files that read as installed.
+
+## 17. Prose-lint skip list misses `.superpowers/sdd/`
+
+`writing-style.md` row 5 exempts internal agent traffic from the prose contract, and the mechanism
+is the skip list matching `/memory/`, `/handoffs/`, `/scratchpad/`, `/.scratch/`,
+`/council-transcripts/` and `/.claude/` against the written path. The superpowers
+subagent-driven-development skill writes every brief, report and review under
+`<repo>/.superpowers/sdd/<plan>/`, which no segment matches, so the hook lints subagent reports that
+the rule already exempts.
+
+Observed 2026-09-04 during account-layer execution: a reviewer's report file drew ai-tells findings
+on quoted Pester output and code identifiers. The reviewer correctly overruled them and said why.
+
+Both mechanisms need the same segment added, per the "naming all three mechanisms keeps them from
+drifting" note in `writing-style.md`: `core/claude/hooks/lint-doc-prose.ts` on write, and
+`~/.claude/hooks/Lint-DocumentProse.ps1`. Check `core/claude/hooks/pre-commit` too, though
+`.superpowers/` is git-ignored scratch so a commit hook may never see it.
