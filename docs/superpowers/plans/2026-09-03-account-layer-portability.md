@@ -338,9 +338,7 @@ platform it was written for.
 
 The hook itself lives in ~/.claude and is not in this repo yet; the test
 suite runs against whichever of the live and exported copies are present.
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01VrXs4JF9EQbPffeJLXpqq4"
+"
 ```
 
 ---
@@ -590,9 +588,7 @@ scope, and one -creplace is smaller than a dependency on install/.
 
 Roots take the same forward-to-back slash normalisation the incoming path
 gets, for the reason recorded on the secret scanner in the previous commit.
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01VrXs4JF9EQbPffeJLXpqq4"
+"
 ```
 
 ---
@@ -772,9 +768,7 @@ entries is still an open question. Nested two-argument calls are correct on
 Both builders moved into named functions so the tests can evaluate them
 under a stubbed POSIX Join-Path; a bare script-scope literal is only
 reachable by scraping the source with a regex.
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01VrXs4JF9EQbPffeJLXpqq4"
+"
 ```
 
 ---
@@ -1274,9 +1268,7 @@ a silent divergence produces session folders that look healthy while
 --resume reports nothing. Rejected a shared module that Restore also
 imports: that would break Restore's own tests, which lift the same three
 functions by name, for no gain in this change.
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01VrXs4JF9EQbPffeJLXpqq4"
+"
 ```
 
 ---
@@ -1600,9 +1592,7 @@ install writes forward-slash form while the originals here are backslashed.
 Reuses only the homePattern idiom from Convert-HookCommand, not the function:
 its Linux branch welds the pwsh -NoProfile -File rewrite in unconditionally,
 which would ship Linux commands to Windows receivers.
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01VrXs4JF9EQbPffeJLXpqq4"
+"
 ```
 
 ---
@@ -1841,9 +1831,7 @@ rules/change-management.md name this machine deliberately and are outside
 it. A row naming a file the payload does not carry throws rather than
 skipping: a silent skip is how a fold stops happening after an upstream
 rename, with nothing reporting the machine path that then ships.
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01VrXs4JF9EQbPffeJLXpqq4"
+"
 ```
 
 ---
@@ -2097,9 +2085,7 @@ leaves no half-written file to commit.
 placeholder can express a Store path with an embedded version or a WSL
 user's home, and a placeholder would be pretending. The receiver-side
 residual report names them by design.
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01VrXs4JF9EQbPffeJLXpqq4"
+"
 ```
 
 ---
@@ -2449,9 +2435,7 @@ three times.
 -NpmGlobal distinguishes an omitted parameter from an explicitly empty one
 through PSBoundParameters: omitted means go look, empty means npm is absent.
 That is how the tests reach the fallback branch without uninstalling npm.
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01VrXs4JF9EQbPffeJLXpqq4"
+"
 ```
 
 ---
@@ -2822,9 +2806,7 @@ left with no hooks is removed rather than serialised empty, and a sibling
 hook in the same group survives. Whether those two statusline scripts still
 run on a receiver is untested; nothing has invoked them since ccstatusline
 took over and this branch is the first thing that will.
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01VrXs4JF9EQbPffeJLXpqq4"
+"
 ```
 
 ---
@@ -3080,9 +3062,7 @@ permissions.allow is an ordered set union with receiver entries first.
 statusLine is replaced whole rather than deep-merged, or a stale
 refreshInterval from the receiver's previous statusline would silently apply
 to the new one.
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01VrXs4JF9EQbPffeJLXpqq4"
+"
 ```
 
 ---
@@ -3425,9 +3405,7 @@ no report.
 
 The install still completes with residuals outstanding: the two entries are
 known-broken by design, not a reason to refuse the other content.
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01VrXs4JF9EQbPffeJLXpqq4"
+"
 ```
 
 ---
@@ -3670,9 +3648,7 @@ unregistered for three weeks.
 Neither case is a substitute for the real second machine. That install
 remains the only evidence for the plugins-repopulate-from-settings claim,
 and it has not been run.
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01VrXs4JF9EQbPffeJLXpqq4"
+"
 ```
 
 ---
@@ -3843,9 +3819,7 @@ since they landed; this removes them.
 The rules file is the account layer's own copy and is not in this repo yet.
 It changes here, before the payload is generated, so the exported copy
 carries its own registration rather than a version that predates it.
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01VrXs4JF9EQbPffeJLXpqq4"
+"
 ```
 
 ---
@@ -3973,9 +3947,7 @@ Unproven, and the only thing that settles it is a real second machine: that
 plugins repopulate on a receiver from enabledPlugins and
 extraKnownMarketplaces alone, since plugins/cache/ does not ship and the two
 extra marketplaces are arbitrary GitHub repos rather than the official one.
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01VrXs4JF9EQbPffeJLXpqq4"
+"
 ```
 
 ---
