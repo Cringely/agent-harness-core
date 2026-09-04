@@ -23,7 +23,11 @@ Describe "Account hooks" {
                 [string]$HookPath,
                 [string]$SandboxHome,
                 [string]$StdinJson,
-                [hashtable]$Env = @{}
+                [hashtable]$Env = @{},
+                # 'pwsh' for every existing caller. 'powershell' drives the same hook under
+                # Windows PowerShell 5.1, which settings.json's "shell": "powershell" may hand
+                # it and which rejects a third positional Join-Path argument outright.
+                [ValidateSet('pwsh', 'powershell')][string]$Shell = 'pwsh'
             )
             $names = @(@('USERPROFILE', 'HOME') + @($Env.Keys))
             $saved = @{}
@@ -32,7 +36,7 @@ Describe "Account hooks" {
                 $env:USERPROFILE = $SandboxHome
                 $env:HOME = $SandboxHome
                 foreach ($k in @($Env.Keys)) { Set-Item -Path "Env:$k" -Value $Env[$k] }
-                $out = @($StdinJson | pwsh -NoProfile -File $HookPath 2>&1)
+                $out = @($StdinJson | & $Shell -NoProfile -File $HookPath 2>&1)
                 return [pscustomobject]@{
                     ExitCode = $LASTEXITCODE
                     Output   = ($out -join "`n")
@@ -268,6 +272,63 @@ Describe "Account hooks" {
             $result.claudeHome | Should -Not -Match '/' -Because "$root must not leave a POSIX separator inside claudeHome"
             $result.memRoot | Should -Not -Match '/' -Because "$root must not leave a POSIX separator inside memRoot"
             $result.councilRoot | Should -Not -Match '/' -Because "$root must not leave a POSIX separator inside councilRoot"
+        }
+    }
+
+    # Windows PowerShell 5.1 rejects a third positional argument to Join-Path outright
+    # (ParameterBindingException), and this hook is registered with "shell": "powershell" in
+    # settings.json, a host that may be 5.1. $ErrorActionPreference = 'SilentlyContinue' at the
+    # top of the hook swallows that exception, so a reintroduced multi-argument call is a
+    # silent no-op copy on a 5.1 receiver, not a visible failure. An AST scan catches the arity
+    # without needing a 5.1 interpreter on hand to reproduce it.
+    It "keeps every Join-Path call in Sync-MemoryToObsidian at two arguments" {
+        foreach ($root in $script:hookRoots) {
+            $hook = Join-Path $root 'Sync-MemoryToObsidian.ps1'
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+                $hook, [ref]$null, [ref]$null)
+            $calls = @($ast.FindAll({ param($n)
+                        $n -is [System.Management.Automation.Language.CommandAst] -and
+                        $n.GetCommandName() -eq 'Join-Path' }, $true))
+            $calls.Count | Should -BeGreaterThan 0 -Because "$root must still call Join-Path somewhere for this check to mean anything"
+            foreach ($call in $calls) {
+                # CommandElements[0] is the command name; the two-argument form is 3 elements
+                # total (name, Path, ChildPath). A reintroduced third argument pushes this past 2.
+                $argCount = $call.CommandElements.Count - 1
+                $argCount | Should -BeLessOrEqual 2 -Because "$($call.Extent.Text) at line $($call.Extent.StartLineNumber) must nest instead of taking a third argument"
+            }
+        }
+    }
+
+    # Stronger than the AST scan: actually drives the hook under Windows PowerShell 5.1 and
+    # checks the file lands, the exact failure mode the reviewer measured (exit 0, nothing
+    # copied) rather than inferring it from arity alone. Skips rather than passing vacuously
+    # when no 5.1 interpreter is on the host running the suite.
+    It "copies an ordinary memory write to the vault under Windows PowerShell 5.1" {
+        if (-not (Get-Command powershell -ErrorAction SilentlyContinue)) {
+            Set-ItResult -Skipped -Because 'no Windows PowerShell 5.1 available to drive this check'
+            return
+        }
+        foreach ($root in $script:hookRoots) {
+            $sandbox = New-HookSandbox
+            try {
+                $vault = Join-Path $sandbox 'vault'
+                $dir = Join-Path (Join-Path (Join-Path (Join-Path $sandbox '.claude') 'projects') 'E--projects-demo') 'memory'
+                New-Item -ItemType Directory -Path $dir -Force | Out-Null
+                $src = Join-Path $dir 'MEMORY.md'
+                'note' | Set-Content -LiteralPath $src
+                $json = @{ tool_input = @{ file_path = ($src -replace '\\', '/') } } |
+                    ConvertTo-Json -Depth 5 -Compress
+                $r = Invoke-HookWithHome `
+                    -HookPath (Join-Path $root 'Sync-MemoryToObsidian.ps1') `
+                    -SandboxHome $sandbox -StdinJson $json `
+                    -Env @{ CLAUDE_OBSIDIAN_VAULT = $vault } `
+                    -Shell 'powershell'
+                $r.ExitCode | Should -Be 0
+                $landed = Join-Path (Join-Path (Join-Path $vault 'E--projects-demo') 'Memory') 'MEMORY.md'
+                Test-Path -LiteralPath $landed |
+                    Should -BeTrue -Because "$root must copy an ordinary memory write under Windows PowerShell 5.1, not silently exit 0"
+            }
+            finally { Remove-Item -Recurse -Force $sandbox -ErrorAction SilentlyContinue }
         }
     }
 
