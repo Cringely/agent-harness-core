@@ -118,7 +118,7 @@ $PayloadRoot = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFrom
 # relative '.' or a trailing separator cannot slip past. This is a string comparison, not a
 # filesystem resolution: it does not see through an NTFS junction, a symlink, an 8.3 short
 # name, or a \\?\-prefixed path, so a -PayloadRoot that reaches -ClaudeHome through one of
-# those is not caught here. Filed as a backlog item (a shared reparse-point-aware helper in
+# those is not caught here. Filed as backlog item 19 (a shared reparse-point-aware helper in
 # AccountShared.ps1, since Export-Account.ps1 has the identical gap in its own guard) rather
 # than fixed in this pass.
 $onWindowsHost = ($PSVersionTable.PSVersion.Major -lt 6) -or $IsWindows

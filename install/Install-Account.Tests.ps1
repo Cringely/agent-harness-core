@@ -610,7 +610,17 @@ Describe "Install-Account" {
         try {
             $logContent | Should -Match 'harness-core-reminder\.sh'
         }
-        finally { Remove-Item -Recurse -Force $p, $hParent -ErrorAction SilentlyContinue }
+        # Round 4: -LiteralPath, not positional -Path. $hParent's name carries literal [ and ]
+        # (the whole point of this test), so without it the pattern matches nothing, the miss is
+        # swallowed by -ErrorAction SilentlyContinue, and the fixture leaks. Same defect class as
+        # the chmod Get-ChildItem this test exists to pin, just in the test's own cleanup instead
+        # of the code under test.
+        # Round 4: -LiteralPath, not positional -Path. $hParent's name carries literal [ and ]
+        # (the whole point of this test), so without it the pattern matches nothing, the miss is
+        # swallowed by -ErrorAction SilentlyContinue, and the fixture leaks. Same defect class as
+        # the chmod Get-ChildItem this test exists to pin, just in the test's own cleanup instead
+        # of the code under test.
+        finally { Remove-Item -Recurse -Force -LiteralPath $p, $hParent -ErrorAction SilentlyContinue }
     }
 
     # Round 3, item D: the two tests above only assert that a hook's filename reaches the log,
