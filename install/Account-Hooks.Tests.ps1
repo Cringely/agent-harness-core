@@ -78,18 +78,18 @@ Describe "Account hooks" {
                 (@($Parts) -join '/')
             }
             Set-Variable -Name HOME -Value $HomeValue -Scope Local -Force
+            # Save every distinct name once, before either mutation touches it. A name that
+            # appears in both -ClearEnv and -SetEnv must still yield its one true original
+            # value: saving inside each mutation's own loop (NF1) let the second loop's read
+            # observe the first loop's removal instead of the real starting value.
+            $keys = @(@($ClearEnv) + @($SetEnv.Keys) | Select-Object -Unique)
             $saved = @{}
-            foreach ($k in $ClearEnv) {
-                $saved[$k] = [Environment]::GetEnvironmentVariable($k)
-                Remove-Item "Env:$k" -ErrorAction SilentlyContinue
-            }
-            foreach ($k in @($SetEnv.Keys)) {
-                $saved[$k] = [Environment]::GetEnvironmentVariable($k)
-                Set-Item "Env:$k" -Value $SetEnv[$k]
-            }
+            foreach ($k in $keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k) }
+            foreach ($k in $ClearEnv) { Remove-Item "Env:$k" -ErrorAction SilentlyContinue }
+            foreach ($k in @($SetEnv.Keys)) { Set-Item "Env:$k" -Value $SetEnv[$k] }
             try { return (& ([scriptblock]::Create($Expression))) }
             finally {
-                foreach ($k in (@($ClearEnv) + @($SetEnv.Keys))) {
+                foreach ($k in $keys) {
                     if ($null -eq $saved[$k]) { Remove-Item "Env:$k" -ErrorAction SilentlyContinue }
                     else { Set-Item "Env:$k" -Value $saved[$k] }
                 }
@@ -588,5 +588,30 @@ $errs.Value.Count
             }
         }
         finally { Remove-Item -Recurse -Force $sandbox -ErrorAction SilentlyContinue }
+    }
+
+    # NF1: a name appearing in both -ClearEnv and -SetEnv used to lose its true original value.
+    # -ClearEnv's save ran first and captured it correctly, but -SetEnv's save then ran again
+    # for the same key and overwrote $saved[$k] with $null (the value already read back AFTER
+    # -ClearEnv had removed it), so the finally block restored nothing instead of the real
+    # original. No production call site collides today (the one call using both passes disjoint
+    # keys, USERPROFILE/LOCALAPPDATA), but the helper is shared harness Tasks 4+ are invited to
+    # reuse, so this is a latent trap for whichever one collides first.
+    It "restores the true original value when a name appears in both ClearEnv and SetEnv" {
+        $probeVar = 'ACCT_HOOKS_TEST_PROBE_COLLIDE'
+        $savedOutside = [Environment]::GetEnvironmentVariable($probeVar)
+        try {
+            $env:ACCT_HOOKS_TEST_PROBE_COLLIDE = 'original-value'
+            $setEnv = @{}
+            $setEnv[$probeVar] = 'temp-value'
+            Invoke-UnderPosixJoin -Expression '$true' -HomeValue '/home/u' `
+                -ClearEnv @($probeVar) -SetEnv $setEnv | Out-Null
+            [Environment]::GetEnvironmentVariable($probeVar) | Should -Be 'original-value' `
+                -Because "a name in both -ClearEnv and -SetEnv must restore its true pre-call value, not end up removed"
+        }
+        finally {
+            if ($null -eq $savedOutside) { Remove-Item "Env:$probeVar" -ErrorAction SilentlyContinue }
+            else { Set-Item "Env:$probeVar" -Value $savedOutside }
+        }
     }
 }
