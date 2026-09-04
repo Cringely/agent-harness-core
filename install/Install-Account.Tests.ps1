@@ -933,7 +933,8 @@ Describe "Install-Account" {
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
                 -NpmGlobal 'C:/npm' -TargetIsWindows:$true -SkipPreflight | Out-Null
 
-            $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
+            $raw = Get-Content (Join-Path $h 'settings.json') -Raw
+            $s = $raw | ConvertFrom-Json
             # An overwrite would revert every one of these on the receiver on every pull.
             $s.enabledPlugins.'superpowers@claude-plugins-official' | Should -BeTrue
             $s.effortLevel | Should -Be 'xhigh'
@@ -944,6 +945,12 @@ Describe "Install-Account" {
             # A receiver-only hook event survives untouched beside the payload's.
             @(@($s.hooks.SessionStart)[0].hooks)[0].command | Should -Be 'echo receiver-only'
             @(@($s.hooks.PreToolUse)[0].hooks)[0].command | Should -Match 'Scan-MemorySecrets\.ps1'
+            # Task 10 review, finding 3: the line above re-wraps $s.hooks.PreToolUse in @() before
+            # reading it, so it reads the same whether the merged event serialised as a genuine
+            # one-element JSON array or a bare object (the single-element pipeline-output collapse
+            # Install-Harness.ps1:822-826 already names). Asserted against the raw file text, which
+            # a re-parse cannot paper over.
+            $raw | Should -Match '"PreToolUse":\s*\['
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
@@ -963,11 +970,17 @@ Describe "Install-Account" {
             & $script:install @args -SkipPreflight | Out-Null
             & $script:install @args -SkipPreflight | Out-Null
 
-            $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
+            $raw = Get-Content (Join-Path $h 'settings.json') -Raw
+            $s = $raw | ConvertFrom-Json
             $cmds = @()
             foreach ($g in @($s.hooks.PreToolUse)) { foreach ($x in @($g.hooks)) { $cmds += $x.command } }
             @($cmds | Where-Object { $_ -match 'Scan-MemorySecrets' }).Count | Should -Be 1
             @($s.hooks.PreToolUse).Count | Should -Be 1
+            # Task 10 review, finding 3: both checks above wrap $s.hooks.PreToolUse in @() before
+            # reading it, so they read "1" whether that property is a genuine one-element JSON
+            # array or a bare object PowerShell's own read-back re-wraps on the way in. Asserted
+            # against the raw file text instead, before any parse can paper over the shape.
+            $raw | Should -Match '"PreToolUse":\s*\['
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
@@ -1016,8 +1029,11 @@ Describe "Install-Account" {
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
                 -SkipPreflight | Out-Null
 
-            $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
+            $raw = Get-Content (Join-Path $h 'settings.json') -Raw
+            $s = $raw | ConvertFrom-Json
             @(@($s.hooks.PreToolUse)[0].hooks)[0].command | Should -Be 'echo from-payload'
+            # Task 10 review, finding 3: same re-wrap gap as the other two hooks assertions above.
+            $raw | Should -Match '"PreToolUse":\s*\['
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
@@ -1067,6 +1083,118 @@ Describe "Install-Account" {
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
 
+    # Task 10 review, finding 1: "hooks": null and "permissions": null at the top of an existing
+    # settings.json crashed the merge with "Cannot index into a null array", since the hooks and
+    # permissions branches assume $ev has properties to look up. A receiver-only key alongside
+    # proves this is a real merge (payload's hooks installed, receiver's own key kept), not the
+    # old overwrite happening to survive a shape it never had to read.
+    It "replaces a null hooks object wholesale instead of crashing on it" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            '{"hooks":null,"effortLevel":"keep-me"}' | Set-Content (Join-Path $h 'settings.json')
+            @{ hooks = @{ PreToolUse = @( @{ matcher = 'Write'; hooks = @(
+                                @{ type = 'command'; command = 'echo from-payload' }) }) } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -SkipPreflight | Out-Null
+
+            $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
+            @(@($s.hooks.PreToolUse)[0].hooks)[0].command | Should -Be 'echo from-payload'
+            $s.effortLevel | Should -Be 'keep-me'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "replaces a null permissions object wholesale instead of crashing on it" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            '{"permissions":null,"effortLevel":"keep-me"}' | Set-Content (Join-Path $h 'settings.json')
+            @{ permissions = @{ allow = @('Bash(ls:*)') } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -SkipPreflight | Out-Null
+
+            $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
+            @($s.permissions.allow) | Should -Be @('Bash(ls:*)')
+            $s.effortLevel | Should -Be 'keep-me'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Task 10 review, finding 2 (top-level): a receiver's settings.json can parse cleanly to
+    # something that is not a JSON object at all. Worst measured case was a bare string, written
+    # back byte for byte at exit 0 with no warning, silently dropping the entire payload.
+    It "backs up and proceeds when the existing settings.json parses to a bare array, not an object" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            '[1,2,3]' | Set-Content (Join-Path $h 'settings.json')
+            @{ effortLevel = 'xhigh' } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -SkipPreflight -WarningAction SilentlyContinue | Out-Null
+
+            $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
+            $s.effortLevel | Should -Be 'xhigh'
+            @(Get-ChildItem -LiteralPath $h -Filter 'settings.json.bak.*').Count | Should -Be 1
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "backs up and proceeds instead of writing the receiver's file back unchanged when it parses to a bare string" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            '"hello"' | Set-Content (Join-Path $h 'settings.json')
+            @{ effortLevel = 'xhigh' } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -SkipPreflight *>&1 | Out-String
+
+            # The defect this pins: the install used to report success and leave the receiver's
+            # file byte for byte unchanged, silently dropping every hook, permission and
+            # statusLine the account layer ships.
+            $out | Should -Match 'not a JSON object|is a String'
+            $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
+            $s.effortLevel | Should -Be 'xhigh'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Task 10 review: a failure anywhere in the settings-merge block used to land outside every
+    # catch in the script, past Task 8's mixed-state warning, surfacing as a bare exception with
+    # no word that $ClaudeHome was left half-installed. Locks settings.json for write exclusion
+    # only (FileShare.Read), so the second install's own read of the existing file still
+    # succeeds and the failure is isolated to the final write, the same reproduction technique
+    # Task 8's own test uses for the tree-copy catch.
+    It "reports the mixed-state warning when the settings.json write fails, not just the tree copy" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight | Out-Null
+            $liveSettings = Join-Path $h 'settings.json'
+            $stream = [System.IO.File]::Open($liveSettings, 'Open', 'Read', 'Read')
+            $threw = $false
+            $warnings = $null
+            try {
+                try {
+                    & $script:install -PayloadRoot $p -ClaudeHome $h `
+                        -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight `
+                        -WarningVariable warnings -WarningAction SilentlyContinue *>$null
+                }
+                catch { $threw = $true }
+            }
+            finally { $stream.Dispose() }
+            $threw | Should -BeTrue -Because "a settings merge failure must still fail the run, not swallow it"
+            (@($warnings) -join "`n") | Should -Match 'mixed state|did not complete|Re-run this script'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
     # Review: an existing settings.json that fails to parse is not a shape Merge-AccountSettings
     # can merge against, and Claude Code could not have read it either. Silently overwriting it
     # would still lose whatever the operator was mid-edit on, so it is backed up instead
@@ -1086,6 +1214,24 @@ Describe "Install-Account" {
             $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
             $s.effortLevel | Should -Be 'xhigh'
             @(Get-ChildItem -LiteralPath $h -Filter 'settings.json.bak.*').Count | Should -Be 1
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Task 10 review, finding 7: Copy-Item correctly no-ops under -WhatIf, but the warning text
+    # unconditionally claimed "Backed up to '<path>'" regardless, which is a dry run reporting
+    # work it did not do.
+    It "under -WhatIf, does not claim a backup it never made" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            'not valid { json' | Set-Content (Join-Path $h 'settings.json')
+
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -SkipPreflight -WhatIf *>&1 | Out-String
+
+            $out | Should -Not -Match 'Backed up to'
+            @(Get-ChildItem -LiteralPath $h -Filter 'settings.json.bak.*').Count | Should -Be 0
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
