@@ -350,4 +350,82 @@ Describe "Install-Account" {
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
+
+    # Review round 1, item 7: at this process's default (PSNativeCommandUseErrorActionPreference
+    # false), a chmod that is present but exits non-zero does not throw, so the failure used to
+    # print raw stderr and nothing else, while the absent-chmod case got a sentence telling the
+    # operator to run chmod themselves. A chmod.cmd stub on the front of PATH stands in for the
+    # failing build; prepending rather than replacing PATH keeps the rest of the preflight probe
+    # answering from the real environment, since this test is not exercising that.
+    It "warns the same way when a present chmod fails as when chmod is absent" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        $stubBin = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-chmodfail-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $stubBin -Force | Out-Null
+        Set-Content (Join-Path $stubBin 'chmod.cmd') "@echo off`r`necho chmod-stub: cannot operate 1>&2`r`nexit /b 1"
+        $savedPath = $env:PATH
+        $out = $null
+        try {
+            $env:PATH = "$stubBin;$savedPath"
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -TargetIsWindows:$false *>&1 | Out-String
+        }
+        finally { $env:PATH = $savedPath; Remove-Item -Recurse -Force $stubBin -EA SilentlyContinue }
+        try {
+            $out | Should -Match 'chmod not on PATH'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Review round 1, item 8: the chmod branch had no test in either direction. Rewriting its
+    # condition to skip left the suite green, and test 4 was already executing chmod.exe against
+    # Windows-style paths on every run with nothing asserting anything about it. A chmod stub
+    # that logs its own invocations makes both directions observable without depending on what
+    # chmod happens to do to a Windows-style path's permission bits.
+    It "does not invoke chmod when preparing a Windows target" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        $stubBin = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-chmodstub-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $stubBin -Force | Out-Null
+        $log = Join-Path $stubBin 'invoked.log'
+        Set-Content (Join-Path $stubBin 'chmod.cmd') "@echo off`r`necho called %* >> `"$log`"`r`nexit /b 0"
+        $savedPath = $env:PATH
+        $logExisted = $false
+        try {
+            $env:PATH = "$stubBin;$savedPath"
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -TargetIsWindows:$true | Out-Null
+            # Checked before $stubBin is removed below: deleting the stub first would make
+            # Test-Path return $false unconditionally, whether or not chmod had actually run.
+            $logExisted = Test-Path -LiteralPath $log
+        }
+        finally { $env:PATH = $savedPath; Remove-Item -Recurse -Force $stubBin -EA SilentlyContinue }
+        try {
+            $logExisted | Should -BeFalse -Because "chmod must not run when preparing a Windows target"
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "invokes chmod +x on each .sh hook when preparing a Linux target" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        $stubBin = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-chmodstub-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $stubBin -Force | Out-Null
+        $log = Join-Path $stubBin 'invoked.log'
+        Set-Content (Join-Path $stubBin 'chmod.cmd') "@echo off`r`necho called %* >> `"$log`"`r`nexit /b 0"
+        $savedPath = $env:PATH
+        $logContent = $null
+        try {
+            $env:PATH = "$stubBin;$savedPath"
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -TargetIsWindows:$false | Out-Null
+            # Read the log before the stub directory is removed below: the earlier version of
+            # this test deleted $stubBin (and invoked.log with it) in this same finally, then
+            # tried to read the log afterward, so it always failed with "does not exist"
+            # regardless of whether chmod had actually run.
+            if (Test-Path -LiteralPath $log) { $logContent = Get-Content -Raw $log }
+        }
+        finally { $env:PATH = $savedPath; Remove-Item -Recurse -Force $stubBin -EA SilentlyContinue }
+        try {
+            $logContent | Should -Match 'harness-core-reminder\.sh'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
 }
