@@ -345,12 +345,20 @@ exit 0
         }
     }
 
-    It "folds all three quoting forms into forward-slash placeholders" {
-        $stand = New-StandInHome
-        $out = New-OutputRoot
-        try {
-            $ch = (Join-Path $stand '.claude')
-            $chBack = $ch -replace '/', '\'
+    # Fix round 1 (task-5-review.md, F2): the original single It here carried nine assertions.
+    # Pester aborts an It at its first failing Should, so the Step-5 tail-slashing ablation
+    # reported one failure and silently skipped the rest -- proven independently reproducible.
+    # One BeforeAll/AfterAll builds the stand-in and runs the real export exactly once; each It
+    # below asserts exactly one thing against that shared, already-computed output, so a failure
+    # in one can never mask another. This is the one Context in the file: every other It in it
+    # stays self-contained per the file's existing convention, because this is the one place
+    # where nine independent assertions would otherwise need nine near-identical fixtures.
+    Context "folds all three quoting forms into forward-slash placeholders" {
+        BeforeAll {
+            $script:qStand = New-StandInHome
+            $script:qOut = New-OutputRoot
+            $qCh = (Join-Path $script:qStand '.claude')
+            $script:qChBack = $qCh -replace '/', '\'
             $settings = @{
                 env = @{ CLAUDE_CODE_USE_POWERSHELL_TOOL = '1'; ENABLE_TOOL_SEARCH = 'auto:5' }
                 permissions = @{ allow = @('mcp__code-context'); defaultMode = 'auto' }
@@ -358,17 +366,17 @@ exit 0
                     PreToolUse = @(
                         @{ matcher = 'Write|Edit'; hooks = @(
                                 @{ type = 'command'
-                                    command = "& '$chBack\hooks\Scan-MemorySecrets.ps1'"
+                                    command = "& '$script:qChBack\hooks\Scan-MemorySecrets.ps1'"
                                     shell = 'powershell'; timeout = 5 }) }
                         @{ matcher = 'Agent|Task|Workflow'; hooks = @(
                                 @{ type = 'command'
-                                    command = "bun `"$chBack\hooks\model-tier-gate.ts`""
+                                    command = "bun `"$script:qChBack\hooks\model-tier-gate.ts`""
                                     timeout = 10 }) }
                     )
                     SessionStart = @(
                         @{ hooks = @(
                                 @{ type = 'command'
-                                    command = "bash `"$chBack\hooks\harness-core-reminder.sh`""
+                                    command = "bash `"$script:qChBack\hooks\harness-core-reminder.sh`""
                                     timeout = 10 }) }
                     )
                     UserPromptSubmit = @(
@@ -382,44 +390,87 @@ exit 0
                                     command = 'node C:/npm/ccstatusline/dist/ccstatusline.js --hook'
                                     timeout = 15 }) }
                     )
+                    # Fix round 1 (A1/A2): closes the plan's worst-defect coverage gap. -ClaudeHome
+                    # here is already backslash-spelled ([System.IO.Path]::GetTempPath() on
+                    # Windows), so the CLAUDE_HOME fold above never exercises the
+                    # forward-slashed-literal-vs-backslash-text case the normalisation in
+                    # ConvertTo-TemplatedText exists for. -CoreRepo is the one literal every test
+                    # in this file already passes forward-slashed ('E:/projects/agent-harness-core'),
+                    # matching what Get-MainCheckout actually returns in production, while a
+                    # hand-typed command referencing the repo is the realistic backslash-spelled
+                    # case. This hook is synthetic (the operator's live settings.json carries no
+                    # CORE_REPO literal today), but it puts the shared normalisation line under a
+                    # Task-5-owned test instead of waiting on Task 6's $AccountTemplatedFiles wiring.
+                    Notification = @(
+                        @{ hooks = @(
+                                @{ type = 'command'
+                                    command = 'bash "E:\projects\agent-harness-core\core\claude\hooks\harness-core-reminder.sh"'
+                                    timeout = 10 }) }
+                    )
                 }
                 statusLine = @{ type = 'command'
                     command = 'node C:/npm/ccstatusline/dist/ccstatusline.js'
                     padding = 0 }
                 skipDangerousModePermissionPrompt = $true
             }
-            $settings | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $ch 'settings.json')
+            $settings | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $qCh 'settings.json')
 
-            & $script:export -ClaudeHome $ch -OutputRoot $out `
+            & $script:export -ClaudeHome $qCh -OutputRoot $script:qOut `
                 -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
                 -VaultPath 'C:/vault' -SkipMcp | Out-Null
 
-            $raw = Get-Content (Join-Path $out 'settings.account.json') -Raw
-            $s = $raw | ConvertFrom-Json
+            $script:qRaw = Get-Content (Join-Path $script:qOut 'settings.account.json') -Raw
+            $script:qParsed = $script:qRaw | ConvertFrom-Json
 
-            $cmds = @()
-            foreach ($e in $s.hooks.PSObject.Properties.Name) {
-                foreach ($g in @($s.hooks.$e)) { foreach ($h in @($g.hooks)) { $cmds += $h.command } }
+            $script:qCmds = @()
+            foreach ($e in $script:qParsed.hooks.PSObject.Properties.Name) {
+                foreach ($g in @($script:qParsed.hooks.$e)) {
+                    foreach ($h in @($g.hooks)) { $script:qCmds += $h.command }
+                }
             }
-            $cmds | Should -Contain "& '{{CLAUDE_HOME}}/hooks/Scan-MemorySecrets.ps1'"
-            $cmds | Should -Contain 'bun "{{CLAUDE_HOME}}/hooks/model-tier-gate.ts"'
-            $cmds | Should -Contain 'bash "{{CLAUDE_HOME}}/hooks/harness-core-reminder.sh"'
-            $cmds | Should -Contain '{{NPM_GLOBAL}}/ccstatusline/dist/ccstatusline.js --hook'.Insert(0, 'node ')
-            $s.statusLine.command | Should -Be 'node {{NPM_GLOBAL}}/ccstatusline/dist/ccstatusline.js'
+        }
+        AfterAll {
+            Remove-Item -Recurse -Force $script:qStand, $script:qOut -ErrorAction SilentlyContinue
+        }
 
-            # The whole rewritten path, not only the prefix. A prefix-only fold leaves a
-            # receiver with /home/u/.claude\hooks\Scan-MemorySecrets.ps1, which is one string
-            # on Linux and not a path at all.
-            $raw | Should -Not -Match 'CLAUDE_HOME\}\}\\\\'
-            # Assert on the parsed commands, not on $raw. JSON doubles every backslash, so a
-            # pattern built by [regex]::Escape($chBack) needs SINGLE backslashes and can never
+        It "folds the quoted powershell hook command, & 'path'" {
+            $script:qCmds | Should -Contain "& '{{CLAUDE_HOME}}/hooks/Scan-MemorySecrets.ps1'"
+        }
+        It "folds the bun double-quoted hook command" {
+            $script:qCmds | Should -Contain 'bun "{{CLAUDE_HOME}}/hooks/model-tier-gate.ts"'
+        }
+        It "folds the bash double-quoted hook command" {
+            $script:qCmds | Should -Contain 'bash "{{CLAUDE_HOME}}/hooks/harness-core-reminder.sh"'
+        }
+        It "folds the unquoted node hook command" {
+            $script:qCmds | Should -Contain '{{NPM_GLOBAL}}/ccstatusline/dist/ccstatusline.js --hook'.Insert(0, 'node ')
+        }
+        It "folds a CORE_REPO-rooted command from a forward-slashed -CoreRepo against backslash-spelled text" {
+            $script:qCmds | Should -Contain 'bash "{{CORE_REPO}}/core/claude/hooks/harness-core-reminder.sh"'
+        }
+        It "folds statusLine.command" {
+            $script:qParsed.statusLine.command | Should -Be 'node {{NPM_GLOBAL}}/ccstatusline/dist/ccstatusline.js'
+        }
+        It "forward-slashes the whole rewritten tail, not only the prefix" {
+            # A prefix-only fold leaves a receiver with /home/u/.claude\hooks\Scan-MemorySecrets.ps1,
+            # which is one string on Linux and not a path at all.
+            $script:qRaw | Should -Not -Match 'CLAUDE_HOME\}\}\\\\'
+        }
+        It "leaves no folded hook command carrying the original backslashed CLAUDE_HOME path" {
+            # Assert on the parsed commands, not on $qRaw. JSON doubles every backslash, so a
+            # pattern built by [regex]::Escape($qChBack) needs SINGLE backslashes and can never
             # match the doubled text whatever the exporter did. Measured: that form does not
             # match "& 'C:\\Users\\jcgam\\.claude\\hooks\\x.ps1'", so it is an assertion with no
             # failing input, which is what patterns/test-falsifiability.md targets.
-            foreach ($c in $cmds) { $c | Should -Not -Match ([regex]::Escape($chBack)) }
-            $s.statusLine.command | Should -Not -Match ([regex]::Escape($chBack))
+            foreach ($c in $script:qCmds) { $c | Should -Not -Match ([regex]::Escape($script:qChBack)) }
         }
-        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+        It "leaves statusLine.command carrying no residual NPM_GLOBAL literal" {
+            # Fix round 1 (A3): the prior form asserted against $qChBack (the CLAUDE_HOME literal),
+            # which this string never contained before or after folding, so it had no failing
+            # input. statusLine.command's pre-fold text carries 'C:/npm' (the NPM_GLOBAL literal),
+            # so that is the value whose survival would mean the fold failed.
+            $script:qParsed.statusLine.command | Should -Not -Match ([regex]::Escape('C:/npm'))
+        }
     }
 
     It "keeps every non-command key, including the two the operator chose to ship" {
