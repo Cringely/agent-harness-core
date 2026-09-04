@@ -738,7 +738,15 @@ function Merge-McpServer {
         # the install printed a success message for a merge that changed nothing on disk. Task
         # 10 handles the parallel shape mismatch for settings.json one file over; same handling
         # here, warn and start from empty rather than silently drop the payload.
-        $kind = if ($doc.mcpServers -is [string]) { 'a string value' }
+        # Review F14: an explicit "mcpServers": null in the existing file is not a
+        # [pscustomobject], same as the string and array cases above, but it has no .GetType()
+        # to call: $doc.mcpServers is $null itself, and a method call on $null throws
+        # "You cannot call a method on a null-valued expression". Not a regression introduced
+        # here; the reviewer traced the same shape crashing one guard clause later, at
+        # $doc.mcpServers.PSObject.Properties[$name] in the merge loop, before this guard
+        # existed. This is the one shape that guard still missed.
+        $kind = if ($null -eq $doc.mcpServers) { 'null' }
+        elseif ($doc.mcpServers -is [string]) { 'a string value' }
         elseif ($doc.mcpServers -is [array]) { 'an array' }
         else { "a $($doc.mcpServers.GetType().Name) value" }
         Write-Warning "Existing mcpServers in claude.json is $kind, not a JSON object. Replacing it with an empty object before merging; whatever it held is lost."
