@@ -700,3 +700,29 @@ The work here is closing the gap at its own level rather than relying on the net
 Take it when someone adds a non-stdio MCP server, or sooner if the Task 14 scan turns out to be
 narrower than it reads. The fix is to derive both the gate's input and the fold's targets from one
 traversal of the entry, so the two cannot drift again.
+
+## 19. The account-layer containment guards do not resolve reparse points
+
+`Install-Account.ps1` refuses a `-PayloadRoot` equal to or nested inside `-ClaudeHome`, and
+`Export-Account.ps1` refuses an `-OutputRoot` equal to or nested inside `-ClaudeHome`. Both compare
+canonical absolute paths, and both can be walked past the same three ways.
+
+A review of the installer's guard measured all three. NTFS junctions are the one that matters: a
+junction pointing from the payload root into the target reproduces exactly the containment the
+guard exists to refuse, and it grows without bound. Four consecutive runs produced 10, then 21,
+then 32, then 43, then 54 files, gaining one more `rules\nested\` level each time. 8.3 short names
+and a `\?\` path prefix also get past it, though neither compounds the way the junction does.
+
+Fifteen other spellings held: equality, nesting in both directions, case differences, forward and
+backward slashes, `..` segments, trailing separators, and relative versus absolute pairs. The
+prefix case that has bitten this repo before is handled correctly, since `.claude` against
+`.claude-backup` is accepted in both orderings.
+
+The fix belongs in `AccountShared.ps1` as one containment helper both scripts call, resolving
+reparse points before comparing. Doing it in either script alone leaves the other wrong, and the
+two guards already exist for the same reason against the same failure. Whoever takes this should
+also decide whether a junction inside the tree being copied is worth refusing outright rather than
+resolving, which is simpler and probably right for a tool with one operator.
+
+Not urgent. It takes a deliberately constructed junction to reach, both scripts print what they
+are about to do, and the destructive one now reports a mixed state on partial failure.
