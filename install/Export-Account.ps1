@@ -187,9 +187,6 @@ function Copy-AccountTree {
         # *.bak.* is change-management.md's timestamped convention. *.bak on its own catches
         # older, untimestamped backups (e.g. hooks/Scan-MemorySecrets.ps1.bak) that predate it
         # and would otherwise ship a machine path in the payload.
-        # *.bak.* is change-management.md's timestamped convention. *.bak on its own catches
-        # older, untimestamped backups (e.g. hooks/Scan-MemorySecrets.ps1.bak) that predate it
-        # and would otherwise ship a machine path in the payload.
         if ($f.Name -like '*.bak.*' -or $f.Name -like '*.bak') { continue }
         if ($SkipRelative -contains "$Relative/$rel") { continue }
         $dest = Join-Path $to $rel
@@ -349,23 +346,28 @@ if ($PSCmdlet.ShouldProcess($OutputRoot, 'fold model-read machine paths')) {
         $wanted = @($script:AccountTemplatedFiles[$rel])
         $rowFolds = @($folds | Where-Object { $wanted -contains ($_.Token -replace '[{}]', '') })
         $text = Get-Content -LiteralPath $target -Raw
-        # Count matches, not attempts. The row names which tokens apply; it does not promise the
-        # file's text still contains the literal. An upstream edit that respells the path, or a
-        # -CoreRepo/-VaultPath value that no longer matches what the file says, would otherwise
-        # leave the machine path in place while this line kept reporting the row's full count.
+        # Count matches, not attempts, and check per TOKEN, not per row. The row names which
+        # tokens apply; it does not promise the file's text still contains every one of their
+        # literals. A row-wide check ("did anything in this row match") is not enough: on a real
+        # export, skills/subagent-prompting/SKILL.md (the one two-token row) shipped
+        # C--Users-jcgam with no warning at all, because its OBSIDIAN_VAULT token matched and
+        # that alone made the row-wide check pass while HOME_SLUG silently did not. Warn on the
+        # specific token that stopped matching, not on whether the row as a whole did.
         $substituted = 0
         foreach ($f in $rowFolds) {
             $before = $text
             $text = ConvertTo-TemplatedText -Text $text -Fold $f
-            if ($text -ne $before) { $substituted++ }
+            if ($text -ne $before) {
+                $substituted++
+            }
+            else {
+                # Loud for the same reason the missing-file throw above is loud: a token that
+                # stopped matching ships the machine path with the console still saying the file
+                # was handled, and a sibling token in the same row matching would otherwise hide it.
+                Write-Warning "${rel}: token $($f.Token) did not match the file's text; it still carries whatever machine path it had."
+            }
         }
         Set-Content -LiteralPath $target -Value $text -NoNewline
-        if (@($rowFolds).Count -gt 0 -and $substituted -eq 0) {
-            # Loud for the same reason the missing-file throw above is loud: a row whose literal
-            # stopped matching ships the machine path with the console still saying the file was
-            # handled.
-            Write-Warning "${rel}: table row names $(@($rowFolds).Count) token(s) but none matched the file's text; it still carries whatever machine path it had."
-        }
         Write-Host "  ${rel}: folded $substituted of $(@($rowFolds).Count) token(s)"
     }
 }

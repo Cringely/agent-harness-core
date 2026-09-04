@@ -671,6 +671,27 @@ exit 0
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
     }
 
+    It "folds the default -HomeSlug when the caller omits it" {
+        # N-3: the sibling branch of the same `if (-not $HomeSlug) { ... }` that F-1 fixed. F-1
+        # covers the caller-supplied half (-HomeSlug passed explicitly); this covers the OTHER
+        # half, -HomeSlug omitted so the exporter falls back to Get-ProjectSlug $HOME. Deleting
+        # that line entirely left the suite green while a real export shipped the raw default
+        # slug in two of the six files -- measured directly. New-StandInHome's own default
+        # skills/council/SKILL.md fixture already carries the default slug literal
+        # ($slugLiteral, computed the same way Get-ProjectSlug does), so no new fixture is needed
+        # here, only the assertion.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            & $script:export -ClaudeHome (Join-Path $stand '.claude') -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipSettings -SkipMcp | Out-Null
+            (Get-Content (Join-Path $out 'skills/council/SKILL.md') -Raw) |
+                Should -Match '\{\{HOME_SLUG\}\}'
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
     It "folds a literal written with either separator spelling" {
         # Install writes forward-slash form, so after an install on the canonical box
         # harness-core.md reads E:/projects/agent-harness-core. A backslash-only fold would
@@ -758,7 +779,43 @@ exit 0
                 -WarningVariable warnings -WarningAction SilentlyContinue | Out-Null
             $warned = @($warnings) -join "`n"
             $warned | Should -Match 'rules/harness-core\.md'
-            $warned | Should -Match '(?i)none matched'
+            $warned | Should -Match '\{\{CORE_REPO\}\}'
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "warns on the unmatched token in a two-token row even when its sibling token matches" {
+        # N-2: skills/subagent-prompting/SKILL.md is the ONLY row naming more than one token
+        # (OBSIDIAN_VAULT, HOME_SLUG). A per-row check ("did the row substitute anything at
+        # all") stays quiet as long as ONE of the two matches, which is exactly how a real
+        # export shipped C--Users-jcgam in this file with no warning while the sibling
+        # OBSIDIAN_VAULT token folded cleanly. Plant HOME_SLUG's literal only; leave
+        # OBSIDIAN_VAULT's out of the file entirely. Uses the exporter's DEFAULT -HomeSlug
+        # (Get-ProjectSlug $HOME), matching New-StandInHome's own default council.md fixture, so
+        # this test does not itself cause an unrelated warning on a sibling file by passing a
+        # -HomeSlug that no longer matches what New-StandInHome already planted elsewhere.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            $slug = $HOME.TrimEnd('\', '/') -creplace '[^A-Za-z0-9]', '-'
+            "the slug is $slug, no vault path mentioned anywhere in this file" |
+                Set-Content (Join-Path $ch 'skills/subagent-prompting/SKILL.md')
+            & $script:export -ClaudeHome $ch -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipSettings -SkipMcp `
+                -WarningVariable warnings -WarningAction SilentlyContinue | Out-Null
+            # Scoped to the one file under test: New-StandInHome's other fixtures are free to
+            # warn about their own unrelated tokens without this assertion picking that up.
+            $subWarning = (@($warnings) |
+                    Where-Object { $_ -match 'skills/subagent-prompting/SKILL\.md' }) -join "`n"
+            $subWarning | Should -Not -BeNullOrEmpty
+            $subWarning | Should -Match '\{\{OBSIDIAN_VAULT\}\}'
+            # The sibling token that DID match must not also be reported as unmatched, and must
+            # still have been folded.
+            $subWarning | Should -Not -Match '\{\{HOME_SLUG\}\}'
+            (Get-Content (Join-Path $out 'skills/subagent-prompting/SKILL.md') -Raw) |
+                Should -Match '\{\{HOME_SLUG\}\}'
         }
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
     }
