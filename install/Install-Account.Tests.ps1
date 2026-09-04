@@ -682,17 +682,26 @@ Describe "Install-Account" {
             'home maps to {{HOME_SLUG}}' | Set-Content (Join-Path $p 'skills/council/SKILL.md')
             '~/.claude/projects/{{HOME_SLUG}}/memory and {{OBSIDIAN_VAULT}}/Handoffs' |
                 Set-Content (Join-Path $p 'skills/subagent-prompting/SKILL.md')
-            @{ hooks = @{ PreToolUse = @( @{ matcher = 'Skill'; hooks = @(
+            @{
+                hooks = @{ PreToolUse = @( @{ matcher = 'Skill'; hooks = @(
                                 @{ type = 'command'
-                                    command = 'node {{NPM_GLOBAL}}/ccstatusline/dist/ccstatusline.js --hook' }) }) } } |
-                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+                                    command = 'node {{NPM_GLOBAL}}/ccstatusline/dist/ccstatusline.js --hook' }) }) }
+                statusLine = @{ type = 'command'
+                    command = 'node {{NPM_GLOBAL}}/ccstatusline/dist/ccstatusline.js' }
+            } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
+            # Backslashed on purpose. Review round 1, F5: forward-slashing was pinned for
+            # {{CLAUDE_HOME}} only, since {{CORE_REPO}} and {{NPM_GLOBAL}} were both handed in
+            # already forward-slashed and the -replace was a no-op under test. -VaultPath and
+            # -HomeSlug, review round 1 F4: both parameters could be deleted without reddening
+            # anything, since nothing ever asserted the skills/handoff/SKILL.md fixture this It
+            # already plants.
             & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
-                -NpmGlobal 'C:/npm/node_modules' -SkipPreflight | Out-Null
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:\projects\agent-harness-core' `
+                -NpmGlobal 'C:\npm\node_modules' -VaultPath 'D:\My Vault\Claude Code' `
+                -HomeSlug 'STUB-SLUG' -SkipPreflight | Out-Null
 
             $expectedHome = $h -replace '\\', '/'
-            $expectedSlug = $HOME.TrimEnd('\', '/') -creplace '[^A-Za-z0-9]', '-'
             (Get-Content (Join-Path $h 'rules/harness-core.md') -Raw) |
                 Should -Match ([regex]::Escape('E:/projects/agent-harness-core'))
             (Get-Content (Join-Path $h 'hooks/harness-core-reminder.sh') -Raw) |
@@ -700,14 +709,22 @@ Describe "Install-Account" {
             (Get-Content (Join-Path $h 'skills/prose-lint/SKILL.md') -Raw) |
                 Should -Match ([regex]::Escape("$expectedHome/tools/prose-lint/.vale.ini"))
             (Get-Content (Join-Path $h 'skills/council/SKILL.md') -Raw) |
-                Should -Match ([regex]::Escape($expectedSlug))
+                Should -Match ([regex]::Escape('STUB-SLUG'))
+            # -VaultPath and its forward-slashing. Review round 1, F4: this fixture was already
+            # planted and never checked.
+            (Get-Content (Join-Path $h 'skills/handoff/SKILL.md') -Raw) |
+                Should -Match ([regex]::Escape('D:/My Vault/Claude Code'))
             $sub = Get-Content (Join-Path $h 'skills/subagent-prompting/SKILL.md') -Raw
-            $sub | Should -Match ([regex]::Escape($expectedSlug))
+            $sub | Should -Match ([regex]::Escape('STUB-SLUG'))
             $sub | Should -Not -Match '\{\{'
 
             $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
             @($s.hooks.PreToolUse)[0].hooks[0].command |
                 Should -Be 'node C:/npm/node_modules/ccstatusline/dist/ccstatusline.js --hook'
+            # npm-present statusLine expansion. Review round 1, F3: the primary path every
+            # ordinary install with npm on the box takes, and no fixture exercised it.
+            $s.statusLine.command |
+                Should -Be 'node C:/npm/node_modules/ccstatusline/dist/ccstatusline.js'
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
@@ -788,6 +805,12 @@ Describe "Install-Account" {
             $raw = Get-Content (Join-Path $h 'settings.json') -Raw
             $raw | Should -Not -Match 'ccstatusline'
             $raw | Should -Not -Match '\{\{NPM_GLOBAL\}\}'
+            # @() around the Where-Object output. Review round 1, F2: dropping it serialises a
+            # single surviving hook as "hooks": {...} instead of "hooks": [...], which the
+            # assertions below cannot see, since ConvertFrom-Json's own @() re-wrap on read
+            # normalises the scalar back into a one-element array and hides the defect. Assert
+            # on the raw JSON text instead, before it goes through that re-wrap.
+            $raw | Should -Match '"hooks":\s*\['
             $s = $raw | ConvertFrom-Json
             $s.statusLine.command | Should -Be "pwsh -NoProfile -File '$($h -replace '\\', '/')/statusline-command.ps1'"
             # The Guard-SkillSize entry in the same matcher group must survive: the branch drops
@@ -812,6 +835,77 @@ Describe "Install-Account" {
                 -NpmGlobal '' -TargetIsWindows:$false -SkipPreflight | Out-Null
             $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
             $s.statusLine.command | Should -Be "bash '$($h -replace '\\', '/')/statusline-command.sh'"
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Review round 1, F1: the phantom-null defect the implementer diagnosed and fixed at the
+    # $event enumeration recurs at three more @()-wrapped sites in the same function, all
+    # reachable from a receiver-authored settings.account.json even though none is reachable
+    # from today's real payload. Task 10 routes receiver JSON through this same function, which
+    # is why these three earn a fix now rather than a deferral. One It per site, matching this
+    # file's own one-assertion-per-It convention, since the three sites are fixed independently.
+    It "does not crash when a hook event's group list is explicitly null" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            '{"hooks":{"PreToolUse":null}}' | Set-Content (Join-Path $p 'settings.account.json')
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -SkipPreflight | Out-Null
+            $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
+            $s.hooks.PSObject.Properties.Name | Should -Not -Contain 'PreToolUse'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "does not crash when a hook group has no hooks key, or an explicit null one" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            @{ hooks = @{ PreToolUse = @(
+                        @{ matcher = 'Write' },
+                        @{ matcher = 'Edit'; hooks = $null }
+                    ) } } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -SkipPreflight | Out-Null
+            $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
+            $s.hooks.PSObject.Properties.Name | Should -Not -Contain 'PreToolUse'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "leaves a hook entry with no command property alone instead of crashing on it" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            @{ hooks = @{ PreToolUse = @( @{ matcher = 'Write'; hooks = @(
+                                @{ type = 'command' }) }) } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -SkipPreflight | Out-Null
+            $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
+            $hook = @(@($s.hooks.PreToolUse)[0].hooks)[0]
+            $hook.type | Should -Be 'command'
+            $hook.PSObject.Properties.Name | Should -Not -Contain 'command'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Review round 1, F6: a surviving {{TOKEN}} was neither expanded, reported, nor tested.
+    # Passthrough stays deliberate rather than a hard stop, since a receiver still gets an
+    # install over one bad file, but a silent survivor lands in a model-read file or a hook
+    # command that cannot run, so it is reported instead of left invisible.
+    It "warns about a surviving unknown placeholder without failing the install" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            'core {{CORE_REPO}} mystery {{MYSTERY}}' | Set-Content (Join-Path $p 'rules/harness-core.md')
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -SkipPreflight *>&1 | Out-String
+            $out | Should -Match 'MYSTERY'
+            $content = Get-Content (Join-Path $h 'rules/harness-core.md') -Raw
+            $content | Should -Match ([regex]::Escape('E:/projects/agent-harness-core'))
+            $content | Should -Match '\{\{MYSTERY\}\}'
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
