@@ -169,4 +169,68 @@ exit 0
             Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue
         }
     }
+
+    # C1: Copy-AccountTree removes each allowlisted directory under -OutputRoot before recopying
+    # it, so an -OutputRoot equal to, or nested inside, -ClaudeHome would delete the live account
+    # layer instead of the export destination. Four Its, each asserting one thing, so a failure
+    # in one cannot mask the others.
+
+    It "still exports normally when -OutputRoot is outside -ClaudeHome" {
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            & $script:export -ClaudeHome (Join-Path $stand '.claude') -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipSettings -SkipMcp | Out-Null
+            Test-Path -LiteralPath (Join-Path $out 'rules/security.md') | Should -BeTrue
+        }
+        finally {
+            Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "refuses when -OutputRoot equals -ClaudeHome, and deletes nothing" {
+        $stand = New-StandInHome
+        $claude = Join-Path $stand '.claude'
+        try {
+            { & $script:export -ClaudeHome $claude -OutputRoot $claude `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp } | Should -Throw
+            Test-Path -LiteralPath (Join-Path $claude 'rules/security.md') | Should -BeTrue
+            Test-Path -LiteralPath (Join-Path $claude 'agents/appsec-sme.md') | Should -BeTrue
+        }
+        finally {
+            Remove-Item -Recurse -Force $stand -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "refuses when -OutputRoot is nested inside -ClaudeHome, and deletes nothing" {
+        $stand = New-StandInHome
+        $claude = Join-Path $stand '.claude'
+        $nestedOut = Join-Path $claude 'export-output'
+        try {
+            { & $script:export -ClaudeHome $claude -OutputRoot $nestedOut `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp } | Should -Throw
+            Test-Path -LiteralPath (Join-Path $claude 'rules/security.md') | Should -BeTrue
+            Test-Path -LiteralPath (Join-Path $claude 'agents/appsec-sme.md') | Should -BeTrue
+        }
+        finally {
+            Remove-Item -Recurse -Force $stand -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "supports -WhatIf, leaving the destination untouched" {
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            & $script:export -ClaudeHome (Join-Path $stand '.claude') -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipSettings -SkipMcp -WhatIf | Out-Null
+            Test-Path -LiteralPath (Join-Path $out 'rules/security.md') | Should -BeFalse
+        }
+        finally {
+            Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue
+        }
+    }
 }

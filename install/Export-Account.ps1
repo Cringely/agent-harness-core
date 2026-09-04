@@ -1,5 +1,3 @@
-# UNWIRED until Task 13 of docs/superpowers/plans/2026-09-03-account-layer-portability.md adds
-# its README and rules/harness-core.md registration. Invoke: pwsh -NoProfile -File install/Export-Account.ps1
 <#
 .SYNOPSIS
     Exports this workstation's ~/.claude account layer into account/claude/ in this repo.
@@ -45,11 +43,27 @@
 .EXAMPLE
     pwsh -NoProfile -File install/Export-Account.ps1
 #>
+# UNWIRED until Task 13 of docs/superpowers/plans/2026-09-03-account-layer-portability.md adds
+# its README and rules/harness-core.md registration. Invoke: pwsh -NoProfile -File install/Export-Account.ps1
+#
+# Moved below the comment-based help block rather than above it: PowerShell only recognises
+# help text that begins at the top of the file (or right after param()), so a notice placed
+# above <# .SYNOPSIS #> made Get-Help return the auto-generated syntax line and one parameter
+# instead of the synopsis and all eight. Task 13 deletes this notice; the help block stays.
+#
 # PositionalBinding=$false, not a position list: Restore-ClaudeProject.ps1:71-95 records that
 # PowerShell auto-assigns a position to every non-switch parameter lacking one, in declaration
 # order, so a later-added seam silently becomes positional and a stray extra argument sets it
 # without a binding error. Unlike Restore this script has no existing positional callers.
-[CmdletBinding(PositionalBinding = $false)]
+#
+# SupportsShouldProcess makes -WhatIf and -Confirm valid on the script and sets
+# $WhatIfPreference for the whole run. No explicit $PSCmdlet.ShouldProcess call is needed to act
+# on it: Copy-AccountTree's Remove-Item, New-Item and Copy-Item are all built-in cmdlets that
+# already implement ShouldProcess themselves, and they read $WhatIfPreference from the calling
+# scope the same way any nested function call does. Adding a manual ShouldProcess wrap around
+# the call site was tried and measured to do nothing: ablating it left the -WhatIf test green,
+# because the underlying cmdlets were already honouring it on their own.
+[CmdletBinding(PositionalBinding = $false, SupportsShouldProcess)]
 param(
     [string]$ClaudeHome,
     [string]$ClaudeJson,
@@ -85,6 +99,26 @@ if (-not $PSBoundParameters.ContainsKey('NpmGlobal')) {
 }
 
 if (-not (Test-Path -LiteralPath $ClaudeHome)) { throw "No account layer at '$ClaudeHome'." }
+
+# Copy-AccountTree removes each allowlisted directory under -OutputRoot before recopying it;
+# that removal is what makes the mirror an actual mirror rather than an overlay. If -OutputRoot
+# resolves to -ClaudeHome itself, or to a path inside it, that same removal deletes the live
+# account layer instead of the export destination. Refuse before anything is touched. Compare
+# canonical absolute paths, not the raw parameter strings, so a relative '.' or a trailing slash
+# cannot slip past the check.
+$claudeHomeFull = [System.IO.Path]::GetFullPath($ClaudeHome).TrimEnd('\', '/')
+$outputRootFull = [System.IO.Path]::GetFullPath($OutputRoot).TrimEnd('\', '/')
+# Windows paths are case-insensitive; Linux paths are not. $IsWindows is undefined on Windows
+# PowerShell 5.1, where the answer is always Windows -- the same platform line
+# Restore-ClaudeProject.ps1's $TargetIsWindows default draws.
+$onWindowsHost = ($PSVersionTable.PSVersion.Major -lt 6) -or $IsWindows
+$pathComparison = if ($onWindowsHost) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
+$sep = [System.IO.Path]::DirectorySeparatorChar
+if ($outputRootFull.Equals($claudeHomeFull, $pathComparison) -or
+    $outputRootFull.StartsWith("$claudeHomeFull$sep", $pathComparison)) {
+    throw "-OutputRoot ('$outputRootFull') must not be the account home or a path inside it " +
+        "('$claudeHomeFull'); the mirror deletes each allowlisted directory before recopying."
+}
 
 Write-Host "Account home : $ClaudeHome"
 Write-Host "Output root  : $OutputRoot"
