@@ -93,6 +93,15 @@ $repoRoot = Split-Path $PSScriptRoot -Parent
 if (-not $ClaudeHome) { $ClaudeHome = Join-Path $HOME '.claude' }
 if (-not $ClaudeJson) { $ClaudeJson = Join-Path $HOME '.claude.json' }
 if (-not $OutputRoot) { $OutputRoot = Join-Path (Join-Path $repoRoot 'account') 'claude' }
+
+# review round 1, ANSWER-4(b): the script performs its work at load time, so dot-sourcing runs
+# the whole export against every default -- including -OutputRoot defaulted to this repo's own
+# account/claude and -ClaudeHome/-ClaudeJson defaulted to the live account layer. Placed here,
+# right after -OutputRoot resolves, so it fires before anything is read or written.
+if ($MyInvocation.InvocationName -eq '.') {
+    throw "Export-Account.ps1 runs the export on load; dot-sourcing it exports against live defaults. Run it: pwsh -NoProfile -File install/Export-Account.ps1"
+}
+
 if (-not $CoreRepo)   { $CoreRepo = Get-MainCheckout -StartDir $repoRoot }
 if (-not $VaultPath) {
     $VaultPath = if ($env:CLAUDE_OBSIDIAN_VAULT) { $env:CLAUDE_OBSIDIAN_VAULT }
@@ -391,10 +400,23 @@ function Get-SecretPattern {
     $assign = @($ast.FindAll({ param($n)
                 $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
                 $n.Left.Extent.Text -eq '$patterns' }, $true))
-    if ($assign.Count -eq 0) {
-        throw "Scan-MemorySecrets.ps1 no longer defines `$patterns."
+    # review round 1, F2: a lone -eq 0 check fails OPEN on a second $patterns assignment (picks
+    # $assign[0], ignores the rest) and on an assignment whose right side lifts empty. Both are
+    # plausible refactors of Scan-MemorySecrets.ps1 and both turned the gate into a silent no-op
+    # under the earlier check, with the whole suite still green. Require exactly one assignment
+    # and a non-empty lifted table.
+    if ($assign.Count -ne 1) {
+        throw "Scan-MemorySecrets.ps1 defines $($assign.Count) `$patterns assignments; expected exactly 1."
     }
-    return @(& ([scriptblock]::Create($assign[0].Right.Extent.Text)))
+    # The right-hand side is EXECUTED here, not merely parsed: [scriptblock]::Create builds a
+    # scriptblock from the assignment's extent text and & invokes it. The file is the operator's
+    # own and already runs as a hook on every Write/Edit, so the trust boundary is unchanged, but
+    # a reader should not assume the AST route is inert.
+    $table = @(& ([scriptblock]::Create($assign[0].Right.Extent.Text)))
+    if ($table.Count -eq 0) {
+        throw "Scan-MemorySecrets.ps1's `$patterns table lifted empty."
+    }
+    return $table
 }
 
 function Test-AccountSecret {
@@ -405,6 +427,29 @@ function Test-AccountSecret {
         if ($Text -match $p.Regex) { $hits += $p.Name }
     }
     return @($hits)
+}
+
+# review round 1, F1: walks an arbitrary JSON-shaped value (PSCustomObject / array / scalar, the
+# shapes ConvertFrom-Json produces) and returns every string reachable inside it. The gate's
+# input must be built from the same object the writer below serialises, not a hand-maintained
+# list of property names -- a fixed list of command/args/env covers today's three stdio servers
+# and misses an http or sse server's headers or url, which is exactly where MCP auth material
+# lives. A non-string scalar (bool, number, $null) has no secret shape and contributes nothing.
+function Get-AccountString {
+    param($Value)
+    if ($null -eq $Value) { return @() }
+    if ($Value -is [string]) { return @($Value) }
+    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+        $out = @()
+        foreach ($p in @($Value.PSObject.Properties)) { $out += @(Get-AccountString -Value $p.Value) }
+        return @($out)
+    }
+    if ($Value -is [System.Collections.IEnumerable]) {
+        $out = @()
+        foreach ($item in $Value) { $out += @(Get-AccountString -Value $item) }
+        return @($out)
+    }
+    return @()
 }
 
 if (-not $SkipMcp) {
@@ -420,19 +465,24 @@ if (-not $SkipMcp) {
         else {
             $patterns = @(Get-SecretPattern -ScanHookPath (Join-Path $ClaudeHome 'hooks/Scan-MemorySecrets.ps1'))
 
+            # review round 1, F4: .PSObject.Properties.Name on a PSCustomObject with zero
+            # NoteProperties (the round trip for "mcpServers": {}) is $null rather than an empty
+            # collection, and @($null) is a one-element array holding $null, not an empty one --
+            # the same shape as the env loop's phantom-null defect below. Computed once and
+            # reused for both the loop and the reported count, so "mcpServers": {} runs zero
+            # iterations and reports 0 servers rather than a phantom 1.
+            $serverNames = @($servers.PSObject.Properties.Name) | Where-Object { $_ }
+
             # Fold and gate in one pass. The gate throws before anything is written, so a failed
             # export leaves no half-written file for someone to commit.
-            foreach ($name in @($servers.PSObject.Properties.Name)) {
+            foreach ($name in $serverNames) {
                 $srv = $servers.$name
-                $strings = @($name)
                 if ($srv.command) {
                     $srv.command = ConvertTo-TemplatedCommand -Text $srv.command -Folds $folds
-                    $strings += $srv.command
                 }
                 if ($null -ne $srv.args) {
                     $srv.args = @(@($srv.args) | ForEach-Object {
                             ConvertTo-TemplatedCommand -Text $_ -Folds $folds })
-                    $strings += @($srv.args)
                 }
                 if ($srv.env) {
                     # ConvertFrom-Json on an empty JSON object ("env": {}) yields a PSCustomObject
@@ -443,9 +493,14 @@ if (-not $SkipMcp) {
                     # $null, and $srv.env.$k = ... throws PSArgumentException on the null name.
                     foreach ($k in @($srv.env.PSObject.Properties.Name) | Where-Object { $_ }) {
                         $srv.env.$k = ConvertTo-TemplatedCommand -Text $srv.env.$k -Folds $folds
-                        $strings += @($k, $srv.env.$k)
                     }
                 }
+
+                # review round 1, F1: gate every string reachable under the POST-FOLD entry, not
+                # only command/args/env. The write below serialises the whole $srv object, so a
+                # property the fold pass has no rule for reached the file unscanned under the
+                # earlier hand-maintained list.
+                $strings = @($name) + @(Get-AccountString -Value $srv)
                 foreach ($s in $strings) {
                     $hits = @(Test-AccountSecret -Text $s -Patterns $patterns)
                     if ($hits.Count -gt 0) {
@@ -456,12 +511,10 @@ if (-not $SkipMcp) {
 
             [pscustomobject]@{ mcpServers = $servers } | ConvertTo-Json -Depth 20 |
                 Set-Content -LiteralPath (Join-Path $OutputRoot 'mcp-servers.json') -Encoding utf8
-            Write-Host "  mcp-servers.json: $(@($servers.PSObject.Properties.Name).Count) server(s)"
+            Write-Host "  mcp-servers.json: $(@($serverNames).Count) server(s)"
         }
     }
 }
-
-Write-Host "Export complete. Review with: git status account/claude"
 
 # Written only after every copy above completes without throwing, so its presence means this
 # -OutputRoot really was produced by a prior export and the non-empty-destination refusal above
@@ -472,3 +525,8 @@ Set-Content -LiteralPath $exportMarker -Value (
     "Written by Export-Account.ps1. Marks this directory as a known export destination so a " +
     "repeat export does not need -Force. Delete this file (or the whole directory) to require " +
     "-Force again.")
+
+# review round 1, F9: this used to sit above the marker write, so the script announced
+# completion before its own last write, and under -WhatIf it printed with nothing written at
+# all (Set-Content is ShouldProcess-aware and no-ops under -WhatIf, same as every step above).
+Write-Host "Export complete. Review with: git status account/claude"
