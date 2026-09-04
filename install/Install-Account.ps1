@@ -1,5 +1,3 @@
-# UNWIRED until Task 13 of docs/superpowers/plans/2026-09-03-account-layer-portability.md adds
-# its README and rules/harness-core.md registration. Invoke: pwsh -NoProfile -File install/Install-Account.ps1
 <#
 .SYNOPSIS
     Installs this repo's account/claude payload onto a workstation's ~/.claude.
