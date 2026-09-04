@@ -11,7 +11,8 @@ Describe "Export-Account" {
             $standHome = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-export-" + [guid]::NewGuid())
             $claude = Join-Path $standHome '.claude'
             foreach ($d in 'rules', 'agents', 'hooks', 'tools/prose-lint/styles/Cringely',
-                'skills/prose-lint', 'skills/handoff', 'skills/council', 'skills/subagent-prompting') {
+                'skills/prose-lint', 'skills/handoff', 'skills/council', 'skills/subagent-prompting',
+                'skills/cloned-skill/.git/refs/heads') {
                 New-Item -ItemType Directory -Path (Join-Path $claude $d) -Force | Out-Null
             }
             'rule body'                | Set-Content (Join-Path $claude 'rules/security.md')
@@ -66,6 +67,12 @@ exit 0
             New-Item -ItemType Directory -Path (Join-Path $claude 'shell-snapshots') -Force | Out-Null
             'runtime state'            | Set-Content (Join-Path $claude 'shell-snapshots/snap-1.ps1')
             '{"token":"x"}'            | Set-Content (Join-Path $claude '.credentials.json')
+
+            # A cloned skill's .git/ internals: real payload shipped skills/beautiful_prose/.git,
+            # 28 files including the operator's committer email in the reflog, before this fix.
+            'ref: refs/heads/main'     | Set-Content (Join-Path $claude 'skills/cloned-skill/.git/HEAD')
+            'operator@example.com'     | Set-Content (Join-Path $claude 'skills/cloned-skill/.git/refs/heads/main')
+            'skill body'               | Set-Content (Join-Path $claude 'skills/cloned-skill/SKILL.md')
 
             return $standHome
         }
@@ -151,6 +158,29 @@ exit 0
             $baks = @(Get-ChildItem -LiteralPath $out -Recurse -File |
                     Where-Object { $_.Name -like '*.bak.*' -or $_.Name -like '*.bak' })
             @($baks).Count | Should -Be 0 -Because "the payload must carry neither .bak spelling"
+        }
+        finally {
+            Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "drops a cloned skill's .git internals, at any depth, while keeping the skill itself" {
+        # Real export measured: skills/beautiful_prose/.git shipped 28 files, including the
+        # operator's committer email in .git/logs/HEAD, before Copy-AccountTree excluded .git.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            & $script:export -ClaudeHome (Join-Path $stand '.claude') -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipSettings -SkipMcp | Out-Null
+
+            Test-Path -LiteralPath (Join-Path $out 'skills/cloned-skill/SKILL.md') | Should -BeTrue `
+                -Because "the skill's own content still belongs in the payload"
+            Test-Path -LiteralPath (Join-Path $out 'skills/cloned-skill/.git') | Should -BeFalse `
+                -Because "a cloned skill's git internals are not the account layer the operator authors"
+            $gits = @(Get-ChildItem -LiteralPath $out -Recurse -Force -Directory |
+                    Where-Object { $_.Name -eq '.git' })
+            @($gits).Count | Should -Be 0 -Because "no .git directory may survive anywhere in the payload"
         }
         finally {
             Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue

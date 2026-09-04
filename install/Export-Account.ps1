@@ -191,6 +191,13 @@ function Copy-AccountTree {
     # -Force so hidden entries are enumerated; a dir\* wildcard silently skips them on Windows.
     foreach ($f in @(Get-ChildItem -LiteralPath $from -Recurse -File -Force)) {
         $rel = ($f.FullName.Substring($from.Length).TrimStart('\', '/')) -replace '\\', '/'
+        # A cloned skill (e.g. skills/beautiful_prose, installed from a marketplace) carries its
+        # own .git/ internals: refs, packed-refs, and a reflog with the operator's committer
+        # email in plain text. None of that is the account layer the operator authors, and none
+        # of it belongs in a payload meant to ship to another machine. Checked on every path
+        # segment, not just the leaf, so a .git/ at any depth under an allowlisted directory is
+        # excluded, the same way *.bak.* is checked on the leaf name rather than only at the top.
+        if (@($rel -split '/') -contains '.git') { continue }
         # *.bak.* is change-management.md's timestamped convention. *.bak on its own catches
         # older, untimestamped backups (e.g. hooks/Scan-MemorySecrets.ps1.bak) that predate it
         # and would otherwise ship a machine path in the payload.
