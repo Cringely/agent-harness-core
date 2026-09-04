@@ -468,4 +468,73 @@ Describe "Account hooks" {
             finally { Remove-Item -Recurse -Force $sandbox -ErrorAction SilentlyContinue }
         }
     }
+
+    It "builds the Vale config path one segment at a time" {
+        foreach ($root in $script:hookRoots) {
+            $text = Import-HookFunction -ScriptPath (Join-Path $root 'Lint-DocumentProse.ps1') `
+                -Name 'Get-ValeConfigPath'
+            $built = Invoke-UnderPosixJoin -Expression ($text + "`nGet-ValeConfigPath") `
+                -HomeValue '/home/u'
+            $built | Should -Be '/home/u/.claude/tools/prose-lint/.vale.ini' `
+                -Because "$root must not put separators inside a single path segment"
+        }
+    }
+
+    # Same AST-scan shape as Task 2's check on Sync-MemoryToObsidian.ps1: catches a
+    # reintroduced multi-argument Join-Path without needing a 5.1 interpreter on hand to
+    # reproduce the silent-no-op failure it causes there.
+    It "keeps every Join-Path call in Lint-DocumentProse at two arguments" {
+        foreach ($root in $script:hookRoots) {
+            $hook = Join-Path $root 'Lint-DocumentProse.ps1'
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+                $hook, [ref]$null, [ref]$null)
+            $calls = @($ast.FindAll({ param($n)
+                        $n -is [System.Management.Automation.Language.CommandAst] -and
+                        $n.GetCommandName() -eq 'Join-Path' }, $true))
+            $calls.Count | Should -BeGreaterThan 0 -Because "$root must still call Join-Path somewhere for this check to mean anything"
+            foreach ($call in $calls) {
+                $argCount = $call.CommandElements.Count - 1
+                $argCount | Should -BeLessOrEqual 2 -Because "$($call.Extent.Text) at line $($call.Extent.StartLineNumber) must nest instead of taking a third argument"
+            }
+        }
+    }
+
+    It "builds skill roots from HOME, and drops the bundled root when LOCALAPPDATA is unset" {
+        foreach ($root in $script:hookRoots) {
+            $text = Import-HookFunction -ScriptPath (Join-Path $root 'Guard-SkillSize.ps1') `
+                -Name 'Get-SkillRoot'
+            $built = @(Invoke-UnderPosixJoin -Expression ($text + "`nGet-SkillRoot") `
+                    -HomeValue '/home/u' -ClearEnv @('USERPROFILE', 'LOCALAPPDATA'))
+            $built.Count | Should -Be 2 `
+                -Because "$root has no bundled-skills root to offer when LOCALAPPDATA is unset"
+            $built[0] | Should -Be '/home/u/.claude/skills'
+            $built[1] | Should -Be '/home/u/.claude/plugins'
+
+            # And the Windows path still yields all three, so the guard did not trade one
+            # platform for the other.
+            $win = @(Invoke-UnderPosixJoin -Expression ($text + "`nGet-SkillRoot") `
+                    -HomeValue '/home/u')
+            $win.Count | Should -Be 3
+            $win[2] | Should -Match 'claude/bundled-skills$'
+        }
+    }
+
+    # Same AST-scan shape as Task 2's check on Sync-MemoryToObsidian.ps1: catches a
+    # reintroduced multi-argument Join-Path without needing a 5.1 interpreter on hand to
+    # reproduce the silent-no-op failure it causes there.
+    It "keeps every Join-Path call in Guard-SkillSize at two arguments" {
+        foreach ($root in $script:hookRoots) {
+            $hook = Join-Path $root 'Guard-SkillSize.ps1'
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+                $hook, [ref]$null, [ref]$null)
+            $calls = @($ast.FindAll({ param($n)
+                        $n -is [System.Management.Automation.Language.CommandAst] -and
+                        $n.GetCommandName() -eq 'Join-Path' }, $true))
+            $calls.Count | Should -BeGreaterThan 0 -Because "$root must still call Join-Path somewhere for this check to mean anything"
+            foreach ($call in $calls) {
+                $argCount = $call.CommandElements.Count - 1
+                $argCount | Should -BeLessOrEqual 2 -Because "$($call.Extent.Text) at line $($call.Extent.StartLineNumber) must nest instead of taking a third argument"
+            }
+        }
+    }
 }
