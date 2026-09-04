@@ -20,9 +20,9 @@
     than attempting to make the copy atomic, the script warns and says to re-run, since every
     copy here is an unconditional overwrite and safe to repeat.
 
-    Placeholder expansion, the Linux invocation rewrite, a settings merge that does not clobber
-    what Claude Code writes into settings.json itself, and a residual-path report are not in
-    this half; Tasks 9 through 12 add them to this same script.
+    Placeholder expansion, the Linux invocation rewrite, and a settings.json merge that does not
+    clobber what Claude Code writes into that file itself are all here (Tasks 9 and 10). A
+    residual-path report is not; Tasks 11 and 12 add it to this same script.
 
     The update path is `git pull` then re-run this script. Install overwrites;
     settings.local.json is the per-machine escape hatch. Removal does not propagate to a
@@ -221,6 +221,14 @@ function Copy-PayloadTree {
 # made atomic here (would break the shape Tasks 9 through 12 build on); what the catch below
 # adds is telling the operator the run did not finish and that a re-run repairs it, since every
 # copy in this block is an unconditional overwrite and safe to repeat.
+#
+# Shared with the settings-merge try/catch further down: a failure there also leaves
+# $ClaudeHome in the same mixed state, since the merge writes settings.json after this block
+# has already copied content. Task 10 review: that later failure used to land outside any
+# catch at all, surfacing as a bare parser or IO exception with no word that the target was
+# left half-installed. One message, one meaning, wherever the run stops.
+$mixedStateWarning = "Install failed partway through: '$ClaudeHome' is left in a mixed state, holding some content from before this run alongside whatever copied before the failure. The install did not complete. Re-run this script: every copy above is an unconditional overwrite, so re-running is idempotent and finishes what this one left unfinished."
+
 try {
     $null = New-Item -ItemType Directory -Path $ClaudeHome -Force
 
@@ -282,7 +290,7 @@ try {
     }
 }
 catch {
-    Write-Warning "Install failed partway through: '$ClaudeHome' is left in a mixed state, holding some content from before this run alongside whatever copied before the failure. The install did not complete. Re-run this script: every copy above is an unconditional overwrite, so re-running is idempotent and finishes what this one left unfinished."
+    Write-Warning $mixedStateWarning
     throw
 }
 
@@ -459,7 +467,11 @@ function Merge-HookEvent {
         # and @($null) is a ONE-element array holding $null, not an empty one; left unfiltered
         # it would splice a literal null into the merged hooks array below.
         foreach ($h in @(@($target.hooks) | Where-Object { $_ })) { $merged.Add($h) }
-        foreach ($ph in @($pg.hooks)) {
+        # Same filter on the payload side. Not reachable through this file's one caller, since
+        # Convert-SettingsForTarget already drops a payload group with no surviving hooks before
+        # the merge runs, but Merge-HookEvent is a named produced interface, not private to that
+        # one call site, so it should not depend on a caller it cannot see to keep it clean.
+        foreach ($ph in @(@($pg.hooks) | Where-Object { $_ })) {
             $idx = -1
             for ($i = 0; $i -lt $merged.Count; $i++) {
                 if ($merged[$i].command -eq $ph.command) { $idx = $i; break }
@@ -489,9 +501,18 @@ function Merge-AccountSettings {
         }
         $ev = $Existing.$name
 
-        if ($name -eq 'statusLine') {
+        if ($name -eq 'statusLine' -or $ev -isnot [System.Management.Automation.PSCustomObject]) {
             # Replaced whole. A deep merge would leave a stale refreshInterval or padding from
-            # whatever statusline the receiver had before.
+            # whatever statusline the receiver had before. The type check catches every other
+            # key too: a hand-edited settings.json can hold "hooks": null, "permissions": null,
+            # or either one as a string or an array instead of an object. Task 10 review,
+            # findings 1 and 2: the hooks/permissions branches below assume $ev has properties to
+            # look up, so "hooks": null crashed with "Cannot index into a null array", and
+            # "hooks": "nope" or "hooks": [] fed a String or an empty array into Add-Member,
+            # which is a silent no-op there, so the payload's own hooks or permissions were
+            # dropped with no warning and an exit-0 "settings.json: merged". Nothing below this
+            # point can descend into a value that is not an object, so it is replaced instead,
+            # the same way the else branch at the bottom already replaces an ordinary scalar.
             $Existing.$name = $pv
         }
         elseif ($name -eq 'hooks') {
@@ -533,13 +554,27 @@ function Merge-AccountSettings {
                     else { $ev | Add-Member -NotePropertyName allow -NotePropertyValue $union.ToArray() -Force }
                 }
                 else {
+                    # allow is unioned above by decision, since dropping a receiver's own
+                    # grants is exactly the regression this task exists to prevent. Every other
+                    # permissions sub-key, deny included, is replaced wholesale instead: today's
+                    # exported payload never carries deny (the operator's live permissions has
+                    # only allow and defaultMode), but the day one is added here, this line
+                    # should union it the same way rather than silently overwrite a receiver's
+                    # own deny list, which is the one direction where losing entries loosens
+                    # security instead of tightening it.
                     $ev | Add-Member -NotePropertyName $sub -NotePropertyValue $pv.$sub -Force
                 }
             }
         }
-        elseif ($pv -is [pscustomobject] -and $ev -is [pscustomobject]) {
+        elseif ($pv -is [System.Management.Automation.PSCustomObject] -and $ev -is [System.Management.Automation.PSCustomObject]) {
             # env, enabledPlugins, extraKnownMarketplaces, skillOverrides: payload wins on a
-            # shared key, receiver-only keys are kept.
+            # shared key, receiver-only keys are kept. The accelerator, not [pscustomobject]:
+            # that one resolves to PSObject, which a ConvertFrom-Json string, number or boolean
+            # also satisfies at the top level (nested values arrive unwrapped as their real
+            # .NET type, so the gap is invisible in ordinary fixtures). The branch above already
+            # routes every non-object $ev away before reaching here, so this mainly guards $pv;
+            # kept correct rather than provably dead, since a future caller of this function is
+            # not bound by today's one call site.
             $Existing.$name = Merge-AccountSettings -Payload $pv -Existing $ev
         }
         else {
@@ -549,42 +584,77 @@ function Merge-AccountSettings {
     return $Existing
 }
 
+# Shared by both "the existing file cannot be merged" cases below: a parse failure, and a file
+# that parses cleanly but is not an object (a bare array, string, or number). Neither is a shape
+# Merge-AccountSettings can descend into, and Claude Code could not have made sense of either.
+# change-management.md's *.bak.<timestamp> convention, the same one Export-Account.ps1 already
+# drops from the exported payload. Gated on ShouldProcess rather than left to Copy-Item alone:
+# Task 10 review, finding 7, found the warning claiming a backup under -WhatIf that Copy-Item
+# correctly never wrote, so the message itself now depends on whether the operation would
+# really run.
+function Backup-BrokenSettings {
+    param([string]$LiveSettings, [string]$Reason)
+    if ($PSCmdlet.ShouldProcess($LiveSettings, 'back up unmergeable settings.json')) {
+        $bak = "$LiveSettings.bak.$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+        Copy-Item -LiteralPath $LiveSettings -Destination $bak -Force
+        Write-Warning "Existing settings.json $Reason. Backed up to '$bak' and installing the payload's settings as the starting point."
+    }
+    else {
+        Write-Warning "Existing settings.json $Reason. Would be backed up and replaced with the payload's settings; re-run without -WhatIf to do it."
+    }
+}
+
 $settingsSrc = Join-Path $PayloadRoot 'settings.account.json'
 if (Test-Path -LiteralPath $settingsSrc) {
-    if (-not $npmPresent) {
-        Write-Warning 'npm is absent: dropping the two ccstatusline hook entries and pointing statusLine.command at the shipped statusline script for this platform.'
-    }
-    $payloadSettings = Get-Content -LiteralPath $settingsSrc -Raw | ConvertFrom-Json
-    $payloadSettings = Convert-SettingsForTarget -Settings $payloadSettings `
-        -ClaudeHome $ClaudeHome -Tokens $tokens `
-        -TargetIsWindows $TargetIsWindows -NpmPresent $npmPresent
+    # Task 10 review: a failure anywhere in this block (a lock on settings.json, or any
+    # unanticipated shape past the two handled explicitly below) used to throw past every catch
+    # in the script, since Task 8's catch above only wraps the tree copy. The merge writes
+    # settings.json after that copy has already run, so a failure here leaves the same
+    # half-installed $ClaudeHome, just later in the run; it gets the same warning and the same
+    # re-throw instead of surfacing as a bare, unexplained exception.
+    try {
+        if (-not $npmPresent) {
+            Write-Warning 'npm is absent: dropping the two ccstatusline hook entries and pointing statusLine.command at the shipped statusline script for this platform.'
+        }
+        $payloadSettings = Get-Content -LiteralPath $settingsSrc -Raw | ConvertFrom-Json
+        $payloadSettings = Convert-SettingsForTarget -Settings $payloadSettings `
+            -ClaudeHome $ClaudeHome -Tokens $tokens `
+            -TargetIsWindows $TargetIsWindows -NpmPresent $npmPresent
 
-    $liveSettings = Join-Path $ClaudeHome 'settings.json'
-    $existing = $null
-    if (Test-Path -LiteralPath $liveSettings) {
-        try {
-            $existing = Get-Content -LiteralPath $liveSettings -Raw | ConvertFrom-Json
+        $liveSettings = Join-Path $ClaudeHome 'settings.json'
+        $existing = $null
+        if (Test-Path -LiteralPath $liveSettings) {
+            try {
+                $existing = Get-Content -LiteralPath $liveSettings -Raw | ConvertFrom-Json
+            }
+            catch {
+                Backup-BrokenSettings -LiveSettings $liveSettings `
+                    -Reason "is not valid JSON: $($_.Exception.Message)"
+            }
         }
-        catch {
-            # A hand-edited settings.json that fails to parse is not a shape Merge-AccountSettings
-            # can merge against, and Claude Code could not have read it either. Overwriting it
-            # silently would still lose whatever the operator was mid-edit on, so it is backed up
-            # (change-management.md's *.bak.<timestamp> convention, the same one
-            # Export-Account.ps1 already drops from the exported payload) and the install
-            # proceeds as though the file were absent, rather than leaving the run half done the
-            # way an uncaught throw here would (Task 8's mixed-state catch does not wrap this
-            # later block, so a throw here would surface as a bare parser exception).
-            $bak = "$liveSettings.bak.$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-            Copy-Item -LiteralPath $liveSettings -Destination $bak -Force
-            Write-Warning "Existing settings.json is not valid JSON: $($_.Exception.Message). Backed up to '$bak' and installing the payload's settings as the starting point."
+        if ($null -ne $existing -and $existing -isnot [System.Management.Automation.PSCustomObject]) {
+            # A receiver's settings.json that parses cleanly to a bare array, string, or number
+            # (`[1,2,3]`, `"hello"`, `42`) is just as far from a mergeable shape as the
+            # unparseable case above, and the worst measured outcome was silent: a bare string
+            # gets written back byte for byte, with no warning, at exit 0, dropping the entire
+            # payload.
+            $kind = if ($existing -is [string]) { 'a string value' }
+            elseif ($existing -is [array]) { 'an array' }
+            else { "a $($existing.GetType().Name) value" }
+            Backup-BrokenSettings -LiveSettings $liveSettings -Reason "parses to $kind, not a JSON object"
+            $existing = $null
         }
+        $merged = Merge-AccountSettings -Payload $payloadSettings -Existing $existing
+        $settingsJson = $merged | ConvertTo-Json -Depth 20
+        $residual = Get-ResidualToken -Text $settingsJson
+        if ($residual.Count -gt 0) {
+            Write-Warning "Unexpanded placeholder(s) in settings.json: $($residual -join ', '). Left verbatim; a hook command carrying one cannot run."
+        }
+        $settingsJson | Set-Content -LiteralPath $liveSettings -Encoding utf8
+        Write-Host '  settings.json: merged'
     }
-    $merged = Merge-AccountSettings -Payload $payloadSettings -Existing $existing
-    $settingsJson = $merged | ConvertTo-Json -Depth 20
-    $residual = Get-ResidualToken -Text $settingsJson
-    if ($residual.Count -gt 0) {
-        Write-Warning "Unexpanded placeholder(s) in settings.json: $($residual -join ', '). Left verbatim; a hook command carrying one cannot run."
+    catch {
+        Write-Warning $mixedStateWarning
+        throw
     }
-    $settingsJson | Set-Content -LiteralPath $liveSettings -Encoding utf8
-    Write-Host '  settings.json: merged'
 }
