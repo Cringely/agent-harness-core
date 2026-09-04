@@ -6,9 +6,22 @@
 
 .DESCRIPTION
     Runs on any workstation from a clone, on Windows or Linux. Content directories are copied
-    over the top of ~/.claude. Four things the copy cannot do on its own are handled here:
-    placeholder expansion, the Linux invocation rewrite, a settings merge that does not clobber
-    what Claude Code writes into settings.json itself, and a residual-path report.
+    over the top of ~/.claude and model-tier-gate.ts is sourced from core rather than the
+    payload, so the repo holds one copy of it. A preflight warns about every prerequisite tool
+    absent from PATH without gating the install. On a Linux target every .sh hook under
+    hooks/ is chmod +x'd; the operator gets the same warning either way if chmod is missing or
+    if it runs and fails. Supports -WhatIf: every write is a built-in cmdlet that honours
+    $WhatIfPreference on its own, with no manual ShouldProcess wrap needed.
+
+    -PayloadRoot and -ClaudeHome are canonicalised and refused if they are the same directory
+    or nested inside each other, since the copy reads recursively from one while writing into
+    the other. A failure partway through the copy leaves the target in a mixed state; rather
+    than attempting to make the copy atomic, the script warns and says to re-run, since every
+    copy here is an unconditional overwrite and safe to repeat.
+
+    Placeholder expansion, the Linux invocation rewrite, a settings merge that does not clobber
+    what Claude Code writes into settings.json itself, and a residual-path report are not in
+    this half; Tasks 9 through 12 add them to this same script.
 
     The update path is `git pull` then re-run this script. Install overwrites;
     settings.local.json is the per-machine escape hatch. Removal does not propagate to a
@@ -92,6 +105,26 @@ if (-not $PayloadRoot) { $PayloadRoot = Join-Path (Join-Path $repoRoot 'account'
 # success and exited 0.
 $ClaudeHome  = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ClaudeHome).TrimEnd('\', '/')
 $PayloadRoot = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PayloadRoot).TrimEnd('\', '/')
+
+# Review round 2 addendum: -PayloadRoot and -ClaudeHome must not be the same directory, or
+# nested inside each other. Copy-PayloadTree reads recursively from -PayloadRoot while writing
+# into -ClaudeHome, so either direction of nesting means the copy walks a tree it is
+# concurrently writing into. Same failure class Export-Account.ps1:141-151 guards against for
+# its own -OutputRoot/-ClaudeHome pair, though the shape of the damage differs there (its
+# mirror deletes each allowlisted directory before recopying, so containment would delete the
+# live account layer; here it would make the copy read from inside its own destination).
+# Compares the canonical paths resolved just above, not the raw parameter strings, so a
+# relative '.' or a trailing separator cannot slip past.
+$onWindowsHost = ($PSVersionTable.PSVersion.Major -lt 6) -or $IsWindows
+$pathComparison = if ($onWindowsHost) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
+$sep = [System.IO.Path]::DirectorySeparatorChar
+if ($PayloadRoot.Equals($ClaudeHome, $pathComparison) -or
+    $PayloadRoot.StartsWith("$ClaudeHome$sep", $pathComparison) -or
+    $ClaudeHome.StartsWith("$PayloadRoot$sep", $pathComparison)) {
+    throw "-PayloadRoot ('$PayloadRoot') and -ClaudeHome ('$ClaudeHome') must not be the same " +
+        "directory or nested inside each other; the copy reads recursively from one while " +
+        "writing into the other."
+}
 
 # Same reasoning and same placement as Export-Account.ps1's guard: right after the defaults
 # that determine what gets read from and written into land, before CoreRepo/NpmGlobal resolve
@@ -215,7 +248,7 @@ try {
     $chmodWarning = 'chmod not on PATH: .sh hooks are not marked executable. Run `chmod +x ~/.claude/hooks/*.sh` on the target.'
     if (-not $TargetIsWindows -and $chmod) {
         $chmodFailed = $false
-        foreach ($s in @(Get-ChildItem (Join-Path $ClaudeHome 'hooks') -Recurse -File -Filter *.sh -ErrorAction SilentlyContinue)) {
+        foreach ($s in @(Get-ChildItem -LiteralPath (Join-Path $ClaudeHome 'hooks') -Recurse -File -Filter *.sh -Force -ErrorAction SilentlyContinue)) {
             & $chmod.Source +x $s.FullName
             if ($LASTEXITCODE -ne 0) { $chmodFailed = $true }
         }
