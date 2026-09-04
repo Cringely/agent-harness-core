@@ -34,6 +34,9 @@
     The literal folded into {{OBSIDIAN_VAULT}}. Defaults to $env:CLAUDE_OBSIDIAN_VAULT, else
     $HOME/Documents/Obsidian Vault/Claude Code.
 
+.PARAMETER HomeSlug
+    The literal folded into {{HOME_SLUG}}. Defaults to Get-ProjectSlug $HOME.
+
 .PARAMETER SkipSettings
     Skip the settings.account.json rewrite. Test seam.
 
@@ -76,6 +79,7 @@ param(
     [string]$CoreRepo,
     [string]$NpmGlobal,
     [string]$VaultPath,
+    [string]$HomeSlug,
     [switch]$SkipSettings,
     [switch]$SkipMcp,
     [switch]$Force
@@ -268,9 +272,9 @@ function ConvertTo-TemplatedCommand {
     return $out
 }
 
-$homeSlug = Get-ProjectSlug ($HOME)
+if (-not $HomeSlug) { $HomeSlug = Get-ProjectSlug $HOME }
 $folds = @(Get-AccountFoldTable -ClaudeHome $ClaudeHome -NpmGlobal $NpmGlobal `
-        -CoreRepo $CoreRepo -VaultPath $VaultPath -HomeSlug $homeSlug)
+        -CoreRepo $CoreRepo -VaultPath $VaultPath -HomeSlug $HomeSlug)
 
 # --- settings.account.json ---------------------------------------------------
 if (-not $SkipSettings) {
@@ -314,6 +318,33 @@ if (-not $SkipSettings) {
         $settings | ConvertTo-Json -Depth 20 |
             Set-Content -LiteralPath (Join-Path $OutputRoot 'settings.account.json') -Encoding utf8
         Write-Host '  settings.account.json: written'
+    }
+}
+
+# --- model-read folds --------------------------------------------------------
+# Executed hooks derive their paths at run time and were fixed at source. These six cannot be:
+# a placeholder written into the live file is read literally by the model on this box, so the
+# fold happens on the way out and the installer expands it on the way in.
+#
+# Gated on ShouldProcess, unlike Copy-AccountTree's call site: Test-Path and throw are plain
+# script logic, not a built-in cmdlet that already honours -WhatIf on its own, so under -WhatIf
+# nothing was actually copied into $OutputRoot and the missing-file check below would throw on
+# the first row instead of leaving the destination untouched.
+if ($PSCmdlet.ShouldProcess($OutputRoot, 'fold model-read machine paths')) {
+    foreach ($rel in $script:AccountTemplatedFiles.Keys) {
+        $target = Join-Path $OutputRoot $rel
+        if (-not (Test-Path -LiteralPath $target)) {
+            # Loud, not skipped. A stale row is how a fold quietly stops happening: the file
+            # gets renamed upstream and the payload then ships a machine path with nothing
+            # reporting it.
+            throw "Templated file '$rel' is named in AccountShared.ps1 but absent from the payload. Update the table or the allowlist."
+        }
+        $wanted = @($script:AccountTemplatedFiles[$rel])
+        $rowFolds = @($folds | Where-Object { $wanted -contains ($_.Token -replace '[{}]', '') })
+        $text = Get-Content -LiteralPath $target -Raw
+        foreach ($f in $rowFolds) { $text = ConvertTo-TemplatedText -Text $text -Fold $f }
+        Set-Content -LiteralPath $target -Value $text -NoNewline
+        Write-Host "  ${rel}: folded $(@($rowFolds).Count) token(s)"
     }
 }
 
