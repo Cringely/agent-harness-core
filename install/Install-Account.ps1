@@ -435,6 +435,120 @@ function Convert-SettingsForTarget {
     return $Settings
 }
 
+# A hook entry's identity is its event, its matcher and its expanded command. A present entry
+# is replaced in place, a missing one is appended, and a receiver-only one is left alone.
+# Install-Harness.ps1's merge keys on the command string alone (L808-866) and knows nothing
+# about matchers or events, so it is not reusable here.
+function Merge-HookEvent {
+    param([object[]]$PayloadGroups, [object[]]$ExistingGroups)
+    $result = New-Object System.Collections.Generic.List[pscustomobject]
+    foreach ($g in @($ExistingGroups)) { $result.Add($g) }
+
+    foreach ($pg in @($PayloadGroups)) {
+        $pMatcher = if ($pg.PSObject.Properties['matcher']) { $pg.matcher } else { $null }
+        $target = $null
+        foreach ($eg in $result) {
+            $eMatcher = if ($eg.PSObject.Properties['matcher']) { $eg.matcher } else { $null }
+            if ($eMatcher -eq $pMatcher) { $target = $eg; break }
+        }
+        if (-not $target) { $result.Add($pg); continue }
+
+        $merged = New-Object System.Collections.Generic.List[pscustomobject]
+        # Where-Object { $_ }: the matched existing group can be hand-edited into a group with
+        # no "hooks" key, or an explicit "hooks": null. Either way $target.hooks reads as $null
+        # and @($null) is a ONE-element array holding $null, not an empty one; left unfiltered
+        # it would splice a literal null into the merged hooks array below.
+        foreach ($h in @(@($target.hooks) | Where-Object { $_ })) { $merged.Add($h) }
+        foreach ($ph in @($pg.hooks)) {
+            $idx = -1
+            for ($i = 0; $i -lt $merged.Count; $i++) {
+                if ($merged[$i].command -eq $ph.command) { $idx = $i; break }
+            }
+            if ($idx -ge 0) { $merged[$idx] = $ph } else { $merged.Add($ph) }
+        }
+        # Add-Member -Force, not a plain assignment: a PSCustomObject throws
+        # "The property 'hooks' cannot be found" on `.hooks =` when the property was never
+        # there to begin with, which is exactly the no-hooks-key group this comment already
+        # names. -Force makes the same call work whether the property pre-exists or not.
+        $target | Add-Member -NotePropertyName hooks -NotePropertyValue $merged.ToArray() -Force
+    }
+    return $result.ToArray()
+}
+
+function Merge-AccountSettings {
+    param([pscustomobject]$Payload, [pscustomobject]$Existing)
+    if (-not $Existing) { return $Payload }
+
+    foreach ($prop in @($Payload.PSObject.Properties)) {
+        $name = $prop.Name
+        $pv = $prop.Value
+
+        if (-not $Existing.PSObject.Properties[$name]) {
+            $Existing | Add-Member -NotePropertyName $name -NotePropertyValue $pv -Force
+            continue
+        }
+        $ev = $Existing.$name
+
+        if ($name -eq 'statusLine') {
+            # Replaced whole. A deep merge would leave a stale refreshInterval or padding from
+            # whatever statusline the receiver had before.
+            $Existing.$name = $pv
+        }
+        elseif ($name -eq 'hooks') {
+            foreach ($event in @($pv.PSObject.Properties.Name | Where-Object { $_ })) {
+                # Not `$existingGroups = if (...) {...} else { @() }`: PowerShell collapses an
+                # if-expression's @() branch to $null, since @() with nothing inside it produces
+                # no pipeline output for the branch to capture, rather than to the empty array a
+                # direct assignment would give. Measured: an existing settings.json that simply
+                # does not carry $event yet (the ordinary case for a hook event installed for
+                # the first time) fed that $null into Merge-HookEvent's ExistingGroups, where
+                # @($null) is a one-element array holding $null, and the matcher lookup then
+                # threw "Cannot index into a null array" on it. The statement form below assigns
+                # a real empty array directly instead of going through a branch's output.
+                # Where-Object { $_ } inside the true branch: $ev.$event can itself be an
+                # explicit JSON null ("hooks":{"PreToolUse":null}), the same one-element phantom
+                # by a different route, filtered out the same way.
+                $existingGroups = @()
+                if ($ev.PSObject.Properties[$event]) {
+                    $existingGroups = @(@($ev.$event) | Where-Object { $_ })
+                }
+                $mergedEvent = @(Merge-HookEvent -PayloadGroups @($pv.$event) -ExistingGroups $existingGroups)
+                if ($ev.PSObject.Properties[$event]) { $ev.$event = $mergedEvent }
+                else { $ev | Add-Member -NotePropertyName $event -NotePropertyValue $mergedEvent -Force }
+            }
+        }
+        elseif ($name -eq 'permissions') {
+            foreach ($sub in @($pv.PSObject.Properties.Name | Where-Object { $_ })) {
+                if ($sub -eq 'allow') {
+                    # Ordered set union, receiver entries first, so a receiver's own grants keep
+                    # their position and the payload's are appended once. Where-Object { $_ } on
+                    # both sides: a receiver's permissions object can be present but empty
+                    # ({"permissions":{}}), so $ev.allow reads as a missing property (also
+                    # $null) and @($null) is the same one-element phantom as above, which
+                    # without the filter adds a blank entry to the union.
+                    $union = New-Object System.Collections.Generic.List[string]
+                    foreach ($a in @(@($ev.allow) | Where-Object { $_ })) { if (-not $union.Contains($a)) { $union.Add($a) } }
+                    foreach ($a in @(@($pv.allow) | Where-Object { $_ })) { if (-not $union.Contains($a)) { $union.Add($a) } }
+                    if ($ev.PSObject.Properties['allow']) { $ev.allow = $union.ToArray() }
+                    else { $ev | Add-Member -NotePropertyName allow -NotePropertyValue $union.ToArray() -Force }
+                }
+                else {
+                    $ev | Add-Member -NotePropertyName $sub -NotePropertyValue $pv.$sub -Force
+                }
+            }
+        }
+        elseif ($pv -is [pscustomobject] -and $ev -is [pscustomobject]) {
+            # env, enabledPlugins, extraKnownMarketplaces, skillOverrides: payload wins on a
+            # shared key, receiver-only keys are kept.
+            $Existing.$name = Merge-AccountSettings -Payload $pv -Existing $ev
+        }
+        else {
+            $Existing.$name = $pv
+        }
+    }
+    return $Existing
+}
+
 $settingsSrc = Join-Path $PayloadRoot 'settings.account.json'
 if (Test-Path -LiteralPath $settingsSrc) {
     if (-not $npmPresent) {
@@ -445,13 +559,32 @@ if (Test-Path -LiteralPath $settingsSrc) {
         -ClaudeHome $ClaudeHome -Tokens $tokens `
         -TargetIsWindows $TargetIsWindows -NpmPresent $npmPresent
 
-    # Overwrite for now. Task 10 replaces this with a merge against whatever the receiver's
-    # Claude Code has written into the same file.
-    $settingsJson = $payloadSettings | ConvertTo-Json -Depth 20
+    $liveSettings = Join-Path $ClaudeHome 'settings.json'
+    $existing = $null
+    if (Test-Path -LiteralPath $liveSettings) {
+        try {
+            $existing = Get-Content -LiteralPath $liveSettings -Raw | ConvertFrom-Json
+        }
+        catch {
+            # A hand-edited settings.json that fails to parse is not a shape Merge-AccountSettings
+            # can merge against, and Claude Code could not have read it either. Overwriting it
+            # silently would still lose whatever the operator was mid-edit on, so it is backed up
+            # (change-management.md's *.bak.<timestamp> convention, the same one
+            # Export-Account.ps1 already drops from the exported payload) and the install
+            # proceeds as though the file were absent, rather than leaving the run half done the
+            # way an uncaught throw here would (Task 8's mixed-state catch does not wrap this
+            # later block, so a throw here would surface as a bare parser exception).
+            $bak = "$liveSettings.bak.$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+            Copy-Item -LiteralPath $liveSettings -Destination $bak -Force
+            Write-Warning "Existing settings.json is not valid JSON: $($_.Exception.Message). Backed up to '$bak' and installing the payload's settings as the starting point."
+        }
+    }
+    $merged = Merge-AccountSettings -Payload $payloadSettings -Existing $existing
+    $settingsJson = $merged | ConvertTo-Json -Depth 20
     $residual = Get-ResidualToken -Text $settingsJson
     if ($residual.Count -gt 0) {
         Write-Warning "Unexpanded placeholder(s) in settings.json: $($residual -join ', '). Left verbatim; a hook command carrying one cannot run."
     }
-    $settingsJson | Set-Content -LiteralPath (Join-Path $ClaudeHome 'settings.json') -Encoding utf8
-    Write-Host '  settings.json: written'
+    $settingsJson | Set-Content -LiteralPath $liveSettings -Encoding utf8
+    Write-Host '  settings.json: merged'
 }
