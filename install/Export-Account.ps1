@@ -439,9 +439,25 @@ function Get-AccountString {
     param($Value)
     if ($null -eq $Value) { return @() }
     if ($Value -is [string]) { return @($Value) }
-    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+    # review round 2, item 1 (F1 entry-name regression): scans the KEY as well as the value on
+    # both object shapes. The code this walk replaced scanned $k (the env key name) as well as
+    # $srv.env.$k; without the key, a secret-shaped property or header name reaches the payload
+    # unscanned, which is a coverage regression against what was deleted.
+    #
+    # review round 2, item 6: [System.Collections.IDictionary] handled on this same branch,
+    # rather than falling through to the generic IEnumerable branch below, where foreach over a
+    # Hashtable yields the hashtable itself rather than its entries and recurses forever. Nothing
+    # in this file calls ConvertFrom-Json with -AsHashtable (every object node is a
+    # PSCustomObject), so this path is unreachable today; left deliberately untested since there
+    # is no live call path that reaches it.
+    if ($Value -is [System.Management.Automation.PSCustomObject] -or $Value -is [System.Collections.IDictionary]) {
         $out = @()
-        foreach ($p in @($Value.PSObject.Properties)) { $out += @(Get-AccountString -Value $p.Value) }
+        if ($Value -is [System.Collections.IDictionary]) {
+            foreach ($k in @($Value.Keys)) { $out += @($k) + @(Get-AccountString -Value $Value[$k]) }
+        }
+        else {
+            foreach ($p in @($Value.PSObject.Properties)) { $out += @($p.Name) + @(Get-AccountString -Value $p.Value) }
+        }
         return @($out)
     }
     if ($Value -is [System.Collections.IEnumerable]) {
@@ -527,6 +543,12 @@ Set-Content -LiteralPath $exportMarker -Value (
     "-Force again.")
 
 # review round 1, F9: this used to sit above the marker write, so the script announced
-# completion before its own last write, and under -WhatIf it printed with nothing written at
-# all (Set-Content is ShouldProcess-aware and no-ops under -WhatIf, same as every step above).
-Write-Host "Export complete. Review with: git status account/claude"
+# completion before its own last write.
+#
+# review round 2, item 5: round 1's commit claimed moving the line also stopped it printing
+# under -WhatIf. That was false: Write-Host is not ShouldProcess-aware, so a lower position in
+# the file does not change whether it runs. This -not $WhatIfPreference guard is what actually
+# suppresses it; the position move above is only about ordering relative to the marker write.
+if (-not $WhatIfPreference) {
+    Write-Host "Export complete. Review with: git status account/claude"
+}

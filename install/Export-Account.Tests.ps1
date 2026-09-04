@@ -267,6 +267,27 @@ exit 0
         }
     }
 
+    It "does not print the completion message under -WhatIf" {
+        # review round 2, item 5: round 1's commit claimed moving the completion line below the
+        # marker write also stopped it printing under -WhatIf. Write-Host is not
+        # ShouldProcess-aware, so that was false -- measured true before this fix. Guarded on
+        # -not $WhatIfPreference instead. Write-Host output is captured through the common
+        # -InformationVariable parameter, which every advanced script (this one carries
+        # [CmdletBinding()]) exposes; Write-Host tees to the Information stream in pwsh 7.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            & $script:export -ClaudeHome (Join-Path $stand '.claude') -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipSettings -SkipMcp -WhatIf `
+                -InformationVariable info -InformationAction SilentlyContinue | Out-Null
+            (@($info) -join "`n") | Should -Not -Match 'Export complete'
+        }
+        finally {
+            Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue
+        }
+    }
+
     # C2: [System.IO.Path]::GetFullPath resolves a relative path against the .NET process
     # current directory, which Set-Location does not move; Remove-Item and Copy-Item resolve a
     # relative path against $PWD instead. Set-Location from this repo (E:) into a stand-in under
@@ -938,21 +959,25 @@ exit 0
 
     It "gates a secret carried in a property the fold pass has no rule for" {
         # review round 1, F1: the gate used to scan a fixed property list (name, command, args,
-        # env). The writer serialises the WHOLE server object, so an http/sse server's headers or
-        # url -- exactly where MCP auth material lives -- reached the file unscanned. Plants an
+        # env). The writer serialises the WHOLE server object, so an http/sse server's headers --
+        # exactly where MCP auth material lives -- reached the file unscanned. Plants an
         # sk_-shaped token, not the FIXTURE-ONLY-MARKER, so this test isolates the property-walk
         # fix on its own: it stays green regardless of which pattern-table mechanism is behind
-        # Get-SecretPattern, and only the marker test above is entangled with the AST lift. Both
-        # a nested object property (headers.Authorization) and a plain string property (url) are
-        # planted, neither of which the fold pass touches, since neither shape is command, args,
-        # or env.
+        # Get-SecretPattern, and only the marker test above is entangled with the AST lift.
+        #
+        # review round 2, item 2: the token used to sit in BOTH headers.Authorization (the nested
+        # object arm) and url (a plain top-level string property, already reached by the old
+        # command/args/env-only walk's sibling args coverage). Reddening on the url plant alone
+        # measured nothing new, so removing nested-object recursion left this It green -- it
+        # never exercised the shape it is named for. url now carries no secret, so only the
+        # nested headers.Authorization plant can make this test pass.
         $stand = New-StandInHome
         $out = New-OutputRoot
         try {
             $ch = (Join-Path $stand '.claude')
             $cj = Join-Path $stand '.claude.json'
             @{ mcpServers = @{ remote = @{ type = 'http'
-                        url = 'https://example.invalid/mcp?tok=sk_livetoken0123456789abcdef'
+                        url = 'https://example.invalid/mcp'
                         headers = @{ Authorization = 'Bearer sk_livetoken0123456789abcdef' } } } } |
                 ConvertTo-Json -Depth 20 | Set-Content $cj
 
@@ -962,6 +987,81 @@ exit 0
                 Should -Throw -ExpectedMessage '*remote*API token*'
             Test-Path -LiteralPath (Join-Path $out 'mcp-servers.json') |
                 Should -BeFalse -Because "a failed gate must leave nothing behind to commit"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "gates a secret carried in a property NAME, not only its value" {
+        # review round 2, item 1/3: Get-AccountString's PSCustomObject branch used to walk only
+        # $p.Value, never $p.Name. The code it replaced scanned $k (the env key) as well as
+        # $srv.env.$k, so a server whose env var NAME is itself secret-shaped is the regression
+        # this fix restores coverage for. env is a real property the fold pass already knows
+        # about (unlike F1's headers/url case), so this isolates the key-vs-value gap on its own.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            $cj = Join-Path $stand '.claude.json'
+            @{ mcpServers = @{ named = @{ type = 'stdio'; command = 'x'
+                        env = @{ 'sk_livetoken0123456789abcdef' = 'harmless' } } } } |
+                ConvertTo-Json -Depth 20 | Set-Content $cj
+
+            { & $script:export -ClaudeHome $ch -ClaudeJson $cj -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings } |
+                Should -Throw -ExpectedMessage '*named*API token*'
+            Test-Path -LiteralPath (Join-Path $out 'mcp-servers.json') |
+                Should -BeFalse -Because "a failed gate must leave nothing behind to commit"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "refuses when Scan-MemorySecrets.ps1 defines more than one `$patterns assignment" {
+        # review round 1, F2 (discretionary in round 1, required in round 2): the count guard is
+        # what stops a decoy $patterns assignment elsewhere in the hook from silently making the
+        # gate lift the wrong table. Without a committed test the guard can be reverted to the
+        # old -eq 0 check with the suite still green.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            $cj = Join-Path $stand '.claude.json'
+            @'
+$patterns = @(@{ Name = 'decoy'; Regex = 'nomatch12345' })
+$patterns = @(
+    @{ Name = 'API token (tk_/sk_/ak_)'; Regex = '(?<![a-zA-Z0-9_])(tk_|sk_|ak_)[a-zA-Z0-9]{10,}' }
+)
+exit 0
+'@ | Set-Content (Join-Path $ch 'hooks/Scan-MemorySecrets.ps1')
+            @{ mcpServers = @{ garmin = @{ type = 'stdio'; command = 'uvx'; env = @{} } } } |
+                ConvertTo-Json -Depth 20 | Set-Content $cj
+
+            { & $script:export -ClaudeHome $ch -ClaudeJson $cj -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings } |
+                Should -Throw -ExpectedMessage '*defines 2*patterns assignments*expected exactly 1*'
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "refuses when Scan-MemorySecrets.ps1's `$patterns table lifts empty" {
+        # review round 1, F2 (discretionary in round 1, required in round 2): a single, otherwise
+        # well-formed assignment whose right side evaluates to zero rows is the other silent
+        # no-op shape -- one assignment passes the count guard, so only the emptiness check below
+        # it stops the gate from lifting nothing.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            $cj = Join-Path $stand '.claude.json'
+            '$patterns = @()' + "`n" + 'exit 0' | Set-Content (Join-Path $ch 'hooks/Scan-MemorySecrets.ps1')
+            @{ mcpServers = @{ garmin = @{ type = 'stdio'; command = 'uvx'; env = @{} } } } |
+                ConvertTo-Json -Depth 20 | Set-Content $cj
+
+            { & $script:export -ClaudeHome $ch -ClaudeJson $cj -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings } |
+                Should -Throw -ExpectedMessage '*patterns*table lifted empty*'
         }
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
     }
