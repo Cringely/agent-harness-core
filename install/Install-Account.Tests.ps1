@@ -1308,4 +1308,161 @@ Describe "Install-Account" {
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
+
+    # Task 11: -ClaudeJson gets the same empty-string guard Task 8 gave -ClaudeHome and
+    # -PayloadRoot. Without it, this is the one script that now writes outside ~/.claude at all
+    # (~/.claude.json), so a caller that meant to pass a real path and got an empty one from an
+    # unset environment variable or a failed lookup would silently fall through to the
+    # operator's live ~/.claude.json instead.
+    It "refuses an explicitly empty -ClaudeJson instead of falling back to the live default" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            { & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson '' -SkipPreflight } |
+                Should -Throw -ExpectedMessage "*-ClaudeJson was passed empty*"
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Task 11: unlike the -PayloadRoot equivalent above, this does not discriminate the
+    # canonicalisation line by itself: Merge-McpServer's Test-Path/Get-Content/Set-Content are
+    # cmdlets that already resolve a relative path against $PWD correctly (this script never
+    # calls Set-Location), so ablating that one line changes nothing here -- verified. Kept as a
+    # feature-level regression test that a relative -ClaudeJson still produces a working
+    # install, which the canonicalisation line is not itself required to make true today.
+    It "resolves a relative -ClaudeJson before merging mcpServers into it" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        @{ mcpServers = @{ garmin = @{ type = 'stdio'; command = 'uvx'; args = @('garmin-mcp'); env = @{} } } } |
+            ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
+        $savedLoc = Get-Location
+        try {
+            Set-Location $h
+            & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson 'claude.json' -SkipPreflight | Out-Null
+            $j = Get-Content (Join-Path $h 'claude.json') -Raw | ConvertFrom-Json
+            $j.mcpServers.garmin.command | Should -Be 'uvx'
+        }
+        finally {
+            Set-Location $savedLoc
+            Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "adds missing mcpServers entries and touches nothing else in claude.json" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            $cj = Join-Path $h 'claude.json'
+            @{
+                userID = 'abc123'
+                projects = @{ '/home/u/demo' = @{ lastCost = 2.5 } }
+                mcpServers = @{ existing = @{ type = 'stdio'; command = 'keep-me'; args = @() } }
+            } | ConvertTo-Json -Depth 20 | Set-Content $cj
+            @{ mcpServers = @{
+                    garmin = @{ type = 'stdio'; command = 'uvx'; args = @('garmin-mcp'); env = @{} } } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
+
+            & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight | Out-Null
+
+            $j = Get-Content $cj -Raw | ConvertFrom-Json
+            $j.mcpServers.garmin.command   | Should -Be 'uvx'
+            $j.mcpServers.existing.command | Should -Be 'keep-me'
+            $j.userID | Should -Be 'abc123'
+            $j.projects.'/home/u/demo'.lastCost | Should -Be 2.5
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "leaves a hand-fixed entry alone across a second install" {
+        # The loop this prevents: the receiver hand-fixes 1password in claude.json because the
+        # shipped Store path with its embedded version does not exist there, the next pull
+        # reverts it, and settings.local.json cannot reach that file to hold the fix.
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            $cj = Join-Path $h 'claude.json'
+            @{ mcpServers = @{} } | ConvertTo-Json -Depth 20 | Set-Content $cj
+            @{ mcpServers = @{ '1password' = @{ type = 'stdio'
+                        command = 'C:\Program Files\WindowsApps\Agilebits.1Password_8.12.26.40_x64__amwd9z03whsfe\onepassword-mcp.exe'
+                        args = @(); env = @{} } } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
+            $args = @{
+                PayloadRoot = $p; ClaudeHome = $h; ClaudeJson = $cj
+                CoreRepo = 'E:/projects/agent-harness-core'; NpmGlobal = 'C:/npm'
+            }
+            & $script:install @args -SkipPreflight | Out-Null
+
+            $j = Get-Content $cj -Raw | ConvertFrom-Json
+            $j.mcpServers.'1password'.command = '/usr/local/bin/op-mcp'
+            $j | ConvertTo-Json -Depth 20 | Set-Content $cj
+
+            & $script:install @args -SkipPreflight | Out-Null
+            $j2 = Get-Content $cj -Raw | ConvertFrom-Json
+            $j2.mcpServers.'1password'.command | Should -Be '/usr/local/bin/op-mcp'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "names both non-portable servers, and nothing that resolves on this machine" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            $cj = Join-Path $h 'claude.json'
+            @{ mcpServers = @{} } | ConvertTo-Json -Depth 20 | Set-Content $cj
+            @{ mcpServers = @{
+                    '1password' = @{ type = 'stdio'
+                        command = 'C:\Program Files\WindowsApps\Agilebits.1Password_8.12.26.40_x64__amwd9z03whsfe\onepassword-mcp.exe'
+                        args = @(); env = @{} }
+                    'code-context' = @{ type = 'stdio'; command = 'wsl'
+                        args = @('-e', '/home/prior/code-context-mcp.sh'); env = @{} }
+                    garmin = @{ type = 'stdio'; command = 'uvx'; args = @('garmin-mcp'); env = @{} } } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
+            @{ hooks = @{ PreToolUse = @( @{ matcher = 'Write|Edit'; hooks = @(
+                                @{ type = 'command'; command = "& '{{CLAUDE_HOME}}/hooks/Scan-MemorySecrets.ps1'"
+                                    shell = 'powershell' }) }) } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal '/usr/lib/node_modules' `
+                -TargetIsWindows:$false -SkipPreflight *>&1 | Out-String
+
+            # Scope every assertion to the report block. The "N added (names)" line above it
+            # legitimately names all three servers, so a whole-output match would pass for the
+            # wrong reason and a whole-output negative would fail for the wrong reason.
+            $parts = @($out -split 'Still carrying a source-machine path')
+            $parts.Count | Should -Be 2 -Because "the report must have printed at all"
+            $report = $parts[1]
+
+            $report | Should -Match '1password'
+            # code-context is the case Test-ResidualWindowsPath alone cannot see: `wsl -e
+            # /home/prior/code-context-mcp.sh` carries no drive letter and no USERPROFILE, so a
+            # drive-letter rule would report one of the two entries this exists to name.
+            $report | Should -Match 'code-context'
+            # The line above alone does not discriminate: the trailer sentence below always
+            # names both "mcpServers.1password" and "mcpServers.code-context" verbatim once any
+            # residual exists at all, so it stayed green in a manual check where
+            # Get-UnresolvedPath was rigged to never flag code-context's own dead path. Matching
+            # the actual dead path pins down that the POSIX-shaped entry was genuinely detected,
+            # not merely named in that fixed sentence.
+            $report | Should -Match ([regex]::Escape('/home/prior/code-context-mcp.sh'))
+            $report | Should -Not -Match 'garmin'
+            # The expanded hook command points at a file that is really there, so it must not
+            # be reported. On a Windows receiver every correctly expanded command carries a
+            # drive letter, and a report that names all of them is no report at all.
+            $report | Should -Not -Match 'Scan-MemorySecrets'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "completes the install even with residuals outstanding" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            $cj = Join-Path $h 'claude.json'
+            @{ mcpServers = @{} } | ConvertTo-Json -Depth 20 | Set-Content $cj
+            @{ mcpServers = @{ wsl = @{ type = 'stdio'; command = 'wsl'
+                        args = @('-e', 'C:\Users\jcgam\x.sh'); env = @{} } } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
+            & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight | Out-Null
+            Test-Path -LiteralPath (Join-Path $h 'rules/security.md') | Should -BeTrue
+            (Get-Content $cj -Raw | ConvertFrom-Json).mcpServers.wsl.command | Should -Be 'wsl'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
 }
