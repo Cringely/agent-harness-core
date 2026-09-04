@@ -540,28 +540,31 @@ function Merge-AccountSettings {
         }
         elseif ($name -eq 'permissions') {
             foreach ($sub in @($pv.PSObject.Properties.Name | Where-Object { $_ })) {
-                if ($sub -eq 'allow') {
-                    # Ordered set union, receiver entries first, so a receiver's own grants keep
-                    # their position and the payload's are appended once. Where-Object { $_ } on
-                    # both sides: a receiver's permissions object can be present but empty
-                    # ({"permissions":{}}), so $ev.allow reads as a missing property (also
-                    # $null) and @($null) is the same one-element phantom as above, which
-                    # without the filter adds a blank entry to the union.
+                if ($sub -eq 'allow' -or $sub -eq 'deny') {
+                    # Ordered set union, receiver entries first, so a receiver's own grants or
+                    # denials keep their position and the payload's are appended once.
+                    # Where-Object { $_ } on both sides: a receiver's permissions object can be
+                    # present but empty ({"permissions":{}}), so $ev.$sub reads as a missing
+                    # property (also $null) and @($null) is the same one-element phantom as
+                    # above, which without the filter adds a blank entry to the union.
+                    #
+                    # deny unions the same as allow, not the wholesale replace every other
+                    # sub-key gets below. Task 10 review round 2: a receiver's own deny entry is
+                    # how an operator locks something off on that machine, and replacing it
+                    # wholesale from a payload that does not name it would silently remove a
+                    # restriction someone deliberately added. Between the two ways this key can
+                    # be wrong, dropping a deny fails in the dangerous direction (loosens
+                    # security) and dropping nothing fails in the safe one, so it is unioned.
                     $union = New-Object System.Collections.Generic.List[string]
-                    foreach ($a in @(@($ev.allow) | Where-Object { $_ })) { if (-not $union.Contains($a)) { $union.Add($a) } }
-                    foreach ($a in @(@($pv.allow) | Where-Object { $_ })) { if (-not $union.Contains($a)) { $union.Add($a) } }
-                    if ($ev.PSObject.Properties['allow']) { $ev.allow = $union.ToArray() }
-                    else { $ev | Add-Member -NotePropertyName allow -NotePropertyValue $union.ToArray() -Force }
+                    foreach ($a in @(@($ev.$sub) | Where-Object { $_ })) { if (-not $union.Contains($a)) { $union.Add($a) } }
+                    foreach ($a in @(@($pv.$sub) | Where-Object { $_ })) { if (-not $union.Contains($a)) { $union.Add($a) } }
+                    if ($ev.PSObject.Properties[$sub]) { $ev.$sub = $union.ToArray() }
+                    else { $ev | Add-Member -NotePropertyName $sub -NotePropertyValue $union.ToArray() -Force }
                 }
                 else {
-                    # allow is unioned above by decision, since dropping a receiver's own
-                    # grants is exactly the regression this task exists to prevent. Every other
-                    # permissions sub-key, deny included, is replaced wholesale instead: today's
-                    # exported payload never carries deny (the operator's live permissions has
-                    # only allow and defaultMode), but the day one is added here, this line
-                    # should union it the same way rather than silently overwrite a receiver's
-                    # own deny list, which is the one direction where losing entries loosens
-                    # security instead of tightening it.
+                    # Every other permissions sub-key (defaultMode, and anything not yet
+                    # invented) is a scalar or otherwise not a grant/deny list, so there is
+                    # nothing to union: replaced wholesale, same as an ordinary settings key.
                     $ev | Add-Member -NotePropertyName $sub -NotePropertyValue $pv.$sub -Force
                 }
             }
@@ -644,12 +647,20 @@ if (Test-Path -LiteralPath $settingsSrc) {
             Backup-BrokenSettings -LiveSettings $liveSettings -Reason "parses to $kind, not a JSON object"
             $existing = $null
         }
-        $merged = Merge-AccountSettings -Payload $payloadSettings -Existing $existing
-        $settingsJson = $merged | ConvertTo-Json -Depth 20
-        $residual = Get-ResidualToken -Text $settingsJson
+        # Scanned against the payload alone, not the merged result: the warning below claims a
+        # hook command from THIS install carries an unexpanded token, which is only true of
+        # content this install itself wrote. Task 10 review round 2, finding D: scanning the
+        # merged output picked up a receiver's own pre-existing {{TOKEN}}-shaped content too
+        # (their own convention, or coincidence), which this install never touched and has no
+        # substitution for, firing a warning that wrongly blames the merge for it. $payloadSettings
+        # is already fully resolved by Convert-SettingsForTarget at this point, so this checks
+        # exactly what the install controls.
+        $residual = Get-ResidualToken -Text ($payloadSettings | ConvertTo-Json -Depth 20)
         if ($residual.Count -gt 0) {
             Write-Warning "Unexpanded placeholder(s) in settings.json: $($residual -join ', '). Left verbatim; a hook command carrying one cannot run."
         }
+        $merged = Merge-AccountSettings -Payload $payloadSettings -Existing $existing
+        $settingsJson = $merged | ConvertTo-Json -Depth 20
         $settingsJson | Set-Content -LiteralPath $liveSettings -Encoding utf8
         Write-Host '  settings.json: merged'
     }
