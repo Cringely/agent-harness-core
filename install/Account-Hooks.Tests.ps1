@@ -68,7 +68,11 @@ Describe "Account hooks" {
         # Windows accepts both spellings, so the Linux-only failure is invisible here. Under the
         # stub only the segment-per-argument form comes back separator-clean.
         function Invoke-UnderPosixJoin {
-            param([string]$Expression, [string]$HomeValue, [string[]]$ClearEnv = @())
+            # -SetEnv pins a variable to an explicit value instead of relying on whatever the
+            # host running the suite happens to have set. LOCALAPPDATA is Windows-only: a test
+            # that read it ambiently to exercise the "present" branch would go red on any Linux
+            # runner, the exact platform this suite exists to cover.
+            param([string]$Expression, [string]$HomeValue, [string[]]$ClearEnv = @(), [hashtable]$SetEnv = @{})
             function Join-Path {
                 param([Parameter(ValueFromRemainingArguments)]$Parts)
                 (@($Parts) -join '/')
@@ -79,10 +83,15 @@ Describe "Account hooks" {
                 $saved[$k] = [Environment]::GetEnvironmentVariable($k)
                 Remove-Item "Env:$k" -ErrorAction SilentlyContinue
             }
+            foreach ($k in @($SetEnv.Keys)) {
+                $saved[$k] = [Environment]::GetEnvironmentVariable($k)
+                Set-Item "Env:$k" -Value $SetEnv[$k]
+            }
             try { return (& ([scriptblock]::Create($Expression))) }
             finally {
-                foreach ($k in $ClearEnv) {
-                    if ($null -ne $saved[$k]) { Set-Item "Env:$k" -Value $saved[$k] }
+                foreach ($k in (@($ClearEnv) + @($SetEnv.Keys))) {
+                    if ($null -eq $saved[$k]) { Remove-Item "Env:$k" -ErrorAction SilentlyContinue }
+                    else { Set-Item "Env:$k" -Value $saved[$k] }
                 }
             }
         }
@@ -469,14 +478,18 @@ Describe "Account hooks" {
         }
     }
 
+    # Drives the hook's own call-site assignment (`$config = Get-ValeConfigPath`) alongside the
+    # function body, not the function in isolation: a test that only lifts the function passes
+    # even when the call site is reverted to the original defective form, since nothing then
+    # asserts the hook actually calls it (F1).
     It "builds the Vale config path one segment at a time" {
         foreach ($root in $script:hookRoots) {
-            $text = Import-HookFunction -ScriptPath (Join-Path $root 'Lint-DocumentProse.ps1') `
-                -Name 'Get-ValeConfigPath'
-            $built = Invoke-UnderPosixJoin -Expression ($text + "`nGet-ValeConfigPath") `
-                -HomeValue '/home/u'
+            $hook = Join-Path $root 'Lint-DocumentProse.ps1'
+            $text = (Import-HookFunction -ScriptPath $hook -Name 'Get-ValeConfigPath') + "`n" +
+                    (Get-VariableAssignmentText -ScriptPath $hook -Names @('config'))
+            $built = Invoke-UnderPosixJoin -Expression ($text + "`n`$config") -HomeValue '/home/u'
             $built | Should -Be '/home/u/.claude/tools/prose-lint/.vale.ini' `
-                -Because "$root must not put separators inside a single path segment"
+                -Because "$root must not put separators inside a single path segment, and must call the builder at its call site"
         }
     }
 
@@ -499,23 +512,30 @@ Describe "Account hooks" {
         }
     }
 
+    # Drives the hook's own call-site assignment (`$SkillRoots = @(Get-SkillRoot)`) alongside
+    # the function body, not the function in isolation: a test that only lifts the function
+    # passes even when the call site is reverted to the original defective form (F1).
     It "builds skill roots from HOME, and drops the bundled root when LOCALAPPDATA is unset" {
         foreach ($root in $script:hookRoots) {
-            $text = Import-HookFunction -ScriptPath (Join-Path $root 'Guard-SkillSize.ps1') `
-                -Name 'Get-SkillRoot'
-            $built = @(Invoke-UnderPosixJoin -Expression ($text + "`nGet-SkillRoot") `
+            $hook = Join-Path $root 'Guard-SkillSize.ps1'
+            $text = (Import-HookFunction -ScriptPath $hook -Name 'Get-SkillRoot') + "`n" +
+                    (Get-VariableAssignmentText -ScriptPath $hook -Names @('SkillRoots'))
+            $built = @(Invoke-UnderPosixJoin -Expression ($text + "`n@(`$SkillRoots)") `
                     -HomeValue '/home/u' -ClearEnv @('USERPROFILE', 'LOCALAPPDATA'))
             $built.Count | Should -Be 2 `
                 -Because "$root has no bundled-skills root to offer when LOCALAPPDATA is unset"
             $built[0] | Should -Be '/home/u/.claude/skills'
             $built[1] | Should -Be '/home/u/.claude/plugins'
 
-            # And the Windows path still yields all three, so the guard did not trade one
-            # platform for the other.
-            $win = @(Invoke-UnderPosixJoin -Expression ($text + "`nGet-SkillRoot") `
-                    -HomeValue '/home/u')
+            # LOCALAPPDATA set explicitly via -SetEnv, not read from the ambient environment
+            # (F2): LOCALAPPDATA is Windows-only, and this suite must discriminate the
+            # LOCALAPPDATA-present case on Linux too, where the ambient variable is always
+            # absent. Exact-value assertion, not a suffix match, now that the value is known.
+            $win = @(Invoke-UnderPosixJoin -Expression ($text + "`n@(`$SkillRoots)") `
+                    -HomeValue '/home/u' -ClearEnv @('USERPROFILE') -SetEnv @{ LOCALAPPDATA = '/x/local' })
             $win.Count | Should -Be 3
-            $win[2] | Should -Match 'claude/bundled-skills$'
+            $win[2] | Should -Be '/x/local/Temp/claude/bundled-skills' `
+                -Because "$root must nest LOCALAPPDATA under Temp/claude/bundled-skills when it is present"
         }
     }
 
@@ -536,5 +556,37 @@ Describe "Account hooks" {
                 $argCount | Should -BeLessOrEqual 2 -Because "$($call.Extent.Text) at line $($call.Extent.StartLineNumber) must nest instead of taking a third argument"
             }
         }
+    }
+
+    # Guard-SkillSize.ps1 shipped as UTF-8 without a byte-order mark, and Windows PowerShell
+    # 5.1 decodes a BOM-less script using the system code page rather than UTF-8. Its (former)
+    # em dashes decoded to a byte sequence containing a stray double quote, closing a string
+    # early and cascading 14 parse errors under 5.1, while pwsh 7's copy of the same parser
+    # decodes UTF-8 correctly regardless and never saw it. settings.json registers this hook
+    # with "shell": "powershell", a host that may be 5.1, so a script dead there is dead on
+    # that receiver no matter what Join-Path does. Runs the parse inside a real powershell.exe
+    # child rather than calling [Parser]::ParseFile from this process (pwsh 7 here), since that
+    # would use pwsh's own encoding-correct copy of the API and never reproduce the bug.
+    It "parses Guard-SkillSize clean under Windows PowerShell 5.1" {
+        if (-not (Get-Command powershell -ErrorAction SilentlyContinue)) {
+            Set-ItResult -Skipped -Because 'no Windows PowerShell 5.1 available to drive this check'
+            return
+        }
+        $sandbox = New-HookSandbox
+        try {
+            $probe = Join-Path $sandbox 'parse-probe.ps1'
+            @'
+param([string]$HookPath)
+[ref]$errs = $null
+[System.Management.Automation.Language.Parser]::ParseFile($HookPath, [ref]$null, $errs) | Out-Null
+$errs.Value.Count
+'@ | Set-Content -LiteralPath $probe
+            foreach ($root in $script:hookRoots) {
+                $hook = Join-Path $root 'Guard-SkillSize.ps1'
+                $errCount = & powershell -NoProfile -File $probe -HookPath $hook
+                [int]$errCount | Should -Be 0 -Because "$root's Guard-SkillSize.ps1 must parse under Windows PowerShell 5.1, not only under pwsh 7"
+            }
+        }
+        finally { Remove-Item -Recurse -Force $sandbox -ErrorAction SilentlyContinue }
     }
 }
