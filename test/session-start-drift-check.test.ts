@@ -48,8 +48,11 @@ afterEach(() => {
  * A POSIX sh to run the hook with, and the directory it came from. Duplicated from
  * pre-commit.test.ts rather than shared: extracting it would edit a passing test file
  * for this change's convenience, and the copy is a locator, not logic.
- * Bare "sh" is right on Unix and on Git Bash; a PowerShell or cmd session on Windows has
- * none on PATH, so fall back to the one git ships, located from `git --exec-path`.
+ * Always an absolute path, never a bare "sh": some cases spawn it with a child PATH
+ * that carries none of the ambient PATH, and a bare name would resolve only against
+ * whatever PATH the child happens to get. On Unix and on Git Bash it resolves off the
+ * ambient PATH; a PowerShell or cmd session on Windows has none there, so fall back to
+ * the one git ships, located from `git --exec-path`.
  */
 let cachedSh: string | undefined;
 /** Set only when sh came from git's own directory. The hook calls sed, tr and awk, which
@@ -60,7 +63,8 @@ function posixSh(): string {
   if (cachedSh) return cachedSh;
   try {
     const probe = Bun.spawnSync(["sh", "-c", "exit 0"], { stdout: "ignore", stderr: "ignore" });
-    if (probe.success) return (cachedSh = "sh");
+    const resolved = probe.success && Bun.which("sh");
+    if (resolved) return (cachedSh = resolved);
   } catch {
     // not on PATH; fall through to git's copy
   }
