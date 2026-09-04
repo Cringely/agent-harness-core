@@ -486,3 +486,164 @@ by adding prose:
 - Does the spec-and-plan requirement belong in `guardrails.template.md`, which every installed
   project receives, or does it stay an account-layer convention that this table has now shown to
   be the same shape as the gaps it was filed alongside?
+
+---
+
+## 14. NotebookLM as a corpus-bounded knowledge agent
+
+**Status:** proposed, investigation only. No commitment to adopt.
+**Surfaced:** 2026-09-03, operator request during the account-layer portability session.
+
+### The idea
+
+Use a NotebookLM notebook as a narrow, high-trust oracle for one knowledge domain at a time: load
+a curated corpus, then interrogate it from a session instead of searching the open web or building
+a retrieval layer. The property worth having is that answers stay inside the corpus and cite the
+passage they came from, which places them at the vendored-reference tier of `no-overclaim.md`'s
+evidence hierarchy rather than the assumption tier where an unsourced model answer sits.
+
+### What already exists here
+
+A `notebooklm` MCP server is configured at the `C:/Users/jcgam` project scope in `~/.claude.json`:
+`npx notebooklm-mcp@latest` over stdio, empty `env`. It is not active in this repository's
+sessions, and nothing in this repo references it.
+
+It is also broken. Google renamed the product to Gemini Notebook, and the configured package has
+not been republished since. Measured against the npm registry on 2026-09-03: `notebooklm-mcp` is
+at 2.0.0, last modified 2026-05-01, repository `PleasePrompto/notebooklm-mcp`. Because the entry
+resolves `@latest` rather than a pin, the breakage arrived without a config change, which is the
+failure mode `security.md`'s pinning rule exists to prevent.
+
+### Replacement candidates, measured not endorsed
+
+Four packages published after the rename. None has been run, and the table records provenance
+only.
+
+| Package | Version | Published | Repository |
+|---|---|---|---|
+| `@charlie.act7/gemini-notebook-mcp` | 2.3.11 | 2026-08-20 | `CharlieCardenasToledo/gemini-notebook-mcp` |
+| `@pan-sec/notebooklm-mcp` | 2026.5.0 | 2026-08-29 | `Pantheon-Security/notebooklm-mcp-secure` |
+| `notebooklm-mcp-server` | 4.0.2 | 2026-08-22 | `moodRobotics/notebooklm-mcp-server` |
+| `@roomi-fields/notebooklm-mcp` | 3.1.2 | 2026-08-21 | `roomi-fields/notebooklm-mcp` |
+
+The first is the closest match by description, which reads almost word for word like the
+configured package's and names the rename directly, so it is probably a fork. Its repository owner
+differs from `PleasePrompto`, so it is a fork or a reimplementation rather than a maintainer
+handover, and that distinction matters when the package holds a Google session.
+
+Every one of them is MIT, single-maintainer, published under a personal email address, and
+unofficial. Swapping one for another fixes the breakage and leaves the shape unchanged: an
+unreviewed dependency brokering an authenticated Google account. `security.md`'s supply-chain
+section rules against exactly this, so the replacement gets a security review and a version pin
+before it is wired anywhere, and the review decides the choice rather than the version number
+deciding it. `appsec-sme` is the right reviewer.
+
+### What the assessment has to cover
+
+An assessment with no stated criteria gets rubber-stamped, so these are the questions, and the
+first one governs the rest.
+
+- **Authentication.** OAuth with a scoped grant, or a full Google session cookie lifted from a
+  browser profile, or a headless browser driving the product interface. This decides whether the
+  access can be scoped and revoked independently of the operator's whole Google account.
+- **Credential storage.** Where on disk, under what permissions, in plaintext or not, and whether
+  a second account is kept beside the first. `@roomi-fields/notebooklm-mcp` is the one to read
+  first here: it ships `setup-auth`, `de-auth` and `accounts` CLI entry points, so it clearly
+  stores credentials and manages more than one.
+- **Network egress.** Any endpoint that is not Google's, reached at any point including start-up
+  telemetry.
+- **Dependency provenance.** Direct counts are small, 4 to 9 across the four candidates, so the
+  transitive tree is worth walking rather than sampling.
+- **Publisher signals.** npm two-factor, provenance attestation, repository activity, whether
+  anyone answers an issue.
+- **Containment.** Whether it runs without broad host filesystem access, and what the revocation
+  path is once it holds a credential.
+
+One preliminary result, measured 2026-09-03: none of the five packages, the configured one
+included, declares a `preinstall` or `postinstall` script. That clears the usual supply-chain
+vector and says nothing about the six questions above.
+
+The assessment has to be able to come out against all four. If the only authentication any of
+them offers is a harvested full-account session cookie, then the finding is that none gets wired,
+and a curated notebook stays something the operator queries by hand. An assessment that can only
+return a ranking is not measuring anything.
+
+### What the investigation has to answer
+
+Adoption turns on three questions, in this order, and the first two can kill it on their own.
+
+The access question comes first. NotebookLM has no official public API, so an MCP server for it is
+presumably driving the product's own interface with a user's credentials. That needs to be
+established rather than assumed, because it decides whether this is a supported integration or a
+dependency that breaks whenever Google changes the product. `@latest` on an unofficial package holding
+a Google session is the least pinned, highest privilege component that would exist in this stack,
+and `security.md` requires a pinned version and a scoped grant before any real use.
+
+The value question comes second. The stack already answers domain questions three ways:
+`code-context` for this repository's code, Context7 for library documentation, and web search for
+everything else. A notebook is worth adding only where a curated corpus beats all three, which
+means a bounded body of source material that changes slowly and that the open web indexes badly.
+Name one such domain and test against it rather than reasoning about the category.
+
+The routing question comes last, and only if the first two clear. Adoption would mean a new row in
+`agent-usage.md` saying when a domain question goes to a notebook instead of to search, alongside
+the cost of maintaining a corpus that goes stale silently.
+
+### Promotion
+
+This is an account-layer tool question, not a core process one, so it does not sit behind
+`CONTRIBUTING.md`'s two-occurrences bar. It enters core only if it produces a routing rule, and a
+routing rule is exactly the kind of finding that bar governs.
+
+---
+
+## 15. The model-tier gate's sonnet branch is unsatisfiable on the Agent tool
+
+**Status:** proposed. Found in use, 2026-09-03, on the first two real dispatches after the gate
+was wired at account scope.
+**Surfaced:** 2026-09-03, account-layer portability session.
+
+### What happened
+
+`model-tier-gate.ts` was registered in `~/.claude/settings.json` as a `PreToolUse` hook on
+`Agent|Task|Workflow`. It worked immediately: the first dispatch omitted `model` and was denied,
+correctly, because a dispatch that names no tier inherits the session model.
+
+The second dispatch passed `model: "sonnet"` and was denied again, this time for omitting
+`effort: "xhigh"`. That denial cannot be satisfied. The Agent tool on this surface accepts
+`description`, `isolation`, `mode`, `model`, `name`, `prompt`, `subagent_type` and `team_name`.
+There is no `effort` parameter, so no sonnet dispatch through this tool can ever carry the field
+the gate demands.
+
+The agent in question was `senior-developer`, whose definition already carries `effort: xhigh`
+beside `model: sonnet`. It would have run at the mandated effort. The gate denied it because the
+gate reads the dispatch and cannot see the definition.
+
+### Why this matters more than it looks
+
+The gate ships a documented escape hatch, `MODEL-OVERRIDE: <reason>`, and its header argues that
+the safeguard is the override being written down and visible rather than a regex grading it. That
+reasoning holds for an override used occasionally. It does not hold when one branch of the gate
+can only ever be passed by overriding it. Every sonnet dispatch on this surface now requires the
+operator to write an override, which trains the reflex the gate exists to prevent, and an override
+written reflexively is a muted gate that still looks armed.
+
+### What to decide
+
+Three candidate responses, and the first two are the real ones.
+
+- Resolve `subagent_type` to its definition and read `effort` and `model` from the frontmatter
+  before denying. This is the accurate fix: the gate's premise is that an unstated tier is an
+  inherited tier, and that premise is false when a definition states it.
+- Deny only on a stated tier that is wrong, rather than on an absent field that the caller has no
+  way to supply. Narrower, and it gives up catching a definition that omits `effort`.
+- Leave it and document the override as the expected path for sonnet. Cheapest, and it accepts the
+  reflex problem above.
+
+Worth checking whether the same shape affects the `Workflow` branch, where `agent()` calls do take
+an `opts.effort`, so the field is suppliable there and the branch is probably sound.
+
+### Evidence
+
+Both denials were live, on real dispatches, with the gate's own stderr. The first is the gate
+working as designed. The second is this item.
