@@ -726,3 +726,47 @@ resolving, which is simpler and probably right for a tool with one operator.
 
 Not urgent. It takes a deliberately constructed junction to reach, both scripts print what they
 are about to do, and the destructive one now reports a mixed state on partial failure.
+
+## 20. `-ClaudeJson` sits outside the containment guard, and the mixed-state warning has gone stale
+
+Two small gaps left open by the `mcpServers` merge, both raised in review and both deliberately
+deferred.
+
+`Install-Account.ps1` compares only `-ClaudeHome` and `-PayloadRoot` when it checks containment. A
+`-ClaudeJson` pointing inside `-PayloadRoot` would have the merge write into the payload tree. No
+realistic caller does this, and the copy has already finished by the time the merge runs, so
+nothing is corrupted today.
+
+The mixed-state warning names only `$ClaudeHome`, but the mcp block now also writes `-ClaudeJson`.
+A code comment at the write says so; the warning text does not. In practice the `Set-Content` is
+the last fallible statement in the `try`, so a failure after it is not reachable.
+
+Take both together with item 19, since the containment half wants the same helper.
+
+## 21. `Convert-HookCommand` and `Expand-AccountToken` both expand `{{CLAUDE_HOME}}`
+
+The account installer reuses `Convert-HookCommand`, a function written for project restore, inside
+the account-layer install path. Both it and `Expand-AccountToken` handle `{{CLAUDE_HOME}}`, so
+either one alone is enough to produce a correct hook command.
+
+The review that found it reads the overlap as accidental, a side effect of the reuse rather than
+defence in depth, and nothing documents it as intentional. The cost is a test blind spot rather
+than a bug: an assertion on the expanded hook command cannot be reddened by disabling either
+function alone, only both at once, so a regression confined to one of them passes unnoticed.
+
+Closing it means deciding which function owns the token on the account path and removing the other
+handler, not adding a test that pins which one did the work. That would assert an implementation
+detail rather than the outcome.
+
+## 22. The prose-lint skip lists do not match `.superpowers/`
+
+`Lint-DocumentProse.ps1` and `core/claude/hooks/lint-doc-prose.ts` both skip `/memory/`,
+`/handoffs/`, `/scratchpad/`, `/.scratch/`, `/council-transcripts/` and `/.claude/`, which is
+`writing-style.md`'s row 5 exemption for internal agent traffic.
+
+Neither matches `/.superpowers/`. That directory holds the subagent-driven-development workspace:
+ledgers, task briefs, implementer reports, review reports. It is the same kind of traffic by every
+test the row applies, written for the next agent rather than for a reader, and it lints today.
+
+Add the segment to both lists in one change, the way the row's other three mechanisms are already
+kept in step.
