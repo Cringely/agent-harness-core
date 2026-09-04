@@ -2980,7 +2980,7 @@ function Merge-AccountSettings {
             $Existing.$name = $pv
         }
         elseif ($name -eq 'hooks') {
-            foreach ($event in @($pv.PSObject.Properties.Name)) {
+            foreach ($event in @($pv.PSObject.Properties.Name | Where-Object { $_ })) {
                 $existingGroups = if ($ev.PSObject.Properties[$event]) { @($ev.$event) } else { @() }
                 $mergedEvent = @(Merge-HookEvent -PayloadGroups @($pv.$event) -ExistingGroups $existingGroups)
                 if ($ev.PSObject.Properties[$event]) { $ev.$event = $mergedEvent }
@@ -2988,7 +2988,7 @@ function Merge-AccountSettings {
             }
         }
         elseif ($name -eq 'permissions') {
-            foreach ($sub in @($pv.PSObject.Properties.Name)) {
+            foreach ($sub in @($pv.PSObject.Properties.Name | Where-Object { $_ })) {
                 if ($sub -eq 'allow') {
                     # Ordered set union, receiver entries first, so a receiver's own grants keep
                     # their position and the payload's are appended once.
@@ -3227,7 +3227,7 @@ Append after the settings merge.
 function Expand-McpServer {
     param([pscustomobject]$Servers, [hashtable]$Tokens)
     if (-not $Servers) { return $Servers }
-    foreach ($name in @($Servers.PSObject.Properties.Name)) {
+    foreach ($name in @($Servers.PSObject.Properties.Name | Where-Object { $_ })) {
         $srv = $Servers.$name
         if ($srv.command) { $srv.command = Expand-AccountToken -Text $srv.command -Tokens $Tokens }
         if ($null -ne $srv.args) {
@@ -3255,7 +3255,7 @@ function Merge-McpServer {
         $doc | Add-Member -NotePropertyName mcpServers -NotePropertyValue ([pscustomobject]@{}) -Force
     }
 
-    foreach ($name in @($PayloadServers.PSObject.Properties.Name)) {
+    foreach ($name in @($PayloadServers.PSObject.Properties.Name | Where-Object { $_ })) {
         if ($doc.mcpServers.PSObject.Properties[$name]) { continue }
         $doc.mcpServers | Add-Member -NotePropertyName $name -NotePropertyValue $PayloadServers.$name -Force
         $added += $name
@@ -3322,7 +3322,7 @@ function Get-ResidualCommand {
     if ($Settings.statusLine.command) {
         Add-IfDead -Where 'statusLine' -Command $Settings.statusLine.command -Into $list
     }
-    foreach ($name in @($Servers.PSObject.Properties.Name)) {
+    foreach ($name in @($Servers.PSObject.Properties.Name | Where-Object { $_ })) {
         $srv = $Servers.$name
         # One line per server, not one per string: two dead args on one entry are one problem.
         $joined = (@($srv.command) + @($srv.args)) -join ' '
