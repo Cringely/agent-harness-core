@@ -1473,6 +1473,31 @@ Describe "Install-Account" {
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
 
+    # Review F14: "mcpServers": null in an existing claude.json falls through the F7 check
+    # above ($null -isnot [pscustomobject] is true) to the generic GetType() fallback, and
+    # .GetType() on $null throws "You cannot call a method on a null-valued expression". Not a
+    # regression from F7: the reviewer traced the same shape crashing one guard clause later,
+    # at $doc.mcpServers.PSObject.Properties[$name] in the merge loop, before F7 existed. F7
+    # moved the pre-existing crash earlier rather than introducing it; this closes the one shape
+    # its own guard still misses.
+    It "warns and replaces an explicit null mcpServers instead of crashing on GetType" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            $cj = Join-Path $h 'claude.json'
+            '{"mcpServers":null}' | Set-Content $cj
+            @{ mcpServers = @{ garmin = @{ type = 'stdio'; command = 'uvx'; args = @('garmin-mcp'); env = @{} } } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
+
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight *>&1 | Out-String
+
+            $out | Should -Match 'mcpServers.*not a JSON object'
+            $j = Get-Content $cj -Raw | ConvertFrom-Json
+            $j.mcpServers.garmin.command | Should -Be 'uvx'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
     # Review F8: -WhatIf printed "mcpServers: 1 added" while claude.json stayed byte-identical.
     # Defensible as a prediction (the count is computed before the gated Set-Content, same as
     # the settings.json merge above), but Task 10 already named its own equivalent test "under
