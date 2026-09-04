@@ -46,6 +46,14 @@
     npm-absent branch, which drops the two ccstatusline hook entries and points
     statusLine.command at the shipped script for the platform.
 
+.PARAMETER VaultPath
+    Expands {{OBSIDIAN_VAULT}}. Defaults to $env:CLAUDE_OBSIDIAN_VAULT, then to
+    $HOME/Documents/Obsidian Vault/Claude Code.
+
+.PARAMETER HomeSlug
+    Expands {{HOME_SLUG}}. Defaults to Get-ProjectSlug $HOME. Test seam: a child pwsh takes
+    $HOME from USERPROFILE, not from $env:HOME, so a test cannot steer the default from outside.
+
 .PARAMETER TargetIsWindows
     Which platform the install is being prepared for. Defaults to the platform actually
     running. A real run should never pass it; it exists so the tests can reach the Linux-only
@@ -70,6 +78,8 @@ param(
     [string]$PayloadRoot,
     [string]$CoreRepo,
     [string]$NpmGlobal,
+    [string]$VaultPath,
+    [string]$HomeSlug,
     [bool]$TargetIsWindows = $(if ($PSVersionTable.PSVersion.Major -lt 6) { $true } else { $IsWindows }),
     [switch]$SkipPreflight
 )
@@ -274,4 +284,174 @@ try {
 catch {
     Write-Warning "Install failed partway through: '$ClaudeHome' is left in a mixed state, holding some content from before this run alongside whatever copied before the failure. The install did not complete. Re-run this script: every copy above is an unconditional overwrite, so re-running is idempotent and finishes what this one left unfinished."
     throw
+}
+
+# --- token expansion ---------------------------------------------------------
+# Every value is forward-slashed. PowerShell on Windows accepts & 'C:/...' and Linux accepts
+# nothing else, so one spelling covers both platforms and the export folds it back cleanly.
+function Get-AccountTokenMap {
+    param(
+        [string]$ClaudeHome,
+        [string]$NpmGlobal,
+        [string]$CoreRepo,
+        [string]$VaultPath,
+        [string]$HomeSlug
+    )
+    return @{
+        '{{CLAUDE_HOME}}'    = ($ClaudeHome -replace '\\', '/')
+        '{{NPM_GLOBAL}}'     = ($NpmGlobal  -replace '\\', '/')
+        '{{CORE_REPO}}'      = ($CoreRepo   -replace '\\', '/')
+        '{{OBSIDIAN_VAULT}}' = ($VaultPath  -replace '\\', '/')
+        '{{HOME_SLUG}}'      = $HomeSlug
+    }
+}
+
+function Expand-AccountToken {
+    param([string]$Text, [hashtable]$Tokens)
+    if (-not $Text) { return $Text }
+    $out = $Text
+    foreach ($k in @($Tokens.Keys)) { $out = $out.Replace($k, [string]$Tokens[$k]) }
+    return $out
+}
+
+# A payload can name a token this script does not know: a stale placeholder from a plan that
+# renamed one, or a typo. Passthrough stays deliberate rather than a hard stop, since a receiver
+# still gets an install over one bad file, but a silent survivor lands in a model-read file or a
+# hook command that cannot run, so it is reported instead of left invisible.
+function Get-ResidualToken {
+    param([string]$Text)
+    if (-not $Text) { return @() }
+    return @(([regex]::Matches($Text, '\{\{[A-Z_]+\}\}') | ForEach-Object { $_.Value } | Select-Object -Unique))
+}
+
+# Parameters, not locals. A test drives this script as a child process with a stand-in $HOME
+# that the child does not inherit, so an internally derived vault path and slug would expand to
+# the runner's real values and the round trip in Task 12 could not assert on either.
+if (-not $VaultPath) {
+    $VaultPath = if ($env:CLAUDE_OBSIDIAN_VAULT) { $env:CLAUDE_OBSIDIAN_VAULT }
+    else { Join-Path (Join-Path (Join-Path $HOME 'Documents') 'Obsidian Vault') 'Claude Code' }
+}
+if (-not $HomeSlug) { $HomeSlug = Get-ProjectSlug $HOME }
+
+$tokens = Get-AccountTokenMap -ClaudeHome $ClaudeHome -NpmGlobal $NpmGlobal `
+    -CoreRepo $CoreRepo -VaultPath $VaultPath -HomeSlug $HomeSlug
+
+foreach ($rel in $script:AccountTemplatedFiles.Keys) {
+    $target = Join-Path $ClaudeHome $rel
+    if (-not (Test-Path -LiteralPath $target)) { continue }
+    $text = Get-Content -LiteralPath $target -Raw
+    $expanded = Expand-AccountToken -Text $text -Tokens $tokens
+    $residual = Get-ResidualToken -Text $expanded
+    if ($residual.Count -gt 0) {
+        Write-Warning "Unexpanded placeholder(s) in ${rel}: $($residual -join ', '). Left verbatim; a model reading this file sees the literal token."
+    }
+    Set-Content -LiteralPath $target -Value $expanded -NoNewline
+}
+
+# --- settings ----------------------------------------------------------------
+# Convert-HookCommand does the {{CLAUDE_HOME}} expansion and, on Linux only, the
+# "& '...ps1'" to "pwsh -NoProfile -File" rewrite in one pass. It never touches the shell key,
+# so that removal is new code below. {{NPM_GLOBAL}} is not under {{CLAUDE_HOME}} and is left
+# alone by that function, so it takes the plain token replace.
+function Convert-SettingsForTarget {
+    param(
+        [pscustomobject]$Settings,
+        [string]$ClaudeHome,
+        [hashtable]$Tokens,
+        [bool]$TargetIsWindows,
+        [bool]$NpmPresent
+    )
+    $homeSlashed = $ClaudeHome -replace '\\', '/'
+
+    # Where-Object { $_ }, not just @(): on a genuinely empty hooks object, .Properties.Name is
+    # $null, and @($null) is a ONE-element array holding $null, not an empty array. Without the
+    # filter the loop below ran once with $event = '', $group = $null, and $kept ended up
+    # holding that $null hook whenever $NpmPresent short-circuited the filter, so
+    # "$hook.command = ..." tried to set a property on $null. Reproduced against the default
+    # test payload's {"hooks":{}}, not just the empty-hooks fixture that first exposed it.
+    foreach ($event in @($Settings.hooks.PSObject.Properties.Name | Where-Object { $_ })) {
+        $keptGroups = New-Object System.Collections.Generic.List[pscustomobject]
+        # Where-Object { $_ } again: $Settings.hooks.$event can itself be an explicit JSON null
+        # (a receiver-authored {"hooks":{"PreToolUse":null}}), and the same @($null) collapse
+        # applies at this locus independently of the filter below.
+        foreach ($group in @(@($Settings.hooks.$event) | Where-Object { $_ })) {
+            # $_ -and (...), not just the ccstatusline test: a group with no "hooks" key, or an
+            # explicit "hooks": null, makes $group.hooks itself $null, and @($null) is the same
+            # one-element phantom. An explicit $null piped into Where-Object still passes
+            # through as one item, so the ccstatusline test alone does not filter it out
+            # whenever $NpmPresent short-circuits the OR.
+            #
+            # Also wraps the pipeline OUTPUT: a single surviving hook unwraps to a bare scalar
+            # and would serialise "hooks": {...} instead of "hooks": [...]
+            # (install/Install-Harness.ps1:822-826).
+            $kept = @(@($group.hooks) | Where-Object {
+                    $_ -and ($NpmPresent -or ($_.command -notmatch 'ccstatusline'))
+                })
+            if ($kept.Count -eq 0) { continue }
+            foreach ($hook in $kept) {
+                # A hook entry with no "command" property has nothing to rewrite.
+                # PSCustomObject assignment to a NoteProperty that does not already exist
+                # throws rather than creating one, so leave the entry alone instead of
+                # crashing on it.
+                if (-not $hook.PSObject.Properties['command']) { continue }
+                $hook.command = Convert-HookCommand $hook.command '{{CLAUDE_HOME}}' $homeSlashed $TargetIsWindows
+                $hook.command = Expand-AccountToken -Text $hook.command -Tokens $Tokens
+                if (-not $TargetIsWindows -and $hook.PSObject.Properties['shell']) {
+                    # On Linux the command string goes to /bin/sh. Leaving the key would send
+                    # the rewritten pwsh command back to a PowerShell host that is not there.
+                    $hook.PSObject.Properties.Remove('shell')
+                }
+            }
+            $group.hooks = $kept
+            $keptGroups.Add($group)
+        }
+        if ($keptGroups.Count -eq 0) { $Settings.hooks.PSObject.Properties.Remove($event) }
+        else { $Settings.hooks.$event = $keptGroups.ToArray() }
+    }
+
+    if ($Settings.statusLine.command) {
+        if ($NpmPresent) {
+            $Settings.statusLine.command =
+                Expand-AccountToken -Text $Settings.statusLine.command -Tokens $Tokens
+        }
+        else {
+            # Point at a script that exists rather than write a command that cannot run.
+            # Whether these two scripts still work is untested: nothing has invoked them since
+            # ccstatusline took over, and this branch is the first thing that will.
+            $Settings.statusLine.command = if ($TargetIsWindows) {
+                "pwsh -NoProfile -File '$homeSlashed/statusline-command.ps1'"
+            }
+            else {
+                "bash '$homeSlashed/statusline-command.sh'"
+            }
+        }
+    }
+
+    if (-not $TargetIsWindows -and $Settings.env -and
+        $Settings.env.PSObject.Properties['CLAUDE_CODE_USE_POWERSHELL_TOOL']) {
+        $Settings.env.PSObject.Properties.Remove('CLAUDE_CODE_USE_POWERSHELL_TOOL')
+    }
+
+    return $Settings
+}
+
+$settingsSrc = Join-Path $PayloadRoot 'settings.account.json'
+if (Test-Path -LiteralPath $settingsSrc) {
+    if (-not $npmPresent) {
+        Write-Warning 'npm is absent: dropping the two ccstatusline hook entries and pointing statusLine.command at the shipped statusline script for this platform.'
+    }
+    $payloadSettings = Get-Content -LiteralPath $settingsSrc -Raw | ConvertFrom-Json
+    $payloadSettings = Convert-SettingsForTarget -Settings $payloadSettings `
+        -ClaudeHome $ClaudeHome -Tokens $tokens `
+        -TargetIsWindows $TargetIsWindows -NpmPresent $npmPresent
+
+    # Overwrite for now. Task 10 replaces this with a merge against whatever the receiver's
+    # Claude Code has written into the same file.
+    $settingsJson = $payloadSettings | ConvertTo-Json -Depth 20
+    $residual = Get-ResidualToken -Text $settingsJson
+    if ($residual.Count -gt 0) {
+        Write-Warning "Unexpanded placeholder(s) in settings.json: $($residual -join ', '). Left verbatim; a hook command carrying one cannot run."
+    }
+    $settingsJson | Set-Content -LiteralPath (Join-Path $ClaudeHome 'settings.json') -Encoding utf8
+    Write-Host '  settings.json: written'
 }
