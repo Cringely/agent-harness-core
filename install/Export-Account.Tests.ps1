@@ -819,4 +819,85 @@ exit 0
         }
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
     }
+
+    It "lifts only the mcpServers key out of claude.json" {
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            $cj = Join-Path $stand '.claude.json'
+            @{
+                userID = 'abc123'
+                anonymousId = 'def456'
+                projects = @{ 'E:\projects\demo' = @{ lastCost = 1.5 } }
+                mcpServers = @{
+                    garmin = @{ type = 'stdio'; command = 'uvx'
+                        args = @('--from', 'git+https://github.com/Taxuspt/garmin_mcp', 'garmin-mcp')
+                        env = @{} }
+                    '1password' = @{ type = 'stdio'
+                        command = 'C:\Program Files\WindowsApps\Agilebits.1Password_8.12.26.40_x64__amwd9z03whsfe\onepassword-mcp.exe'
+                        args = @(); env = @{} }
+                }
+            } | ConvertTo-Json -Depth 20 | Set-Content $cj
+
+            & $script:export -ClaudeHome $ch -ClaudeJson $cj -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipSettings | Out-Null
+
+            $raw = Get-Content (Join-Path $out 'mcp-servers.json') -Raw
+            $m = $raw | ConvertFrom-Json
+            $m.mcpServers.garmin.command | Should -Be 'uvx'
+            $m.mcpServers.'1password'.command | Should -Match 'onepassword-mcp\.exe$'
+            @($m.PSObject.Properties.Name) | Should -Be @('mcpServers')
+            # None of the rest of that file may travel: it is 46 project entries and two
+            # identifiers, and one of them names the operator.
+            $raw | Should -Not -Match 'userID'
+            $raw | Should -Not -Match 'anonymousId'
+            $raw | Should -Not -Match 'lastCost'
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "fails closed when any mcpServers string trips the secret scanner's own patterns" {
+        # Server entries reach secrets through 1Password or an environment variable, never
+        # inline. Measured against today's live mcpServers: all 15 strings clean, 0 hits.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            $cj = Join-Path $stand '.claude.json'
+            @{ mcpServers = @{ leaky = @{ type = 'stdio'; command = 'x'
+                        args = @('--token', 'sk_livetoken0123456789abcdef'); env = @{} } } } |
+                ConvertTo-Json -Depth 20 | Set-Content $cj
+
+            { & $script:export -ClaudeHome $ch -ClaudeJson $cj -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings } |
+                Should -Throw -ExpectedMessage '*leaky*'
+            Test-Path -LiteralPath (Join-Path $out 'mcp-servers.json') |
+                Should -BeFalse -Because "a failed gate must leave nothing behind to commit"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "folds a server command that sits under the account home" {
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            $cj = Join-Path $stand '.claude.json'
+            @{ mcpServers = @{ local = @{ type = 'stdio'
+                        command = 'node'
+                        args = @(($ch -replace '/', '\') + '\tools\srv\index.js')
+                        env = @{} } } } | ConvertTo-Json -Depth 20 | Set-Content $cj
+
+            & $script:export -ClaudeHome $ch -ClaudeJson $cj -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipSettings | Out-Null
+
+            $m = Get-Content (Join-Path $out 'mcp-servers.json') -Raw | ConvertFrom-Json
+            @($m.mcpServers.local.args)[0] | Should -Be '{{CLAUDE_HOME}}/tools/srv/index.js'
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
 }

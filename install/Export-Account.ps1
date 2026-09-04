@@ -372,6 +372,97 @@ if ($PSCmdlet.ShouldProcess($OutputRoot, 'fold model-read machine paths')) {
     }
 }
 
+# --- mcpServers --------------------------------------------------------------
+# The pattern table is read out of the live secret scanner rather than copied, so the gate here
+# and the gate on every memory write are the same seven patterns. A copy would drift, and the
+# drift would be invisible: both sides would still pass their own tests.
+#
+# Rejected the alternative of piping each string through Scan-MemorySecrets.ps1 as a child
+# process. It exercises the control end to end, which is better, but it costs one process spawn
+# per string and the hook only reports a boolean verdict, so a failure could not name which
+# pattern matched.
+function Get-SecretPattern {
+    param([string]$ScanHookPath)
+    if (-not (Test-Path -LiteralPath $ScanHookPath)) {
+        throw "Cannot read the secret pattern table: '$ScanHookPath' is absent."
+    }
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+        $ScanHookPath, [ref]$null, [ref]$null)
+    $assign = @($ast.FindAll({ param($n)
+                $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $n.Left.Extent.Text -eq '$patterns' }, $true))
+    if ($assign.Count -eq 0) {
+        throw "Scan-MemorySecrets.ps1 no longer defines `$patterns."
+    }
+    return @(& ([scriptblock]::Create($assign[0].Right.Extent.Text)))
+}
+
+function Test-AccountSecret {
+    param([string]$Text, [hashtable[]]$Patterns)
+    $hits = @()
+    if (-not $Text) { return $hits }
+    foreach ($p in @($Patterns)) {
+        if ($Text -match $p.Regex) { $hits += $p.Name }
+    }
+    return @($hits)
+}
+
+if (-not $SkipMcp) {
+    if (-not (Test-Path -LiteralPath $ClaudeJson)) {
+        Write-Warning "absent, skipping: $ClaudeJson"
+    }
+    else {
+        $claudeJsonObj = Get-Content -LiteralPath $ClaudeJson -Raw | ConvertFrom-Json
+        $servers = $claudeJsonObj.mcpServers
+        if (-not $servers) {
+            Write-Warning "no mcpServers key in $ClaudeJson"
+        }
+        else {
+            $patterns = @(Get-SecretPattern -ScanHookPath (Join-Path $ClaudeHome 'hooks/Scan-MemorySecrets.ps1'))
+
+            # Fold and gate in one pass. The gate throws before anything is written, so a failed
+            # export leaves no half-written file for someone to commit.
+            foreach ($name in @($servers.PSObject.Properties.Name)) {
+                $srv = $servers.$name
+                $strings = @($name)
+                if ($srv.command) {
+                    $srv.command = ConvertTo-TemplatedCommand -Text $srv.command -Folds $folds
+                    $strings += $srv.command
+                }
+                if ($null -ne $srv.args) {
+                    $srv.args = @(@($srv.args) | ForEach-Object {
+                            ConvertTo-TemplatedCommand -Text $_ -Folds $folds })
+                    $strings += @($srv.args)
+                }
+                if ($srv.env) {
+                    # ConvertFrom-Json on an empty JSON object ("env": {}) yields a PSCustomObject
+                    # with zero NoteProperties. Its .PSObject.Properties.Name is $null rather than
+                    # an empty collection (measured on pwsh 7.6.5), and @($null) is a one-element
+                    # array holding $null, not an empty array. Without the filter, a server with
+                    # no env vars (the common case: garmin, 1password) iterates once with $k =
+                    # $null, and $srv.env.$k = ... throws PSArgumentException on the null name.
+                    foreach ($k in @($srv.env.PSObject.Properties.Name) | Where-Object { $_ }) {
+                        $srv.env.$k = ConvertTo-TemplatedCommand -Text $srv.env.$k -Folds $folds
+                        $strings += @($k, $srv.env.$k)
+                    }
+                }
+                foreach ($s in $strings) {
+                    $hits = @(Test-AccountSecret -Text $s -Patterns $patterns)
+                    if ($hits.Count -gt 0) {
+                        throw "Refusing to export mcpServers entry '$name': $($hits -join ', '). Server entries reach secrets through 1Password or an environment variable, never inline."
+                    }
+                }
+            }
+
+            [pscustomobject]@{ mcpServers = $servers } | ConvertTo-Json -Depth 20 |
+                Set-Content -LiteralPath (Join-Path $OutputRoot 'mcp-servers.json') -Encoding utf8
+            Write-Host "  mcp-servers.json: $(@($servers.PSObject.Properties.Name).Count) server(s)"
+        }
+    }
+}
+
+Write-Host "Export complete. Review with: git status account/claude"
+
 # Written only after every copy above completes without throwing, so its presence means this
 # -OutputRoot really was produced by a prior export and the non-empty-destination refusal above
 # can trust it next time. Sits at the output root rather than inside an allowlisted directory, so
