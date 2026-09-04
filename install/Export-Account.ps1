@@ -206,6 +206,109 @@ foreach ($f in $script:AccountRootFiles) {
     else { Write-Warning "absent, skipping: $src" }
 }
 
+# --- fold table --------------------------------------------------------------
+# Each fold has one named source. {{CLAUDE_HOME}} is the -ClaudeHome value, {{NPM_GLOBAL}} is
+# `npm root -g`, {{CORE_REPO}} is the main checkout, {{OBSIDIAN_VAULT}} and {{HOME_SLUG}} come
+# from $HOME. Order is immaterial: no literal contains another, since the npm path and the
+# vault both sit under the bare home rather than under .claude, and the slug shares no
+# characters with any path spelling.
+function Get-AccountFoldTable {
+    param(
+        [string]$ClaudeHome,
+        [string]$NpmGlobal,
+        [string]$CoreRepo,
+        [string]$VaultPath,
+        [string]$HomeSlug
+    )
+    return @(
+        [pscustomobject]@{ Token = '{{CLAUDE_HOME}}';    Literal = $ClaudeHome; IsPath = $true }
+        [pscustomobject]@{ Token = '{{NPM_GLOBAL}}';     Literal = $NpmGlobal;  IsPath = $true }
+        [pscustomobject]@{ Token = '{{CORE_REPO}}';      Literal = $CoreRepo;   IsPath = $true }
+        [pscustomobject]@{ Token = '{{OBSIDIAN_VAULT}}'; Literal = $VaultPath;  IsPath = $true }
+        [pscustomobject]@{ Token = '{{HOME_SLUG}}';      Literal = $HomeSlug;   IsPath = $false }
+    )
+}
+
+# Folds one literal into its token. A path fold matches both separator spellings and
+# forward-slashes the whole tail, not only the prefix: install writes forward-slash form, and
+# this box's originals are backslashed, so a fold that matched one spelling would leave the
+# other literal and break the round trip the design depends on.
+#
+# Only the $homePattern idiom is reused from Convert-HookCommand (Restore-ClaudeProject.ps1:192).
+# Calling that function whole here is wrong in both directions: its Linux branch welds the
+# "& '...ps1'" to "pwsh -NoProfile -File" rewrite in at L245-247, which would ship Linux
+# commands to Windows receivers, and its Windows branch at L195-197 leaves the tail
+# backslashed. The installer may call it whole, with $OldHome set to '{{CLAUDE_HOME}}'.
+function ConvertTo-TemplatedText {
+    param([string]$Text, [pscustomobject]$Fold)
+    if (-not $Fold.Literal -or -not $Text) { return $Text }
+    if (-not $Fold.IsPath) { return $Text.Replace($Fold.Literal, $Fold.Token) }
+
+    # Normalise the literal to backslashes BEFORE escaping. [regex]::Escape leaves '/' alone, so
+    # building the pattern straight from a forward-slashed literal produces a forward-only
+    # pattern and the both-separator substitution below matches nothing to rewrite. That is not
+    # hypothetical: Get-MainCheckout returns a forward-slashed path, and both live {{CORE_REPO}}
+    # source files spell it with backslashes, so without this line the real export folds nothing
+    # and ships E:\projects\agent-harness-core to every receiver with the whole suite green.
+    # Measured: Escape('E:/projects/...') -> 'E:/projects/...' (no separator class);
+    # Escape('E:\projects\...') -> 'E:[\\/]projects[\\/]...' which matches both spellings.
+    $pattern = [regex]::Escape(($Fold.Literal -replace '/', '\')) -replace '\\\\', '[\\\\/]'
+    $token = $Fold.Token
+    $tail = '(?<tail>(?:[\\/][^"''\s]*)*)'
+    return [regex]::Replace($Text, $pattern + $tail, {
+            param($m)
+            $token + $m.Groups['tail'].Value.Replace('\', '/')
+        })
+}
+
+function ConvertTo-TemplatedCommand {
+    param([string]$Text, [pscustomobject[]]$Folds)
+    $out = $Text
+    foreach ($f in @($Folds)) { $out = ConvertTo-TemplatedText -Text $out -Fold $f }
+    return $out
+}
+
+$homeSlug = Get-ProjectSlug ($HOME)
+$folds = @(Get-AccountFoldTable -ClaudeHome $ClaudeHome -NpmGlobal $NpmGlobal `
+        -CoreRepo $CoreRepo -VaultPath $VaultPath -HomeSlug $homeSlug)
+
+# --- settings.account.json ---------------------------------------------------
+if (-not $SkipSettings) {
+    $settingsSrc = Join-Path $ClaudeHome 'settings.json'
+    if (-not (Test-Path -LiteralPath $settingsSrc)) {
+        Write-Warning "absent, skipping: $settingsSrc"
+    }
+    else {
+        # Parse and rewrite the command strings rather than text-replacing the whole file: the
+        # JSON encoding doubles every backslash, so a text pass would have to match two
+        # spellings of two spellings and would also reach strings that are not paths.
+        $settings = Get-Content -LiteralPath $settingsSrc -Raw | ConvertFrom-Json
+
+        foreach ($event in $settings.hooks.PSObject.Properties.Name) {
+            # Wrap the pipeline OUTPUT, not just the input: a single-match result unwraps to a
+            # bare scalar and would serialise "hooks": {...} instead of "hooks": [...], which
+            # Claude Code cannot load (install/Install-Harness.ps1:822-826).
+            $groups = @($settings.hooks.$event)
+            foreach ($group in $groups) {
+                $hooks = @($group.hooks)
+                foreach ($hook in $hooks) {
+                    $hook.command = ConvertTo-TemplatedCommand -Text $hook.command -Folds $folds
+                }
+                $group.hooks = $hooks
+            }
+            $settings.hooks.$event = $groups
+        }
+        if ($settings.statusLine.command) {
+            $settings.statusLine.command =
+                ConvertTo-TemplatedCommand -Text $settings.statusLine.command -Folds $folds
+        }
+
+        $settings | ConvertTo-Json -Depth 20 |
+            Set-Content -LiteralPath (Join-Path $OutputRoot 'settings.account.json') -Encoding utf8
+        Write-Host '  settings.account.json: written'
+    }
+}
+
 # Written only after every copy above completes without throwing, so its presence means this
 # -OutputRoot really was produced by a prior export and the non-empty-destination refusal above
 # can trust it next time. Sits at the output root rather than inside an allowlisted directory, so

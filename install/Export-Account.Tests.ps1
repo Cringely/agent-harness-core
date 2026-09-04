@@ -344,4 +344,156 @@ exit 0
             Remove-Item -Recurse -Force $stand, $victim -ErrorAction SilentlyContinue
         }
     }
+
+    It "folds all three quoting forms into forward-slash placeholders" {
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            $chBack = $ch -replace '/', '\'
+            $settings = @{
+                env = @{ CLAUDE_CODE_USE_POWERSHELL_TOOL = '1'; ENABLE_TOOL_SEARCH = 'auto:5' }
+                permissions = @{ allow = @('mcp__code-context'); defaultMode = 'auto' }
+                hooks = @{
+                    PreToolUse = @(
+                        @{ matcher = 'Write|Edit'; hooks = @(
+                                @{ type = 'command'
+                                    command = "& '$chBack\hooks\Scan-MemorySecrets.ps1'"
+                                    shell = 'powershell'; timeout = 5 }) }
+                        @{ matcher = 'Agent|Task|Workflow'; hooks = @(
+                                @{ type = 'command'
+                                    command = "bun `"$chBack\hooks\model-tier-gate.ts`""
+                                    timeout = 10 }) }
+                    )
+                    SessionStart = @(
+                        @{ hooks = @(
+                                @{ type = 'command'
+                                    command = "bash `"$chBack\hooks\harness-core-reminder.sh`""
+                                    timeout = 10 }) }
+                    )
+                    UserPromptSubmit = @(
+                        @{ hooks = @(
+                                @{ type = 'command'
+                                    # -NpmGlobal below is 'C:/npm', a stand-in for the whole
+                                    # `npm root -g` value, which already IS the node_modules
+                                    # directory (.SYNOPSIS: -NpmGlobal defaults to `npm root -g`).
+                                    # A package therefore sits directly under it, with no second
+                                    # node_modules segment to fold past.
+                                    command = 'node C:/npm/ccstatusline/dist/ccstatusline.js --hook'
+                                    timeout = 15 }) }
+                    )
+                }
+                statusLine = @{ type = 'command'
+                    command = 'node C:/npm/ccstatusline/dist/ccstatusline.js'
+                    padding = 0 }
+                skipDangerousModePermissionPrompt = $true
+            }
+            $settings | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $ch 'settings.json')
+
+            & $script:export -ClaudeHome $ch -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipMcp | Out-Null
+
+            $raw = Get-Content (Join-Path $out 'settings.account.json') -Raw
+            $s = $raw | ConvertFrom-Json
+
+            $cmds = @()
+            foreach ($e in $s.hooks.PSObject.Properties.Name) {
+                foreach ($g in @($s.hooks.$e)) { foreach ($h in @($g.hooks)) { $cmds += $h.command } }
+            }
+            $cmds | Should -Contain "& '{{CLAUDE_HOME}}/hooks/Scan-MemorySecrets.ps1'"
+            $cmds | Should -Contain 'bun "{{CLAUDE_HOME}}/hooks/model-tier-gate.ts"'
+            $cmds | Should -Contain 'bash "{{CLAUDE_HOME}}/hooks/harness-core-reminder.sh"'
+            $cmds | Should -Contain '{{NPM_GLOBAL}}/ccstatusline/dist/ccstatusline.js --hook'.Insert(0, 'node ')
+            $s.statusLine.command | Should -Be 'node {{NPM_GLOBAL}}/ccstatusline/dist/ccstatusline.js'
+
+            # The whole rewritten path, not only the prefix. A prefix-only fold leaves a
+            # receiver with /home/u/.claude\hooks\Scan-MemorySecrets.ps1, which is one string
+            # on Linux and not a path at all.
+            $raw | Should -Not -Match 'CLAUDE_HOME\}\}\\\\'
+            # Assert on the parsed commands, not on $raw. JSON doubles every backslash, so a
+            # pattern built by [regex]::Escape($chBack) needs SINGLE backslashes and can never
+            # match the doubled text whatever the exporter did. Measured: that form does not
+            # match "& 'C:\\Users\\user\\.claude\\hooks\\x.ps1'", so it is an assertion with no
+            # failing input, which is what patterns/test-falsifiability.md targets.
+            foreach ($c in $cmds) { $c | Should -Not -Match ([regex]::Escape($chBack)) }
+            $s.statusLine.command | Should -Not -Match ([regex]::Escape($chBack))
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "keeps every non-command key, including the two the operator chose to ship" {
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            @{
+                env = @{ CLAUDE_CODE_USE_POWERSHELL_TOOL = '1' }
+                permissions = @{ allow = @('mcp__code-context'); defaultMode = 'auto' }
+                skillOverrides = @{ 'appsec-kpi-deck' = 'off' }
+                enabledPlugins = @{ 'superpowers@claude-plugins-official' = $true }
+                skipDangerousModePermissionPrompt = $true
+                effortLevel = 'xhigh'
+                hooks = @{}
+            } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $ch 'settings.json')
+
+            & $script:export -ClaudeHome $ch -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipMcp | Out-Null
+
+            $s = Get-Content (Join-Path $out 'settings.account.json') -Raw | ConvertFrom-Json
+            $s.permissions.defaultMode | Should -Be 'auto'
+            # Decision 8: excluding these was recommended and the operator overruled it. The
+            # cost is recorded in the design; the test's job is to notice if they silently stop
+            # shipping, in either direction.
+            $s.skipDangerousModePermissionPrompt | Should -BeTrue
+            $s.effortLevel | Should -Be 'xhigh'
+            $s.skillOverrides.'appsec-kpi-deck' | Should -Be 'off'
+            $s.env.CLAUDE_CODE_USE_POWERSHELL_TOOL | Should -Be '1'
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "serialises a one-hook matcher group as a JSON array" {
+        # A round trip through ConvertFrom-Json is not a reliable check: the file's raw text is
+        # the only faithful signal of what got written. Install-Harness.Tests.ps1 makes the same
+        # assertion the same way, for the same reason.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            $chBack = $ch -replace '/', '\'
+            @{ hooks = @{ PreToolUse = @(
+                        @{ matcher = 'Write|Edit'; hooks = @(
+                                @{ type = 'command'; command = "& '$chBack\hooks\Scan-MemorySecrets.ps1'"
+                                    shell = 'powershell' }) }) } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $ch 'settings.json')
+
+            & $script:export -ClaudeHome $ch -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipMcp | Out-Null
+
+            $raw = Get-Content (Join-Path $out 'settings.account.json') -Raw
+            $raw | Should -Not -Match '"hooks":\s*\{\s*"type"'
+            $raw | Should -Match '"hooks":\s*\['
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "leaves settings.json itself out of the payload" {
+        # Only the templated copy travels. Shipping the literal file would put this
+        # workstation's absolute paths on every receiver.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            '{"hooks":{}}' | Set-Content (Join-Path $ch 'settings.json')
+            & $script:export -ClaudeHome $ch -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipMcp | Out-Null
+            Test-Path -LiteralPath (Join-Path $out 'settings.json') | Should -BeFalse
+            Test-Path -LiteralPath (Join-Path $out 'settings.account.json') | Should -BeTrue
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
 }
