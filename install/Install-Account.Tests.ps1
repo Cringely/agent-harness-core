@@ -909,4 +909,184 @@ Describe "Install-Account" {
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
+
+    It "keeps receiver-only settings keys the payload does not carry" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            @{
+                enabledPlugins = @{ 'superpowers@claude-plugins-official' = $true }
+                effortLevel = 'xhigh'
+                teammateMode = 'auto'
+                permissions = @{ allow = @('Bash(ls:*)') }
+                hooks = @{ SessionStart = @( @{ hooks = @(
+                                @{ type = 'command'; command = 'echo receiver-only' }) }) }
+            } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $h 'settings.json')
+
+            @{
+                permissions = @{ allow = @('mcp__code-context'); defaultMode = 'auto' }
+                hooks = @{ PreToolUse = @( @{ matcher = 'Write|Edit'; hooks = @(
+                                @{ type = 'command'; command = "& '{{CLAUDE_HOME}}/hooks/Scan-MemorySecrets.ps1'"
+                                    shell = 'powershell' }) }) }
+            } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -NpmGlobal 'C:/npm' -TargetIsWindows:$true -SkipPreflight | Out-Null
+
+            $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
+            # An overwrite would revert every one of these on the receiver on every pull.
+            $s.enabledPlugins.'superpowers@claude-plugins-official' | Should -BeTrue
+            $s.effortLevel | Should -Be 'xhigh'
+            $s.teammateMode | Should -Be 'auto'
+            # permissions.allow is an ordered set union, receiver entries first.
+            @($s.permissions.allow) | Should -Be @('Bash(ls:*)', 'mcp__code-context')
+            $s.permissions.defaultMode | Should -Be 'auto'
+            # A receiver-only hook event survives untouched beside the payload's.
+            @(@($s.hooks.SessionStart)[0].hooks)[0].command | Should -Be 'echo receiver-only'
+            @(@($s.hooks.PreToolUse)[0].hooks)[0].command | Should -Match 'Scan-MemorySecrets\.ps1'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "is idempotent: a second install adds no duplicate hook entry" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            @{ hooks = @{ PreToolUse = @( @{ matcher = 'Write|Edit'; hooks = @(
+                                @{ type = 'command'; command = "& '{{CLAUDE_HOME}}/hooks/Scan-MemorySecrets.ps1'"
+                                    shell = 'powershell' }) }) } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+            $args = @{
+                PayloadRoot = $p; ClaudeHome = $h; ClaudeJson = (Join-Path $h 'claude.json')
+                CoreRepo = 'E:/projects/agent-harness-core'; NpmGlobal = 'C:/npm'
+                TargetIsWindows = $true
+            }
+            & $script:install @args -SkipPreflight | Out-Null
+            & $script:install @args -SkipPreflight | Out-Null
+
+            $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
+            $cmds = @()
+            foreach ($g in @($s.hooks.PreToolUse)) { foreach ($x in @($g.hooks)) { $cmds += $x.command } }
+            @($cmds | Where-Object { $_ -match 'Scan-MemorySecrets' }).Count | Should -Be 1
+            @($s.hooks.PreToolUse).Count | Should -Be 1
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "replaces statusLine whole and lets the payload win a shared scalar" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            @{ statusLine = @{ type = 'command'; command = 'old'; padding = 4; refreshInterval = 99 }
+                effortLevel = 'low' } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $h 'settings.json')
+            @{ hooks = @{}; statusLine = @{ type = 'command'; command = 'node {{NPM_GLOBAL}}/x.js'; padding = 0 }
+                effortLevel = 'xhigh' } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -NpmGlobal 'C:/npm' -TargetIsWindows:$true -SkipPreflight | Out-Null
+
+            $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
+            $s.statusLine.command | Should -Be 'node C:/npm/x.js'
+            $s.statusLine.padding | Should -Be 0
+            # Whole replacement, not a deep merge: a stale refreshInterval from the receiver's
+            # previous statusline would silently apply to the new one.
+            $s.statusLine.PSObject.Properties.Name | Should -Not -Contain 'refreshInterval'
+            $s.effortLevel | Should -Be 'xhigh'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # The brief's three tests above only ever feed the phantom-null shapes through the payload,
+    # which Convert-SettingsForTarget already sanitises before Merge-AccountSettings ever sees
+    # it. The receiver's own settings.json takes no such pass, and Merge-AccountSettings and
+    # Merge-HookEvent do their own @()-wrapping of its properties, so the same phantom-null
+    # hazard documented at Install-Account.ps1:366-371 recurs here, fed this time by hand-edited
+    # data instead of the exporter's own output. Four cases below, one It per site, matching
+    # this file's convention for the three sites already pinned on the payload side.
+    It "merges a payload hook event into an existing settings.json whose same event is explicitly null" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            '{"hooks":{"PreToolUse":null}}' | Set-Content (Join-Path $h 'settings.json')
+            @{ hooks = @{ PreToolUse = @( @{ matcher = 'Write'; hooks = @(
+                                @{ type = 'command'; command = 'echo from-payload' }) }) } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -SkipPreflight | Out-Null
+
+            $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
+            @(@($s.hooks.PreToolUse)[0].hooks)[0].command | Should -Be 'echo from-payload'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "does not splice a null hook entry when the matched existing group has no hooks key, or an explicit null one" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            @{ hooks = @{ PreToolUse = @(
+                        @{ matcher = 'Write' },
+                        @{ matcher = 'Edit'; hooks = $null }
+                    ) } } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $h 'settings.json')
+            @{ hooks = @{ PreToolUse = @(
+                        @{ matcher = 'Write'; hooks = @(@{ type = 'command'; command = 'echo write' }) },
+                        @{ matcher = 'Edit'; hooks = @(@{ type = 'command'; command = 'echo edit' }) }
+                    ) } } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -SkipPreflight | Out-Null
+
+            $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
+            $groups = @($s.hooks.PreToolUse)
+            $writeHooks = @(($groups | Where-Object { $_.matcher -eq 'Write' }).hooks)
+            $editHooks = @(($groups | Where-Object { $_.matcher -eq 'Edit' }).hooks)
+            $writeHooks.Count | Should -Be 1
+            $writeHooks[0].command | Should -Be 'echo write'
+            $editHooks.Count | Should -Be 1
+            $editHooks[0].command | Should -Be 'echo edit'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "does not insert a blank entry into permissions.allow when the existing permissions object is empty" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            '{"permissions":{}}' | Set-Content (Join-Path $h 'settings.json')
+            @{ permissions = @{ allow = @('Bash(ls:*)') } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -SkipPreflight | Out-Null
+
+            $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
+            @($s.permissions.allow) | Should -Be @('Bash(ls:*)')
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Review: an existing settings.json that fails to parse is not a shape Merge-AccountSettings
+    # can merge against, and Claude Code could not have read it either. Silently overwriting it
+    # would still lose whatever the operator was mid-edit on, so it is backed up instead
+    # (change-management.md's *.bak.<timestamp> convention) and the install proceeds as though
+    # the file were absent, rather than leaving the run half done the way an uncaught throw here
+    # would (Task 8's mixed-state catch does not wrap this later block).
+    It "backs up and proceeds when the existing settings.json fails to parse" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            'not valid { json' | Set-Content (Join-Path $h 'settings.json')
+            @{ effortLevel = 'xhigh' } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+
+            { & $script:install -PayloadRoot $p -ClaudeHome $h `
+                    -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                    -SkipPreflight -WarningAction SilentlyContinue | Out-Null } | Should -Not -Throw
+
+            $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
+            $s.effortLevel | Should -Be 'xhigh'
+            @(Get-ChildItem -LiteralPath $h -Filter 'settings.json.bak.*').Count | Should -Be 1
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
 }
