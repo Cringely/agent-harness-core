@@ -88,6 +88,25 @@ Describe "Account hooks" {
             New-Item -ItemType Directory -Path $s -Force | Out-Null
             return $s
         }
+
+        # Lifts the named variable-assignment statements out of a script, in source order, by
+        # their extent text. Used to run a hook's own root-derivation lines through a stub
+        # instead of a hand-copied stand-in: a stand-in tests what the copy says, not what the
+        # hook does, and the two can drift the moment either one is edited alone.
+        function Get-VariableAssignmentText {
+            param([string]$ScriptPath, [string[]]$Names)
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+                $ScriptPath, [ref]$null, [ref]$null)
+            $stmts = @($ast.FindAll({ param($n)
+                        $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                        $n.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                        $Names -contains $n.Left.VariablePath.UserPath }, $true) |
+                    Sort-Object { $_.Extent.StartOffset })
+            if ($stmts.Count -ne $Names.Count) {
+                throw "$ScriptPath does not assign all of: $($Names -join ', ')"
+            }
+            return (@($stmts | ForEach-Object { $_.Extent.Text }) -join "`n")
+        }
     }
 
     # Every assertion below iterates $script:hookRoots. An empty list would make all of them
@@ -95,6 +114,20 @@ Describe "Account hooks" {
     # names. Assert the list is populated before relying on it.
     It "resolves at least one hooks directory to run against" {
         $script:hookRoots.Count | Should -BeGreaterThan 0
+    }
+
+    It "derives a separator-clean root under a POSIX HOME" {
+        foreach ($root in $script:hookRoots) {
+            $hook = Join-Path $root 'Scan-MemorySecrets.ps1'
+            $code = Get-VariableAssignmentText -ScriptPath $hook -Names @('claudeHome', 'memRoot', 'councilRoot')
+            # Appends a literal expression, not a string-interpolated one: the backtick before
+            # each $ keeps it text here so it becomes a real variable reference only once
+            # Invoke-UnderPosixJoin evaluates the assembled code.
+            $result = Invoke-UnderPosixJoin -HomeValue '/home/alice' `
+                -Expression ($code + "`n@{ memRoot = `$memRoot; councilRoot = `$councilRoot }")
+            $result.memRoot | Should -Not -Match '/' -Because "$root must not leave a POSIX separator inside memRoot"
+            $result.councilRoot | Should -Not -Match '/' -Because "$root must not leave a POSIX separator inside councilRoot"
+        }
     }
 
     It "blocks a secret written under a memory root derived from HOME" {
