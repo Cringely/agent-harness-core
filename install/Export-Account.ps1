@@ -10,7 +10,8 @@
     The copy works from an allowlist in AccountShared.ps1 and never a denylist, and it mirrors
     rather than overlays: each allowlisted directory is removed and recopied, so a file deleted
     from ~/.claude leaves the repo instead of accreting there. Within those directories every
-    *.bak.* is dropped.
+    *.bak.* (change-management.md's timestamped convention) and every plain *.bak (an older,
+    untimestamped backup predating that convention) is dropped.
 
     A second export with nothing changed produces no diff, which makes `git status` after an
     export a usable review of what changed in the account layer.
@@ -183,7 +184,13 @@ function Copy-AccountTree {
     # -Force so hidden entries are enumerated; a dir\* wildcard silently skips them on Windows.
     foreach ($f in @(Get-ChildItem -LiteralPath $from -Recurse -File -Force)) {
         $rel = ($f.FullName.Substring($from.Length).TrimStart('\', '/')) -replace '\\', '/'
-        if ($f.Name -like '*.bak.*') { continue }
+        # *.bak.* is change-management.md's timestamped convention. *.bak on its own catches
+        # older, untimestamped backups (e.g. hooks/Scan-MemorySecrets.ps1.bak) that predate it
+        # and would otherwise ship a machine path in the payload.
+        # *.bak.* is change-management.md's timestamped convention. *.bak on its own catches
+        # older, untimestamped backups (e.g. hooks/Scan-MemorySecrets.ps1.bak) that predate it
+        # and would otherwise ship a machine path in the payload.
+        if ($f.Name -like '*.bak.*' -or $f.Name -like '*.bak') { continue }
         if ($SkipRelative -contains "$Relative/$rel") { continue }
         $dest = Join-Path $to $rel
         $null = New-Item -ItemType Directory -Path (Split-Path $dest -Parent) -Force
@@ -342,9 +349,24 @@ if ($PSCmdlet.ShouldProcess($OutputRoot, 'fold model-read machine paths')) {
         $wanted = @($script:AccountTemplatedFiles[$rel])
         $rowFolds = @($folds | Where-Object { $wanted -contains ($_.Token -replace '[{}]', '') })
         $text = Get-Content -LiteralPath $target -Raw
-        foreach ($f in $rowFolds) { $text = ConvertTo-TemplatedText -Text $text -Fold $f }
+        # Count matches, not attempts. The row names which tokens apply; it does not promise the
+        # file's text still contains the literal. An upstream edit that respells the path, or a
+        # -CoreRepo/-VaultPath value that no longer matches what the file says, would otherwise
+        # leave the machine path in place while this line kept reporting the row's full count.
+        $substituted = 0
+        foreach ($f in $rowFolds) {
+            $before = $text
+            $text = ConvertTo-TemplatedText -Text $text -Fold $f
+            if ($text -ne $before) { $substituted++ }
+        }
         Set-Content -LiteralPath $target -Value $text -NoNewline
-        Write-Host "  ${rel}: folded $(@($rowFolds).Count) token(s)"
+        if (@($rowFolds).Count -gt 0 -and $substituted -eq 0) {
+            # Loud for the same reason the missing-file throw above is loud: a row whose literal
+            # stopped matching ships the machine path with the console still saying the file was
+            # handled.
+            Write-Warning "${rel}: table row names $(@($rowFolds).Count) token(s) but none matched the file's text; it still carries whatever machine path it had."
+        }
+        Write-Host "  ${rel}: folded $substituted of $(@($rowFolds).Count) token(s)"
     }
 }
 

@@ -16,6 +16,10 @@ Describe "Export-Account" {
             }
             'rule body'                | Set-Content (Join-Path $claude 'rules/security.md')
             'stale backup'             | Set-Content (Join-Path $claude 'rules/security.md.bak.20260101-000000')
+            # F-10: predates change-management.md's *.bak.<timestamp> convention, no timestamp
+            # suffix. hooks/Scan-MemorySecrets.ps1.bak is the real file the review found shipping
+            # C:\Users\jcgam in the payload.
+            'stale backup, no timestamp' | Set-Content (Join-Path $claude 'hooks/Scan-MemorySecrets.ps1.bak')
             'agent def'                | Set-Content (Join-Path $claude 'agents/appsec-sme.md')
             'StylesPath = styles'      | Set-Content (Join-Path $claude 'tools/prose-lint/.vale.ini')
             'rule yaml'                | Set-Content (Join-Path $claude 'tools/prose-lint/styles/Cringely/X.yml')
@@ -118,6 +122,29 @@ exit 0
             Test-Path -LiteralPath (Join-Path $out '.credentials.json') | Should -BeFalse
             Test-Path -LiteralPath (Join-Path $out 'settings.local.json') |
                 Should -BeFalse -Because "settings.local.json is the per-machine escape hatch"
+        }
+        finally {
+            Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "drops a plain .bak file with no timestamp suffix, not only the *.bak.<timestamp> form" {
+        # F-10: *.bak.* only matches change-management.md's timestamped convention.
+        # hooks/Scan-MemorySecrets.ps1.bak predates that convention, carries no timestamp, and
+        # shipped C:\Users\jcgam in the real payload before this fix.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            & $script:export -ClaudeHome (Join-Path $stand '.claude') -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipSettings -SkipMcp | Out-Null
+
+            Test-Path -LiteralPath (Join-Path $out 'hooks/Scan-MemorySecrets.ps1.bak') |
+                Should -BeFalse -Because "an untimestamped .bak is still a backup and must not ship"
+            # No file anywhere in the payload matches either form, not just the one fixture path.
+            $baks = @(Get-ChildItem -LiteralPath $out -Recurse -File |
+                    Where-Object { $_.Name -like '*.bak.*' -or $_.Name -like '*.bak' })
+            @($baks).Count | Should -Be 0 -Because "the payload must carry neither .bak spelling"
         }
         finally {
             Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue
@@ -555,7 +582,15 @@ exit 0
             $ch = (Join-Path $stand '.claude')
             $core = 'E:\projects\agent-harness-core'
             $vault = 'C:\Users\jcgam\Documents\Obsidian Vault\Claude Code'
-            $slug = $stand.TrimEnd('\', '/') -creplace '[^A-Za-z0-9]', '-'
+            # NOT $stand's own -creplace slug: $stand nests under the real $HOME, so that slug
+            # carries the default Get-ProjectSlug $HOME slug as a PREFIX. HOME_SLUG is the one
+            # IsPath=$false fold (a plain String.Replace), so a passing -HomeSlug and a leftover
+            # `$homeSlug = Get-ProjectSlug $HOME` after the new `if` (the exact bug the brief's
+            # Step 2 warns about) both satisfy `Should -Match '\{\{HOME_SLUG\}\}'` on the
+            # prefixed string, and the regression goes undetected. A literal disjoint from the
+            # default makes the two distinguishable.
+            $slug = 'ZZ-HOMESLUG-FIXTURE-ZZ'
+            $defaultSlug = $HOME.TrimEnd('\', '/') -creplace '[^A-Za-z0-9]', '-'
             foreach ($d in 'skills/handoff', 'skills/council', 'skills/subagent-prompting') {
                 New-Item -ItemType Directory -Path (Join-Path $ch $d) -Force | Out-Null
             }
@@ -588,11 +623,17 @@ exit 0
                 Should -Match '\{\{CLAUDE_HOME\}\}/tools/prose-lint/\.vale\.ini'
             (Get-Content (Join-Path $out 'skills/handoff/SKILL.md') -Raw) |
                 Should -Match '\{\{OBSIDIAN_VAULT\}\}/Handoffs/'
-            (Get-Content (Join-Path $out 'skills/council/SKILL.md') -Raw) |
-                Should -Match '\{\{HOME_SLUG\}\}'
+            $council = Get-Content (Join-Path $out 'skills/council/SKILL.md') -Raw
+            $council | Should -Match '\{\{HOME_SLUG\}\}'
+            # F-1: without a $slug disjoint from the default, this line alone cannot tell a
+            # correctly-wired -HomeSlug apart from a leftover `Get-ProjectSlug $HOME` that
+            # silently overwrote it, because the default slug is a prefix of the wired one.
+            $council | Should -Not -Match ([regex]::Escape($defaultSlug)) `
+                -Because "a leftover 'Get-ProjectSlug `$HOME' after the caller's -HomeSlug would leave the default slug in the output"
             $sub = Get-Content (Join-Path $out 'skills/subagent-prompting/SKILL.md') -Raw
             $sub | Should -Match '\{\{HOME_SLUG\}\}'
             $sub | Should -Match '\{\{OBSIDIAN_VAULT\}\}/Handoffs/handoff-latest\.md'
+            $sub | Should -Not -Match ([regex]::Escape($defaultSlug))
 
             # The allowlist half. ssh.md is outside the table, so both literals stay.
             $ssh = Get-Content (Join-Path $out 'rules/ssh.md') -Raw
@@ -696,6 +737,28 @@ exit 0
                     -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
                     -VaultPath 'C:/vault' -SkipSettings -SkipMcp } |
                 Should -Throw -ExpectedMessage '*rules/harness-core.md*'
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "warns when a table row's tokens do not match the file's text" {
+        # The missing-file throw above catches a row whose FILE went missing. It says nothing
+        # about a row whose LITERAL stopped matching: an upstream edit that respells the path, or
+        # a -CoreRepo/-VaultPath value the file's text no longer contains. Without this, the
+        # payload ships the machine path while the console still reports the row as handled.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            'no machine paths of any kind live in this file' |
+                Set-Content (Join-Path $ch 'rules/harness-core.md')
+            & $script:export -ClaudeHome $ch -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipSettings -SkipMcp `
+                -WarningVariable warnings -WarningAction SilentlyContinue | Out-Null
+            $warned = @($warnings) -join "`n"
+            $warned | Should -Match 'rules/harness-core\.md'
+            $warned | Should -Match '(?i)none matched'
         }
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
     }
