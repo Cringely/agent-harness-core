@@ -1371,6 +1371,130 @@ Describe "Install-Account" {
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
 
+    # Review F3: Expand-McpServer had no falsifiable coverage. Deleting the function outright,
+    # or dropping any one of its three arms (command, args, env), all left the suite green,
+    # despite it being one of this task's four required interfaces and the reason expansion is
+    # a separate pass before the merge. One token in each of the three positions.
+    It "expands tokens in a server's command, one args element and one env value" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            $cj = Join-Path $h 'claude.json'
+            @{ mcpServers = @{} } | ConvertTo-Json -Depth 20 | Set-Content $cj
+            @{ mcpServers = @{
+                    probe = @{ type = 'stdio'
+                        command = '{{CLAUDE_HOME}}/hooks/probe.sh'
+                        args = @('--home', '{{CLAUDE_HOME}}/data')
+                        env = @{ HOME_DIR = '{{CLAUDE_HOME}}' } } } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
+
+            & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight | Out-Null
+
+            $j = Get-Content $cj -Raw | ConvertFrom-Json
+            $homeSlashed = $h -replace '\\', '/'
+            $j.mcpServers.probe.command   | Should -Be "$homeSlashed/hooks/probe.sh"
+            $j.mcpServers.probe.args[1]   | Should -Be "$homeSlashed/data"
+            $j.mcpServers.probe.env.HOME_DIR | Should -Be $homeSlashed
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Review F4: nothing pinned -Depth 30 on the ConvertTo-Json call in Merge-McpServer. The
+    # value shipped is correct (measured nesting on a real ~/.claude.json is 8), but at -Depth 2
+    # every project's allowedTools, mcpServers and similar subtrees collapse from objects and
+    # arrays into type-name strings, silently, at exit 0. A real "projects" entry nests about 7
+    # deep; this fixture mirrors that.
+    It "preserves deeply nested claude.json content through the merge" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            $cj = Join-Path $h 'claude.json'
+            @{
+                mcpServers = @{}
+                projects = @{ '/home/u/demo' = @{ a = @{ b = @{ c = @{ d = @{ e = 'leaf' } } } } } }
+            } | ConvertTo-Json -Depth 20 | Set-Content $cj
+            @{ mcpServers = @{
+                    garmin = @{ type = 'stdio'; command = 'uvx'; args = @('garmin-mcp'); env = @{} } } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
+
+            & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight | Out-Null
+
+            $j = Get-Content $cj -Raw | ConvertFrom-Json
+            $j.projects.'/home/u/demo'.a.b.c.d.e | Should -Be 'leaf'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Review F5: claude.json was rewritten on every install, including ones adding nothing.
+    # Claude Code rewrites this file continuously while it runs, so an unconditional
+    # read-modify-write is a lost-update race against the operator's live session on every
+    # install rather than only on ones that change something. Asserted on LastWriteTimeUtc, not
+    # content: the two possible writes here (payload-wins-nothing and a byte-identical
+    # re-serialisation of the receiver's own data) both leave the content unchanged, so only the
+    # timestamp can tell a real write from a skipped one.
+    It "does not rewrite claude.json when the payload adds nothing new" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            $cj = Join-Path $h 'claude.json'
+            @{ mcpServers = @{ garmin = @{ type = 'stdio'; command = 'uvx'; args = @('garmin-mcp'); env = @{} } } } |
+                ConvertTo-Json -Depth 20 | Set-Content $cj
+            @{ mcpServers = @{ garmin = @{ type = 'stdio'; command = 'uvx'; args = @('garmin-mcp'); env = @{} } } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
+            $before = (Get-Item $cj).LastWriteTimeUtc
+
+            & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight | Out-Null
+
+            (Get-Item $cj).LastWriteTimeUtc | Should -Be $before
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Review F7: a non-object mcpServers in an existing claude.json ("mcpServers":"oops" or
+    # ":[1,2]") made Add-Member on the retrieved value a no-op that never touches $doc itself,
+    # so the install printed "mcpServers: 1 added" and the payload server was silently dropped
+    # behind that success message. Same class Task 10 already handles for settings.json one
+    # file over.
+    It "warns and replaces a non-object mcpServers instead of silently dropping the merge" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            $cj = Join-Path $h 'claude.json'
+            '{"mcpServers":"oops"}' | Set-Content $cj
+            @{ mcpServers = @{ garmin = @{ type = 'stdio'; command = 'uvx'; args = @('garmin-mcp'); env = @{} } } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
+
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight *>&1 | Out-String
+
+            $out | Should -Match 'mcpServers.*not a JSON object'
+            $j = Get-Content $cj -Raw | ConvertFrom-Json
+            $j.mcpServers.garmin.command | Should -Be 'uvx'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Review F8: -WhatIf printed "mcpServers: 1 added" while claude.json stayed byte-identical.
+    # Defensible as a prediction (the count is computed before the gated Set-Content, same as
+    # the settings.json merge above), but Task 10 already named its own equivalent test "under
+    # -WhatIf, does not claim a backup it never made", so the house style here is the opposite:
+    # say so rather than let the count read as a claim.
+    It "marks the mcpServers add count as a dry run under -WhatIf" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            $cj = Join-Path $h 'claude.json'
+            @{ mcpServers = @{} } | ConvertTo-Json -Depth 20 | Set-Content $cj
+            @{ mcpServers = @{ garmin = @{ type = 'stdio'; command = 'uvx'; args = @('garmin-mcp'); env = @{} } } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
+
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight -WhatIf *>&1 | Out-String
+
+            $out | Should -Match 'mcpServers: 1 added \(garmin\) \(dry run\)'
+            (Get-Content $cj -Raw | ConvertFrom-Json).mcpServers.PSObject.Properties.Name.Count | Should -Be 0
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
     It "leaves a hand-fixed entry alone across a second install" {
         # The loop this prevents: the receiver hand-fixes 1password in claude.json because the
         # shipped Store path with its embedded version does not exist there, the next pull
@@ -1411,7 +1535,12 @@ Describe "Install-Account" {
                         args = @(); env = @{} }
                     'code-context' = @{ type = 'stdio'; command = 'wsl'
                         args = @('-e', '/home/prior/code-context-mcp.sh'); env = @{} }
-                    garmin = @{ type = 'stdio'; command = 'uvx'; args = @('garmin-mcp'); env = @{} } } } |
+                    # The real argument list, not a simplified "garmin-mcp": the URL is what
+                    # makes Get-UnresolvedPath's drive-letter branch misfire (review F1), and a
+                    # fixture that drops it cannot measure the defect it exists to catch.
+                    garmin = @{ type = 'stdio'; command = 'uvx'; args = @(
+                            '--python', '3.12', '--with', 'mcp<2.0', '--from',
+                            'git+https://github.com/Taxuspt/garmin_mcp', 'garmin-mcp'); env = @{} } } } |
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
             @{ hooks = @{ PreToolUse = @( @{ matcher = 'Write|Edit'; hooks = @(
                                 @{ type = 'command'; command = "& '{{CLAUDE_HOME}}/hooks/Scan-MemorySecrets.ps1'"
@@ -1430,6 +1559,20 @@ Describe "Install-Account" {
             $report = $parts[1]
 
             $report | Should -Match '1password'
+            # Review F2: the line above alone does not discriminate either, same mechanism as
+            # the code-context fix below -- the trailer sentence names "mcpServers.1password"
+            # verbatim once any residual exists at all, so it stayed green in a manual check
+            # where Get-UnresolvedPath was rigged to never flag 1password's own dead path while
+            # leaving code-context detection intact.
+            #
+            # Matching just the full path is not enough either: the "Command:" line prints the
+            # unmodified, untruncated command text regardless of whether the dead-path fix
+            # (review F6) is in place, so a bare substring match on the path passes against the
+            # Command line even with F6 reverted. Anchored on "does not exist here: <full path>"
+            # instead, which is only true once the report's own Dead field carries the real,
+            # untruncated Store path rather than the "C:\Program" fragment F6 fixed.
+            $report | Should -Match ([regex]::Escape(
+                    'does not exist here: C:\Program Files\WindowsApps\Agilebits.1Password_8.12.26.40_x64__amwd9z03whsfe\onepassword-mcp.exe'))
             # code-context is the case Test-ResidualWindowsPath alone cannot see: `wsl -e
             # /home/prior/code-context-mcp.sh` carries no drive letter and no USERPROFILE, so a
             # drive-letter rule would report one of the two entries this exists to name.
@@ -1462,6 +1605,36 @@ Describe "Install-Account" {
                 -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight | Out-Null
             Test-Path -LiteralPath (Join-Path $h 'rules/security.md') | Should -BeTrue
             (Get-Content $cj -Raw | ConvertFrom-Json).mcpServers.wsl.command | Should -Be 'wsl'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Review F9: Test-Path against a UNC-shaped candidate that does not resolve stalls for
+    # several seconds on name resolution (measured 11.5s in review) before returning $false,
+    # which reads as a hung install rather than a completed one. Skipped before Test-Path
+    # instead. Bounded generously above the ~19s the whole 76-test suite normally takes, so a
+    # regression back to the per-candidate stall (which this fixture alone would add ~11s to)
+    # fails the assertion rather than merely slowing the run down unnoticed.
+    It "does not stall on a UNC-shaped candidate, and does not report it as a residual" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            $cj = Join-Path $h 'claude.json'
+            @{ mcpServers = @{} } | ConvertTo-Json -Depth 20 | Set-Content $cj
+            @{ mcpServers = @{ shares = @{ type = 'stdio'
+                        command = '//no-such-host-xyz/share/tool'; args = @(); env = @{} } } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
+
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight *>&1 | Out-String
+            $sw.Stop()
+
+            $sw.Elapsed.TotalSeconds | Should -BeLessThan 5 -Because "a UNC-shaped candidate must be skipped, not probed"
+            # Not "$out | Should -Not -Match 'shares'": the "mcpServers: 1 added (shares)" line
+            # above the report legitimately names the server it added, same reasoning as the
+            # $parts split used elsewhere in this file. With nothing else in this fixture to
+            # flag, the correct outcome is no residual report at all.
+            $out | Should -Not -Match 'Still carrying a source-machine path'
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }

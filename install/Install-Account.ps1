@@ -729,6 +729,21 @@ function Merge-McpServer {
         Get-Content -LiteralPath $ClaudeJsonPath -Raw | ConvertFrom-Json
     }
     else { [pscustomobject]@{} }
+    if ($doc.PSObject.Properties['mcpServers'] -and
+        $doc.mcpServers -isnot [System.Management.Automation.PSCustomObject]) {
+        # Review F7: a receiver's claude.json can carry "mcpServers":"oops" or ":[1,2]" (external
+        # corruption, or Claude Code writing partway through a crash). Add-Member on a retrieved
+        # string or array is a silent no-op that never touches $doc.mcpServers itself, so the
+        # loop below found nothing to skip, "added" every payload server by its own count, and
+        # the install printed a success message for a merge that changed nothing on disk. Task
+        # 10 handles the parallel shape mismatch for settings.json one file over; same handling
+        # here, warn and start from empty rather than silently drop the payload.
+        $kind = if ($doc.mcpServers -is [string]) { 'a string value' }
+        elseif ($doc.mcpServers -is [array]) { 'an array' }
+        else { "a $($doc.mcpServers.GetType().Name) value" }
+        Write-Warning "Existing mcpServers in claude.json is $kind, not a JSON object. Replacing it with an empty object before merging; whatever it held is lost."
+        $doc.mcpServers = [pscustomobject]@{}
+    }
     if (-not $doc.PSObject.Properties['mcpServers']) {
         $doc | Add-Member -NotePropertyName mcpServers -NotePropertyValue ([pscustomobject]@{}) -Force
     }
@@ -739,7 +754,16 @@ function Merge-McpServer {
         $added += $name
     }
 
-    $doc | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $ClaudeJsonPath -Encoding utf8
+    # Review F5: gated on there being something to add. Claude Code rewrites this file
+    # continuously while it runs, so an unconditional read-modify-write here is a lost-update
+    # race against the operator's live session on every install, not only on ones that change
+    # something. A run that adds nothing (every mcpServers entry the payload names already
+    # exists) has nothing worth that window, and leaves claude.json uncreated on a fresh
+    # -ClaudeJson if the payload's own mcpServers is empty, which is the same "nothing to do"
+    # case rather than a new one.
+    if ($added.Count -gt 0) {
+        $doc | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $ClaudeJsonPath -Encoding utf8
+    }
     return @($added)
 }
 
@@ -752,7 +776,12 @@ if (Test-Path -LiteralPath $mcpSrc) {
         $payloadServers = Expand-McpServer -Tokens $tokens `
             -Servers ((Get-Content -LiteralPath $mcpSrc -Raw | ConvertFrom-Json).mcpServers)
         $added = @(Merge-McpServer -PayloadServers $payloadServers -ClaudeJsonPath $ClaudeJson)
-        Write-Host "  mcpServers: $($added.Count) added$(if ($added.Count) { " ($($added -join ', '))" })"
+        # Review F8: the count is computed before Merge-McpServer's own gated Set-Content, so it
+        # is a prediction under -WhatIf, not a report of what landed on disk. House style, per
+        # Task 10's own equivalent ("under -WhatIf, does not claim a backup it never made"), is
+        # to say so rather than let it read as a claim.
+        $dryRun = if ($WhatIfPreference) { ' (dry run)' } else { '' }
+        Write-Host "  mcpServers: $($added.Count) added$(if ($added.Count) { " ($($added -join ', '))" })$dryRun"
     }
     catch {
         Write-Warning $mixedStateWarning
@@ -779,8 +808,24 @@ function Get-UnresolvedPath {
     if (-not $Text) { return $out }
     # A drive-letter path or a POSIX-rooted one, stopping at a quote or whitespace. Flags like
     # -NoProfile and bare command names carry no leading separator and are never matched.
-    foreach ($m in [regex]::Matches($Text, '(?:[A-Za-z]:[\\/]|/)[^"''\s]*')) {
+    #
+    # Both branches are anchored (review F1). Unanchored, the drive-letter branch matches the
+    # tail of a URL scheme: in "git+https://github.com/...", the "s" in "https" satisfies
+    # [A-Za-z], and the "://" that follows reads as the drive separator, so the match runs on as
+    # "s://github.com/...". Test-Path on that returns $false (no throw; drive s: simply does not
+    # resolve), so a real server carrying a git+https install command -- garmin, on this machine
+    # -- was reported as a source-machine path, though it is not one. The negative lookbehind
+    # rejects a drive letter preceded by a word character, "+", "." or "-", which a URL scheme
+    # always is. The POSIX branch gets the matching guard for "//host/..." inside a URL for the
+    # same reason, rejecting a "/" preceded by ":", "/" or a word character.
+    foreach ($m in [regex]::Matches($Text, '(?:(?<![\w+.\-])[A-Za-z]:[\\/]|(?<![:/\w])/)[^"''\s]*')) {
         $p = $m.Value.TrimEnd(',', ';', ')')
+        # A UNC-shaped candidate ("//host/share/...") is skipped before Test-Path rather than
+        # tested: Test-Path against a host that does not resolve stalls for several seconds on
+        # name resolution before returning $false (review F9, measured at 11.5s), which reads as
+        # a hung install rather than a completed one. Trades away detecting a genuine UNC
+        # residual, which no entry on this machine carries.
+        if ($p -match '^//[^/]') { continue }
         if ($p -and -not (Test-Path -LiteralPath $p)) { $out += $p }
     }
     return @($out)
@@ -791,8 +836,25 @@ function Get-ResidualCommand {
     $found = @()
 
     function Add-IfDead {
-        param([string]$Where, [string]$Command, [System.Collections.IList]$Into)
+        param([string]$Where, [string]$Command, [string]$Whole, [System.Collections.IList]$Into)
         $dead = @(Get-UnresolvedPath -Text $Command)
+        # $Whole (review F6): mcpServers builds $Command by joining $srv.command and its args
+        # with plain spaces, unquoted, so Get-UnresolvedPath's regex stops at the first internal
+        # space. A genuine, space-containing rooted path -- 1password's Store path, on this
+        # machine -- truncates to the text before the space (e.g. "C:\Program" out of
+        # "C:\Program Files\...\onepassword-mcp.exe") before Test-Path ever sees it, and the
+        # verdict then hangs on whether that unrelated fragment happens to exist rather than on
+        # the real path. Only mcpServers passes $Whole: hooks and statusLine commands are single
+        # shell strings the regex already scans correctly (a hook path is single-quoted, which
+        # bounds it without help).
+        if ($Whole -and $Whole -match '^(?:[A-Za-z]:[\\/]|/)' -and $Whole -notmatch '^//[^/]') {
+            # Drop whatever truncated fragment of $Whole the regex above already found -- it is
+            # the same defect, not a second one -- before testing the real, untruncated path.
+            # Same UNC skip as Get-UnresolvedPath above: $Whole reaches Test-Path directly here,
+            # so it needs its own guard rather than inheriting the one inside that function's loop.
+            $dead = @($dead | Where-Object { -not $Whole.StartsWith($_) })
+            if (-not (Test-Path -LiteralPath $Whole) -and $dead -notcontains $Whole) { $dead += $Whole }
+        }
         if ($dead.Count -eq 0) { return }
         $shape = if (Test-ResidualWindowsPath $Command) { 'Windows-shaped' } else { 'POSIX-shaped' }
         $Into.Add([pscustomobject]@{
@@ -821,7 +883,7 @@ function Get-ResidualCommand {
         $srv = $Servers.$name
         # One line per server, not one per string: two dead args on one entry are one problem.
         $joined = (@($srv.command) + @($srv.args)) -join ' '
-        Add-IfDead -Where "mcpServers.$name" -Command $joined -Into $list
+        Add-IfDead -Where "mcpServers.$name" -Command $joined -Whole $srv.command -Into $list
     }
     $found = @($list.ToArray())
     return $found
