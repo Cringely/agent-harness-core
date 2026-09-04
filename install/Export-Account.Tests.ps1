@@ -47,10 +47,16 @@ Describe "Export-Account" {
             # STAND-IN hook, not the live one, and throws when the AST has no such assignment,
             # which would take Task 7's three tests and both round-trip tests with it. Two rows
             # is enough, and the sk_ rule is the one the planted-token test depends on.
+            #
+            # review round 1, F3: FIXTURE-ONLY-MARKER exists nowhere else in the repo. A
+            # hardcoded copy of the live seven rules inside Export-Account.ps1 would still pass
+            # every test that only plants sk_/AKIA tokens, since both are also live rules; this
+            # third row is what makes the AST lift measured rather than asserted in a comment.
             @'
 $patterns = @(
     @{ Name = 'API token (tk_/sk_/ak_)'; Regex = '(?<![a-zA-Z0-9_])(tk_|sk_|ak_)[a-zA-Z0-9]{10,}' }
     @{ Name = 'AWS-style key';           Regex = 'AKIA[0-9A-Z]{16}' }
+    @{ Name = 'FIXTURE-ONLY-MARKER';     Regex = 'QQZZ-fixture-marker' }
 )
 exit 0
 '@ | Set-Content (Join-Path $claude 'hooks/Scan-MemorySecrets.ps1')
@@ -820,12 +826,19 @@ exit 0
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
     }
 
-    It "lifts only the mcpServers key out of claude.json" {
-        $stand = New-StandInHome
-        $out = New-OutputRoot
-        try {
-            $ch = (Join-Path $stand '.claude')
-            $cj = Join-Path $stand '.claude.json'
+    # review round 1, F6: the original single It here packed six assertions into one Should
+    # chain. Pester stops an It at its first failing Should, so a break in one of the three
+    # functional assertions (garmin's command, 1password's command, the top-level key set) would
+    # leave the three secrecy assertions (userID/anonymousId/lastCost must not travel) unrun --
+    # exactly the assertions that matter for this test's name. Shared BeforeAll/AfterAll, one It
+    # per independently-falsifiable claim, matching the file's own C1 convention at :205-250 and
+    # the "folds all three quoting forms" Context above.
+    Context "lifts only the mcpServers key out of claude.json" {
+        BeforeAll {
+            $script:mStand = New-StandInHome
+            $script:mOut = New-OutputRoot
+            $mCh = (Join-Path $script:mStand '.claude')
+            $mCj = Join-Path $script:mStand '.claude.json'
             @{
                 userID = 'abc123'
                 anonymousId = 'def456'
@@ -838,24 +851,40 @@ exit 0
                         command = 'C:\Program Files\WindowsApps\Agilebits.1Password_8.12.26.40_x64__amwd9z03whsfe\onepassword-mcp.exe'
                         args = @(); env = @{} }
                 }
-            } | ConvertTo-Json -Depth 20 | Set-Content $cj
+            } | ConvertTo-Json -Depth 20 | Set-Content $mCj
 
-            & $script:export -ClaudeHome $ch -ClaudeJson $cj -OutputRoot $out `
+            & $script:export -ClaudeHome $mCh -ClaudeJson $mCj -OutputRoot $script:mOut `
                 -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
                 -VaultPath 'C:/vault' -SkipSettings | Out-Null
 
-            $raw = Get-Content (Join-Path $out 'mcp-servers.json') -Raw
-            $m = $raw | ConvertFrom-Json
-            $m.mcpServers.garmin.command | Should -Be 'uvx'
-            $m.mcpServers.'1password'.command | Should -Match 'onepassword-mcp\.exe$'
-            @($m.PSObject.Properties.Name) | Should -Be @('mcpServers')
-            # None of the rest of that file may travel: it is 46 project entries and two
-            # identifiers, and one of them names the operator.
-            $raw | Should -Not -Match 'userID'
-            $raw | Should -Not -Match 'anonymousId'
-            $raw | Should -Not -Match 'lastCost'
+            $script:mRaw = Get-Content (Join-Path $script:mOut 'mcp-servers.json') -Raw
+            $script:mParsed = $script:mRaw | ConvertFrom-Json
         }
-        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+        AfterAll {
+            Remove-Item -Recurse -Force $script:mStand, $script:mOut -ErrorAction SilentlyContinue
+        }
+
+        It "keeps garmin's command" {
+            $script:mParsed.mcpServers.garmin.command | Should -Be 'uvx'
+        }
+        It "keeps 1password's command" {
+            $script:mParsed.mcpServers.'1password'.command | Should -Match 'onepassword-mcp\.exe$'
+        }
+        It "carries only the mcpServers top-level key" {
+            @($script:mParsed.PSObject.Properties.Name) | Should -Be @('mcpServers')
+        }
+        # None of the rest of claude.json may travel: it is 46 project entries and two
+        # identifiers, and one of them names the operator. Each in its own It so a break in one
+        # cannot mask the other two, which is the whole point of this Context.
+        It "drops userID" {
+            $script:mRaw | Should -Not -Match 'userID'
+        }
+        It "drops anonymousId" {
+            $script:mRaw | Should -Not -Match 'anonymousId'
+        }
+        It "drops lastCost" {
+            $script:mRaw | Should -Not -Match 'lastCost'
+        }
     }
 
     It "fails closed when any mcpServers string trips the secret scanner's own patterns" {
@@ -870,12 +899,87 @@ exit 0
                         args = @('--token', 'sk_livetoken0123456789abcdef'); env = @{} } } } |
                 ConvertTo-Json -Depth 20 | Set-Content $cj
 
+            # review round 1, F7: '*leaky*' alone pins the fixture's server name and matches any
+            # throw that happens to interpolate it, including one from an unrelated cause. Pin
+            # both the entry name and the pattern name that actually fired, so this test can only
+            # pass on the gate this file is named for.
             { & $script:export -ClaudeHome $ch -ClaudeJson $cj -OutputRoot $out `
                     -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
                     -VaultPath 'C:/vault' -SkipSettings } |
-                Should -Throw -ExpectedMessage '*leaky*'
+                Should -Throw -ExpectedMessage '*leaky*API token*'
             Test-Path -LiteralPath (Join-Path $out 'mcp-servers.json') |
                 Should -BeFalse -Because "a failed gate must leave nothing behind to commit"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "names the pattern that fired when the AST lift, not a hardcoded copy, is what caught it" {
+        # review round 1, F3: FIXTURE-ONLY-MARKER exists only in New-StandInHome's stand-in hook.
+        # A hardcoded seven-row copy of the live table inside Export-Account.ps1 passes every
+        # other mcpServers test unchanged, because sk_ and AKIA are both live rules too -- this
+        # is the one assertion a hardcoded copy cannot satisfy, since it has no row named
+        # FIXTURE-ONLY-MARKER at all.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            $cj = Join-Path $stand '.claude.json'
+            @{ mcpServers = @{ marked = @{ type = 'stdio'; command = 'x'
+                        args = @('--flag', 'QQZZ-fixture-marker'); env = @{} } } } |
+                ConvertTo-Json -Depth 20 | Set-Content $cj
+
+            { & $script:export -ClaudeHome $ch -ClaudeJson $cj -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings } |
+                Should -Throw -ExpectedMessage '*marked*FIXTURE-ONLY-MARKER*'
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "gates a secret carried in a property the fold pass has no rule for" {
+        # review round 1, F1: the gate used to scan a fixed property list (name, command, args,
+        # env). The writer serialises the WHOLE server object, so an http/sse server's headers or
+        # url -- exactly where MCP auth material lives -- reached the file unscanned. Plants an
+        # sk_-shaped token, not the FIXTURE-ONLY-MARKER, so this test isolates the property-walk
+        # fix on its own: it stays green regardless of which pattern-table mechanism is behind
+        # Get-SecretPattern, and only the marker test above is entangled with the AST lift. Both
+        # a nested object property (headers.Authorization) and a plain string property (url) are
+        # planted, neither of which the fold pass touches, since neither shape is command, args,
+        # or env.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            $cj = Join-Path $stand '.claude.json'
+            @{ mcpServers = @{ remote = @{ type = 'http'
+                        url = 'https://example.invalid/mcp?tok=sk_livetoken0123456789abcdef'
+                        headers = @{ Authorization = 'Bearer sk_livetoken0123456789abcdef' } } } } |
+                ConvertTo-Json -Depth 20 | Set-Content $cj
+
+            { & $script:export -ClaudeHome $ch -ClaudeJson $cj -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings } |
+                Should -Throw -ExpectedMessage '*remote*API token*'
+            Test-Path -LiteralPath (Join-Path $out 'mcp-servers.json') |
+                Should -BeFalse -Because "a failed gate must leave nothing behind to commit"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "refuses to run when dot-sourced, before touching -ClaudeHome or -OutputRoot" {
+        # ANSWER-4(b): the script performs its work at load time, so a bare dot-source runs the
+        # whole export against every default, including a repo-internal -OutputRoot and a live
+        # -ClaudeHome/-ClaudeJson. Uses stand-in paths here regardless, so a regression in the
+        # guard writes into a throwaway TEMP directory rather than anything live.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            { . $script:export -ClaudeHome (Join-Path $stand '.claude') -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp } |
+                Should -Throw -ExpectedMessage '*dot-sourcing*'
+            Test-Path -LiteralPath $out |
+                Should -BeFalse -Because "the guard fires before -OutputRoot is created"
         }
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
     }
