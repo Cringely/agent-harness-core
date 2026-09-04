@@ -285,9 +285,17 @@ if (-not $SkipSettings) {
         $settings = Get-Content -LiteralPath $settingsSrc -Raw | ConvertFrom-Json
 
         foreach ($event in $settings.hooks.PSObject.Properties.Name) {
-            # Wrap the pipeline OUTPUT, not just the input: a single-match result unwraps to a
-            # bare scalar and would serialise "hooks": {...} instead of "hooks": [...], which
-            # Claude Code cannot load (install/Install-Harness.ps1:822-826).
+            # Defensive, not load-bearing today: this loop is straight-line property access, and
+            # measured on both pwsh 7.6.5 and Windows PowerShell 5.1, ConvertFrom-Json already
+            # preserves a single-element JSON array as Object[] through both $settings.hooks.$event
+            # and $group.hooks, with or without this wrap, for every fixture in this file. The
+            # hazard these @() guard against is a single-match FILTERING pipeline result (a
+            # Where-Object or ForEach-Object -First 1) unwrapping to a bare scalar, which would
+            # then serialise "hooks": {...} instead of "hooks": [...]
+            # (install/Install-Harness.ps1:822-826). Nothing in this loop is a pipeline today, so
+            # removing either @() here currently changes nothing observable. Kept anyway, so a
+            # future edit that does introduce a filtering step here does not reintroduce that
+            # exact defect silently.
             $groups = @($settings.hooks.$event)
             foreach ($group in $groups) {
                 $hooks = @($group.hooks)
