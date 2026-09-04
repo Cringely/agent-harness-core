@@ -44,7 +44,12 @@
 .EXAMPLE
     pwsh -NoProfile -File install/Install-Account.ps1
 #>
-[CmdletBinding(PositionalBinding = $false)]
+# SupportsShouldProcess makes -WhatIf and -Confirm valid on the script and sets
+# $WhatIfPreference for the whole run. No explicit $PSCmdlet.ShouldProcess call is needed to
+# act on it: every write below (New-Item, Copy-Item) is a built-in cmdlet that already
+# implements ShouldProcess itself and reads $WhatIfPreference from the calling scope, the same
+# way Export-Account.ps1:68-74 already established for its own copy loop.
+[CmdletBinding(PositionalBinding = $false, SupportsShouldProcess)]
 param(
     [string]$ClaudeHome,
     [string]$ClaudeJson,
@@ -59,9 +64,34 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'AccountShared.ps1')
 
 $repoRoot = Split-Path $PSScriptRoot -Parent
+
+# An explicitly passed empty string or $null is a caller error, not "no preference": falling
+# through to the default here would silently target the operator's live ~/.claude (-ClaudeHome)
+# or this clone's own payload (-PayloadRoot) for a caller that meant to supply a real path and
+# got an empty one from an unset environment variable or a failed lookup. ContainsKey
+# distinguishes "passed empty" from "omitted", the same test -NpmGlobal already uses below for
+# the opposite reason: there, an explicit empty is a real request rather than an error.
+foreach ($n in 'ClaudeHome', 'PayloadRoot') {
+    if ($PSBoundParameters.ContainsKey($n) -and -not $PSBoundParameters[$n]) {
+        throw "-$n was passed empty. Omit it to take the default, or pass a real path."
+    }
+}
+
 if (-not $ClaudeHome)  { $ClaudeHome = Join-Path $HOME '.claude' }
 if (-not $ClaudeJson)  { $ClaudeJson = Join-Path $HOME '.claude.json' }
 if (-not $PayloadRoot) { $PayloadRoot = Join-Path (Join-Path $repoRoot 'account') 'claude' }
+
+# GetUnresolvedProviderPathFromPSPath, not [System.IO.Path]::GetFullPath: see
+# Export-Account.ps1:130-138 for the full reasoning (GetFullPath resolves a relative path
+# against the .NET process working directory, which Set-Location does not move, while
+# Copy-Item and New-Item resolve against $PWD instead). Canonicalising both paths here, before
+# anything reads or writes through either, is what makes Copy-PayloadTree's
+# `$f.FullName.Substring($from.Length)` arithmetic below safe: a relative -PayloadRoot used to
+# produce a $from that did not match the prefix of Get-ChildItem's absolute FullName values,
+# scattering every tree-copied file into a garbled destination while the install still reported
+# success and exited 0.
+$ClaudeHome  = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ClaudeHome).TrimEnd('\', '/')
+$PayloadRoot = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PayloadRoot).TrimEnd('\', '/')
 
 # Same reasoning and same placement as Export-Account.ps1's guard: right after the defaults
 # that determine what gets read from and written into land, before CoreRepo/NpmGlobal resolve
@@ -137,40 +167,52 @@ function Copy-PayloadTree {
     return $copied
 }
 
-$null = New-Item -ItemType Directory -Path $ClaudeHome -Force
+# There is no manifest and no staging-and-swap: a failure partway through this block leaves
+# $ClaudeHome holding whatever had already copied plus whatever was there before. That is not
+# made atomic here (would break the shape Tasks 9 through 12 build on); what the catch below
+# adds is telling the operator the run did not finish and that a re-run repairs it, since every
+# copy in this block is an unconditional overwrite and safe to repeat.
+try {
+    $null = New-Item -ItemType Directory -Path $ClaudeHome -Force
 
-foreach ($d in $script:AccountTreeDirs) {
-    $n = Copy-PayloadTree -PayloadRoot $PayloadRoot -ClaudeHome $ClaudeHome -Relative $d
-    Write-Host "  ${d}: $n files"
-}
-foreach ($f in $script:AccountRootFiles) {
-    $src = Join-Path $PayloadRoot $f
-    if (Test-Path -LiteralPath $src) {
-        Copy-Item -LiteralPath $src -Destination (Join-Path $ClaudeHome $f) -Force
+    foreach ($d in $script:AccountTreeDirs) {
+        $n = Copy-PayloadTree -PayloadRoot $PayloadRoot -ClaudeHome $ClaudeHome -Relative $d
+        Write-Host "  ${d}: $n files"
+    }
+    foreach ($f in $script:AccountRootFiles) {
+        $src = Join-Path $PayloadRoot $f
+        if (Test-Path -LiteralPath $src) {
+            Copy-Item -LiteralPath $src -Destination (Join-Path $ClaudeHome $f) -Force
+        }
+    }
+
+    # Core is authoritative for this one file, so it comes out of core/ in the same clone
+    # rather than out of the payload. Two copies in one repo would drift the moment either was
+    # edited.
+    $gateSrc = Join-Path $CoreRepo 'core/claude/hooks/model-tier-gate.ts'
+    if (Test-Path -LiteralPath $gateSrc) {
+        $null = New-Item -ItemType Directory -Path (Join-Path $ClaudeHome 'hooks') -Force
+        Copy-Item -LiteralPath $gateSrc -Destination (Join-Path $ClaudeHome 'hooks/model-tier-gate.ts') -Force
+        Write-Host '  hooks/model-tier-gate.ts: from core'
+    }
+    else {
+        Write-Warning "Absent: $gateSrc. The model-tier gate will not be installed, and a model-less Agent dispatch will not be blocked."
+    }
+
+    # Same CommandNotFoundException hazard as npm above, and this one fires on the Windows box
+    # whenever a test drives the Linux branch: `& chmod` with no chmod on PATH is terminating,
+    # so the round-trip test in Task 12 would die here rather than assert on the installed tree.
+    $chmod = Get-Command chmod -ErrorAction SilentlyContinue
+    if (-not $TargetIsWindows -and $chmod) {
+        foreach ($s in @(Get-ChildItem (Join-Path $ClaudeHome 'hooks') -Recurse -File -Filter *.sh -ErrorAction SilentlyContinue)) {
+            & $chmod.Source +x $s.FullName
+        }
+    }
+    elseif (-not $TargetIsWindows) {
+        Write-Warning 'chmod not on PATH: .sh hooks are not marked executable. Run `chmod +x ~/.claude/hooks/*.sh` on the target.'
     }
 }
-
-# Core is authoritative for this one file, so it comes out of core/ in the same clone rather
-# than out of the payload. Two copies in one repo would drift the moment either was edited.
-$gateSrc = Join-Path $CoreRepo 'core/claude/hooks/model-tier-gate.ts'
-if (Test-Path -LiteralPath $gateSrc) {
-    $null = New-Item -ItemType Directory -Path (Join-Path $ClaudeHome 'hooks') -Force
-    Copy-Item -LiteralPath $gateSrc -Destination (Join-Path $ClaudeHome 'hooks/model-tier-gate.ts') -Force
-    Write-Host '  hooks/model-tier-gate.ts: from core'
-}
-else {
-    Write-Warning "Absent: $gateSrc. The model-tier gate will not be installed, and a model-less Agent dispatch will not be blocked."
-}
-
-# Same CommandNotFoundException hazard as npm above, and this one fires on the Windows box
-# whenever a test drives the Linux branch: `& chmod` with no chmod on PATH is terminating, so
-# the round-trip test in Task 12 would die here rather than assert on the installed tree.
-$chmod = Get-Command chmod -ErrorAction SilentlyContinue
-if (-not $TargetIsWindows -and $chmod) {
-    foreach ($s in @(Get-ChildItem (Join-Path $ClaudeHome 'hooks') -Recurse -File -Filter *.sh -ErrorAction SilentlyContinue)) {
-        & $chmod.Source +x $s.FullName
-    }
-}
-elseif (-not $TargetIsWindows) {
-    Write-Warning 'chmod not on PATH: .sh hooks are not marked executable. Run `chmod +x ~/.claude/hooks/*.sh` on the target.'
+catch {
+    Write-Warning "Install failed partway through: '$ClaudeHome' is left in a mixed state, holding some content from before this run alongside whatever copied before the failure. The install did not complete. Re-run this script: every copy above is an unconditional overwrite, so re-running is idempotent and finishes what this one left unfinished."
+    throw
 }

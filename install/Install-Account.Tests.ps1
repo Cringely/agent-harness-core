@@ -96,9 +96,25 @@ Describe "Install-Account" {
     It "does not offer jq when npm is present, since the shell statusline is never reached" {
         $p = New-StandInPayload; $h = New-StandInClaudeHome
         try {
-            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo $script:repoRoot `
-                -TargetIsWindows:$false -NpmGlobal '/usr/lib/node_modules' *>&1 | Out-String
+            # Same PATH-emptying test 3 uses, and for the same reason: on a runner where every
+            # prerequisite except jq happens to already be installed, the preflight warning
+            # never fires at all, and 'jq' is absent from $out whether or not the jq condition
+            # actually works. Review round 1, item 4: measured this test passing for that wrong
+            # reason on this box, since nothing but jq was ever missing here to begin with.
+            $emptyBin = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-bin-" + [guid]::NewGuid())
+            New-Item -ItemType Directory -Path $emptyBin -Force | Out-Null
+            $savedPath = $env:PATH
+            try {
+                $env:PATH = $emptyBin
+                $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+                    -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo $script:repoRoot `
+                    -TargetIsWindows:$false -NpmGlobal '/usr/lib/node_modules' *>&1 | Out-String
+            }
+            finally { $env:PATH = $savedPath; Remove-Item -Recurse -Force $emptyBin -EA SilentlyContinue }
+
+            # Positive control: without this, a broken jq condition and an empty $out are
+            # indistinguishable from a working one, since both leave 'jq' absent from $out.
+            $out | Should -Match '\bvale\b' -Because "the warning must actually fire for the jq check below to mean anything"
             $out | Should -Not -Match '\bjq\b'
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
@@ -116,6 +132,221 @@ Describe "Install-Account" {
                 Should -Throw -ExpectedMessage '*dot-sourcing*'
             Test-Path -LiteralPath (Join-Path $h 'rules/security.md') |
                 Should -BeFalse -Because "the guard fires before the payload tree is copied"
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Review round 1, item 1: a relative -PayloadRoot used to garble every tree-copied
+    # destination, because Copy-PayloadTree's $f.FullName.Substring($from.Length) chopped an
+    # arbitrary number of characters off an absolute FullName using the length of whatever
+    # Join-Path made of the raw, unresolved -PayloadRoot. The install still reported success.
+    It "resolves a relative -PayloadRoot before copying, instead of garbling every destination" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        $parent = Split-Path $p -Parent
+        $leaf = Split-Path $p -Leaf
+        $savedLoc = Get-Location
+        try {
+            Set-Location $parent
+            & $script:install -PayloadRoot $leaf -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight | Out-Null
+            Test-Path -LiteralPath (Join-Path $h 'rules/security.md') | Should -BeTrue
+        }
+        finally {
+            Set-Location $savedLoc
+            Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "resolves a -PayloadRoot containing .. before copying" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        $nested = Join-Path $p 'nested'
+        New-Item -ItemType Directory -Path $nested -Force | Out-Null
+        $savedLoc = Get-Location
+        try {
+            Set-Location $nested
+            & $script:install -PayloadRoot '..' -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight | Out-Null
+            Test-Path -LiteralPath (Join-Path $h 'rules/security.md') | Should -BeTrue
+        }
+        finally {
+            Set-Location $savedLoc
+            Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue
+        }
+    }
+
+    # Review round 1, item 2: an explicitly empty or $null -ClaudeHome used to fall through to
+    # the live $HOME/.claude default, since `if (-not $ClaudeHome)` cannot tell "the caller did
+    # not ask" from "the caller asked for nothing". This never touches the live account layer:
+    # a regression here throws before -ClaudeHome is read, so there is nothing to clean up.
+    It "refuses an explicitly empty -ClaudeHome instead of falling back to the live default" {
+        { & $script:install -ClaudeHome '' -PayloadRoot 'irrelevant' -SkipPreflight } |
+            Should -Throw -ExpectedMessage "*-ClaudeHome was passed empty*"
+    }
+
+    It "refuses an explicitly empty -PayloadRoot instead of falling back to the default" {
+        $h = New-StandInClaudeHome
+        try {
+            { & $script:install -ClaudeHome $h -PayloadRoot '' -SkipPreflight } |
+                Should -Throw -ExpectedMessage "*-PayloadRoot was passed empty*"
+        }
+        finally { Remove-Item -Recurse -Force $h -ErrorAction SilentlyContinue }
+    }
+
+    # Review round 1, item 3: the script that overwrites the live account layer was the one
+    # script in install/ without a dry run.
+    It "supports -WhatIf, leaving the target claude home untouched" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -WhatIf | Out-Null
+            Test-Path -LiteralPath (Join-Path $h 'rules/security.md') | Should -BeFalse
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Review round 1, item 5, coverage row: the overwrite is the script's whole documented
+    # purpose ("Install overwrites") and, before this test, no test had ever installed twice
+    # onto a non-empty target. Both copy loops (tree and root-file) are exercised, and a
+    # receiver-only file the payload never mentions proves the copy overlays rather than mirrors.
+    It "overwrites an already-installed tree file and root file, leaving a receiver-only file alone" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight | Out-Null
+            'receiver only, never in the payload' | Set-Content (Join-Path $h 'rules/local-only.md')
+
+            'rule body v2' | Set-Content (Join-Path $p 'rules/security.md')
+            'ps statusline v2' | Set-Content (Join-Path $p 'statusline-command.ps1')
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight | Out-Null
+
+            Get-Content -Raw (Join-Path $h 'rules/security.md') | Should -Match 'rule body v2'
+            Get-Content -Raw (Join-Path $h 'statusline-command.ps1') | Should -Match 'ps statusline v2'
+            Test-Path -LiteralPath (Join-Path $h 'rules/local-only.md') | Should -BeTrue
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Review round 1, item 5, coverage row: the message an operator sees on a fresh clone
+    # before an export has ever run.
+    It "throws an actionable message when -PayloadRoot does not exist" {
+        $h = New-StandInClaudeHome
+        $missing = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-nopayload-" + [guid]::NewGuid())
+        try {
+            { & $script:install -PayloadRoot $missing -ClaudeHome $h `
+                    -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight } |
+                Should -Throw -ExpectedMessage '*Run install/Export-Account.ps1*'
+        }
+        finally { Remove-Item -Recurse -Force $h -ErrorAction SilentlyContinue }
+    }
+
+    # Review round 1, item 5, coverage row: the only signal that a model-less Agent dispatch
+    # will go unblocked on the receiving box.
+    It "warns when the core-sourced model-tier-gate.ts is absent, and installs nothing for it" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        $emptyCore = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-nocore-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $emptyCore -Force | Out-Null
+        try {
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo $emptyCore `
+                -SkipPreflight *>&1 | Out-String
+            $out | Should -Match 'Absent:.*model-tier-gate\.ts'
+            Test-Path -LiteralPath (Join-Path $h 'hooks/model-tier-gate.ts') | Should -BeFalse
+        }
+        finally { Remove-Item -Recurse -Force $p, $h, $emptyCore -ErrorAction SilentlyContinue }
+    }
+
+    # Review round 1, item 5, coverage row: -SkipPreflight actually skips, proven with the same
+    # emptied-PATH setup test 3 uses to show the probe fires when it is not skipped.
+    It "suppresses the preflight warning under -SkipPreflight even with every tool absent" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        $emptyBin = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-bin-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $emptyBin -Force | Out-Null
+        $savedPath = $env:PATH
+        $out = $null
+        try {
+            $env:PATH = $emptyBin
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight *>&1 | Out-String
+        }
+        finally { $env:PATH = $savedPath; Remove-Item -Recurse -Force $emptyBin -EA SilentlyContinue }
+        try {
+            $out | Should -Not -Match 'Not on PATH'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Review round 1, item 5, coverage row: when -NpmGlobal is omitted the script must go look
+    # via `npm root -g` rather than assuming npm absent. A stub npm.cmd on an otherwise-empty
+    # PATH stands in for a real npm install; finding it and treating npm as present is what
+    # suppresses jq from the missing-tool list below.
+    It "probes npm for -NpmGlobal when the parameter is omitted, and finds it" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        $stubBin = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-npmstub-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $stubBin -Force | Out-Null
+        Set-Content (Join-Path $stubBin 'npm.cmd') "@echo off`r`necho C:\fake\global`r`nexit /b 0"
+        $savedPath = $env:PATH
+        $out = $null
+        try {
+            $env:PATH = $stubBin
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo $script:repoRoot `
+                -TargetIsWindows:$false *>&1 | Out-String
+        }
+        finally { $env:PATH = $savedPath; Remove-Item -Recurse -Force $stubBin -EA SilentlyContinue }
+        try {
+            $out | Should -Not -Match '\bjq\b'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Review round 1, item 5, coverage row: jq only matters on the Linux npm-absent path; the
+    # commit message's own claim ("jq joins the list only on Linux with npm absent") was
+    # unpinned, since dropping the -not $TargetIsWindows term left the suite green.
+    It "does not add jq on Windows even with npm absent" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        $emptyBin = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-bin-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $emptyBin -Force | Out-Null
+        $savedPath = $env:PATH
+        $out = $null
+        try {
+            $env:PATH = $emptyBin
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo $script:repoRoot `
+                -TargetIsWindows:$true -NpmGlobal '' *>&1 | Out-String
+        }
+        finally { $env:PATH = $savedPath; Remove-Item -Recurse -Force $emptyBin -EA SilentlyContinue }
+        try {
+            $out | Should -Match '\bvale\b' -Because "the warning must fire for the jq check below to mean anything"
+            $out | Should -Not -Match '\bjq\b' -Because "jq only matters on the Linux npm-absent path"
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Review round 1, item 6: a copy failure partway through left the target half-old,
+    # half-new, with the console record stopping mid-copy and nothing telling the operator
+    # what to do about it. Locks a target file open so the second install's Copy-Item onto it
+    # throws, the same reproduction technique the review used.
+    It "reports a mixed-state warning and re-throws when the copy fails partway through" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight | Out-Null
+            $locked = Join-Path $h 'agents/appsec-sme.md'
+            $stream = [System.IO.File]::Open($locked, 'Open', 'Read', 'None')
+            $threw = $false
+            $warnings = $null
+            try {
+                try {
+                    & $script:install -PayloadRoot $p -ClaudeHome $h `
+                        -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight `
+                        -WarningVariable warnings -WarningAction SilentlyContinue *>$null
+                }
+                catch { $threw = $true }
+            }
+            finally { $stream.Dispose() }
+            $threw | Should -BeTrue -Because "a partial failure must still fail the run, not swallow it"
+            (@($warnings) -join "`n") | Should -Match 'mixed state|did not complete|Re-run this script'
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
