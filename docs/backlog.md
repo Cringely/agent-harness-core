@@ -678,3 +678,25 @@ Both mechanisms need the same segment added, per the "naming all three mechanism
 drifting" note in `writing-style.md`: `core/claude/hooks/lint-doc-prose.ts` on write, and
 `~/.claude/hooks/Lint-DocumentProse.ps1`. Check `core/claude/hooks/pre-commit` too, though
 `.superpowers/` is git-ignored scratch so a commit hook may never see it.
+
+## 18. The mcpServers gate and the mcpServers fold cover different property sets
+
+`install/Export-Account.ps1` scans every string reachable under an MCP server entry before writing
+`account/claude/mcp-servers.json`, but the placeholder fold still walks only `command`, `args` and
+`env`. The two came from different rounds of the same task and the asymmetry was left in
+deliberately.
+
+Nothing leaks today. All three live servers are `type: stdio` with exactly `[type, command, args,
+env]`, so every property the writer serialises is also a property the fold visits. Add an `http` or
+`sse` server, though, and a machine path sitting in its `url` or in a `headers` value gets committed
+unfolded, because the fold never looks there.
+
+The reason this is a backlog item rather than a fix in the task that found it: extending the fold
+means a mutating walk that rewrites values in place, which is a good deal more code than the
+read-only collector the gate uses, and Task 14's payload-wide residual machine-path scan is a hard
+gate that catches an unfolded machine path wherever it sits. So there is a net under this already.
+The work here is closing the gap at its own level rather than relying on the net.
+
+Take it when someone adds a non-stdio MCP server, or sooner if the Task 14 scan turns out to be
+narrower than it reads. The fix is to derive both the gate's input and the fold's targets from one
+traversal of the entry, so the two cannot drift again.
