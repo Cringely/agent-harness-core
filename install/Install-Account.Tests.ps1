@@ -33,23 +33,50 @@ Describe "Install-Account" {
         }
     }
 
-    It "copies the payload tree into the target claude home" {
-        $p = New-StandInPayload; $h = New-StandInClaudeHome
-        try {
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight | Out-Null
-            Test-Path -LiteralPath (Join-Path $h 'rules/security.md')          | Should -BeTrue
-            Test-Path -LiteralPath (Join-Path $h 'agents/appsec-sme.md')       | Should -BeTrue
-            Test-Path -LiteralPath (Join-Path $h 'skills/prose-lint/SKILL.md') | Should -BeTrue
-            Test-Path -LiteralPath (Join-Path $h 'tools/prose-lint/.vale.ini') | Should -BeTrue
-            Test-Path -LiteralPath (Join-Path $h 'hooks/Scan-MemorySecrets.ps1') | Should -BeTrue
-            Test-Path -LiteralPath (Join-Path $h 'statusline-command.ps1')     | Should -BeTrue
-            Test-Path -LiteralPath (Join-Path $h 'statusline-command.sh')      | Should -BeTrue
-            # The payload's own files are inputs, not content, and must not land in the target.
-            Test-Path -LiteralPath (Join-Path $h 'settings.account.json') | Should -BeFalse
-            Test-Path -LiteralPath (Join-Path $h 'mcp-servers.json')      | Should -BeFalse
+    # Review round 2, item C: one assertion per It. Nine assertions used to share one It, so
+    # three different coverage-table ablations (recursive tree copy, root-file copy, the
+    # root-file allowlist) each broke a different assertion and each still only ever reported
+    # as the same single failing It, since Pester aborts an It at the first failing Should. The
+    # install itself runs once in BeforeAll; every It below only asserts against its result.
+    Context "copies the payload tree into the target claude home" {
+        BeforeAll {
+            $script:t1p = New-StandInPayload
+            $script:t1h = New-StandInClaudeHome
+            & $script:install -PayloadRoot $script:t1p -ClaudeHome $script:t1h `
+                -ClaudeJson (Join-Path $script:t1h 'claude.json') -SkipPreflight | Out-Null
         }
-        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+        AfterAll {
+            Remove-Item -Recurse -Force $script:t1p, $script:t1h -ErrorAction SilentlyContinue
+        }
+
+        It "copies rules/security.md" {
+            Test-Path -LiteralPath (Join-Path $script:t1h 'rules/security.md') | Should -BeTrue
+        }
+        It "copies agents/appsec-sme.md" {
+            Test-Path -LiteralPath (Join-Path $script:t1h 'agents/appsec-sme.md') | Should -BeTrue
+        }
+        It "copies skills/prose-lint/SKILL.md" {
+            Test-Path -LiteralPath (Join-Path $script:t1h 'skills/prose-lint/SKILL.md') | Should -BeTrue
+        }
+        It "copies tools/prose-lint/.vale.ini" {
+            Test-Path -LiteralPath (Join-Path $script:t1h 'tools/prose-lint/.vale.ini') | Should -BeTrue
+        }
+        It "copies hooks/Scan-MemorySecrets.ps1" {
+            Test-Path -LiteralPath (Join-Path $script:t1h 'hooks/Scan-MemorySecrets.ps1') | Should -BeTrue
+        }
+        It "copies statusline-command.ps1" {
+            Test-Path -LiteralPath (Join-Path $script:t1h 'statusline-command.ps1') | Should -BeTrue
+        }
+        It "copies statusline-command.sh" {
+            Test-Path -LiteralPath (Join-Path $script:t1h 'statusline-command.sh') | Should -BeTrue
+        }
+        # The payload's own files are inputs, not content, and must not land in the target.
+        It "does not copy the payload's own settings.account.json" {
+            Test-Path -LiteralPath (Join-Path $script:t1h 'settings.account.json') | Should -BeFalse
+        }
+        It "does not copy the payload's own mcp-servers.json" {
+            Test-Path -LiteralPath (Join-Path $script:t1h 'mcp-servers.json') | Should -BeFalse
+        }
     }
 
     It "installs model-tier-gate.ts from core, byte-identical, though the payload lacks it" {
@@ -68,9 +95,14 @@ Describe "Install-Account" {
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
 
-    It "names every absent prerequisite, and jq only when the Linux fallback needs it" {
-        $p = New-StandInPayload; $h = New-StandInClaudeHome
-        try {
+    # Review round 2, item C: -ForEach makes each tool its own It. Measured: dropping vale, uvx
+    # and jq from the prerequisite list at once used to produce one failure line naming only
+    # vale, since Pester stops at the first failing Should in a bundled It. The install runs
+    # once in BeforeAll, under the same emptied PATH the original test used.
+    Context "names every absent prerequisite, and jq only when the Linux fallback needs it" {
+        BeforeAll {
+            $script:t3p = New-StandInPayload
+            $script:t3h = New-StandInClaudeHome
             # PATH emptied to a directory holding nothing, so every probe misses. Without this
             # the assertion would depend on what happens to be installed on the runner.
             $emptyBin = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-bin-" + [guid]::NewGuid())
@@ -78,19 +110,23 @@ Describe "Install-Account" {
             $savedPath = $env:PATH
             try {
                 $env:PATH = $emptyBin
-                $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
-                    -ClaudeJson (Join-Path $h 'claude.json') `
+                $script:t3out = & $script:install -PayloadRoot $script:t3p -ClaudeHome $script:t3h `
+                    -ClaudeJson (Join-Path $script:t3h 'claude.json') `
                     -CoreRepo $script:repoRoot -TargetIsWindows:$false -NpmGlobal '' *>&1 | Out-String
             }
             finally { $env:PATH = $savedPath; Remove-Item -Recurse -Force $emptyBin -EA SilentlyContinue }
-
-            foreach ($tool in 'vale', 'bun', 'node', 'bash', 'uvx', 'jq') {
-                $out | Should -Match "\b$tool\b" -Because "every consumer of $tool fails open, so an absent one is invisible without the warning"
-            }
-            # The install still completes: preflight warns, it does not gate.
-            Test-Path -LiteralPath (Join-Path $h 'rules/security.md') | Should -BeTrue
         }
-        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+        AfterAll {
+            Remove-Item -Recurse -Force $script:t3p, $script:t3h -ErrorAction SilentlyContinue
+        }
+
+        It "names <_> as an absent prerequisite" -ForEach 'vale', 'bun', 'node', 'bash', 'uvx', 'jq' {
+            $script:t3out | Should -Match "\b$_\b" -Because "every consumer of $_ fails open, so an absent one is invisible without the warning"
+        }
+
+        It "still completes the install: preflight warns, it does not gate" {
+            Test-Path -LiteralPath (Join-Path $script:t3h 'rules/security.md') | Should -BeTrue
+        }
     }
 
     It "does not offer jq when npm is present, since the shell statusline is never reached" {
@@ -172,6 +208,40 @@ Describe "Install-Account" {
             Set-Location $savedLoc
             Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue
         }
+    }
+
+    # Review round 2 addendum: -PayloadRoot and -ClaudeHome must be refused when equal, and when
+    # either is nested inside the other, since Copy-PayloadTree reads recursively from one while
+    # writing into the other. "Test both directions and the equality case." The containment check
+    # runs before the -PayloadRoot existence check (Install-Account.ps1's "No payload at" throw),
+    # so none of these three need a real payload on disk to prove the guard fires first.
+    It "refuses when -PayloadRoot and -ClaudeHome are the same directory" {
+        $h = New-StandInClaudeHome
+        try {
+            { & $script:install -PayloadRoot $h -ClaudeHome $h -SkipPreflight } |
+                Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
+        }
+        finally { Remove-Item -Recurse -Force $h -ErrorAction SilentlyContinue }
+    }
+
+    It "refuses when -PayloadRoot is nested inside -ClaudeHome" {
+        $h = New-StandInClaudeHome
+        $nestedPayload = Join-Path $h 'payload'
+        try {
+            { & $script:install -PayloadRoot $nestedPayload -ClaudeHome $h -SkipPreflight } |
+                Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
+        }
+        finally { Remove-Item -Recurse -Force $h -ErrorAction SilentlyContinue }
+    }
+
+    It "refuses when -ClaudeHome is nested inside -PayloadRoot" {
+        $p = New-StandInPayload
+        $nestedHome = Join-Path $p 'nested-home'
+        try {
+            { & $script:install -PayloadRoot $p -ClaudeHome $nestedHome -SkipPreflight } |
+                Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
+        }
+        finally { Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue }
     }
 
     # Review round 1, item 2: an explicitly empty or $null -ClaudeHome used to fall through to
@@ -427,5 +497,33 @@ Describe "Install-Account" {
             $logContent | Should -Match 'harness-core-reminder\.sh'
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Review round 2 addendum: the chmod pass's Get-ChildItem used positional -Path, which
+    # treats [ and ] as wildcard delimiters instead of literal characters. A -ClaudeHome
+    # containing brackets (a Windows username in brackets, a bracketed repo checkout dir) would
+    # silently match nothing, chmod nothing, and warn nothing, since a non-matching wildcard is
+    # not an error. -LiteralPath takes the hooks directory as a literal string instead.
+    It "chmods .sh hooks under a -ClaudeHome path containing bracket characters" {
+        $p = New-StandInPayload
+        $hParent = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-home-[br]-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $hParent -Force | Out-Null
+        $stubBin = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-chmodstub-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $stubBin -Force | Out-Null
+        $log = Join-Path $stubBin 'invoked.log'
+        Set-Content (Join-Path $stubBin 'chmod.cmd') "@echo off`r`necho called %* >> `"$log`"`r`nexit /b 0"
+        $savedPath = $env:PATH
+        $logContent = $null
+        try {
+            $env:PATH = "$stubBin;$savedPath"
+            & $script:install -PayloadRoot $p -ClaudeHome $hParent `
+                -ClaudeJson (Join-Path $hParent 'claude.json') -SkipPreflight -TargetIsWindows:$false | Out-Null
+            if (Test-Path -LiteralPath $log) { $logContent = Get-Content -Raw $log }
+        }
+        finally { $env:PATH = $savedPath; Remove-Item -Recurse -Force $stubBin -EA SilentlyContinue }
+        try {
+            $logContent | Should -Match 'harness-core-reminder\.sh'
+        }
+        finally { Remove-Item -Recurse -Force $p, $hParent -ErrorAction SilentlyContinue }
     }
 }
