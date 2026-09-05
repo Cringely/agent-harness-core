@@ -516,8 +516,10 @@ by adding prose:
 
 **Status:** assessed 2026-09-05. **Recommendation: none of the four candidates gets wired to the
 operator's Google account.** The assessment ran the six questions below against all four unpacked
-tarballs, statically, nothing executed. Report at
-`.superpowers/sdd/2026-09-03-account-layer-portability/nb-mcp-assessment.md`.
+tarballs, statically, nothing executed. It ran in an SDD workspace under `.superpowers/sdd/`, whose
+`.gitignore` is `*` and which the process deletes on completion, so the findings are inlined here
+rather than cited to it. Citations that point into a published tarball name the exact version,
+because that is re-fetchable and a scratch path is not.
 
 Every candidate authenticates by driving a browser through a human Google login and keeping the
 resulting account-level session cookies (`SID`, `HSID`, `SSID`, `APISID`, `SAPISID`,
@@ -532,6 +534,32 @@ Google, which reaches every rules file, agent definition and memory note in one 
 `@pan-sec/notebooklm-mcp` defaults its allowlist to `os.homedir()` and omits `.claude` from its
 denied segments. So a prompt injection in an ingested source would have both a credential worth
 stealing and material worth stealing, on one machine.
+
+`notebooklm-mcp-server@4.0.2` ships one bundled `dist/index.js`, 1,510,631 bytes over 44,971 lines,
+with 350 dependency modules inlined at build time behind esbuild's per-module banners. It is not
+minified and it was read: identifiers and 2,878 comment lines survive, the eight first-party blocks
+are labelled by source path, and `src/auth.ts` was spot-checked against the public repository and
+matches. Reviewability is not the problem. Two other things are. Nothing mechanically links the
+tarball back to the repository: no `sourceMappingURL`, no `.map`, no `.d.ts`, no `src/`, `build.js`
+excluded by the `files` array so the build cannot be reproduced from what npm serves, and no
+provenance attestation. And inlining the dependency tree blinds every consumer-side scanner.
+`npm audit` and Dependabot see the 8 declared dependencies and audit none of the code that actually
+runs, so axios frozen in at 1.13.4 will never surface an advisory to anyone who installs this.
+That second one is true regardless of what the server does at runtime.
+`@pan-sec/notebooklm-mcp` has a milder form of it, 105 `.js` and 105 `.d.ts` with zero `.map`; the
+incumbent, charlie and roomi publish ordinary `tsc` output 1:1 with their sources.
+
+This sharpens rather than changes the recommendation, and it moves charlie for a reason worth
+recording: it is the only candidate whose shipped artifact can be tied to reviewed source by
+something other than hand-checking, so a future version bump there is a diff to read rather than an
+audit to redo.
+
+One correction to the assessment's own working note, which never reached this item but would have
+been wrong if it had: `notebooklm-mcp-server` does not harvest the whole browser cookie jar. The
+primary harvest is URL-filtered to `notebooklm.google.com`, and the code then reaches into the
+unfiltered jar for three named cookies scoped to other Google hosts, with a comment at
+`src/auth.ts:128-132` saying exactly why. A documented cross-host reach is a worse finding than an
+unfiltered API call, not a better one, because it is deliberate.
 
 **Correction to this item's own preliminary result.** The paragraph below stating that none of the
 five declares a `preinstall` or `postinstall` script is false, and it was relayed to the reviewer as
