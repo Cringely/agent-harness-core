@@ -7,10 +7,12 @@ suite is exactly where it hides: could this test have failed at all? A test can 
 assert something true, and still be structurally incapable of reporting the defect it was written
 for. From the run output that test is indistinguishable from a real pass.
 
-Four shapes account for the sightings so far. A matcher blind to the defect under guard. A fixture
+Five shapes account for the sightings so far. A matcher blind to the defect under guard. A fixture
 set whose every case sits on the safe side of the guarded line. A measurement whose result is read as
 proof of a claim it cannot separate from its opposite. And an async test that fails by hanging, which
-reads as still running rather than as a failure.
+reads as still running rather than as a failure. The fifth, found by the mutation run described
+below, is a table of cases drawn from the constant under test, so a change to the constant rewrites
+the test along with it.
 
 ## Name the matcher's blind spot
 
@@ -84,10 +86,85 @@ or not. That version was never written and no experiment isolated the mechanism,
 stays unconfirmed. The watchdog holds either way, since it turns a hang into a failure whatever
 produced the hang.
 
+## Reading and mutating are different instruments, and reading alone leaves a blind spot
+
+The receipts above came one at a time, each from a reviewer working by hand: reading a test,
+doubting it, choosing what to break. Reading is what aims an ablation, since the reviewer picks the
+line. Mutation testing is the same check with the choice taken away. A tool alters production lines
+by rule, deleting a statement, flipping a condition, changing a constant, runs the whole suite once
+per alteration, and reports which alterations the suite let through. The two are not a small and a
+large version of one instrument. They are aimed differently, and they find different things.
+
+In this repository, review had found four unfalsifiable tests before any mutation ran, by reading
+and by ablations the reviewer chose. All four sit in the PowerShell installers, and all four are the
+shapes a reader's eye stops on: a guard with nothing behind it, or an assertion that an empty output
+satisfies or that its neighbour already entails. A mutation run confirmed all four still present and
+found three more, all in the TypeScript suites, that reading had passed over. The three share a
+shape reading is bad at, because each one looks on the page like the test that ought to exist.
+
+A table-driven test built its cases by filtering the very constant under test, so deleting a value
+from the constant deleted the case that would have caught the deletion, and the suite stayed fully
+green. A test proving a list was de-duplicated asserted that the output contained `"a, b"`, with a
+comment above it stating the claim; without the de-duplication the output reads `"a, a, b"`, which
+contains that substring, so the assertion cannot check what the comment says it checks. A test named
+for one configuration source winning over the filesystem fallbacks never created a fallback for it
+to win over, and moving the winning candidate to last in the search order kept it green. Reading
+judges a test by the intent it presents, in its name, its comment, its table of cases. Mutation
+never reads the name.
+
+Then there is the defect reading cannot find at all, because it is an absence: behaviour with no
+test over it. Thirty of the thirty-five surviving mutations changed real behaviour while the suite
+stayed green. One hook had no test file. Six others did, and of those, one was ever run as a process
+by its tests; the other five were tested by importing their functions, so a hook with dozens of
+tests, and a test file longer than the hook itself, would not have noticed if its deny payload, the
+output that makes it a gate, stopped being emitted. A reader of that test file sees a long, careful
+suite and has no way to see what is missing from it. Mutation measures the absence directly, since
+every alteration on an unexercised path survives.
+
+Not every survivor is a gap in the suite. Five of the thirty-five were equivalent mutants,
+alterations that change the text and not the behaviour, and no tool tells those apart from real
+gaps; a person reads each survivor and decides. That reading is where the run's one finding about
+production code turned up. A test written to prove that a non-ASCII filename comes back as itself
+rather than as an escaped form stayed green with a configuration override removed from the command,
+and a live check showed why: the command's own output flag already suppressed the escaping, so the
+override had never done anything. The test was right about the behaviour and wrong about what
+produced it, and the line it was written to defend was dead.
+
+The cost is what keeps this from being the default. Each mutation is a full run of the suite, and
+each survivor is a hand judgment, so the run trades one unbounded reading job for a bounded one:
+here, ninety-nine suite runs and thirty-five survivors to read. It is worth paying when a suite's
+green is about to be cited as evidence for something, a merge gate, a claim that a hook is tested, a
+test count offered as coverage, and worth paying again when the suite's shape changes, not on every
+commit, because what it finds is structural and stays found. It is not worth paying on a suite whose
+green nothing depends on, and it says nothing new about a file with no tests, where every mutation
+survives and a glance at the test directory already said so. Reading stays, and mutation is what to
+run once a reader has passed the suite and something expensive rests on that.
+
+The run's headline figure needs its frame kept on. Sixty-four of the ninety-four non-equivalent
+mutations were killed, 68%, and that is a measurement of this run against these ninety-nine
+mutations at that commit. It is not a property of the suite. Ninety-nine alterations across a tree
+of several thousand lines is a sample, not a sweep; a different rule for choosing lines, or the same
+rule on a later tree, gives a different figure, and the figure does not compare across suites or
+across runs that chose their lines differently.
+
+One number from a run answers a question nothing else answers cheaply: is a high test count real,
+or is it one behaviour tested many ways? Count how many tests each mutation killed. A suite that
+tests one behaviour many ways has a top-heavy distribution, because one alteration to that behaviour
+takes all of them out at once. A flat distribution means the tests are pulling apart, each holding
+up its own piece. Across these ninety-nine, thirty-five mutations killed exactly one test and only
+four killed more than five, and that settled a live question about the file carrying the most tests
+in the tree without anyone reading it. The distribution counts kills only, so it says nothing about
+survivors: a flat kill distribution and thirty untested behaviours came out of the same run.
+
 ## Provenance
 
-All four receipts come from one project, gathered over a single day of review work with one later
-follow-up, so this is a shape seen once rather than a pattern confirmed across projects.
+The four receipts behind the matcher, fixture, measurement and hanging sections come from one
+project, gathered over a single day of review work with one later follow-up. The mutation section
+comes from a second source, this repository itself, measured 2026-09-05 at commit `23d9c69`: 99
+mutations applied across 5,645 lines of production code, 64 killed, 35 surviving, 5 of the survivors
+judged equivalent by hand. The four findings review had made before that run are backlog items 24,
+26, 27 and 32 in `docs/backlog.md`. So the unfalsifiable-test shape has now been seen in two
+projects, while the comparison between reading and mutating rests on that one run.
 
 ## Related
 
@@ -97,4 +174,6 @@ running in that order: an ablation whose test could not fail either way returns 
 nothing. That doc's "A check that examines nothing looks exactly like a check that passes" section is
 the same family applied outside tests, where a comparison over empty input agrees perfectly, and its
 remedy of asserting the input is non-empty before comparing anything is the non-test form of naming
-the matcher's blind spot.
+the matcher's blind spot. Mutation testing, in the section above, is that doc's check with the choice
+of line taken away from the reviewer: a tool alters lines nobody suspected and counts the ones the
+suite let through.
