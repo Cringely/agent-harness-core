@@ -41,7 +41,8 @@
 // `/home/x/scratch/myrepo` — puts every file in that repo in scope. decide()
 // then returns allow for every write by every agent, and nothing logs, warns,
 // or reports that the gate has stopped having opinions. It looks exactly like
-// a gate that is passing. Pre-existing and unchanged here; backlogged. If you
+// a gate that is passing. Pre-existing and unchanged here, and not yet in the
+// backlog — this comment is the only record of it. If you
 // are relying on this gate, check that no ancestor of the project root is
 // named for scratch.
 //

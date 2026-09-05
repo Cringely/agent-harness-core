@@ -328,10 +328,12 @@ export function scrubQuotesAndHeredocs(command: string): string {
  * and the tail either matches that word or fails at once. A `-C` followed by a token that starts
  * option-shaped but is not consumable whole (`-a.b`): the generic branch consumes the `-a` prefix
  * and stops mid-token, where the star cannot iterate and the tail cannot match, so that branch
- * dies at once too. Both forks resolve in O(1). Measured flat across nine attack shapes to
- * n=25600 (325 KB of command text), four of them built to drive the second fork: worst cell
- * 53.8 ms, linear across the last doubling. Several shapes show a one-time ~20x step somewhere
- * between 40 and 80 KB; the pattern this replaces shows the same step at the same sizes and both
+ * dies at once too. Both forks resolve in O(1). Measured flat to n=25600 (325 KB of command text)
+ * across EIGHT of nine attack shapes, four of them built to drive the second fork: worst cell
+ * 53.8 ms, linear across the last doubling. The ninth shape is the pre-existing quadratic
+ * described in the next paragraph, which is neither flat nor bounded by that number — 53.8 ms is
+ * the worst of eight, not of nine. Several shapes show a one-time step of 19x to 75x somewhere
+ * between 9 and 102 KB; the pattern this replaces shows the same step at the same sizes and both
  * are linear on either side of it, so it is an engine threshold and not backtracking.
  *
  * "Linear" above is the per-start-position walk, and the whole-string scan is not linear — a
