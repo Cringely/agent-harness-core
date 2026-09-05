@@ -703,11 +703,35 @@ if (-not $SkipMcp) {
 # left without one already demands -Force. The cost of the small fix is a partially written
 # -OutputRoot on a failed run; the cost of the large one is copying 218 files twice on every run.
 if ($WslHome -and -not $WhatIfPreference) {
+    # Boundary, not a bare substring test. Review round 3, reproduced on the live payload:
+    # $body.Contains($WslHome) reads ANY occurrence of the literal as a machine path, and /root --
+    # one of the four shapes $script:PosixHomeShape above declares supported, and what a
+    # `wsl --import` distro gives its default user -- is also a substring of the vendored
+    # skills/owasp-mcp/references/05-command-injection-execution.md line
+    # "Access to sensitive paths (/etc/passwd, /root, /proc/, ~/.ssh)." So `-WslHome /root` aborted
+    # after writing 216 files and no marker, and told the operator to edit a third-party OWASP
+    # document where the string is not a machine path at all. Direction 1 of item 23 declared
+    # /root supported; direction 2 made it fatal. The literal scan chosen above is still the right
+    # scan -- it is the BOUNDARY that was missing, not the mechanism.
+    #
+    # Same idiom $script:PosixHomeShape already uses on its own /root arm, so the two gates agree
+    # on where a POSIX home ends: the next character must be a separator, a quote, whitespace, or
+    # nothing at all. `/root/x` and a bare `/root` at end of line still fire; `/root,` and
+    # `/rootkit` do not.
+    #
+    # Rejected \b, the obvious smaller boundary: `t` is a word character and `,` is not, so \b
+    # matches at exactly the position that has to stop matching and the OWASP line still takes the
+    # export down. Rejected excluding vendored trees from the scan: that is a denylist, and it
+    # would blind the gate to a vendored file that did carry the operator's own home.
+    #
+    # -cmatch and not -match: POSIX paths are case-sensitive and .Contains was ordinal, so the
+    # case-insensitive default would widen the gate past the boundary this is here to add.
+    $wslHomePattern = [regex]::Escape($WslHome) + '(?![^/"''\s])'
     # $outputRootFull, not $OutputRoot: FullName below is absolute, and -OutputRoot may be
     # relative, so the Substring that builds $rel has to be taken against the resolved root.
     foreach ($f in @(Get-ChildItem -LiteralPath $outputRootFull -Recurse -File -Force)) {
         $body = Get-Content -LiteralPath $f.FullName -Raw
-        if ($body -and $body.Contains($WslHome)) {
+        if ($body -and $body -cmatch $wslHomePattern) {
             $rel = ($f.FullName.Substring($outputRootFull.Length).TrimStart('\', '/')) -replace '\\', '/'
             throw "Refusing to complete the export: '$rel' still carries the WSL home literal after folding. {{WSL_HOME}} is folded in mcpServers only, so a copy of that path in a rules file, a hook command or a templated file ships verbatim. Remove it at source, or add the file to AccountTemplatedFiles with a WSL_HOME row."
         }
