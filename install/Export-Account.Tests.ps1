@@ -1231,6 +1231,65 @@ exit 0
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
     }
 
+    # A SUPPLIED -WslHome that names no directory is refused at the parameter, not at the scan.
+    #
+    # This is the hole the merge of fix/exporter-correctness and fix/export-identity-gate opened
+    # and then had to close. Each parent fixed a different half of this line, both halves were
+    # pinned by their own branch's tests, and the COMBINATION was pinned by nothing: the merge
+    # nulled the pattern for a degenerate value and called that fail-safe. Measured end to end, it
+    # was fail-open. -WslHome '/' produced a SUCCESSFUL export, marker written, with
+    # /home/wsluser/code-context-mcp.sh shipped verbatim in a copied file and mcp-servers.json
+    # rewritten to "C:{{WSL_HOME}}tools{{WSL_HOME}}srv.js". The mcpServers shape gate did not
+    # catch it either -- the '/' fold rewrites every separator, so $script:PosixHomeShape has no
+    # POSIX home left to find. Both gates off, and strictly weaker than either parent alone:
+    # under fix/exporter-correctness the empty pattern matched everything and aborted on the first
+    # file, loudly.
+    #
+    # Whitespace is the same defect in different clothes and gets a case of its own: the
+    # auto-resolution branch calls .Trim() and the explicit-parameter path did not, so a trailing
+    # space built '/home/wsluser\ (?!...)' and degraded the scan the same way.
+    #
+    # -WslHome '' is deliberately NOT here. An unresolved value is legal and is covered by the It
+    # above, which asserts the mcpServers shape gate stands in for the scan in that case.
+    It "refuses a supplied -WslHome that names no directory: <label>" -ForEach @(
+        @{ Value = '/';                Label = 'a bare slash' }
+        @{ Value = '//';               Label = 'two slashes' }
+        @{ Value = '   ';              Label = 'whitespace only' }
+        @{ Value = '/home/wsluser ';   Label = 'a trailing space' }
+        @{ Value = '/home/wsluser/';   Label = 'a trailing slash' }
+    ) {
+        # The last two are ACCEPTED after normalisation rather than refused -- .Trim().TrimEnd('/')
+        # turns both into '/home/wsluser' -- so they assert the normalisation instead of a throw.
+        # Kept in the same table because the failure they used to cause is identical to the first
+        # three: a pattern that matches nothing and an export that completes anyway.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            'wsl home lives at /home/wsluser/code-context-mcp.sh' |
+                Set-Content (Join-Path $ch 'rules/ssh.md')
+
+            $run = { & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -WslHome $Value -SkipSettings -SkipMcp }
+
+            if ($Value.Trim().TrimEnd('/')) {
+                # Normalises to a real path, so the scan must fire on the literal in ssh.md.
+                $run | Should -Throw -ExpectedMessage '*still carries the WSL home literal*'
+            }
+            else {
+                $run | Should -Throw -ExpectedMessage '*must name an absolute POSIX directory*'
+            }
+
+            # Either way the export must not have completed. Asserted separately from the throw
+            # because the defect this pins was a throw-free SUCCESS, and a gate that threw after
+            # writing the payload would satisfy the Should above while still shipping the file.
+            Test-Path -LiteralPath (Join-Path $out '.export-account-marker') |
+                Should -BeFalse -Because "a refused export must leave no marker behind to commit"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
     # Backlog item 23, first direction. The gate above keyed on a `/home/` prefix, which is one
     # of four spellings a WSL home takes, so its name promised more than its pattern delivered.
     # One It per shape rather than a loop inside one: Pester stops an It at its first failing
