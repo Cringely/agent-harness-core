@@ -591,6 +591,13 @@ Describe "Install-Account" {
         }
         finally { $env:PATH = $savedPath; Remove-Item -Recurse -Force $stubBin -EA SilentlyContinue }
         try {
+            # Backlog item 26: this It used to carry the negative alone, and an empty $out
+            # satisfies a negative. Making Test-Prerequisite return an empty list reddened eight
+            # tests and left this one green, so it could not tell whether the npm probe had found
+            # anything -- the only thing it claims to prove. Same positive control its sibling
+            # two Its down already carries. PATH holds nothing but the npm stub, so vale is
+            # genuinely absent and the preflight warning must name it.
+            $out | Should -Match '\bvale\b' -Because "the warning must actually fire for the jq check below to mean anything"
             $out | Should -Not -Match '\bjq\b'
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
@@ -1545,6 +1552,59 @@ Describe "Install-Account" {
             $out | Should -Match 'Unexpanded placeholder\(s\) in rules/harness-core\.md: \{\{RENAMED_TOKEN\}\}'
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Backlog item 26: Get-ResidualToken de-duplicates with | Select-Object -Unique, and dropping
+    # that left the suite at 96 pass, 0 fail while a file carrying one token twice reported it
+    # twice. Cosmetic, but stated behaviour with nothing behind it. Reads the warning through
+    # -WarningVariable rather than Out-String: the anchor here is what follows the token list,
+    # and a formatted stream can wrap a long warning anywhere.
+    It "names a token carried twice in one file once, not once per occurrence" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            'Core repo: {{CORE_REPO}}. See {{TWICE}}, and again {{TWICE}}.' |
+                Set-Content (Join-Path $p 'rules/harness-core.md')
+
+            $warnings = $null
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -SkipPreflight -WarningVariable warnings -WarningAction SilentlyContinue *>$null
+
+            (@($warnings) -join "`n") |
+                Should -Match 'in rules/harness-core\.md: \{\{TWICE\}\}\. Left verbatim'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Backlog item 27, first half. AccountShared.ps1 lifts three functions out of
+    # Restore-ClaudeProject.ps1 by AST and throws by name when one is missing, so a rename over
+    # there becomes a loud failure here instead of an undefined call at run time. Nothing
+    # exercised the throw: replacing it with `if ($false)` left both suites green, because the
+    # failure it exists for needs the RENAME, not the guard's removal. This plants the rename in
+    # a fixture copy of both files and asserts the message names the function.
+    #
+    # Lives in this file rather than in an AccountShared suite of its own because
+    # Install-Account.ps1 dot-sources AccountShared.ps1 on line 2 of its body: a broken lift
+    # takes this script down before it reads a single parameter.
+    It "throws by name when Restore-ClaudeProject.ps1 no longer defines a function the lift wants" {
+        $dir = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-lift-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        try {
+            Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'AccountShared.ps1') `
+                -Destination (Join-Path $dir 'AccountShared.ps1')
+            $restore = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Restore-ClaudeProject.ps1') -Raw
+            $renamed = $restore -replace 'function Convert-HookCommand\b', 'function Convert-HookCommandGone'
+            # The rename has to have landed, or the fixture is the original file and the throw
+            # correctly never fires.
+            $renamed | Should -Not -Be $restore -Because 'the fixture is the renamed copy, not the original'
+            Set-Content -LiteralPath (Join-Path $dir 'Restore-ClaudeProject.ps1') -Value $renamed -NoNewline
+
+            # Dot-sourced inside a scriptblock so the lifted definitions land in that scope
+            # rather than in this suite's.
+            { & { . (Join-Path $dir 'AccountShared.ps1') } } |
+                Should -Throw -ExpectedMessage '*no longer defines Convert-HookCommand*'
+        }
+        finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
     }
 
     # Task 11: -ClaudeJson gets the same empty-string guard Task 8 gave -ClaudeHome and
