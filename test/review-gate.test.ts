@@ -227,9 +227,11 @@ describe("parseGitCommitInvocation() — F-R3-1: --dry-run exemption reverted", 
 // 456/0 through that, because no test on any branch covered a quoted option argument.
 //
 // The shipped fix keeps the ambiguity where it is harmless and removes it where it is not: `-C`
-// and `-c` refuse an OPTION-SHAPED argument. Every case below was checked against master's
-// pattern as well; the whole block is a master-equivalence contract, not a new opinion about
-// what a commit invocation is.
+// and `-c` refuse an argument the generic flag alternative can consume WHOLE, and only that. The
+// narrower version of the same idea — refuse anything that merely LOOKS option-shaped — also
+// shipped once and lost its own class of commands; see the second block below. Every case here
+// was checked against master's pattern as well; the whole block is a master-equivalence contract,
+// not a new opinion about what a commit invocation is.
 describe("parseGitCommitInvocation() — item 37: a quoted option argument still reaches the gate", () => {
   // Each of these is a form `master` recognised, the shipped pattern recognises, and the first
   // fix did not. Verified against all three patterns before being written down.
@@ -264,6 +266,33 @@ describe("parseGitCommitInvocation() — item 37: a quoted option argument still
     ["git -C -C x commit", "a -C whose argument is itself -C"],
   ])("%s — %s", (command) => {
     expect(parseGitCommitInvocation(command).isCommit).toBe(true);
+  });
+
+  // The second regression this fix cleaned up, and the reason the lookahead tests the WHOLE
+  // token rather than its first two characters. `-a.b` starts option-shaped, so a lookahead
+  // reading only `-{1,2}[A-Za-z]` blocks the pair alternative on it — but the generic
+  // alternative cannot consume it either, because `[\w-]*` stops at the `.` and there is no `=`
+  // for `(?:=\S+)?` to take. Neither alternative crosses the token, the star cannot advance, and
+  // the whole match is lost, which :485 and :679 read as ALLOW. Every case below is one master
+  // matched. They are the shapes an alphabet of `-a`, `--no-pager` and `--flag=v` cannot express.
+  test.each([
+    ["git -C -a.b commit", "a -C argument with a dot"],
+    ["git -C -a/b commit -m x", "a -C argument with a slash"],
+    ["git -C -a:b commit", "a -C argument with a colon"],
+    ["git -C -a,b commit", "a -C argument with a comma"],
+    ["git -C -a.b=c commit", "a non-consumable character before the ="],
+    ["git -c -a.b commit", "the same shape on -c"],
+  ])("%s — %s", (command) => {
+    expect(parseGitCommitInvocation(command).isCommit).toBe(true);
+  });
+
+  // The pair alternative is blocked exactly when the generic alternative can consume the token
+  // whole, so these two cases have to disagree: `--odd-dir-name` fits the generic alternative and
+  // loses its capture, `-a.b` does not fit it and keeps master's. One assertion each way, because
+  // a fix that simply stopped capturing option-shaped arguments would pass the first alone.
+  test("a -C argument keeps master's capture when the generic alternative cannot consume it whole", () => {
+    expect(parseGitCommitInvocation("git -C -a.b commit").repoPath).toBe("-a.b");
+    expect(parseGitCommitInvocation("git -C --odd-dir-name commit -m x").repoPath).toBeUndefined();
   });
 
   // One test, three assertions, because the middle one is the only one that could fail against
