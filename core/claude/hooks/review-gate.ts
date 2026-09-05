@@ -308,9 +308,24 @@ export function scrubQuotesAndHeredocs(command: string): string {
  * asked to recognize: `git commit`, `git -C <path> commit`, and either with flags, including
  * `git -c user.name=x commit` (the detached-value form of `-c` is common enough in practice to be
  * worth its own alternative, unlike other detached-value short flags this heuristic still misses).
+ *
+ * The `(?!-[Cc]\s)` guard on the generic-flag alternative is what keeps the starred group
+ * UNAMBIGUOUS, and it is load-bearing rather than cosmetic (backlog item 37). Without it a bare
+ * `-C` matched two different alternatives that consume different numbers of tokens — the pair
+ * form swallowing the next token, the generic form taking the flag alone — so a run of n
+ * flag-shaped tokens tiled Fibonacci(n+1) ways and the engine walked every tiling when the
+ * trailing `\s+commit` failed. `git -C` repeated 40 times is 125 characters and took 1878 ms
+ * through parseGitCommitInvocation on bun, unbounded on node. With the guard, `-C` and `-c`
+ * always take the following token as their argument (which is what real git does with argv, flag
+ * shaped or not), every position has exactly one viable alternative, and the walk is linear.
+ * Rejected alternative: narrowing the pair forms to `\s+-C\s+(?!-)(\S+)` instead. That also
+ * disambiguates, but it drops the captured repo path whenever a directory happens to look like a
+ * flag, and the gate uses that path to pick which repo's staged files it lists.
+ * The consumer-side guards — an input-length cap or a timeout around exec() — were not
+ * considered: they would leave the pattern wrong (~/.claude/rules/fix-quality.md).
  */
 const GIT_COMMIT_RE =
-  /\bgit(?=\s)((?:\s+-C\s+(\S+)|\s+-c\s+\S+|\s+-{1,2}[A-Za-z][\w-]*(?:=\S+)?)*)\s+commit(?=\s|$)/;
+  /\bgit(?=\s)((?:\s+-C\s+(\S+)|\s+-c\s+\S+|\s+(?!-[Cc]\s)-{1,2}[A-Za-z][\w-]*(?:=\S+)?)*)\s+commit(?=\s|$)/;
 
 /**
  * True (with the `-C` path, if any) when `command` invokes `git commit`, after blanking quoted
