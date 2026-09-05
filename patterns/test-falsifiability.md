@@ -86,40 +86,56 @@ or not. That version was never written and no experiment isolated the mechanism,
 stays unconfirmed. The watchdog holds either way, since it turns a hang into a failure whatever
 produced the hang.
 
-## Reading and mutating are different instruments, and reading alone leaves a blind spot
+## A rule-chosen ablation reaches the lines a reviewer did not suspect
 
-The receipts above came one at a time, each from a reviewer working by hand: reading a test,
-doubting it, choosing what to break. Reading is what aims an ablation, since the reviewer picks the
-line. Mutation testing is the same check with the choice taken away. A tool alters production lines
-by rule, deleting a statement, flipping a condition, changing a constant, runs the whole suite once
-per alteration, and reports which alterations the suite let through. The two are not a small and a
-large version of one instrument. They are aimed differently, and they find different things.
+Every receipt above came from a reviewer working by hand: read a test, doubt it, choose the line to
+break. The choice is the bound on the method. A reviewer ablates where a reviewer suspects, so what
+comes back is a test of the reviewer's hypothesis about where the holes are, and a hole nobody
+hypothesised stays where it is. Mutation testing is the same check with the choice taken away. A
+tool alters production lines by rule, deleting a statement, flipping a condition, changing a
+constant, runs the whole suite once per alteration, and reports which alterations the suite let
+through. It is not a different check but the same one, run over lines that owe nothing to anyone's
+suspicion, and that is the whole of what it adds.
 
-In this repository, review had found four unfalsifiable tests before any mutation ran, by reading
-and by ablations the reviewer chose. All four sit in the PowerShell installers, and all four are the
-shapes a reader's eye stops on: a guard with nothing behind it, or an assertion that an empty output
-satisfies or that its neighbour already entails. A mutation run confirmed all four still present and
-found three more, all in the TypeScript suites, that reading had passed over. The three share a
-shape reading is bad at, because each one looks on the page like the test that ought to exist.
+The one measured comparison so far is a hand pass followed by a rule pass, over a tree where only
+the installer suites had been through the first. A branch review had ablated twelve production
+lines in those suites by hand and re-read its own fixes, and it recorded eight gaps no test would
+notice: guards with nothing behind them, a default that no case ever exercised because every case
+supplied the value, an assertion that an empty output satisfies, and assertions that a neighbour
+already entails. The rule pass, ninety-nine alterations chosen by rule, confirmed the eight still
+present and found three more, all in the hook suites, which no hand pass had touched.
 
-A table-driven test built its cases by filtering the very constant under test, so deleting a value
-from the constant deleted the case that would have caught the deletion, and the suite stayed fully
-green. A test proving a list was de-duplicated asserted that the output contained `"a, b"`, with a
-comment above it stating the claim; without the de-duplication the output reads `"a, a, b"`, which
-contains that substring, so the assertion cannot check what the comment says it checks. A test named
-for one configuration source winning over the filesystem fallbacks never created a fallback for it
-to win over, and moving the winning candidate to last in the search order kept it green. Reading
-judges a test by the intent it presents, in its name, its comment, its table of cases. Mutation
-never reads the name.
+Two of the three are shapes this doc already names, recurring in a second project. A test proving a
+list was de-duplicated asserted that the output contained `"a, b"`, with a comment above it stating
+the claim; without the de-duplication the output reads `"a, a, b"`, which contains that substring.
+That is the matcher's blind spot, membership hiding a wrong count. A test named for one
+configuration source winning over the filesystem fallbacks never created a fallback for it to win
+over, and moving the winning candidate to last in the search order kept it green. That is the
+fixture set on the safe side of the guarded line, and the same shape as the unexercised default in
+the hand pass, so it recurred twice in this tree alone. The third is the new one. A table-driven
+test built its cases by filtering the very constant under test, so deleting a value from the
+constant deleted the case that would have caught the deletion, and the suite stayed fully green. The
+remedy is to write the table out by hand, so the test owns its expected values instead of borrowing
+them from its subject.
 
-Then there is the defect reading cannot find at all, because it is an absence: behaviour with no
-test over it. Thirty of the thirty-five surviving mutations changed real behaviour while the suite
-stayed green. One hook had no test file. Six others did, and of those, one was ever run as a process
-by its tests; the other five were tested by importing their functions, so a hook with dozens of
-tests, and a test file longer than the hook itself, would not have noticed if its deny payload, the
-output that makes it a gate, stopped being emitted. A reader of that test file sees a long, careful
-suite and has no way to see what is missing from it. Mutation measures the absence directly, since
-every alteration on an unexercised path survives.
+What the rule pass added was reach, and reach has a bound worth keeping in view. Thirty of the
+thirty-five surviving alterations changed real behaviour while the suite stayed green: behaviour
+with no test over it. A hand pass finds absences too, since a guard with nothing behind it is
+exactly that, but it finds them where it looked. A sample of ninety-nine alterations measures
+absence on ninety-nine lines, no more, and its worth is that nobody chose those lines. Among what
+they turned up: of the seven TypeScript hooks, one had no test file, and of the six that did, one
+was ever run as a process by its tests. The other five were tested by importing their functions, so
+a hook with dozens of tests, and a test file longer than the hook itself, would not have noticed if
+the refusal it exists to emit stopped being emitted.
+
+The split, eight findings in the installer suites from the hand pass and three in the hook suites
+from the rule pass, has more than one explanation. The two suites are in different languages and
+written in different styles, only one of them had been through a hand pass before, and the two
+passes chose their lines differently. Any of the three would produce the split on its own, and
+eleven cases across two suites cannot separate them. The claim that survives is the narrow one: the
+rule pass found tests the hand pass had never touched, because the hand pass had never gone near
+that suite at all. Whether a hand pass over the hook suites would have found the same three was not
+measured.
 
 Not every survivor is a gap in the suite. Five of the thirty-five were equivalent mutants,
 alterations that change the text and not the behaviour, and no tool tells those apart from real
@@ -147,24 +163,28 @@ of several thousand lines is a sample, not a sweep; a different rule for choosin
 rule on a later tree, gives a different figure, and the figure does not compare across suites or
 across runs that chose their lines differently.
 
-One number from a run answers a question nothing else answers cheaply: is a high test count real,
-or is it one behaviour tested many ways? Count how many tests each mutation killed. A suite that
-tests one behaviour many ways has a top-heavy distribution, because one alteration to that behaviour
-takes all of them out at once. A flat distribution means the tests are pulling apart, each holding
-up its own piece. Across these ninety-nine, thirty-five mutations killed exactly one test and only
-four killed more than five, and that settled a live question about the file carrying the most tests
-in the tree without anyone reading it. The distribution counts kills only, so it says nothing about
-survivors: a flat kill distribution and thirty untested behaviours came out of the same run.
+One number from a run answers a question that is otherwise expensive to ask: is a high test count
+real, or is it one behaviour tested many ways? Count how many tests each mutation killed. A suite
+that tests one behaviour many ways has a top-heavy distribution, because one alteration to that
+behaviour takes all of them out at once. A flat distribution means the tests are pulling apart,
+each holding up its own piece. Across these ninety-nine, thirty-five mutations killed exactly one
+test and only four killed more than five, which is evidence that the count is earned. It is evidence
+about the tree as a whole and not about any one file, since the distribution isolates a file only
+when it is drawn per file, and this one was not. It counts kills only, so it says nothing about
+survivors either: a flat kill distribution and thirty untested behaviours came out of the same run.
 
 ## Provenance
 
 The four receipts behind the matcher, fixture, measurement and hanging sections come from one
-project, gathered over a single day of review work with one later follow-up. The mutation section
-comes from a second source, this repository itself, measured 2026-09-05 at commit `23d9c69`: 99
-mutations applied across 5,645 lines of production code, 64 killed, 35 surviving, 5 of the survivors
-judged equivalent by hand. The four findings review had made before that run are backlog items 24,
-26, 27 and 32 in `docs/backlog.md`. So the unfalsifiable-test shape has now been seen in two
-projects, while the comparison between reading and mutating rests on that one run.
+project, gathered over a single day of review work with one later follow-up. The hand-versus-rule
+section comes from a second source, this repository itself. The hand pass is backlog items 24, 26,
+27 and 32 in `docs/backlog.md`, which between them record eight gaps: one in item 24, four in item
+26, two in item 27, and one in item 32, whose other finding is about production code rather than a
+test and is not counted. The rule pass was measured 2026-09-05 at commit `23d9c69`: 99 mutations,
+64 killed, 35 surviving, 5 of the survivors judged equivalent by hand. So the matcher and fixture
+shapes have now been seen in two projects, which is the bar `CONTRIBUTING.md` sets for core, while
+the fifth shape and the comparison between hand-chosen and rule-chosen ablation rest on that one
+run.
 
 ## Related
 
@@ -174,6 +194,5 @@ running in that order: an ablation whose test could not fail either way returns 
 nothing. That doc's "A check that examines nothing looks exactly like a check that passes" section is
 the same family applied outside tests, where a comparison over empty input agrees perfectly, and its
 remedy of asserting the input is non-empty before comparing anything is the non-test form of naming
-the matcher's blind spot. Mutation testing, in the section above, is that doc's check with the choice
-of line taken away from the reviewer: a tool alters lines nobody suspected and counts the ones the
-suite let through.
+the matcher's blind spot. Its four steps are what a mutation tool runs once per altered line, which
+is the sense in which the rule-chosen section above calls mutation the same check.
