@@ -35,6 +35,23 @@
 // that excludes Bash, or with OS-level sandbox filesystem rules, if the agent
 // is untrusted rather than merely narrow.
 //
+// Second coverage boundary, worse than the first because it is silent and
+// total: SCRATCH_SEGMENTS matches ANY path segment, so a project checked out
+// under a directory named `scratch`, `scratchpad` or `.scratch` — say
+// `/home/x/scratch/myrepo` — puts every file in that repo in scope. decide()
+// then returns allow for every write by every agent, and nothing logs, warns,
+// or reports that the gate has stopped having opinions. It looks exactly like
+// a gate that is passing. Pre-existing and unchanged here; backlogged. If you
+// are relying on this gate, check that no ancestor of the project root is
+// named for scratch.
+//
+// And it is reachable from the payload, not only from where the checkout sits:
+// a relative filePath is resolved against the session cwd, which arrives on
+// stdin as `payload.cwd`. readSessionCwd() below type-checks that field but
+// cannot narrow it further — a cwd IS a directory path — so the honest
+// statement is that this is payload-driven with no narrower shape available,
+// and unchanged from master. Not that it is out of the payload's reach.
+//
 // Fail-open contract, matching agent-worktree-gate.ts: malformed stdin,
 // missing fields, an unreadable definition, or our own bugs all log to stderr
 // and exit 0 with no stdout, which Claude Code reads as "no opinion" and the

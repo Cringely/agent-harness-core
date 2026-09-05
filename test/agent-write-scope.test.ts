@@ -163,8 +163,6 @@ describe("readSessionCwd() — a non-string cwd falls back instead of throwing",
     expect(readSessionCwd(payload)).toBe(process.cwd());
   });
 
-  // The fallback has to be usable by both consumers, which is the point of returning a string
-  // rather than undefined.
   // Returning a string rather than undefined is the point: both consumers take it straight into
   // path resolution. The deny below uses an absolute path with no scratch segment so the outcome
   // does not depend on where this checkout happens to live.
