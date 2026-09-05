@@ -12,11 +12,13 @@
     $WhatIfPreference on its own, and the one write that is not, the chmod call, is wrapped in
     its own $PSCmdlet.ShouldProcess check so a dry run does not mark hooks executable either.
 
-    -PayloadRoot and -ClaudeHome are canonicalised and refused if they are the same directory
-    or nested inside each other, since the copy reads recursively from one while writing into
-    the other. A failure partway through the copy leaves the target in a mixed state; rather
-    than attempting to make the copy atomic, the script warns and says to re-run, since every
-    copy here is an unconditional overwrite and safe to repeat.
+    -PayloadRoot and -ClaudeHome are resolved through reparse points, 8.3 short names and a
+    \\?\ prefix, then refused if they are the same directory or nested inside each other, since
+    the copy reads recursively from one while writing into the other. -ClaudeJson is refused if
+    it sits inside -PayloadRoot for the same reason. A failure partway through the copy leaves
+    the target in a mixed state; rather than attempting to make the copy atomic, the script
+    warns and says to re-run, since every copy here is an unconditional overwrite and safe to
+    repeat.
 
     Placeholder expansion, the Linux invocation rewrite, and a settings.json merge that does not
     clobber what Claude Code writes into that file itself are all here (Tasks 9 and 10). An
@@ -137,22 +139,95 @@ $ClaudeJson  = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFrom
 # its own -OutputRoot/-ClaudeHome pair, though the shape of the damage differs there (its
 # mirror deletes each allowlisted directory before recopying, so containment would delete the
 # live account layer; here it would make the copy read from inside its own destination).
-# Compares the canonical paths resolved just above, not the raw parameter strings, so a
-# relative '.' or a trailing separator cannot slip past. This is a string comparison, not a
-# filesystem resolution: it does not see through an NTFS junction, a symlink, an 8.3 short
-# name, or a \\?\-prefixed path, so a -PayloadRoot that reaches -ClaudeHome through one of
-# those is not caught here. Filed as backlog item 19 (a shared reparse-point-aware helper in
-# AccountShared.ps1, since Export-Account.ps1 has the identical gap in its own guard) rather
-# than fixed in this pass.
 $onWindowsHost = ($PSVersionTable.PSVersion.Major -lt 6) -or $IsWindows
+
+# Backlog item 19: the comparison below is only as good as the spelling it is handed, and three
+# spellings reach the same directory without matching as strings. Reproduced on this tree before
+# the fix, not inferred: -ClaudeHome spelled as an NTFS junction whose target is
+# <PayloadRoot>\rules\nested walked straight past the old string guard, and the copy then wrote
+# its own destination back into its own source -- 22, 33, 44, 55 files over four consecutive
+# runs, one more rules\nested\ level each time, deepest path
+# rules\nested\rules\nested\rules\nested\rules\nested\skills\prose-lint. An 8.3 short component
+# and a \\?\ extended-length prefix get past it the same way, without compounding.
+#
+# Resolved by asking the filesystem what each path component really is, rather than by adding
+# more string cases. Walking one component at a time from the root is what makes an
+# INTERMEDIATE reparse point visible: measured, ResolveLinkTarget on a path below a junction
+# returns null, because only the junction itself is a link. Get-Item's FullName expands an 8.3
+# component on the way past (measured: ...\PROBE-~1\REALTA~1 comes back fully spelled), so that
+# case needs no separate handling.
+#
+# Two simpler alternatives were measured and rejected. [System.IO.Path]::GetFullPath and
+# Convert-Path both leave a junction spelled as the junction, so neither closes the case that
+# compounds. Refusing any reparse point found under either root, which backlog item 19 floats
+# as the cheaper option, would refuse the install outright on a machine whose ~/.claude is
+# itself a junction -- a layout this tool has no reason to reject, and one the operator would
+# hit as a hard failure rather than as a warning.
+#
+# Components that do not exist yet are appended verbatim: -ClaudeHome routinely does not exist
+# before the first install, and nothing can be reparsed through a directory that is not there.
+#
+# Belongs in AccountShared.ps1 as one helper both scripts call, since Export-Account.ps1's
+# -OutputRoot guard has the identical gap. Left here because that file and Export-Account.ps1
+# are owned by another agent on this burn-down; hoisting it is a follow-up, not a rewrite.
+function Resolve-ContainmentPath {
+    param([string]$Path)
+    $p = $Path
+    # Stripped rather than resolved: every API measured (GetUnresolvedProviderPathFromPSPath,
+    # Get-Item.FullName, Convert-Path, GetFullPath) carries a \\?\ prefix through verbatim, so
+    # leaving one on turns every later comparison into a mismatch. Windows-only, since a
+    # backslash is an ordinary filename character on Linux.
+    if ($onWindowsHost) {
+        if ($p.StartsWith('\\?\UNC\')) { $p = '\\' + $p.Substring(8) }
+        elseif ($p.StartsWith('\\?\')) { $p = $p.Substring(4) }
+    }
+    $p = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($p)
+
+    $root = [System.IO.Path]::GetPathRoot($p)
+    if (-not $root) { return $p.TrimEnd('\', '/') }
+    $seps = [char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    $cur = $root
+    foreach ($part in $p.Substring($root.Length).Split($seps, [System.StringSplitOptions]::RemoveEmptyEntries)) {
+        $next = Join-Path $cur $part
+        $item = Get-Item -LiteralPath $next -Force -ErrorAction SilentlyContinue
+        if (-not $item) { $cur = $next; continue }
+        $cur = $item.FullName
+        # $true, not $false: a junction can point at another junction, and the final target is
+        # the only spelling that compares. Measured safe on a DANGLING junction (target already
+        # deleted): it returns the recorded target rather than throwing, so no try/catch here.
+        $link = $item.ResolveLinkTarget($true)
+        if ($link) { $cur = $link.FullName }
+    }
+    return $cur.TrimEnd('\', '/')
+}
+
+# Resolved for the comparison only. $ClaudeHome, $PayloadRoot and $ClaudeJson keep the spelling
+# the caller passed, so every path this script prints, copies to, and writes is still the one
+# the operator named.
+$claudeHomeReal = Resolve-ContainmentPath $ClaudeHome
+$payloadRootReal = Resolve-ContainmentPath $PayloadRoot
+$claudeJsonReal = Resolve-ContainmentPath $ClaudeJson
+
 $pathComparison = if ($onWindowsHost) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
 $sep = [System.IO.Path]::DirectorySeparatorChar
-if ($PayloadRoot.Equals($ClaudeHome, $pathComparison) -or
-    $PayloadRoot.StartsWith("$ClaudeHome$sep", $pathComparison) -or
-    $ClaudeHome.StartsWith("$PayloadRoot$sep", $pathComparison)) {
-    throw "-PayloadRoot ('$PayloadRoot') and -ClaudeHome ('$ClaudeHome') must not be the same " +
+if ($payloadRootReal.Equals($claudeHomeReal, $pathComparison) -or
+    $payloadRootReal.StartsWith("$claudeHomeReal$sep", $pathComparison) -or
+    $claudeHomeReal.StartsWith("$payloadRootReal$sep", $pathComparison)) {
+    throw "-PayloadRoot ('$payloadRootReal') and -ClaudeHome ('$claudeHomeReal') must not be the same " +
         "directory or nested inside each other; the copy reads recursively from one while " +
         "writing into the other."
+}
+
+# Backlog item 20: -ClaudeJson sat outside the guard entirely, so a caller could point the
+# mcpServers merge at a file inside the payload tree and have the install write into the thing
+# it just read. Second, not folded into the check above, because the two answers differ: a
+# -ClaudeJson INSIDE -ClaudeHome is the ordinary shape every test in this suite uses and must
+# stay accepted, while the -PayloadRoot pair is symmetric. Ordered after that check so the pair
+# above still reports its own message for a call that violates both.
+if ($claudeJsonReal.Equals($payloadRootReal, $pathComparison) -or
+    $claudeJsonReal.StartsWith("$payloadRootReal$sep", $pathComparison)) {
+    throw "-ClaudeJson ('$claudeJsonReal') must not sit inside -PayloadRoot ('$payloadRootReal'); " +
+        "the mcpServers merge would write into the payload tree this install reads from."
 }
 
 # Same reasoning and same placement as Export-Account.ps1's guard: right after the defaults
@@ -240,7 +315,19 @@ function Copy-PayloadTree {
 # has already copied content. Task 10 review: that later failure used to land outside any
 # catch at all, surfacing as a bare parser or IO exception with no word that the target was
 # left half-installed. One message, one meaning, wherever the run stops.
+#
+# Backlog item 20: the mcpServers block one file over writes -ClaudeJson as well, and named only
+# $ClaudeHome when it failed, so the operator was never told which second file the run had been
+# in the middle of. The sentence added for it says the merge did not FINISH, not that the file
+# was damaged: the failure this catch was reproduced against is a Set-Content that cannot open a
+# locked claude.json, which leaves the file untouched. A truncating partial write is reachable in
+# principle and has not been observed here, so the wording has to be true either way.
+#
+# Two messages over one shared body rather than one message naming both files everywhere: the
+# tree copy and the settings merge never touch claude.json, and naming a file they did not write
+# is the same defect in the other direction.
 $mixedStateWarning = "Install failed partway through: '$ClaudeHome' is left in a mixed state, holding some content from before this run alongside whatever copied before the failure. The install did not complete. Re-run this script: every copy above is an unconditional overwrite, so re-running is idempotent and finishes what this one left unfinished."
+$mcpMixedStateWarning = $mixedStateWarning + " The mcpServers merge into '$ClaudeJson' did not finish either. That merge is add-if-missing, so the re-run repeats it without duplicating anything."
 
 # F4, final review round: Copy-Item/New-Item/Set-Content are ShouldProcess-aware and no-op under
 # -WhatIf on their own, but the status lines below are plain Write-Host built from script counters
@@ -863,7 +950,8 @@ if (Test-Path -LiteralPath $mcpSrc) {
         Write-Host "  mcpServers: $($added.Count) added$(if ($added.Count) { " ($($added -join ', '))" })$dryRun"
     }
     catch {
-        Write-Warning $mixedStateWarning
+        # Item 20: the variant that names -ClaudeJson as well. Only this block writes it.
+        Write-Warning $mcpMixedStateWarning
         throw
     }
 }

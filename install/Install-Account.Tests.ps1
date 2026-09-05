@@ -329,6 +329,91 @@ Describe "Install-Account" {
         }
     }
 
+    # Backlog item 19. The three spellings that walked past the old string-only guard, one It
+    # each so a regression in one is not masked by another failing first. The junction case is
+    # the one that compounds: reproduced before the fix at 22, 33, 44 and 55 files over four
+    # consecutive runs, gaining one more rules\nested\ level each time, because the copy's
+    # destination sat inside its own source and only the -ClaudeHome spelling hid it.
+    It "refuses a -ClaudeHome that reaches inside -PayloadRoot through an NTFS junction" {
+        if (-not $IsWindows) {
+            Set-ItResult -Skipped -Because 'NTFS junctions are a Windows filesystem feature'
+            return
+        }
+        $p = New-StandInPayload
+        # A real directory under the payload's own rules/, which is what makes the copy write
+        # into the tree it reads. The junction is only how -ClaudeHome gets spelled.
+        $realHome = Join-Path $p 'rules\nested'
+        New-Item -ItemType Directory -Path $realHome -Force | Out-Null
+        $junc = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-junc-" + [guid]::NewGuid())
+        cmd /c mklink /J "$junc" "$realHome" *>$null
+        try {
+            # Precondition, not the assertion: without it a machine that refused to create the
+            # junction would leave -ClaudeHome pointing at nothing, the guard would correctly
+            # not fire, and the failure would read as a regression in the guard.
+            Test-Path -LiteralPath $junc | Should -BeTrue -Because 'the junction is the whole fixture'
+            { & $script:install -PayloadRoot $p -ClaudeHome $junc `
+                    -ClaudeJson (Join-Path ([System.IO.Path]::GetTempPath()) "acct-cj-$([guid]::NewGuid()).json") `
+                    -SkipPreflight } |
+                Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
+        }
+        finally {
+            cmd /c rmdir "$junc" *>$null
+            Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "refuses a -ClaudeHome spelled with 8.3 short components that is the same directory as -PayloadRoot" {
+        if (-not $IsWindows) {
+            Set-ItResult -Skipped -Because '8.3 short names are a Windows filesystem feature'
+            return
+        }
+        $p = New-StandInPayload
+        try {
+            $short = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($p).ShortPath
+            if (-not $short -or $short -eq $p) {
+                # 8.3 name creation can be switched off per volume (fsutil 8dot3name). Skipped
+                # rather than passed: with no short name there is no bypass to refuse, and a
+                # green result here would claim coverage the run did not have.
+                Set-ItResult -Skipped -Because '8.3 name creation is disabled on this volume'
+                return
+            }
+            { & $script:install -PayloadRoot $p -ClaudeHome $short `
+                    -ClaudeJson (Join-Path ([System.IO.Path]::GetTempPath()) "acct-cj-$([guid]::NewGuid()).json") `
+                    -SkipPreflight } |
+                Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
+        }
+        finally { Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue }
+    }
+
+    It "refuses a \\?\-prefixed -ClaudeHome that is the same directory as -PayloadRoot" {
+        if (-not $IsWindows) {
+            Set-ItResult -Skipped -Because 'the \\?\ extended-length prefix is Windows-only'
+            return
+        }
+        $p = New-StandInPayload
+        try {
+            { & $script:install -PayloadRoot $p -ClaudeHome "\\?\$p" `
+                    -ClaudeJson (Join-Path ([System.IO.Path]::GetTempPath()) "acct-cj-$([guid]::NewGuid()).json") `
+                    -SkipPreflight } |
+                Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
+        }
+        finally { Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue }
+    }
+
+    # Backlog item 20. -ClaudeJson sat outside the containment guard, so the mcpServers merge
+    # could be pointed at a file inside the payload tree the same install reads from. The
+    # opposite shape, -ClaudeJson inside -ClaudeHome, is what every other It in this file passes
+    # and must keep working, so no separate It pins it.
+    It "refuses a -ClaudeJson that sits inside -PayloadRoot" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            { & $script:install -PayloadRoot $p -ClaudeHome $h `
+                    -ClaudeJson (Join-Path $p 'claude.json') -SkipPreflight } |
+                Should -Throw -ExpectedMessage '*-ClaudeJson*must not sit inside -PayloadRoot*'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
     # Review round 1, item 2: an explicitly empty or $null -ClaudeHome used to fall through to
     # the live $HOME/.claude default, since `if (-not $ClaudeHome)` cannot tell "the caller did
     # not ask" from "the caller asked for nothing". This never touches the live account layer:
@@ -1599,6 +1684,39 @@ Describe "Install-Account" {
                 -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight | Out-Null
 
             (Get-Item $cj).LastWriteTimeUtc | Should -Be $before
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Backlog item 20, second half. The mcpServers block writes -ClaudeJson as well as
+    # $ClaudeHome, and its catch used to emit the shared warning that names only $ClaudeHome.
+    # Set-Content can fail with the file already truncated, so the operator was told the run
+    # damaged one file when it had damaged two. Locks claude.json against writers the same way
+    # the settings.json mixed-state test locks settings.json, and needs a server the receiver
+    # lacks, since Merge-McpServer only writes when it has something to add.
+    It "names -ClaudeJson too when the mcpServers write fails, not just -ClaudeHome" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            $cj = Join-Path $h 'claude.json'
+            @{ mcpServers = @{ alpha = @{ type = 'stdio'; command = 'uvx'; args = @('alpha'); env = @{} } } } |
+                ConvertTo-Json -Depth 20 | Set-Content $cj
+            @{ mcpServers = @{ beta = @{ type = 'stdio'; command = 'uvx'; args = @('beta'); env = @{} } } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
+
+            $stream = [System.IO.File]::Open($cj, 'Open', 'Read', 'Read')
+            $threw = $false
+            $warnings = $null
+            try {
+                try {
+                    & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
+                        -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight `
+                        -WarningVariable warnings -WarningAction SilentlyContinue *>$null
+                }
+                catch { $threw = $true }
+            }
+            finally { $stream.Dispose() }
+            $threw | Should -BeTrue -Because "a failed mcpServers write must still fail the run"
+            (@($warnings) -join "`n") | Should -Match ([regex]::Escape($cj))
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
