@@ -53,9 +53,10 @@ import { join } from "node:path";
 /**
  * Paths dropped even when the allowlist above admits them. Two kinds: generated
  * or vendored trees that are not ours to restyle, and internal agent traffic —
- * memory notes, handoffs, scratch, council transcripts, and the project's own
- * .claude/ tree MINUS .claude/worktrees/, which holds full repo checkouts whose
- * README.md and docs/ are deliverables. Internal traffic is written in the
+ * memory notes, handoffs, scratch, the subagent-driven-development workspace,
+ * council transcripts, and the project's own .claude/ tree MINUS
+ * .claude/worktrees/, which holds full repo checkouts whose README.md and docs/
+ * are deliverables. Internal traffic is written in the
  * compressed register (dropped articles, fragments, bare paths and identifiers)
  * that the reader-facing prose rules flag wholesale, so linting it yields noise
  * and never a deliverable improvement.
@@ -83,6 +84,12 @@ const SKIP_PATHS = [
   /(^|\/)handoffs\//i, // session handoffs
   /(^|\/)scratchpad\//i, // agent scratch
   /(^|\/)\.scratch\//i, // agent scratch, dot variant
+  // The superpowers subagent-driven-development workspace: task briefs,
+  // implementer reports, review reports, all under .superpowers/sdd/<plan>/.
+  // The dot is load-bearing. A dotless `superpowers/` would also match a
+  // repository's committed docs/superpowers/{plans,specs}/, which are
+  // deliverables and must keep linting.
+  /(^|\/)\.superpowers\//i,
   /(^|\/)council-transcripts\//i, // council run transcripts
 ];
 
