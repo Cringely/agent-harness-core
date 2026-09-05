@@ -97,13 +97,14 @@ constant, runs the whole suite once per alteration, and reports which alteration
 through. It is not a different check but the same one, run over lines that owe nothing to anyone's
 suspicion, and that is the whole of what it adds.
 
-The one measured comparison so far is a hand pass followed by a rule pass, over a tree where only
-the installer suites had been through the first. A branch review had ablated twelve production
-lines in those suites by hand and re-read its own fixes, and it recorded eight gaps no test would
-notice: guards with nothing behind them, a default that no case ever exercised because every case
-supplied the value, an assertion that an empty output satisfies, and assertions that a neighbour
-already entails. The rule pass, ninety-nine alterations chosen by rule, confirmed the eight still
-present and found three more, all in the hook suites, which no hand pass had touched.
+The record so far is one hand pass, over the installer suites, followed by one rule pass over the
+installers and the hooks together. A branch review had ablated production lines in those suites by
+hand, a dozen of them in one sweep, and re-read its own fixes, and across four backlog items it
+recorded eight gaps no test would notice: guards with nothing behind them, a default that no case
+ever exercised because every case supplied the value, an assertion that an empty output satisfies,
+and assertions that a neighbour already entails. The four items were confirmed still open at the
+same commit, and the rule pass, ninety-nine alterations chosen by rule, found three more, all in
+the hook suites, which nobody had ablated by hand.
 
 Two of the three are shapes this doc already names, recurring in a second project. A test proving a
 list was de-duplicated asserted that the output contained `"a, b"`, with a comment above it stating
@@ -111,30 +112,29 @@ the claim; without the de-duplication the output reads `"a, a, b"`, which contai
 That is the matcher's blind spot, membership hiding a wrong count. A test named for one
 configuration source winning over the filesystem fallbacks never created a fallback for it to win
 over, and moving the winning candidate to last in the search order kept it green. That is the
-fixture set on the safe side of the guarded line, and the same shape as the unexercised default in
-the hand pass, so it recurred twice in this tree alone. The third is the new one. A table-driven
+fixture set on the safe side of the guarded line, and the same shape as the unexercised default
+among the installer findings, so it recurred twice in this tree alone. The third is the new one. A table-driven
 test built its cases by filtering the very constant under test, so deleting a value from the
 constant deleted the case that would have caught the deletion, and the suite stayed fully green. The
 remedy is to write the table out by hand, so the test owns its expected values instead of borrowing
 them from its subject.
 
-What the rule pass added was reach, and reach has a bound worth keeping in view. Thirty of the
-thirty-five surviving alterations changed real behaviour while the suite stayed green: behaviour
-with no test over it. A hand pass finds absences too, since a guard with nothing behind it is
-exactly that, but it finds them where it looked. A sample of ninety-nine alterations measures
-absence on ninety-nine lines, no more, and its worth is that nobody chose those lines. Among what
-they turned up: of the seven TypeScript hooks, one had no test file, and of the six that did, one
+What the rule pass added was lines nobody had chosen, and the addition has a bound worth keeping in
+view. Thirty of the thirty-five surviving alterations changed real behaviour while the suite stayed
+green: behaviour with no test over it. A reviewer finds absences too, since a guard with nothing
+behind it is exactly that, but finds them where the reviewer looked. A sample of ninety-nine
+alterations measures absence on exactly ninety-nine lines. Among what they turned up: of the seven TypeScript hooks, one had no test file, and of the six that did, one
 was ever run as a process by its tests. The other five were tested by importing their functions, so
 a hook with dozens of tests, and a test file longer than the hook itself, would not have noticed if
 the refusal it exists to emit stopped being emitted.
 
-The split, eight findings in the installer suites from the hand pass and three in the hook suites
-from the rule pass, has more than one explanation. The two suites are in different languages and
-written in different styles, only one of them had been through a hand pass before, and the two
-passes chose their lines differently. Any of the three would produce the split on its own, and
-eleven cases across two suites cannot separate them. The claim that survives is the narrow one: the
-rule pass found tests the hand pass had never touched, because the hand pass had never gone near
-that suite at all. Whether a hand pass over the hook suites would have found the same three was not
+The split, eight findings in the installer suites from the reviewer and three in the hook suites
+from the run, has more than one explanation. The two suites are in different languages and written
+in different styles, only one of them had been reviewed by hand before, and the two passes chose
+their lines differently. Any of the three would produce the split on its own, and eleven cases
+across two suites cannot separate them. The claim that survives is the narrow one: the run found
+tests the reviewer had never touched, because the review had never gone near that suite at all.
+Whether the same review, done by hand over the hook suites, would have found the same three was not
 measured.
 
 Not every survivor is a gap in the suite. Five of the thirty-five were equivalent mutants,
@@ -176,15 +176,15 @@ survivors either: a flat kill distribution and thirty untested behaviours came o
 ## Provenance
 
 The four receipts behind the matcher, fixture, measurement and hanging sections come from one
-project, gathered over a single day of review work with one later follow-up. The hand-versus-rule
-section comes from a second source, this repository itself. The hand pass is backlog items 24, 26,
-27 and 32 in `docs/backlog.md`, which between them record eight gaps: one in item 24, four in item
-26, two in item 27, and one in item 32, whose other finding is about production code rather than a
-test and is not counted. The rule pass was measured 2026-09-05 at commit `23d9c69`: 99 mutations,
-64 killed, 35 surviving, 5 of the survivors judged equivalent by hand. So the matcher and fixture
-shapes have now been seen in two projects, which is the bar `CONTRIBUTING.md` sets for core, while
-the fifth shape and the comparison between hand-chosen and rule-chosen ablation rest on that one
-run.
+project, gathered over a single day of review work with one later follow-up. The rule-chosen
+section comes from a second source, this repository itself. The hand-chosen ablations are backlog
+items 24, 26, 27 and 32 in `docs/backlog.md`, which between them record eight gaps: one in item 24,
+four in item 26, two in item 27, and one in item 32, whose other finding is a defect in production
+code rather than an untested correct line and is not counted. The run was measured 2026-09-05 at
+commit `23d9c69`: 99 mutations, 64 killed, 35 surviving, 5 of the survivors judged equivalent by
+hand. So the matcher and fixture shapes have now been seen in two projects, which is the bar
+`CONTRIBUTING.md` sets for core, while the fifth shape and the claim about hand-chosen and
+rule-chosen ablation rest on that one run.
 
 ## Related
 
