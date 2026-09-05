@@ -46,6 +46,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
+import { isValidAgentName } from "./agent-name";
 
 /**
  * Directory names that count as scratch. A path is in scope if any segment matches.
@@ -74,9 +75,17 @@ export function inScratch(filePath: string, cwd: string): boolean {
  * The `writeScope` value declared in an agent definition's frontmatter, or null
  * when the file is absent, unreadable, or declares nothing. Null means this
  * hook has no opinion — absence of a declaration is not a reason to block.
+ *
+ * `agentType` is payload text and becomes a path one line down, so it is checked against the
+ * agent-name allowlist first (backlog item 38). A name that fails is treated as a name with no
+ * definition — the same null this returns for an absent file — because that is already the
+ * outcome for every unrecognized type, and because a throw here would break the hook's fail-open
+ * contract. The check subsumes the empty-string guard that used to sit on this line: "" has no
+ * first character, so the allowlist rejects it, and it must be rejected — `${""}.md` names the
+ * readable file `.md`.
  */
 export function readWriteScope(agentType: string, projectDir: string): string | null {
-  if (!agentType) return null;
+  if (!isValidAgentName(agentType)) return null;
   const defPath = join(projectDir, ".claude", "agents", `${agentType}.md`);
   if (!existsSync(defPath)) return null;
   try {

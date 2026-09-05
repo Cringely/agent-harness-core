@@ -3,8 +3,11 @@
 // exported pure inScratch()/decide(), so these run with no spawn, no
 // filesystem, and no agent definitions on disk.
 
-import { describe, expect, test } from "bun:test";
-import { decide, inScratch } from "../core/claude/hooks/agent-write-scope";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { decide, inScratch, readWriteScope } from "../core/claude/hooks/agent-write-scope";
 
 const CWD = "/home/runner/project";
 
@@ -94,5 +97,51 @@ describe("decide() — only scratch-scoped agents are gated", () => {
 
   test("missing file_path allows rather than crashing — fail open", () => {
     expect(decide("scratch", undefined, CWD)).toEqual({ action: "allow" });
+  });
+});
+
+// --- readWriteScope() — item 38: agent_type is payload text, not a path fragment ---------------
+//
+// The hook interpolates agent_type straight into `.claude/agents/<type>.md`. These run against a
+// real fixture tree because the escape only shows up against real files: every planted definition
+// below declares `writeScope: scratch`, so an unguarded read RESOLVES it and returns "scratch",
+// while a guarded one returns null — the same answer a missing definition gives, which is the
+// behaviour this fix must not regress.
+
+const scopeRoot = mkdtempSync(join(tmpdir(), "write-scope-agent-type-"));
+const scopeProjectDir = join(scopeRoot, "project");
+const scopeAgentsDir = join(scopeProjectDir, ".claude", "agents");
+mkdirSync(join(scopeAgentsDir, "sub"), { recursive: true });
+mkdirSync(join(scopeRoot, "outside"), { recursive: true });
+
+function writeScopeDef(absPath: string) {
+  writeFileSync(absPath, ["---", "name: planted", "writeScope: scratch", "---", "", "Body."].join("\n"));
+}
+
+writeScopeDef(join(scopeAgentsDir, "valid-agent.md"));
+// The file an empty agent_type resolves to once `<type>.md` is interpolated.
+writeScopeDef(join(scopeAgentsDir, ".md"));
+// Reached by a separator-bearing name, and by an absolute one: node's join() folds a leading
+// separator instead of restarting from the filesystem root, so `/sub/nested` lands here too.
+writeScopeDef(join(scopeAgentsDir, "sub", "nested.md"));
+// Outside the agents directory entirely — only a traversal reaches this one.
+writeScopeDef(join(scopeRoot, "outside", "escaped.md"));
+
+afterAll(() => {
+  rmSync(scopeRoot, { recursive: true, force: true });
+});
+
+describe("readWriteScope() — item 38: only a filename-safe agent name resolves a definition", () => {
+  test("a normal agent name still resolves its definition", () => {
+    expect(readWriteScope("valid-agent", scopeProjectDir)).toBe("scratch");
+  });
+
+  test.each([
+    ["traversal", "../../../outside/escaped"],
+    ["absolute path", "/sub/nested"],
+    ["path separator", "sub/nested"],
+    ["empty string", ""],
+  ])("%s in agent_type reads nothing: %p", (_label, agentType) => {
+    expect(readWriteScope(agentType, scopeProjectDir)).toBeNull();
   });
 });
