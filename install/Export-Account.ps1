@@ -737,9 +737,16 @@ if ($WslHome -and -not $WhatIfPreference) {
     # scan -- it is the BOUNDARY that was missing, not the mechanism.
     #
     # Same idiom $script:PosixHomeShape already uses on its own /root arm, so the two gates agree
-    # on where a POSIX home ends: the next character must be a separator, a quote, whitespace, or
-    # nothing at all. `/root/x` and a bare `/root` at end of line still fire; `/root,` and
-    # `/rootkit` do not.
+    # on where a POSIX home ends: the next character must be a separator, a quote, whitespace,
+    # a closing bracket or backtick, or nothing at all. `/root/x` and a bare `/root` at end of
+    # line still fire; `/root,` and `/rootkit` do not.
+    #
+    # Review round 4: the boundary as first shipped closed on `,`, `;`, `:` and friends but not on
+    # `)`, `]`, a backtick, or `>` -- so `(/root)`, `[/root]`, `` `/root` `` and a markdown link
+    # `[link](/root)` all read as clean. A code span or a parenthetical is exactly how a bare home
+    # path gets written into a rules or skills file, so the negated class now also excludes those
+    # four. Sentence-final `/root.` is still a miss and is left one: a trailing `.` is not locally
+    # distinguishable from the trailing `,` the boundary exists to ignore.
     #
     # Rejected \b, the obvious smaller boundary: `t` is a word character and `,` is not, so \b
     # matches at exactly the position that has to stop matching and the OWASP line still takes the
@@ -748,7 +755,14 @@ if ($WslHome -and -not $WhatIfPreference) {
     #
     # -cmatch and not -match: POSIX paths are case-sensitive and .Contains was ordinal, so the
     # case-insensitive default would widen the gate past the boundary this is here to add.
-    $wslHomePattern = [regex]::Escape($WslHome) + '(?![^/"''\s])'
+    #
+    # TrimEnd('/'): -WslHome is a public parameter and nothing upstream can put a trailing slash on
+    # the value this script resolves at :150-152, but the branch's own tests pass one explicitly.
+    # A trailing slash makes the escaped literal end in '/', so the boundary after it demands a
+    # second separator that a real path never has ('/home/user//launcher.sh' does not exist) and
+    # the gate goes from fail-closed to a near-total no-op on every copied file, with no error.
+    $wslHomeLiteral = $WslHome.TrimEnd('/')
+    $wslHomePattern = [regex]::Escape($wslHomeLiteral) + '(?![^/"''\s)\]`>])'
     # One buffer for the whole scan, not one per file. IndexOf below is bounded by $read, so bytes
     # left over from a longer previous file are never looked at.
     $head = [byte[]]::new(8000)
