@@ -12,11 +12,13 @@
     $WhatIfPreference on its own, and the one write that is not, the chmod call, is wrapped in
     its own $PSCmdlet.ShouldProcess check so a dry run does not mark hooks executable either.
 
-    -PayloadRoot and -ClaudeHome are canonicalised and refused if they are the same directory
-    or nested inside each other, since the copy reads recursively from one while writing into
-    the other. A failure partway through the copy leaves the target in a mixed state; rather
-    than attempting to make the copy atomic, the script warns and says to re-run, since every
-    copy here is an unconditional overwrite and safe to repeat.
+    -PayloadRoot and -ClaudeHome are resolved through reparse points, 8.3 short names and a
+    \\?\ prefix, then refused if they are the same directory or nested inside each other, since
+    the copy reads recursively from one while writing into the other. -ClaudeJson is refused if
+    it sits inside -PayloadRoot for the same reason. A failure partway through the copy leaves
+    the target in a mixed state; rather than attempting to make the copy atomic, the script
+    warns and says to re-run, since every copy here is an unconditional overwrite and safe to
+    repeat.
 
     Placeholder expansion, the Linux invocation rewrite, and a settings.json merge that does not
     clobber what Claude Code writes into that file itself are all here (Tasks 9 and 10). An
@@ -137,22 +139,51 @@ $ClaudeJson  = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFrom
 # its own -OutputRoot/-ClaudeHome pair, though the shape of the damage differs there (its
 # mirror deletes each allowlisted directory before recopying, so containment would delete the
 # live account layer; here it would make the copy read from inside its own destination).
-# Compares the canonical paths resolved just above, not the raw parameter strings, so a
-# relative '.' or a trailing separator cannot slip past. This is a string comparison, not a
-# filesystem resolution: it does not see through an NTFS junction, a symlink, an 8.3 short
-# name, or a \\?\-prefixed path, so a -PayloadRoot that reaches -ClaudeHome through one of
-# those is not caught here. Filed as backlog item 19 (a shared reparse-point-aware helper in
-# AccountShared.ps1, since Export-Account.ps1 has the identical gap in its own guard) rather
-# than fixed in this pass.
 $onWindowsHost = ($PSVersionTable.PSVersion.Major -lt 6) -or $IsWindows
+
+# Backlog item 19: the comparison below is only as good as the spelling it is handed, and three
+# spellings reach the same directory without matching as strings -- an NTFS junction, an 8.3 short
+# component, and a \\?\ extended-length prefix. Resolve-ContainmentPath canonicalises each one.
+# It lives in AccountShared.ps1, not here, because Export-Account.ps1's -OutputRoot guard has the
+# identical gap and a copy in either script would leave the other comparing raw strings; the
+# reproduction that motivates it, the alternatives measured and rejected, and the decision on a
+# reparse point found inside one of the trees are all recorded with the function.
+#
+# -OnWindows is passed rather than left to the function to find, so the guard cannot start
+# depending on where a caller happens to assign its platform flag. See the parameter's own
+# comment in AccountShared.ps1 for the failure that shape produces.
+#
+# Resolved for the comparison only. $ClaudeHome, $PayloadRoot and $ClaudeJson keep the spelling
+# the caller passed, so every path this script prints as progress, copies to, and writes is still
+# the one the operator named. The two throws below are the deliberate exception and name both
+# spellings: an operator who typed a junction, an 8.3 name or a \\?\ prefix needs their own
+# spelling back to recognise which argument was refused, and needs the directory it resolves to
+# in order to see why it was.
+$claudeHomeReal = Resolve-ContainmentPath -Path $ClaudeHome -OnWindows $onWindowsHost
+$payloadRootReal = Resolve-ContainmentPath -Path $PayloadRoot -OnWindows $onWindowsHost
+$claudeJsonReal = Resolve-ContainmentPath -Path $ClaudeJson -OnWindows $onWindowsHost
+
 $pathComparison = if ($onWindowsHost) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
 $sep = [System.IO.Path]::DirectorySeparatorChar
-if ($PayloadRoot.Equals($ClaudeHome, $pathComparison) -or
-    $PayloadRoot.StartsWith("$ClaudeHome$sep", $pathComparison) -or
-    $ClaudeHome.StartsWith("$PayloadRoot$sep", $pathComparison)) {
+if ($payloadRootReal.Equals($claudeHomeReal, $pathComparison) -or
+    $payloadRootReal.StartsWith("$claudeHomeReal$sep", $pathComparison) -or
+    $claudeHomeReal.StartsWith("$payloadRootReal$sep", $pathComparison)) {
     throw "-PayloadRoot ('$PayloadRoot') and -ClaudeHome ('$ClaudeHome') must not be the same " +
         "directory or nested inside each other; the copy reads recursively from one while " +
-        "writing into the other."
+        "writing into the other. They resolve to '$payloadRootReal' and '$claudeHomeReal'."
+}
+
+# Backlog item 20: -ClaudeJson sat outside the guard entirely, so a caller could point the
+# mcpServers merge at a file inside the payload tree and have the install write into the thing
+# it just read. Second, not folded into the check above, because the two answers differ: a
+# -ClaudeJson INSIDE -ClaudeHome is the ordinary shape every test in this suite uses and must
+# stay accepted, while the -PayloadRoot pair is symmetric. Ordered after that check so the pair
+# above still reports its own message for a call that violates both.
+if ($claudeJsonReal.Equals($payloadRootReal, $pathComparison) -or
+    $claudeJsonReal.StartsWith("$payloadRootReal$sep", $pathComparison)) {
+    throw "-ClaudeJson ('$ClaudeJson') must not sit inside -PayloadRoot ('$PayloadRoot'); " +
+        "the mcpServers merge would write into the payload tree this install reads from. " +
+        "They resolve to '$claudeJsonReal' and '$payloadRootReal'."
 }
 
 # Same reasoning and same placement as Export-Account.ps1's guard: right after the defaults
@@ -240,7 +271,19 @@ function Copy-PayloadTree {
 # has already copied content. Task 10 review: that later failure used to land outside any
 # catch at all, surfacing as a bare parser or IO exception with no word that the target was
 # left half-installed. One message, one meaning, wherever the run stops.
+#
+# Backlog item 20: the mcpServers block one file over writes -ClaudeJson as well, and named only
+# $ClaudeHome when it failed, so the operator was never told which second file the run had been
+# in the middle of. The sentence added for it says the merge did not FINISH, not that the file
+# was damaged: the failure this catch was reproduced against is a Set-Content that cannot open a
+# locked claude.json, which leaves the file untouched. A truncating partial write is reachable in
+# principle and has not been observed here, so the wording has to be true either way.
+#
+# Two messages over one shared body rather than one message naming both files everywhere: the
+# tree copy and the settings merge never touch claude.json, and naming a file they did not write
+# is the same defect in the other direction.
 $mixedStateWarning = "Install failed partway through: '$ClaudeHome' is left in a mixed state, holding some content from before this run alongside whatever copied before the failure. The install did not complete. Re-run this script: every copy above is an unconditional overwrite, so re-running is idempotent and finishes what this one left unfinished."
+$mcpMixedStateWarning = $mixedStateWarning + " The mcpServers merge into '$ClaudeJson' did not finish either. That merge is add-if-missing, so the re-run repeats it without duplicating anything."
 
 # F4, final review round: Copy-Item/New-Item/Set-Content are ShouldProcess-aware and no-op under
 # -WhatIf on their own, but the status lines below are plain Write-Host built from script counters
@@ -399,10 +442,16 @@ foreach ($rel in $script:AccountTemplatedFiles.Keys) {
 }
 
 # --- settings ----------------------------------------------------------------
-# Convert-HookCommand does the {{CLAUDE_HOME}} expansion and, on Linux only, the
-# "& '...ps1'" to "pwsh -NoProfile -File" rewrite in one pass. It never touches the shell key,
-# so that removal is new code below. {{NPM_GLOBAL}} is not under {{CLAUDE_HOME}} and is left
-# alone by that function, so it takes the plain token replace.
+# Expand-AccountToken owns every token, including {{CLAUDE_HOME}}, on every path in this file.
+# Convert-HookCommand owns the Linux-only "& '...ps1'" to "pwsh -NoProfile -File" rewrite and
+# nothing else. It never touches the shell key, so that removal is new code below.
+#
+# Backlog item 21: both functions used to expand {{CLAUDE_HOME}} here, because Convert-HookCommand
+# was called first with '{{CLAUDE_HOME}}' as its $OldHome and Expand-AccountToken ran over the
+# result. Either alone produced a correct command, so no assertion on an expanded hook command
+# could be reddened by breaking one of them -- a regression confined to either would have shipped
+# with the suite green. Split rather than pinned: a test naming which function did the work would
+# assert an implementation detail. See the call site below for how the split is enforced.
 function Convert-SettingsForTarget {
     param(
         [pscustomobject]$Settings,
@@ -444,8 +493,23 @@ function Convert-SettingsForTarget {
                 # throws rather than creating one, so leave the entry alone instead of
                 # crashing on it.
                 if (-not $hook.PSObject.Properties['command']) { continue }
-                $hook.command = Convert-HookCommand $hook.command '{{CLAUDE_HOME}}' $homeSlashed $TargetIsWindows
+                # Item 21, the enforced half of the split described at the top of this section.
+                # Expansion runs FIRST, so {{CLAUDE_HOME}} is already gone by the time
+                # Convert-HookCommand sees the string, and $homeSlashed is passed as both its
+                # $OldHome and its $NewHome so its own home substitution has nothing left to
+                # rewrite. Handing the token back as $OldHome would have restored the overlap by
+                # a different route: breaking Expand-AccountToken would then still leave a
+                # correct command, which is the blind spot this change exists to close.
+                #
+                # Not called at all when preparing a Windows target: with the token gone its
+                # Windows branch is a self-to-self replace, and the pwsh rewrite is Linux-only.
+                # Not inlined either -- the three lines that do the rewrite live in
+                # Restore-ClaudeProject.ps1:245-247, and AccountShared.ps1's header says why a
+                # second copy of a lifted function is the thing being avoided.
                 $hook.command = Expand-AccountToken -Text $hook.command -Tokens $Tokens
+                if (-not $TargetIsWindows) {
+                    $hook.command = Convert-HookCommand $hook.command $homeSlashed $homeSlashed $false
+                }
                 if (-not $TargetIsWindows -and $hook.PSObject.Properties['shell']) {
                     # On Linux the command string goes to /bin/sh. Leaving the key would send
                     # the rewritten pwsh command back to a PowerShell host that is not there.
@@ -863,7 +927,8 @@ if (Test-Path -LiteralPath $mcpSrc) {
         Write-Host "  mcpServers: $($added.Count) added$(if ($added.Count) { " ($($added -join ', '))" })$dryRun"
     }
     catch {
-        Write-Warning $mixedStateWarning
+        # Item 20: the variant that names -ClaudeJson as well. Only this block writes it.
+        Write-Warning $mcpMixedStateWarning
         throw
     }
 }
