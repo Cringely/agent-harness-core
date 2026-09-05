@@ -3,6 +3,10 @@ Describe "Install-Account" {
     BeforeAll {
         $script:install = "$PSScriptRoot/Install-Account.ps1"
         $script:repoRoot = Split-Path $PSScriptRoot -Parent
+        # Resolve-ContainmentPath lives here now, so Export-Account.ps1 can call the same
+        # function. One It below dot-sources this file to call it directly; every other
+        # containment test still reaches it through the installer.
+        $script:shared = "$PSScriptRoot/AccountShared.ps1"
 
         # A payload shaped like account/claude, planted rather than exported, so these tests
         # never depend on Task 14 having run and never read the operator's live ~/.claude.
@@ -398,6 +402,97 @@ Describe "Install-Account" {
                 Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
         }
         finally { Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue }
+    }
+
+    # The three Its above are all Windows-only, so on a Linux runner the only thing left
+    # exercising Resolve-ContainmentPath was the -ClaudeJson It below, which passes whether or not
+    # link resolution works. Ablating the ResolveLinkTarget line would have left a Linux suite
+    # green -- the unfalsifiable-guard shape items 26 and 27 exist to remove. ResolveLinkTarget
+    # resolves POSIX symlinks too, and New-Item makes one without a filesystem-specific helper, so
+    # this is the junction test's Linux-runnable sibling. It also runs on a Windows host that
+    # allows symlink creation; where it does not, the junction It above is the Windows coverage
+    # and this one skips rather than reporting a pass it did not earn.
+    It "refuses a -ClaudeHome that reaches inside -PayloadRoot through a symlink" {
+        $p = New-StandInPayload
+        $realHome = Join-Path $p 'rules/nested'
+        New-Item -ItemType Directory -Path $realHome -Force | Out-Null
+        $link = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-symlink-" + [guid]::NewGuid())
+        try {
+            try { New-Item -ItemType SymbolicLink -Path $link -Target $realHome -ErrorAction Stop | Out-Null }
+            catch {
+                $link = $null
+                Set-ItResult -Skipped -Because "this host will not create a directory symlink: $($_.Exception.Message)"
+                return
+            }
+            { & $script:install -PayloadRoot $p -ClaudeHome $link `
+                    -ClaudeJson (Join-Path ([System.IO.Path]::GetTempPath()) "acct-cj-$([guid]::NewGuid()).json") `
+                    -SkipPreflight } |
+                Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
+        }
+        finally {
+            # Directory.Delete removes the reparse point and never the target. Remove-Item on a
+            # directory symlink is the shape that has historically prompted about children
+            # instead, and a prompt in a finally block hangs the whole run.
+            if ($link) { try { [System.IO.Directory]::Delete($link) } catch { } }
+            Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue
+        }
+    }
+
+    # The refusal message used to interpolate only the resolved spellings, so an operator who
+    # typed a junction got an error naming a directory they never typed and no way to tell which
+    # argument was refused. Both spellings now appear. Needs a fixture where the two differ, and
+    # the cheapest such spelling is platform-specific: a \\?\ prefix on Windows, which needs no
+    # privilege, and a symlink everywhere else.
+    It "names the -ClaudeHome spelling the caller passed, not only the directory it resolves to" {
+        $p = New-StandInPayload
+        $link = $null
+        try {
+            if (($PSVersionTable.PSVersion.Major -lt 6) -or $IsWindows) {
+                $spelling = "\\?\$p"
+            }
+            else {
+                $link = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-symlink-msg-" + [guid]::NewGuid())
+                try { New-Item -ItemType SymbolicLink -Path $link -Target $p -ErrorAction Stop | Out-Null }
+                catch {
+                    $link = $null
+                    Set-ItResult -Skipped -Because "this host will not create a directory symlink: $($_.Exception.Message)"
+                    return
+                }
+                $spelling = $link
+            }
+            # Escaped: a \\?\ prefix carries a literal '?', which -ExpectedMessage would otherwise
+            # read as a single-character wildcard and match a spelling this test means to exclude.
+            $wanted = [System.Management.Automation.WildcardPattern]::Escape("-ClaudeHome ('$spelling')")
+            { & $script:install -PayloadRoot $p -ClaudeHome $spelling `
+                    -ClaudeJson (Join-Path ([System.IO.Path]::GetTempPath()) "acct-cj-$([guid]::NewGuid()).json") `
+                    -SkipPreflight } |
+                Should -Throw -ExpectedMessage "*$wanted*"
+        }
+        finally {
+            if ($link) { try { [System.IO.Directory]::Delete($link) } catch { } }
+            Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue
+        }
+    }
+
+    # Resolve-ContainmentPath is shared now, so the platform flag has to be an argument rather
+    # than a variable the function finds in whatever scope dot-sourced it. Nothing under install/
+    # sets Set-StrictMode, so an ambient read of an unassigned $onWindowsHost is $null with no
+    # error, and Export-Account.ps1 resolves its paths before it assigns that flag: the \\?\ strip
+    # would be skipped there silently while every test above still passed, since Install-Account's
+    # own ordering happens to be safe. Pinned by putting a $false $onWindowsHost in scope and
+    # passing -OnWindows $true; only a function reading its parameter strips the prefix. Called
+    # directly rather than through the installer because the installer cannot discriminate the two.
+    It 'takes the platform from -OnWindows, not from an ambient $onWindowsHost' {
+        # Prefixed onto the platform's own temp path rather than a literal C:\ one: on Linux a
+        # drive-qualified path sends GetUnresolvedProviderPathFromPSPath looking for a PSDrive
+        # named C, and the test would fail there for a reason that has nothing to do with the
+        # parameter. Nothing is created at the path; only the spelling matters.
+        $probe = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-onwindows-" + [guid]::NewGuid())
+        $onWindowsHost = $false
+        . $script:shared
+        $resolved = Resolve-ContainmentPath -Path "\\?\$probe" -OnWindows $true
+        $resolved.Contains('\\?\') |
+            Should -BeFalse -Because "the -OnWindows argument decides whether the prefix is stripped"
     }
 
     # Backlog item 20. -ClaudeJson sat outside the containment guard, so the mcpServers merge
