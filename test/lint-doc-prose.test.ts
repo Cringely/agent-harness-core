@@ -5,7 +5,7 @@
 // non-doc files do not.
 
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { planLint, resolveValeConfig, shouldLint } from "../core/claude/hooks/lint-doc-prose";
@@ -82,6 +82,19 @@ describe("shouldLint() — internal agent traffic is exempt", () => {
   test("council-transcripts/ nested under docs/ does not lint", () => {
     expect(shouldLint("docs/council-transcripts/2026-08-01-scope.md")).toBe(false);
   });
+
+  // The subagent-driven-development workspace. Real SDD files sit flat at
+  // .superpowers/sdd/<plan>/<name>.md and fail the living-doc allowlist on
+  // their own, so a case built on one would pass vacuously and prove nothing
+  // about the skip list. Both cases below satisfy the allowlist — one on the
+  // README arm, one on the docs/ arm — and are dropped by SKIP_PATHS only.
+  test(".superpowers/ README does not lint", () => {
+    expect(shouldLint(".superpowers/sdd/2026-09-03-account-layer/README.md")).toBe(false);
+  });
+
+  test(".superpowers/ nested under docs/ does not lint", () => {
+    expect(shouldLint(".superpowers/sdd/2026-09-03-account-layer/docs/notes.md")).toBe(false);
+  });
 });
 
 // A worktree is the one thing under .claude/ that is NOT internal traffic: the
@@ -134,6 +147,14 @@ describe("shouldLint() — the exemption is segment-anchored, not substring", ()
 
   test("a package README below the root still lints", () => {
     expect(shouldLint("packages/foo/README.md")).toBe(true);
+  });
+
+  // The dot in .superpowers is what separates the two. This repository commits
+  // docs/superpowers/{plans,specs}/ — plans and specs a person reads — while
+  // the SDD workspace it must not be confused with is .superpowers/ at the
+  // repo root. A dotless token silences the first along with the second.
+  test("docs/superpowers/ plans still lint", () => {
+    expect(shouldLint("docs/superpowers/plans/2026-09-03-account-layer-portability.md")).toBe(true);
   });
 });
 
@@ -199,5 +220,110 @@ describe("resolveValeConfig() — resolution order", () => {
     } finally {
       rmSync(empty, { recursive: true, force: true });
     }
+  });
+});
+
+// writing-style.md row 5 names three mechanisms for one exemption — this hook
+// on write, core/claude/hooks/pre-commit on commit, and the account layer's
+// Lint-DocumentProse.ps1 — and states that a change to one is a change to the
+// others. Nothing checked that: the segment set is prose in a rules file and
+// three unrelated literal lists in code. Backlog items 17 and 22 are the same
+// missing segment reported twice, weeks apart, which is what an unenforced
+// contract looks like.
+//
+// It sits in this file rather than a fourth test file so the whole prose-lint
+// exemption is asserted in one place.
+//
+// Rejected as the simpler alternative: asserting each segment NAME appears
+// somewhere in each file. All three files name every segment in their own
+// comments, so that version stays green against a mechanism whose matcher was
+// deleted and only the comment survived. These assertions run against parsed
+// matcher forms, which no comment can satisfy.
+const AGENT_TRAFFIC_SEGMENTS = [
+  "memory",
+  "handoffs",
+  "scratchpad",
+  ".scratch",
+  ".superpowers",
+  "council-transcripts",
+  ".claude",
+];
+
+const REPO_ROOT = join(import.meta.dir, "..");
+
+/** Text between `open` and the first `close` after it. Throws rather than
+ * returning "" when either is absent, so a renamed list fails loudly instead of
+ * silently emptying every assertion below. */
+function region(text: string, open: string, close: string): string {
+  const start = text.indexOf(open);
+  if (start < 0) throw new Error(`region opener not found: ${JSON.stringify(open)}`);
+  const end = text.indexOf(close, start + open.length);
+  if (end < 0) throw new Error(`region closer not found: ${JSON.stringify(close)}`);
+  return text.slice(start + open.length, end);
+}
+
+function readRepoFile(...parts: string[]): string {
+  return readFileSync(join(REPO_ROOT, ...parts), "utf8");
+}
+
+/** The regex SOURCES in lint-doc-prose.ts's SKIP_PATHS, e.g. "(^|\\/)memory\\/".
+ * Comment-only lines fail the trailing "/i," and drop out. */
+function tsSkipSources(): string[] {
+  const body = region(
+    readRepoFile("core", "claude", "hooks", "lint-doc-prose.ts"),
+    "const SKIP_PATHS = [",
+    "\n];",
+  );
+  return body
+    .split(/\r?\n/)
+    .map((line) => /^\/(.+)\/i,(?:\s*\/\/.*)?$/.exec(line.trim())?.[1])
+    .filter((src): src is string => typeof src === "string");
+}
+
+/** Every glob in pre-commit's is_internal_traffic() case arms, split on "|". */
+function preCommitArms(): string[] {
+  const body = region(
+    readRepoFile("core", "claude", "hooks", "pre-commit"),
+    "is_internal_traffic() {",
+    "\n}",
+  );
+  const arms: string[] = [];
+  for (const line of body.split(/\r?\n/)) {
+    const match = /^\s*(\S.*?)\)\s*return 0\s*;;\s*$/.exec(line);
+    if (match) arms.push(...match[1].split("|").map((a) => a.trim()));
+  }
+  return arms;
+}
+
+/** The quoted tokens in the account hook's $skip array, e.g. "/memory/". */
+function accountSkipTokens(): string[] {
+  const body = region(
+    readRepoFile("account", "claude", "hooks", "Lint-DocumentProse.ps1"),
+    "$skip = @(",
+    "\n)",
+  );
+  return [...body.matchAll(/'([^']*)'/g)].map((m) => m[1]);
+}
+
+// A parser that silently returned [] would make every case below pass
+// vacuously, so none of them is written to tolerate one: region() throws when
+// its anchor is gone, .some() over an empty array is false, and toContain on an
+// empty array fails. A separate "the lists parsed to something" case was
+// written and cut — no ablation reddens it without reddening these too, which
+// makes it padding rather than a guard.
+describe("prose-lint exemption — the three mechanisms carry one segment set", () => {
+  test.each(AGENT_TRAFFIC_SEGMENTS)("lint-doc-prose.ts matches %s/ as a segment", (segment) => {
+    const wanted = `(^|\\/)${segment.replace(/\./g, "\\.")}\\/`;
+    expect(tsSkipSources().some((src) => src.startsWith(wanted))).toBe(true);
+  });
+
+  test.each(AGENT_TRAFFIC_SEGMENTS)("pre-commit matches %s/ at root and nested", (segment) => {
+    const arms = preCommitArms();
+    expect(arms).toContain(`${segment}/*`);
+    expect(arms).toContain(`*/${segment}/*`);
+  });
+
+  test.each(AGENT_TRAFFIC_SEGMENTS)("Lint-DocumentProse.ps1 skips /%s/", (segment) => {
+    expect(accountSkipTokens()).toContain(`/${segment}/`);
   });
 });
