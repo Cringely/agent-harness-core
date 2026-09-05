@@ -934,4 +934,37 @@ Describe "Install-Harness" {
         { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Quiet } |
             Should -Throw -ExpectedMessage '*-Quiet applies to -Audit only*'
     }
+
+    # bun's absence has to be produced rather than assumed: this workstation has bun on PATH,
+    # so without narrowing PATH the assertion would pass or fail on whatever the runner happens
+    # to have installed. Narrowed rather than emptied, which is the shape
+    # Install-Account.Tests.ps1 uses for the same job: the installer runs two native commands of
+    # its own, git in the core.hooksPath block and chmod on the pre-commit hook, and a
+    # CommandNotFoundException from either is terminating under its
+    # $ErrorActionPreference = 'Stop', so an emptied PATH would fail this test on a crash rather
+    # than on the missing warning. Their directories are resolved rather than named, because a
+    # runner's layout is not this workstation's: the two share /usr/bin on a merged-usr Linux
+    # box and sit nowhere near each other here.
+    It "warns that the gates stop enforcing when bun is not on PATH, and installs anyway" {
+        $keptDirs = @('git', 'chmod') |
+            ForEach-Object { Get-Command $_ -ErrorAction SilentlyContinue } |
+            Where-Object { $_ } |
+            ForEach-Object { Split-Path -Parent $_.Source }
+        $savedPath = $env:PATH
+        $out = $null
+        try {
+            $env:PATH = @($keptDirs | Select-Object -Unique) -join [System.IO.Path]::PathSeparator
+            $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 |
+                Out-String -Width 500
+        }
+        finally { $env:PATH = $savedPath }
+
+        $out | Should -Match 'bun is not on PATH'
+        # The consequence, not just the absence. A warning naming the tool and not what its
+        # absence costs reads as advice, and the cost is the whole reason the probe exists.
+        $out | Should -Match 'gates stop enforcing'
+        # Warn, never gate: a project may legitimately install this layer before installing
+        # bun, and the hooks and registrations are correct on disk either way.
+        Test-Path "$script:target/.claude/hooks/agent-worktree-gate.ts" | Should -BeTrue
+    }
 }
