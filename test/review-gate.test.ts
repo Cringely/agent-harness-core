@@ -210,6 +210,64 @@ describe("parseGitCommitInvocation() — F-R3-1: --dry-run exemption reverted", 
   });
 });
 
+// Item 37: GIT_COMMIT_RE used to hold three starred alternatives that overlap on the same input
+// token while consuming different numbers of tokens — `\s+-C\s+(\S+)` and `\s+-c\s+\S+` each
+// swallow the next token as an argument, while the generic flag alternative matched `-C`/`-c`
+// alone. A run of n flag-shaped tokens therefore tiled Fibonacci(n+1) ways and the engine walked
+// every tiling once the trailing `\s+commit` failed. Measured on this machine before the fix,
+// through parseGitCommitInvocation on bun: 92.7 ms at n=32, 640.3 ms at n=36, 1878.3 ms at n=40.
+// After: under 1 ms. The budget below is ~19x under the pre-fix number and ~100x over the
+// post-fix one, so it discriminates without being a stopwatch on a busy machine.
+describe("parseGitCommitInvocation() — item 37: no exponential backtracking on flag-shaped tokens", () => {
+  const REDOS_BUDGET_MS = 100;
+
+  /** Best of `runs` timings, stopping early once one run comes in under budget. Best-of, not mean:
+   * a single scheduling or GC hiccup inflates a run, but no hiccup makes an exponential walk fast,
+   * so the minimum is the noise-robust statistic here. */
+  function fastestMs(fn: () => void, runs = 3): number {
+    let best = Infinity;
+    for (let i = 0; i < runs; i++) {
+      const t0 = performance.now();
+      fn();
+      best = Math.min(best, performance.now() - t0);
+      if (best < REDOS_BUDGET_MS) break;
+    }
+    return best;
+  }
+
+  test(
+    "125 characters of `git -C -C -C … x` parses in linear time, not Fibonacci-many tilings",
+    () => {
+      const attack = `git${" -C".repeat(40)} x`;
+      expect(attack.length).toBe(125);
+      parseGitCommitInvocation("git commit"); // warm the regex/JIT before timing
+      const elapsed = fastestMs(() => parseGitCommitInvocation(attack));
+      expect(parseGitCommitInvocation(attack).isCommit).toBe(false);
+      expect(elapsed).toBeLessThan(REDOS_BUDGET_MS);
+    },
+    30_000,
+  );
+
+  test("`-C` always consumes its argument, so `git -C commit` is a chdir with no subcommand", () => {
+    expect(parseGitCommitInvocation("git -C commit").isCommit).toBe(false);
+    expect(parseGitCommitInvocation("git -C commit commit").isCommit).toBe(true);
+    expect(parseGitCommitInvocation("git -C commit commit").repoPath).toBe("commit");
+  });
+
+  test("`-c` always consumes its argument, so `git -c commit` is not a commit invocation", () => {
+    expect(parseGitCommitInvocation("git -c commit").isCommit).toBe(false);
+  });
+
+  // Discriminates this fix from the rejected alternative of narrowing `-C`'s argument to `(?!-)`:
+  // real git takes the next argv element as the directory whatever it looks like, and the gate
+  // needs that path to list the right repo's staged files.
+  test("a flag-shaped `-C` argument is still captured as the repo path", () => {
+    const result = parseGitCommitInvocation("git -C --odd-dir-name commit -m x");
+    expect(result.isCommit).toBe(true);
+    expect(result.repoPath).toBe("--odd-dir-name");
+  });
+});
+
 // --- findUnreviewedFiles --------------------------------------------------------------------------
 
 describe("findUnreviewedFiles() — pure, fabricated transcripts", () => {
