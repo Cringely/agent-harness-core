@@ -113,20 +113,21 @@ That is the matcher's blind spot, membership hiding a wrong count. A test named 
 configuration source winning over the filesystem fallbacks never created a fallback for it to win
 over, and moving the winning candidate to last in the search order kept it green. That is the
 fixture set on the safe side of the guarded line, and the same shape as the unexercised default
-among the installer findings, so it recurred twice in this tree alone. The third is the new one. A table-driven
-test built its cases by filtering the very constant under test, so deleting a value from the
-constant deleted the case that would have caught the deletion, and the suite stayed fully green. The
-remedy is to write the table out by hand, so the test owns its expected values instead of borrowing
-them from its subject.
+among the installer findings, so it recurred twice in this tree alone. The third is the new one. A
+table-driven test built its cases by filtering the very constant under test, so deleting a value
+from the constant deleted the case that would have caught the deletion, and the suite stayed fully
+green. The remedy is to write the table out by hand, so the test owns its expected values instead
+of borrowing them from its subject.
 
 What the rule pass added was lines nobody had chosen, and the addition has a bound worth keeping in
 view. Thirty of the thirty-five surviving alterations changed real behaviour while the suite stayed
 green: behaviour with no test over it. A reviewer finds absences too, since a guard with nothing
 behind it is exactly that, but finds them where the reviewer looked. A sample of ninety-nine
-alterations measures absence on exactly ninety-nine lines. Among what they turned up: of the seven TypeScript hooks, one had no test file, and of the six that did, one
-was ever run as a process by its tests. The other five were tested by importing their functions, so
-a hook with dozens of tests, and a test file longer than the hook itself, would not have noticed if
-the refusal it exists to emit stopped being emitted.
+alterations measures absence on exactly ninety-nine lines. Among what they turned up: of the seven
+TypeScript hooks, one had no test file, and of the six that did, one was ever run as a process by
+its tests. The other five were tested by importing their functions, so a hook with dozens of tests,
+and a test file longer than the hook itself, would not have noticed if the refusal it exists to
+emit stopped being emitted.
 
 The split, eight findings in the installer suites from the reviewer and three in the hook suites
 from the run, has more than one explanation. The two suites are in different languages and written
