@@ -910,6 +910,69 @@ exit 0
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
     }
 
+    It "folds the longest matching literal when one fold literal is a prefix of another" {
+        # Backlog item 30. Get-AccountFoldTable used to state, in a comment, that no literal is a
+        # substring of another, and the callers applied the rows in declaration order. Nothing
+        # checked the precondition, and the token the item was filed for ({{HOME}}) breaks it: the
+        # bare home is a prefix of both the .claude path and the vault path, so folding it first
+        # yields {{HOME}}/.claude where {{CLAUDE_HOME}} belongs.
+        #
+        # NPM_GLOBAL is declared second and CORE_REPO fourth, so a -NpmGlobal that is a prefix of
+        # -CoreRepo puts the shorter literal first in declaration order and the assertion below
+        # can only pass on the sort. mcpServers rather than a templated file: the model-read fold
+        # pass filters $folds down to the tokens each row names, so no single templated file ever
+        # sees two colliding literals, while an mcpServers string sees the whole table.
+        #
+        # -VaultPath is left at C:/vault so New-StandInHome's handoff fixture still folds; a row
+        # that folded nothing would now take the export down before this assertion ran.
+        #
+        # Review round 3: this It used to omit -WslHome entirely, so every run shelled out to the
+        # real `wsl -e sh -c 'echo $HOME'` on the operator's box for a value that has nothing to do
+        # with fold ordering. The item-24 It below keeps -CoreRepo and -NpmGlobal explicit for that
+        # exact reason and stubs `wsl`; this one now passes -WslHome '' instead.
+        #
+        # The poisoned stub is what makes the omission observable rather than merely tidy. `wsl` on
+        # PATH answers /home/poison, and a copied file carries /home/poison/launcher.sh, so if the
+        # explicit -WslHome '' is ever dropped again the resolution block picks the stub up, the
+        # whole-payload gate fires on rules/security.md, and this It goes red instead of quietly
+        # depending on whatever the host's WSL happens to hold.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        $stubDir = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-wslstub-" + [guid]::NewGuid())
+        $oldPath = $env:PATH
+        try {
+            New-Item -ItemType Directory -Path $stubDir -Force | Out-Null
+            # .cmd for the same reason the item-24 It gives: a .ps1 that never calls exit leaves
+            # $LASTEXITCODE at whatever the previous native command set.
+            "@echo off`r`necho /home/poison`r`n" |
+                Set-Content -LiteralPath (Join-Path $stubDir 'wsl.cmd') -NoNewline
+            $env:PATH = $stubDir + [System.IO.Path]::PathSeparator + $oldPath
+
+            $ch = (Join-Path $stand '.claude')
+            $cj = Join-Path $stand '.claude.json'
+            'the launcher lives at /home/poison/launcher.sh' |
+                Set-Content (Join-Path $ch 'rules/security.md')
+            @{ mcpServers = @{
+                    nested = @{ type = 'stdio'; command = 'node'
+                        args = @('E:\projects\agent-harness-core\tools\srv.js'); env = @{} }
+                } } | ConvertTo-Json -Depth 20 | Set-Content $cj
+
+            & $script:export -ClaudeHome $ch -ClaudeJson $cj -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'E:/projects' `
+                -VaultPath 'C:/vault' -WslHome '' -SkipSettings | Out-Null
+
+            $m = Get-Content (Join-Path $out 'mcp-servers.json') -Raw | ConvertFrom-Json
+            @($m.mcpServers.nested.args)[0] | Should -Be '{{CORE_REPO}}/tools/srv.js' `
+                -Because "declaration order would fold {{NPM_GLOBAL}} first and swallow the tail"
+            Test-Path -LiteralPath (Join-Path $out '.export-account-marker') |
+                Should -BeTrue -Because "an explicit -WslHome '' keeps the stub out of the run"
+        }
+        finally {
+            $env:PATH = $oldPath
+            Remove-Item -Recurse -Force $stand, $out, $stubDir -ErrorAction SilentlyContinue
+        }
+    }
+
     It "throws when a table row names a file the payload does not carry" {
         # A silent skip here is how a fold quietly stops happening: the file gets renamed
         # upstream, the row goes stale, and the payload ships a machine path with nothing
@@ -931,24 +994,45 @@ exit 0
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
     }
 
-    It "warns when a table row's tokens do not match the file's text" {
+    It "throws when a table row folds none of its tokens" {
         # The missing-file throw above catches a row whose FILE went missing. It says nothing
         # about a row whose LITERAL stopped matching: an upstream edit that respells the path, or
         # a -CoreRepo/-VaultPath value the file's text no longer contains. Without this, the
         # payload ships the machine path while the console still reports the row as handled.
+        #
+        # Backlog item 29: this used to assert a Write-Warning. A row that folds zero of its
+        # tokens and a row that folds all of them were reported in the same register, one as a
+        # warning beside a "folded 0 of 1" status line that reads like completed work. A zero
+        # count is the $AccountTemplatedFiles row and the source text having drifted apart, so it
+        # is fatal now. The partial case (one token of two) stays a warning and is covered by the
+        # It below.
+        #
+        # Review round 3: the message used to say "The fold table in AccountShared.ps1", which
+        # names nothing that is there. Get-AccountFoldTable is defined in Export-Account.ps1; what
+        # lives in AccountShared.ps1 is the $AccountTemplatedFiles row this throw is about. The
+        # captured-message form below rather than one -ExpectedMessage wildcard, because half the
+        # claim is negative -- the message must NOT send the reader after a fold table -- and
+        # Should -Throw has no way to say that.
         $stand = New-StandInHome
         $out = New-OutputRoot
         try {
             $ch = (Join-Path $stand '.claude')
             'no machine paths of any kind live in this file' |
                 Set-Content (Join-Path $ch 'rules/harness-core.md')
-            & $script:export -ClaudeHome $ch -OutputRoot $out `
-                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
-                -VaultPath 'C:/vault' -SkipSettings -SkipMcp `
-                -WarningVariable warnings -WarningAction SilentlyContinue | Out-Null
-            $warned = @($warnings) -join "`n"
-            $warned | Should -Match 'rules/harness-core\.md'
-            $warned | Should -Match '\{\{CORE_REPO\}\}'
+            $msg = $null
+            try {
+                & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp | Out-Null
+            }
+            catch { $msg = $_.Exception.Message }
+            # First, so the two -Not assertions below cannot pass vacuously on a $null message.
+            $msg | Should -Not -BeNullOrEmpty -Because "a zero-token fold is fatal, not a warning"
+            $msg | Should -BeLike "*rules/harness-core.md*folded none*CORE_REPO*"
+            $msg | Should -BeLike '*AccountTemplatedFiles row in AccountShared.ps1*' `
+                -Because "that is the row the reader has to fix"
+            $msg | Should -Not -BeLike '*fold table*' `
+                -Because "Get-AccountFoldTable is in Export-Account.ps1, not the file the message names"
         }
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
     }
@@ -1106,11 +1190,311 @@ exit 0
             { & $script:export -ClaudeHome $ch -ClaudeJson $cj -OutputRoot $out `
                     -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
                     -VaultPath 'C:/vault' -WslHome '' -SkipSettings } |
-                Should -Throw -ExpectedMessage '*code-context*unfolded WSL home path*'
+                Should -Throw -ExpectedMessage '*code-context*unfolded POSIX home path*/home/wsluser*'
             Test-Path -LiteralPath (Join-Path $out 'mcp-servers.json') |
                 Should -BeFalse -Because "a failed gate must leave nothing behind to commit"
         }
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    # Backlog item 23, first direction. The gate above keyed on a `/home/` prefix, which is one
+    # of four spellings a WSL home takes, so its name promised more than its pattern delivered.
+    # One It per shape rather than a loop inside one: Pester stops an It at its first failing
+    # Should, and a single It here would report the first shape that regressed and stay silent
+    # about the other two, which is the F2/F6 defect the two Contexts in this file were split for.
+    It "fails closed on an unfolded <Name> in mcpServers" -ForEach @(
+        @{ Name = 'WSL root home';         Path = '/root/code-context-mcp.sh';              Shown = '/root' }
+        @{ Name = 'distro /Users home';    Path = '/Users/wsluser/code-context-mcp.sh';     Shown = '/Users/wsluser' }
+        @{ Name = 'WSL path into Windows'; Path = '/mnt/c/Users/winuser/code-context.sh';   Shown = '/mnt/c/Users/winuser' }
+    ) {
+        # The third is the one that motivated the item: it carries the WINDOWS username and
+        # escapes both sides -- the WSL gate did not know the prefix, and the Windows folds match
+        # on backslashes.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            $cj = Join-Path $stand '.claude.json'
+            @{ mcpServers = @{
+                    'code-context' = @{ type = 'stdio'; command = 'wsl'
+                        args = @('-e', $Path); env = @{} }
+                } } | ConvertTo-Json -Depth 20 | Set-Content $cj
+
+            { & $script:export -ClaudeHome $ch -ClaudeJson $cj -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -WslHome '' -SkipSettings } |
+                Should -Throw -ExpectedMessage "*code-context*unfolded POSIX home path*$Shown*"
+            Test-Path -LiteralPath (Join-Path $out 'mcp-servers.json') |
+                Should -BeFalse -Because "a failed gate must leave nothing behind to commit"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "does not read a forward-slashed Windows path as a POSIX home" {
+        # The falsifying half of the shape list above. `/Users/<name>` and `/home/<user>` are
+        # substrings of `C:/Users/<name>` and `C:/home/<name>`, and an mcpServers entry is free to
+        # carry a forward-slashed Windows path that no fold happens to own. Without the
+        # drive-letter lookbehind in $script:PosixHomeShape this entry throws and a legitimate
+        # export dies on a path that is not a POSIX home at all.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            $cj = Join-Path $stand '.claude.json'
+            @{ mcpServers = @{
+                    winpath = @{ type = 'stdio'; command = 'node'
+                        args = @('C:/Users/winuser/tools/srv.js'); env = @{} }
+                } } | ConvertTo-Json -Depth 20 | Set-Content $cj
+
+            & $script:export -ClaudeHome $ch -ClaudeJson $cj -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -WslHome '' -SkipSettings | Out-Null
+
+            $m = Get-Content (Join-Path $out 'mcp-servers.json') -Raw | ConvertFrom-Json
+            @($m.mcpServers.winpath.args)[0] | Should -Be 'C:/Users/winuser/tools/srv.js'
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "fails closed on a WSL home literal carried by a copied file, not only by mcpServers" {
+        # Backlog item 23, second direction. The gate inside the mcpServers loop reads mcpServers
+        # strings only, and Copy-AccountTree copies rules, agents, skills, hooks and the two
+        # statusline scripts verbatim with no fold pass over any of them. -SkipMcp here so
+        # mcpServers is never read at all: this can only pass on the whole-payload scan, not on
+        # the loop gate.
+        #
+        # Review round 3: this used to say the literal also reaches here "through a settings hook
+        # command". It cannot -- ConvertTo-TemplatedCommand folds hook commands and statusLine
+        # with the whole table, {{WSL_HOME}} included, before this scan runs.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            'the launcher lives at /home/wsluser/code-context-mcp.sh' |
+                Set-Content (Join-Path $ch 'rules/security.md')
+
+            { & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -WslHome '/home/wsluser' -SkipSettings -SkipMcp } |
+                Should -Throw -ExpectedMessage '*rules/security.md*WSL home literal*'
+
+            # Review round 3: this gate throws AFTER the payload is on disk, while every It in this
+            # file covering an mcpServers gate asserts the opposite ("a failed gate must leave
+            # nothing behind to commit"). Pinned rather than changed, so the file stops stating two
+            # opposite things about its own gates without saying which is intended. The behaviour
+            # is argued in 2f3b196: staging the payload in a temp tree and moving it on success is
+            # the alternative, and it copies 218 files twice on every run. It is bounded for the
+            # default -OutputRoot, where account/claude/.export-account-marker is tracked and a
+            # re-run therefore still passes the marker check. A FRESH -OutputRoot like this one is
+            # left non-empty and marker-less, so every retry against it needs -Force.
+            Test-Path -LiteralPath (Join-Path $out 'rules/security.md') |
+                Should -BeTrue -Because "the whole-payload gate throws after the copy, by design"
+            Test-Path -LiteralPath (Join-Path $out '.export-account-marker') |
+                Should -BeFalse -Because "no marker is what makes a fresh -OutputRoot need -Force to retry"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "completes when a payload file names the WSL home as prose rather than as a path" {
+        # Review round 3, the blocking defect, reproduced against a0ff0ab:
+        #
+        #   pwsh -NoProfile -File install/Export-Account.ps1 -OutputRoot <tmp> -WslHome '/root' -SkipMcp
+        #
+        # exited 1 with "'skills/owasp-mcp/references/05-command-injection-execution.md' still
+        # carries the WSL home literal after folding", having written 216 files and no marker. That
+        # file is vendored third-party OWASP documentation and its line 79 reads
+        # "Access to sensitive paths (/etc/passwd, /root, /proc/, ~/.ssh)." -- /root there is not a
+        # machine path at all. /root is also one of the four shapes $script:PosixHomeShape declares
+        # supported, and it is what `wsl --import` gives its default user, so every machine whose
+        # WSL default user is root had a bricked exporter whose own failure message told the
+        # operator to edit an OWASP document.
+        #
+        # The fixture copies that OWASP line verbatim rather than paraphrasing it: the payload's
+        # only /root occurrence is that one line (grepped on the live tree), and the comma after
+        # /root is the whole reason a bare .Contains fires.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            'Access to sensitive paths (/etc/passwd, /root, /proc/, ~/.ssh).' |
+                Set-Content (Join-Path $ch 'rules/security.md')
+
+            & $script:export -ClaudeHome $ch -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -WslHome '/root' -SkipSettings -SkipMcp | Out-Null
+
+            Test-Path -LiteralPath (Join-Path $out '.export-account-marker') |
+                Should -BeTrue -Because "the marker is written only once every gate has passed"
+            (Get-Content (Join-Path $out 'rules/security.md') -Raw) | Should -Match '/root,' `
+                -Because "a copied third-party document is not the exporter's to rewrite"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "still fails closed on /root when it is a real path segment, not prose" {
+        # The falsifying half of the boundary above, and the negative space the blocking fix has to
+        # keep: a WSL root account's home reaching a copied file must still abort the export.
+        # Reverting the boundary leaves this green (a bare .Contains also fires here), so its
+        # ablation is the over-permissive mutation -- requiring a '/' after the literal, or dropping
+        # the scan -- not the revert.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            'the launcher lives at /root/code-context-mcp.sh' |
+                Set-Content (Join-Path $ch 'rules/security.md')
+
+            { & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -WslHome '/root' -SkipSettings -SkipMcp } |
+                Should -Throw -ExpectedMessage '*rules/security.md*WSL home literal*'
+            Test-Path -LiteralPath (Join-Path $out '.export-account-marker') |
+                Should -BeFalse -Because "a gate that threw must not have written the marker"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "fails closed on a WSL home literal closed by a bracket, backtick, or markdown link" {
+        # Review round 4, F1: the boundary's negated class stopped at '/', '"', "'" and whitespace,
+        # so a literal immediately followed by ')', ']', a backtick, or '>' read as clean --
+        # '(/root)', '[/root]' and a code span all missed, and a code span is the single most likely
+        # way a bare home path lands in a rules or skills file. Reverting the widened class (back to
+        # '(?![^/"''\s])') leaves this green: neither shape below satisfies the narrower boundary.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            'see the launcher config (/home/wsluser) or `/home/wsluser` for details' |
+                Set-Content (Join-Path $ch 'rules/security.md')
+
+            { & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -WslHome '/home/wsluser' -SkipSettings -SkipMcp } |
+                Should -Throw -ExpectedMessage '*rules/security.md*WSL home literal*'
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "fails closed on a WSL home literal at end of line, not only when a path separator follows" {
+        # Review round 4, F2: every whole-payload fixture in this file puts a '/' right after the
+        # literal ('/home/wsluser/code-context-mcp.sh', '/root/code-context-mcp.sh'), so nothing
+        # exercised the quote/whitespace/EOF arm of the boundary. Narrowing
+        # '(?![^/"''\s)\]`>])' to the single arm '(?=/)' still passes every other It in this file but
+        # leaves this one green, because a bare literal at end of line has no '/' after it. The two
+        # code comments at :739-742 and :744-749 assert that ablation is caught; this It is what
+        # makes that true.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            'the wsl user is /home/wsluser' | Set-Content (Join-Path $ch 'rules/security.md')
+
+            { & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -WslHome '/home/wsluser' -SkipSettings -SkipMcp } |
+                Should -Throw -ExpectedMessage '*rules/security.md*WSL home literal*'
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "still fails closed on a copied-file literal when -WslHome carries a trailing slash" {
+        # Review round 4, F3: an operator typo, '-WslHome /home/wsluser/' instead of
+        # '/home/wsluser', made the escaped literal end in '/', so the boundary after it then
+        # demanded a SECOND separator that a real path never has ('//code-context-mcp.sh' does not
+        # occur), and the gate went from fail-closed to a near-total no-op with no error. Dropping
+        # the TrimEnd('/') before the pattern is built leaves this green.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            'the launcher lives at /home/wsluser/code-context-mcp.sh' |
+                Set-Content (Join-Path $ch 'rules/security.md')
+
+            { & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -WslHome '/home/wsluser/' -SkipSettings -SkipMcp } |
+                Should -Throw -ExpectedMessage '*rules/security.md*WSL home literal*'
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "does not text-decode a binary payload file looking for the WSL home" {
+        # Review round 3: the scan read every payload file with Get-Content -Raw, including the two
+        # PNGs under skills/wiring-diagram/examples/ (600 KB between them). Decoding megabytes of
+        # image on every export is waste, and a decoded byte run that happened to match would abort
+        # the export pointing at an image the operator cannot edit.
+        #
+        # The fixture forces that second failure rather than measuring the first: PNG magic, then a
+        # NUL, then the WSL home as ASCII bytes. Get-Content -Raw decodes those trailing bytes back
+        # into the literal, on a path boundary ('/' follows it), so the gate fires on the image
+        # unless the file is skipped as binary. Timing is not asserted -- a wall-clock threshold in
+        # a test is a flake, and the false abort is the half that has a correctness answer.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            $magic = [byte[]](0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D)
+            $png = [byte[]]($magic +
+                [System.Text.Encoding]::ASCII.GetBytes('/home/wsluser/code-context-mcp.sh'))
+            [System.IO.File]::WriteAllBytes(
+                (Join-Path $ch 'skills/cloned-skill/diagram.png'), $png)
+
+            & $script:export -ClaudeHome $ch -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -WslHome '/home/wsluser' -SkipSettings -SkipMcp | Out-Null
+
+            Test-Path -LiteralPath (Join-Path $out 'skills/cloned-skill/diagram.png') |
+                Should -BeTrue -Because "a binary file is skipped by the gate, not by the copy"
+            Test-Path -LiteralPath (Join-Path $out '.export-account-marker') |
+                Should -BeTrue -Because "the gate must not abort on bytes it had no business decoding"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "resolves -WslHome from wsl when the caller omits the parameter" {
+        # Backlog item 24: ablating the default-resolution block left the whole suite green,
+        # because every test touching the parameter passed it explicitly -- a populated path in
+        # the folding Context above and an empty string in the fail-closed It above it. Neither
+        # reaches the `if (-not $PSBoundParameters.ContainsKey('WslHome'))` branch.
+        #
+        # A stub `wsl` prepended to PATH, not the real one: the real answer is this machine's WSL
+        # username, which is the literal this whole fold exists to keep out of the payload, and a
+        # test asserting against it would put it in the test name on the first failure. The stub
+        # makes the expected value a fixture value the repo can print.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        $stubDir = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-wslstub-" + [guid]::NewGuid())
+        $oldPath = $env:PATH
+        try {
+            New-Item -ItemType Directory -Path $stubDir -Force | Out-Null
+            # .cmd, not .ps1: a .ps1 that never calls exit leaves $LASTEXITCODE at whatever the
+            # previous native command set, and the resolution block reads $LASTEXITCODE.
+            "@echo off`r`necho /home/stubwsl`r`n" |
+                Set-Content -LiteralPath (Join-Path $stubDir 'wsl.cmd') -NoNewline
+            $env:PATH = $stubDir + [System.IO.Path]::PathSeparator + $oldPath
+
+            $ch = (Join-Path $stand '.claude')
+            $cj = Join-Path $stand '.claude.json'
+            @{ mcpServers = @{
+                    'code-context' = @{ type = 'stdio'; command = 'wsl'
+                        args = @('-e', '/home/stubwsl/code-context-mcp.sh'); env = @{} }
+                } } | ConvertTo-Json -Depth 20 | Set-Content $cj
+
+            # -CoreRepo and -NpmGlobal stay explicit so nothing else shells out to PATH; -WslHome
+            # is the one parameter deliberately omitted.
+            & $script:export -ClaudeHome $ch -ClaudeJson $cj -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipSettings | Out-Null
+
+            $m = Get-Content (Join-Path $out 'mcp-servers.json') -Raw | ConvertFrom-Json
+            @($m.mcpServers.'code-context'.args) |
+                Should -Contain '{{WSL_HOME}}/code-context-mcp.sh' `
+                -Because "the fold can only land if the omitted -WslHome resolved from wsl"
+        }
+        finally {
+            $env:PATH = $oldPath
+            Remove-Item -Recurse -Force $stand, $out, $stubDir -ErrorAction SilentlyContinue
+        }
     }
 
     It "fails closed when any mcpServers string trips the secret scanner's own patterns" {
