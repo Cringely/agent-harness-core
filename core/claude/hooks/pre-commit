@@ -84,9 +84,18 @@ fi
 scratch_dir=$(mktemp -d) || exit 0
 trap 'rm -rf "$scratch_dir"' EXIT
 
-# Internal agent traffic: memory notes, handoffs, scratch, council transcripts
-# and the project's own .claude/ tree. Written in the compressed register the
-# reader-facing prose rules flag wholesale, so linting it is noise.
+# Internal agent traffic: memory notes, handoffs, scratch, the
+# subagent-driven-development workspace, council transcripts and the project's
+# own .claude/ tree. Written in the compressed register the reader-facing prose
+# rules flag wholesale, so linting it is noise.
+#
+# .superpowers/ is normally gitignored, so this hook may never see it — the arm
+# is here because the three prose-lint mechanisms carry ONE exemption set by
+# contract (writing-style.md row 5 names all three), and a segment present in
+# two of them is the drift that contract exists to stop. The dot is
+# load-bearing either way: a dotless `superpowers/` would also exclude a
+# repository's committed docs/superpowers/{plans,specs}/, which are
+# deliverables.
 #
 # Keyed on the REPO-RELATIVE path git handed us, which is the only path
 # available here. The blob under test lives at "$scratch_dir/$f" (an absolute
@@ -99,8 +108,8 @@ trap 'rm -rf "$scratch_dir"' EXIT
 # `*` does cross "/", so the nested arm needs no depth enumeration.
 is_internal_traffic() {
   case "$1" in
-    .claude/*|memory/*|handoffs/*|scratchpad/*|.scratch/*|council-transcripts/*) return 0 ;;
-    */.claude/*|*/memory/*|*/handoffs/*|*/scratchpad/*|*/.scratch/*|*/council-transcripts/*) return 0 ;;
+    .claude/*|memory/*|handoffs/*|scratchpad/*|.scratch/*|.superpowers/*|council-transcripts/*) return 0 ;;
+    */.claude/*|*/memory/*|*/handoffs/*|*/scratchpad/*|*/.scratch/*|*/.superpowers/*|*/council-transcripts/*) return 0 ;;
   esac
   return 1
 }

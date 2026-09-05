@@ -102,6 +102,39 @@ Describe "Account hooks" {
             return $s
         }
 
+        # A throwaway Vale kit at the sandbox HOME's ~/.claude/tools/prose-lint, which is where
+        # Lint-DocumentProse.ps1 looks. One rule over one token, so the prose-lint case below
+        # asserts the hook's own path matching rather than whatever the operator's real styles
+        # happen to flag today. Built from an array joined on newlines rather than a here-string:
+        # a here-string terminator has to sit at column 0, which is a syntax trap inside a
+        # function nested this deep.
+        function New-ProbeValeKit {
+            param([string]$SandboxHome)
+            $kit = Join-Path (Join-Path (Join-Path $SandboxHome '.claude') 'tools') 'prose-lint'
+            $style = Join-Path (Join-Path $kit 'styles') 'HookProbe'
+            New-Item -ItemType Directory -Path $style -Force | Out-Null
+            $ini = @(
+                'StylesPath = styles'
+                'MinAlertLevel = suggestion'
+                ''
+                '[*.md]'
+                # BasedOnStyles, not "HookProbe = YES". The latter parses without complaint and
+                # registers the name as a CHECK, so `vale ls-config` shows it and the run finds
+                # nothing. Measured against vale 3.15.1: the YES spelling gave exit 0 and no
+                # output on a file holding the flagged token, the line below gave the finding.
+                'BasedOnStyles = HookProbe'
+            ) -join "`n"
+            Set-Content -LiteralPath (Join-Path $kit '.vale.ini') -Value $ini
+            $rule = @(
+                'extends: existence'
+                'message: "probe token %s"'
+                'level: error'
+                'tokens:'
+                '  - leverage'
+            ) -join "`n"
+            Set-Content -LiteralPath (Join-Path $style 'Banned.yml') -Value $rule
+        }
+
         # Lifts the named variable-assignment statements out of a script, in source order, by
         # their extent text. Used to run a hook's own root-derivation lines through a stub
         # instead of a hand-copied stand-in: a stand-in tests what the copy says, not what the
@@ -509,6 +542,55 @@ Describe "Account hooks" {
                 $argCount = $call.CommandElements.Count - 1
                 $argCount | Should -BeLessOrEqual 2 -Because "$($call.Extent.Text) at line $($call.Extent.StartLineNumber) must nest instead of taking a third argument"
             }
+        }
+    }
+
+    # The only thing asserting the '/.superpowers/' exemption was a text check in
+    # test/lint-doc-prose.test.ts: the literal appears in the $skip array. The matching itself,
+    # $norm.ToLower().Contains($p), had never run against a path in any test, so the token could
+    # have been inert and every suite stayed green. The other two mechanisms carry real
+    # behavioural cases, which is what makes this one a gap rather than a house style.
+    #
+    # The control runs first and has to draw a finding. Without it the exempt case proves
+    # nothing: a hook with no engine, no config, or a sandbox path that happens to match some
+    # other skip token is silent for both inputs, and silence is the exempt case's pass
+    # condition. Same content and same sandbox for both files, so the path is the only variable.
+    #
+    # Skipped rather than passed where vale is absent, for the same reason.
+    It "drops an SDD report under .superpowers/ while a docs/ control still lints" {
+        if (-not (Get-Command vale -ErrorAction SilentlyContinue)) {
+            Set-ItResult -Skipped -Because 'no vale on PATH to drive the prose-lint hook'
+            return
+        }
+        foreach ($root in $script:hookRoots) {
+            $sandbox = New-HookSandbox
+            try {
+                New-ProbeValeKit -SandboxHome $sandbox
+                $hook = Join-Path $root 'Lint-DocumentProse.ps1'
+
+                $ctlDir = Join-Path $sandbox 'docs'
+                New-Item -ItemType Directory -Path $ctlDir -Force | Out-Null
+                $ctl = Join-Path $ctlDir 'report.md'
+                'We leverage the pipeline.' | Set-Content -LiteralPath $ctl
+                $ctlJson = @{ tool_input = @{ file_path = ($ctl -replace '\\', '/') } } |
+                    ConvertTo-Json -Depth 5 -Compress
+                $ctlRun = Invoke-HookWithHome -HookPath $hook -SandboxHome $sandbox -StdinJson $ctlJson
+                $ctlRun.ExitCode | Should -Be 0
+                $ctlRun.Output | Should -Match 'additionalContext' `
+                    -Because "$root's rig is inert unless the control file draws a finding"
+
+                $sddDir = Join-Path (Join-Path (Join-Path $sandbox '.superpowers') 'sdd') 'p'
+                New-Item -ItemType Directory -Path $sddDir -Force | Out-Null
+                $sdd = Join-Path $sddDir 'report.md'
+                'We leverage the pipeline.' | Set-Content -LiteralPath $sdd
+                $sddJson = @{ tool_input = @{ file_path = ($sdd -replace '\\', '/') } } |
+                    ConvertTo-Json -Depth 5 -Compress
+                $sddRun = Invoke-HookWithHome -HookPath $hook -SandboxHome $sandbox -StdinJson $sddJson
+                $sddRun.ExitCode | Should -Be 0
+                $sddRun.Output | Should -BeNullOrEmpty `
+                    -Because "$root must drop an SDD report under .superpowers/ on the same content the control flagged"
+            }
+            finally { Remove-Item -Recurse -Force $sandbox -ErrorAction SilentlyContinue }
         }
     }
 
