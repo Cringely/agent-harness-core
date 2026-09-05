@@ -770,3 +770,54 @@ test the row applies, written for the next agent rather than for a reader, and i
 
 Add the segment to both lists in one change, the way the row's other three mechanisms are already
 kept in step.
+
+## 23. The WSL-home gate is narrower than its name in two directions
+
+`Export-Account.ps1` folds a WSL home path to `{{WSL_HOME}}` and then refuses to write
+`mcp-servers.json` if any post-fold string still carries a bare `/home/<user>` segment. The gate
+did its job on the export it was written for, but its guarantee is smaller than it reads, in two
+ways a future export could walk into.
+
+The check keys on a `/home/` prefix. A WSL root account lives at `/root`, a Linux distribution
+image can put a user under `/Users/<name>`, and a WSL path reaching back into Windows is
+`/mnt/c/Users/<name>`. The last one is the awkward case: it carries the Windows username, and it
+escapes both the WSL gate, which does not recognise the prefix, and the Windows folds, which match
+on backslashes. A two-valued test over a path shape that is not enumerated cannot decide the
+question it is being asked, which is the same failure the scope-filter invariant in
+`change-management.md` already records.
+
+Separately, the gate runs over `mcpServers` strings only. The same literal can reach the payload
+through a settings hook command, through a copied rules file, or through any templated file that
+reports folding one of one and is counted as clean. Today's payload was verified free of it by
+direct scan across all 218 files, so neither half blocked the branch. Closing this means
+deciding the set of home-path shapes the fold owns and applying the gate at the point every file
+passes through, rather than at the one file that happened to carry the literal first.
+
+## 24. The `-WslHome` default-resolution block cannot be reddened
+
+Ablating the block that resolves `-WslHome` when the caller supplies no value leaves the
+Export-Account suite at 56 passing and 0 failing. No assertion names the behaviour, so a
+regression in it would ship green.
+
+This is the fifth instance on this branch of a test that could not fail, and the fourth found by
+ablation rather than by reading. The pattern is consistent enough to be worth stating as a habit
+rather than a series of incidents: an assertion is not evidence until the code it names has been
+broken underneath it.
+
+The fix is a case that exercises the default path with the parameter omitted, not an assertion on
+the resolved value from a call that passes one.
+
+## 25. Licence marking inside the vendored security skills is uneven
+
+Seven skill trees under `account/claude/skills/` come from `microsoft/hve-core`: the six OWASP
+knowledge bases and `secure-by-design`. Each tree's `SKILL.md` carries an SPDX `license:` field,
+and 52 of the 85 files carry a licence marker in the file itself. The 33 reference files under
+`owasp-cicd/`, `owasp-infrastructure/` and `owasp-mcp/` carry none, while the matching files under
+the other three OWASP trees all do.
+
+The repository `NOTICE` covers all 85 and says so explicitly, so attribution accompanies the
+distribution. This item is about closing the gap at its source rather than about the notice.
+
+The repair does not belong in the payload. These files are copied verbatim from `~/.claude/` by
+the exporter, so a hand edit under `account/claude/` is reverted by the next export. Fix the live
+tree, or take the gap upstream to `microsoft/hve-core`, then re-export.
