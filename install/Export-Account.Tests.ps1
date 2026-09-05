@@ -1251,7 +1251,7 @@ exit 0
     #
     # -WslHome '' is deliberately NOT here. An unresolved value is legal and is covered by the It
     # above, which asserts the mcpServers shape gate stands in for the scan in that case.
-    It "refuses a supplied -WslHome that names no directory: <label>" -ForEach @(
+    It "rejects or normalises a degenerate -WslHome rather than exporting: <label>" -ForEach @(
         @{ Value = '/';                Label = 'a bare slash' }
         @{ Value = '//';               Label = 'two slashes' }
         @{ Value = '   ';              Label = 'whitespace only' }
@@ -1288,6 +1288,58 @@ exit 0
                 Should -BeFalse -Because "a refused export must leave no marker behind to commit"
         }
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    # The same judgement on the value the script RESOLVES, not only on one the caller supplied.
+    #
+    # This pins a regression the first version of the producer guard introduced. That version read
+    # `$PSBoundParameters.ContainsKey('WslHome') -and $WslHome`, so it judged a supplied value and
+    # skipped a resolved one -- while the commit deleted the consumer-side TrimEnd that had been
+    # covering the resolved path. Net effect: a distro whose $HOME ends in '/' went from throwing
+    # to completing the export with the literal shipped. A guard that removes a defence from the
+    # path it does not cover is worse than no guard, and only a test on the resolution branch
+    # catches it, because every other WslHome test passes the parameter explicitly.
+    #
+    # `wsl -e sh -c 'echo $HOME'` returns that distro's passwd entry. Nothing makes it well-formed.
+    It "judges a RESOLVED WslHome too, not only a supplied one: <label>" -ForEach @(
+        @{ Echo = '/home/stubwsl/'; Throws = 'literal';   Label = 'a distro whose $HOME ends in a slash' }
+        @{ Echo = '/';              Throws = 'predicate'; Label = 'a distro whose $HOME is a bare slash' }
+    ) {
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        $stubDir = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-wslstub-" + [guid]::NewGuid())
+        $oldPath = $env:PATH
+        try {
+            New-Item -ItemType Directory -Path $stubDir -Force | Out-Null
+            "@echo off`r`necho $Echo`r`n" |
+                Set-Content -LiteralPath (Join-Path $stubDir 'wsl.cmd') -NoNewline
+            $env:PATH = $stubDir + [System.IO.Path]::PathSeparator + $oldPath
+
+            $ch = (Join-Path $stand '.claude')
+            'wsl home lives at /home/stubwsl/code-context-mcp.sh' |
+                Set-Content (Join-Path $ch 'rules/ssh.md')
+
+            # -WslHome deliberately NOT passed. That omission is the whole point of this It, and it
+            # is what every other WslHome test in this file forecloses by passing the parameter.
+            $run = { & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp }
+
+            if ($Throws -eq 'predicate') {
+                $run | Should -Throw -ExpectedMessage '*must name an absolute POSIX directory*'
+            }
+            else {
+                # Normalises to /home/stubwsl, so the scan must then fire on the literal in ssh.md.
+                $run | Should -Throw -ExpectedMessage '*still carries the WSL home literal*'
+            }
+
+            Test-Path -LiteralPath (Join-Path $out '.export-account-marker') |
+                Should -BeFalse -Because "a refused export must leave no marker behind to commit"
+        }
+        finally {
+            $env:PATH = $oldPath
+            Remove-Item -Recurse -Force $stand, $out, $stubDir -ErrorAction SilentlyContinue
+        }
     }
 
     # Backlog item 23, first direction. The gate above keyed on a `/home/` prefix, which is one
