@@ -821,3 +821,102 @@ distribution. This item is about closing the gap at its source rather than about
 The repair does not belong in the payload. These files are copied verbatim from `~/.claude/` by
 the exporter, so a hand edit under `account/claude/` is reverted by the next export. Fix the live
 tree, or take the gap upstream to `microsoft/hve-core`, then re-export.
+
+## 26. Three unpinned guards and one assertion that passes on an empty output
+
+The whole-branch review ablated twelve production lines and found four more that no test notices.
+None is a wrong line; each is a correct line with nothing behind it.
+
+`Export-Account.ps1:164` anchors the containment comparison with
+`$sep = [System.IO.Path]::DirectorySeparatorChar`, so a sibling that shares a name prefix is not
+mistaken for a nested path. Setting `$sep = ""` leaves the suite at 56 pass, 0 fail, and exporting
+to `.claude-payload` beside `.claude` is then refused with a message that is false.
+`Install-Account.Tests.ps1:257` and `:271` already pin this on the installer's identical guard, in
+both directions. Port the pair across.
+
+`Export-Account.ps1:542` filters the server list with `| Where-Object { $_ }`. Dropping it leaves
+56 pass, 0 fail, and `"mcpServers": {}` then reports one server and proceeds on a phantom entry,
+because `.PSObject.Properties.Name` on an empty object is `$null` and `@($null)` holds one element.
+`change-management.md` records that trap as having bitten four times.
+
+`Install-Account.ps1:353` de-duplicates residual tokens with `| Select-Object -Unique`. Dropping it
+leaves 88 pass, 0 fail, and a file carrying one token twice reports it twice. Cosmetic, but stated
+behaviour with nothing behind it.
+
+`Install-Account.Tests.ps1:439` asserts only that the output does not match `\bjq\b`. Its sibling
+at `:462` asserts the same negative but guards it with a positive control first. Making
+`Test-Prerequisite` return an empty list reddens eight tests including that sibling, while `:439`
+stays green: an empty string satisfies it, so it cannot tell whether the npm probe found anything,
+which is the only thing it claims to prove. Add the same `Should -Match '\bvale\b'` control.
+
+## 27. Two ablations that cannot discriminate
+
+Distinct from item 26. These two tests do redden, and neither reddening means what it appears to.
+
+`AccountShared.ps1:21` throws when the AST lift finds no function, converting a rename in
+`Restore-ClaudeProject.ps1` into a loud failure. Replacing the throw with `if ($false)` leaves 56
+pass, 0 fail. That is the correct outcome rather than a defect, because the failure the guard
+exists for needs the rename and not the guard's removal. `FIXTURE-ONLY-MARKER` proves the lift happens;
+nothing proves it fails loudly. An honest test renames a function in a fixture copy and asserts the
+throw.
+
+`Export-Account.Tests.ps1:1035-1037` asserts that `args` contains `{{WSL_HOME}}/code-context-mcp.sh`
+and then that it does not contain the raw `/home/wsluser/` form. The fixture's `args` has two
+elements, so the second assertion cannot fail unless the first already has. Deleting the
+`{{WSL_HOME}}` fold row does redden the Context, but through its `BeforeAll`: the fail-closed gate
+throws before the file is written, so neither `It` body runs. Neither assertion has been observed to
+discriminate anything.
+
+That matters because item 23 proposes changing that gate. Any change that stops it throwing on this
+fixture turns both assertions live for the first time, with no evidence they work.
+
+## 28. Add a `.gitattributes` rule normalising the payload to LF
+
+`account/claude/` is written LF by the exporter and checked out CRLF under `core.autocrlf=true`, so
+a fresh clone can show up to 205 of the 218 payload files as modified with no content difference.
+The current `.gitattributes` covers `*.sh` and `core/claude/hooks/pre-commit` only.
+
+`7b1497e`'s commit message describes the symptom at length, which means the knowledge exists but
+lives in a commit body rather than anywhere a future reader would look.
+
+One caution carried from `change-management.md`: adding `text eol=lf` renormalises every existing
+clone, so this is worth doing for the payload's real ergonomics and never as a way to repair a
+failing test. A matcher that breaks on line endings gets fixed in the matcher.
+
+## 29. Make the exporter's zero-fold report fatal where a fold is required
+
+`Export-Account.ps1:432` prints `folded $substituted of N token(s)` as a plain `Write-Host`, and
+`:428` warns per token. A file that folds zero of its tokens is reported in the same register as one
+that folds all of them.
+
+For the two files where a fold is required rather than incidental, a zero count means the fold table
+and the source text have drifted apart, which is the failure the report exists to catch. Make that
+case throw. Ruled during execution and recorded in the ledger; it did not reach this file at the
+time.
+
+## 30. A `{{HOME}}` fold token needs longest-literal-first ordering
+
+`Get-AccountFoldTable` states a precondition that no fold literal is a substring of another.
+`$HOME` breaks it: it is a literal prefix of both the `.claude` path and the vault path, so folding
+it first swallows their tails and produces `{{HOME}}/.claude` where `{{CLAUDE_HOME}}` belongs.
+
+Adding the token means ordering the table longest-literal-first in `ConvertTo-TemplatedText`, not
+just appending a row. Worth doing only alongside a reason to add `{{HOME}}`; recorded here so the
+ordering constraint is not rediscovered by whoever does.
+
+## 31. The residual-path report reads pre-install state under `-WhatIf`
+
+Item F4 of the branch review covered the status lines that claim work `-WhatIf` did not do, and
+those are fixed. The installer's residual-path report is a different shape and was deliberately left
+alone rather than folded into that fix.
+
+It reads on-disk state. Under `-WhatIf` nothing has been written, so on a first-time install the
+state it reads is the state before the install, and the report under-counts the residual paths a
+real run would produce. The two known non-portable entries, `1password` and `code-context`, would
+not appear.
+
+The report is otherwise the best-designed diagnostic in either script, and it ends with the line
+that makes it falsifiable: "Anything else on this list is an exporter bug." A dry run that quietly
+returns a shorter list weakens exactly that claim. Fixing it means reporting against what the
+install would write rather than against what is on disk, which is a larger change than the status
+lines needed and is why it is here rather than in that commit.
