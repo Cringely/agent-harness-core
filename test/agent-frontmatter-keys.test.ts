@@ -25,32 +25,29 @@
 //     allowlist for the opposite reason memory does: leaving it off would
 //     fail a key that works exactly as designed.
 //
-// Three cases, kept separate on purpose (see issue #11):
+// Two cases, kept separate on purpose (see issue #11):
 //   - a key not in ALLOWED_KEYS -> hard failure, one test per offending file.
-//   - effort key ABSENT -> not a finding, asserted nowhere.
-//   - effort key PRESENT on a model with no effort support -> deliberately
-//     NOT asserted. Whether a haiku def should carry `effort` is an open
-//     question on #11, unsettled until someone captures what haiku actually
-//     does with the parameter. A test is the wrong place to hold an open
-//     argument, and asserting either way would fail against master.
+//   - any `effort` VALUE -> asserted nowhere, in either direction. Absent is not
+//     a finding; present on a model with no effort support is not either, since
+//     whether a haiku def should carry `effort` is an open question on #11 and a
+//     test is the wrong place to hold an open argument. What a sonnet def should
+//     carry joined that list on 2026-09-05, when the operator dropped the
+//     xhigh mandate the gate used to enforce: effort is a per-role judgment now,
+//     and the defs are where that judgment gets written down.
 //
 // It also pins the defs against core's own model-tier gate, which lives here
 // because the file walk is already done. A key that parses is not the same as a
-// configuration core will run: task-reviewer.md and research-scout.md shipped
-// `model: sonnet` with `effort: high` and `medium`, both of which the rule in
-// core/claude/hooks/model-tier-gate.ts refuses, so core installed a gate and two
-// defs whose declared tiers that gate's own rule rejects. Stated as the rule
-// rather than as dispatch behavior on purpose: the gate reads the tool payload,
-// not the def, so what a real dispatch of these types sends is uncaptured. The
-// rule comes from the gate by import, never restated here.
+// tier core will run: a def that omits `model:` or writes `inherit` loads fine
+// and dispatches at the session model, which is the failure the gate was built
+// for. Stated as the gate's rule rather than as dispatch behavior on purpose:
+// the gate reads the tool payload, not the def, so what a real dispatch of these
+// types sends is uncaptured. The rule comes from the gate by import, never
+// restated here.
 
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import {
-  effortViolation,
-  VALID_TIERS,
-} from "../core/claude/hooks/model-tier-gate";
+import { VALID_TIERS } from "../core/claude/hooks/model-tier-gate";
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const AGENTS_DIR = join(REPO_ROOT, "core/claude/agents");
@@ -123,25 +120,14 @@ describe("frontmatter keys are on the allowlist", () => {
 });
 
 describe("shipped defs satisfy the gate core ships beside them", () => {
-  // Two cases rather than two assertions in one, so an ablation proves each is
-  // load-bearing: bun stops a case at its first failed expect.
-  //
-  // `effortViolation` is imported from the gate rather than restated as
-  // "sonnet implies xhigh". A test holding its own copy of the rule keeps
-  // passing while the gate's rule drifts away from it, which is the exact
-  // contradiction this case exists to catch: task-reviewer.md and
-  // research-scout.md both shipped a sonnet def the gate would deny.
-  test.each(DEF_PATHS)("%s declares an effort the gate accepts", (path) => {
-    const text = readFileSync(path, "utf8");
-    expect(
-      effortViolation(frontmatterValue(text, "model"), frontmatterValue(text, "effort")),
-    ).toBeNull();
-  });
-
-  // A def with no `model:` makes the effort case above vacuous — no tier, no
-  // mandate, no violation — and its dispatch inherits the session model, which
-  // is the failure the gate was built for. The tier vocabulary check closes
-  // both: "" is not a valid tier.
+  // One case, down from two on 2026-09-05. The dropped one asserted that every
+  // def declared an effort the gate accepts, via the gate's own
+  // `effortViolation`. With the sonnet/xhigh mandate gone that function returned
+  // null for every input, so the case passed against every possible def and
+  // measured nothing — a test that cannot fail is worse than no test, because it
+  // reads as coverage. The tier check below is the half that still discriminates:
+  // a def with no `model:`, or one writing `inherit`, dispatches at the session
+  // model, and "" is not a valid tier.
   test.each(DEF_PATHS)("%s names a tier the gate accepts", (path) => {
     expect(VALID_TIERS).toContain(frontmatterValue(readFileSync(path, "utf8"), "model"));
   });

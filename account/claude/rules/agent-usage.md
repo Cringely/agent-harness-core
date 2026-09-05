@@ -56,9 +56,13 @@ and not merely present. A rules-file edit encoding a directive verbatim, a commi
 entry: the coordinator writes those inline rather than paying a Fable dispatch to phrase what is
 already decided.
 
-## Effort on Sonnet Is Not Optional
+## Effort Is a Judgment Call, Not a Mandate
 
-Any agent dispatched on `sonnet` must set `effort: "xhigh"`. The key is `effort` — same spelling in agent-def frontmatter, on the Agent tool call, and on a Workflow `agent()` call — never `reasoning_effort`, which is ignored without error and leaves the agent at inherited session effort forever. Sonnet gets picked for work needing real reasoning below Opus prices, and an unset effort throws away the reason it was picked. Haiku and Opus still set effort by judgment; whether haiku should carry the same mandate is open, not settled here. (Operator directive, 2026-08-11.)
+Pick the effort level the work justifies. `xhigh` where the reasoning is real, something cheaper where it is not; a premium reasoning budget spent on a mechanical task is waste. The key is `effort`, never `reasoning_effort`, which is ignored without error and leaves the agent at inherited session effort forever. Effort is settable in agent-def frontmatter and on a Workflow `agent()` call. The Agent tool's input schema has no `effort` parameter at all, so a plain dispatch cannot state one.
+
+This replaces a mandate that every `sonnet` dispatch set `effort: "xhigh"` (operator directive 2026-08-11, withdrawn 2026-09-05). Recorded rather than deleted, because the mandate reads well and will be proposed again. It went for two reasons. The economic one: xhigh on every sonnet dispatch buys reasoning the work did not need. The mechanical one: the Agent tool cannot express any effort value, so the gate denied sonnet dispatches that had no legal way to comply, and the only route past it was escalating to a premium tier, which inverts the quality-per-dollar the rule was written to protect. It blocked three dispatches in one session and all three escalated to opus. A softer "sonnet must state SOME effort" rule carries the identical defect and is not the replacement.
+
+The tier requirement is untouched. A dispatch still names its model, and `~/.claude/hooks/model-tier-gate.ts` still denies one that does not.
 
 ## Return channel: scratch file always
 
