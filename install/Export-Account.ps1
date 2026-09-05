@@ -63,6 +63,26 @@
 .PARAMETER HomeSlug
     The literal folded into {{HOME_SLUG}}. Defaults to Get-ProjectSlug $HOME.
 
+.PARAMETER AccountUser
+    The workstation username. Redacted to a neutral placeholder wherever it appears as a profile
+    path segment in the payload, and refused by the identity gate wherever it survives anywhere
+    else. Defaults to the leaf of $HOME, which is the spelling every occurrence in the live
+    account layer actually carries. A test seam as much as an override: the default is this
+    machine's real username, and a test asserting against it would print that username in its own
+    failure output.
+
+.PARAMETER IdentityFile
+    JSON declaring the identifying strings that cannot be derived from the environment -- the
+    operator's legal name and personal email addresses:
+
+        { "names": ["First Last"], "emails": ["someone@example.com"] }
+
+    Defaults to $HOME/.claude-account-identity.json, deliberately OUTSIDE both this repo and
+    ~/.claude: a file inside the repo is one `git add -f` from being published, and a file under
+    ~/.claude is inside the tree this script exports. Absent means nothing extra to check, with a
+    warning -- never "check nothing", since the derived username arm runs either way. Malformed
+    JSON throws rather than degrading the gate silently.
+
 .PARAMETER SkipSettings
     Skip the settings.account.json rewrite. Test seam.
 
@@ -105,6 +125,8 @@ param(
     [string]$WslHome,
     [string]$VaultPath,
     [string]$HomeSlug,
+    [string]$AccountUser,
+    [string]$IdentityFile,
     [switch]$SkipSettings,
     [switch]$SkipMcp,
     [switch]$Force
@@ -201,6 +223,138 @@ if ((Test-Path -LiteralPath $outputRootFull) -and
         "from a previous export. Re-run with -Force if overwriting it is intentional, or pick a " +
         "different -OutputRoot."
 }
+
+# --- identifying strings -----------------------------------------------------
+# security.md's mandate: identifying information must never reach a remote repository, and only a
+# human can override that. account/claude/ is a generated payload committed to a PUBLIC repo, so
+# this script has to carry the mandate as a gate rather than trust that a scrub happened somewhere
+# upstream. It had not. A content scan of this repo for the username comes back clean, and that
+# cleanliness is the residue of a one-time git-filter-repo run performed entirely outside this
+# generator. Nothing here stopped the next export from writing the username straight back in: six
+# payload files hold a neutral placeholder exactly where their live sources under ~/.claude hold
+# the username, and no code anywhere made that substitution.
+#
+# Two mechanisms, deliberately different widths, and the difference is the point.
+#
+#   REDACTION rewrites the workstation username to a neutral placeholder, but only where it sits
+#   in a profile-path position. Mechanical and narrow.
+#
+#   The GATE refuses the export when any identifying string survives into the payload. Strictly
+#   WIDER than the redaction: it matches the username anywhere, not only inside a path, so it
+#   still fires on everything redaction is not allowed to paper over. It is the only mechanism for
+#   the other two classes. A legal name or a personal email reaching the payload is a defect in
+#   the source for a human to fix, never something a generator should quietly rewrite -- rewriting
+#   a name means substituting somebody else's, and a redactor that edits arbitrary prose is how a
+#   document gets mangled.
+#
+# Resolved and loaded HERE, before the first copy, so a malformed identity file fails the run
+# before 218 files are on disk rather than after.
+
+# Derived, not declared. The leaf of $HOME is the spelling every occurrence in the live tree
+# actually carries (C:\Users\<leaf>, /c/Users/<leaf>, C--Users-<leaf>), and $HOME is already the
+# source every other fold in this file derives from. Rejected $env:USERNAME, the obvious
+# alternative: that is the ACCOUNT name, which a renamed account or a roaming profile lets diverge
+# from the PROFILE directory name, and it is the profile directory that appears in a path.
+if (-not $AccountUser) { $AccountUser = Split-Path ($HOME.TrimEnd('\', '/')) -Leaf }
+if (-not $AccountUser) {
+    throw "Could not derive the workstation username from `$HOME ('$HOME'). Pass -AccountUser explicitly."
+}
+
+if (-not $IdentityFile) { $IdentityFile = Join-Path $HOME '.claude-account-identity.json' }
+$declaredNames = @()
+$declaredEmails = @()
+if (Test-Path -LiteralPath $IdentityFile) {
+    try { $identity = Get-Content -LiteralPath $IdentityFile -Raw | ConvertFrom-Json }
+    catch {
+        # Throw, not warn. A security gate reading its own config must not degrade to "checked
+        # less than you think" because a comma went missing.
+        throw "Identity file '$IdentityFile' is not valid JSON ($($_.Exception.Message)). Fix the file, or pass -IdentityFile; a gate must not silently check less than it claims to."
+    }
+    # @($identity.names) when the key is absent is @($null) -- a ONE-element array holding $null,
+    # not an empty one, the same trap the mcpServers env loop below documents. The Where-Object is
+    # what makes an absent key mean zero entries; the outer @() is what keeps a single surviving
+    # entry an array instead of a bare string.
+    $declaredNames = @(@($identity.names) | Where-Object { $_ })
+    $declaredEmails = @(@($identity.emails) | Where-Object { $_ })
+}
+else {
+    Write-Warning ("No identity file at '$IdentityFile': only the workstation username is " +
+        "checked. Create it to also refuse the operator's legal name and personal email -- " +
+        '{"names":["First Last"],"emails":["someone@example.com"]} -- ' +
+        "and note entries are matched verbatim, so declare each token you want caught.")
+}
+
+# Word-boundary LOOKAROUNDS, not \b and not a bare substring. Measured on the live account layer:
+# skills/owasp-llm/references/08-vector-and-embedding-weaknesses.md:117 contains "adjusting",
+# which holds the operator's declared first name as a substring. A bare containment check reads
+# that as a hit and aborts every export against a vendored third-party document nobody here may
+# edit. Same failure the WSL gate's /root boundary already fixed, one class up. And the reason
+# this comment describes the collision instead of quoting it is the rule above: a file that ships
+# to the public repo must not carry the strings the gate defends, least of all in the gate's own
+# source. \b is not the substitute here either: \b asserts a
+# transition, so its answer depends on whether the declared entry happens to start and end with a
+# word character, and an entry like "@example.com" inverts it. The lookarounds say what is meant
+# regardless of the entry -- not preceded or followed by another identifier character.
+#
+# IgnoreCase throughout, unlike the WSL gate's deliberate -cmatch. That gate asks whether two
+# POSIX paths are the same path, where case is significant. This one asks whether a string
+# identifies a person, where it is not.
+function New-IdentityCheck {
+    param([string]$Class, [string[]]$Value)
+    return @(@($Value) | Where-Object { $_ } | ForEach-Object {
+            [pscustomobject]@{
+                Class = $Class
+                Regex = '(?<![A-Za-z0-9])' + [regex]::Escape($_) + '(?![A-Za-z0-9])'
+            }
+        })
+}
+$identityChecks = @(New-IdentityCheck -Class 'workstation username' -Value $AccountUser) +
+    @(New-IdentityCheck -Class 'declared name' -Value $declaredNames) +
+    @(New-IdentityCheck -Class 'declared email' -Value $declaredEmails)
+
+# The redaction is narrower than the gate on purpose, and this lookbehind is the whole of that
+# narrowing: the username only where a path separator puts it in a profile directory position.
+# That covers all 12 occurrences the live account layer carries today -- 3 in
+# rules/change-management.md, 1 in rules/ssh.md, and 1+3+2+2 across four tools/prose-lint style
+# files -- in every spelling they use (C:\Users\x, /c/Users/x, /mnt/c/Users/x).
+#
+# Rejected a tree-wide blind replace of the bare username, the smaller expression: a username
+# short or common enough to read as an ordinary word (root, admin, user) turns it into exactly the
+# false-positive failure the WSL gate's /root boundary exists to stop, and there it mangles the
+# document instead of merely aborting.
+#
+# Rejected extending the lookbehind to `home[\\/]` as well: no live occurrence needs it, and it
+# would overlap the WSL-home gate below -- redacting /home/<user> before that gate reads it would
+# swallow the unfolded-WSL-home signal and ship a silently wrong path in its place.
+#
+# Rejected extending it to the `C--Users-<user>` slug spelling for the same reason: the two files
+# carrying that spelling are $AccountTemplatedFiles rows folded to {{HOME_SLUG}} before this runs,
+# that fold already throws when it stops matching, and redacting a slug the installer does not
+# expand would hand a receiver a wrong slug instead of an abort. The gate still catches it.
+#
+# {1,2} on the separator, because JSON doubles every backslash and both generated payload files
+# are JSON. Without it the same logical path gets two different treatments decided by nothing but
+# its spelling: C:/Users/<user> inside mcp-servers.json redacts (JSON does not escape a forward
+# slash) while C:\\Users\\<user> in the same file does not match and takes the gate's abort
+# instead. Either answer is defensible; picking one by accident of separator arithmetic is not,
+# and the inconsistency is invisible until the day an unfoldable path lands in one of them. One
+# mechanism, every spelling, with the Write-Host below naming any file it touches -- a redaction
+# inside a generated config is worth seeing, and that line is what makes it visible.
+$userRedactPattern = '(?<=Users[\\/]{1,2})' + [regex]::Escape($AccountUser) + '(?![A-Za-z0-9])'
+
+# 'user', not '{{USERNAME}}'. Two reasons, and the first is measured: substituting this exact
+# shape into the six live source files reproduces the committed account/claude/ byte for byte,
+# 12 occurrences, so folding the operator's one-time scrub into the generator changes no committed
+# content and keeps "a second export with nothing changed produces no content diff" true.
+#
+# The second is that a token would be wrong even if it were free. Every {{TOKEN}} in this file is
+# a PORTABILITY fold: Install-Account.ps1's Get-AccountTokenMap expands it to the receiver's own
+# answer. This is a REDACTION, and there is no receiver-side answer to expand it to -- these
+# sentences are measured claims about THIS workstation (where Git Bash puts $HOME, where the ssh
+# config lives), so rewriting the username to a receiver's would turn a true statement into a
+# false one. That is the objection Get-AccountTokenMap already records against expanding
+# {{WSL_HOME}}, one step worse: not a dead entry looking resolved, but a wrong one.
+$userPlaceholder = 'user'
 
 Write-Host "Account home : $ClaudeHome"
 Write-Host "Output root  : $OutputRoot"
@@ -724,7 +878,25 @@ if (-not $SkipMcp) {
 # The copied-file It in Export-Account.Tests.ps1 pins that disclosed behaviour, because the
 # mcpServers gate's Its in the same file assert the opposite ("a failed gate must leave nothing
 # behind to commit") and the file should not state both without saying which is intended.
-if ($WslHome -and -not $WhatIfPreference) {
+
+# --- identity redaction and gate, whole payload ------------------------------
+# Same traversal, not a second one. Everything the identity gate must see is already the set this
+# loop walks: Copy-AccountTree's verbatim copies, the folded $AccountTemplatedFiles rows, and the
+# two files written from parsed JSON above. A second pass over the same 218 files would double the
+# read for nothing, and the two scans would drift on which files they agree to skip -- the binary
+# sniff below is a rule both need and neither should own alone.
+#
+# Order inside the loop is load-bearing. The WSL gate reads the body BEFORE redaction, so it sees
+# exactly the bytes it saw before this block existed and its behaviour is unchanged. Redaction
+# then runs, and the identity gate scans what SURVIVED it. Reversing the last two would make the
+# gate refuse the very occurrences redaction exists to handle; reversing the first two is the
+# /home/<user> overlap argued at $userRedactPattern above.
+#
+# The loop condition widened from `$WslHome -and -not $WhatIfPreference` to drop the $WslHome
+# half: the identity gate has to run on every export, including the one where wsl is absent, and
+# $WslHome now gates only the WSL arm inside. Under -WhatIf nothing was copied at all, so there is
+# still nothing here to read.
+if (-not $WhatIfPreference) {
     # Boundary, not a bare substring test. Review round 3, reproduced on the live payload:
     # $body.Contains($WslHome) reads ANY occurrence of the literal as a machine path, and /root --
     # one of the four shapes $script:PosixHomeShape above declares supported, and what a
@@ -748,7 +920,12 @@ if ($WslHome -and -not $WhatIfPreference) {
     #
     # -cmatch and not -match: POSIX paths are case-sensitive and .Contains was ordinal, so the
     # case-insensitive default would widen the gate past the boundary this is here to add.
-    $wslHomePattern = [regex]::Escape($WslHome) + '(?![^/"''\s])'
+    #
+    # Null when -WslHome did not resolve. The WSL arm below is skipped in that case, exactly as
+    # the old `$WslHome -and` loop condition skipped the whole loop; the mcpServers shape gate is
+    # what stands there, as its own comment records.
+    $wslHomePattern = if ($WslHome) { [regex]::Escape($WslHome) + '(?![^/"''\s])' } else { $null }
+    $ignoreCase = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
     # One buffer for the whole scan, not one per file. IndexOf below is bounded by $read, so bytes
     # left over from a longer previous file are never looked at.
     $head = [byte[]]::new(8000)
@@ -770,9 +947,44 @@ if ($WslHome -and -not $WhatIfPreference) {
         if ($read -gt 0 -and [System.Array]::IndexOf($head, [byte]0, 0, $read) -ge 0) { continue }
 
         $body = Get-Content -LiteralPath $f.FullName -Raw
-        if ($body -and $body -cmatch $wslHomePattern) {
-            $rel = ($f.FullName.Substring($outputRootFull.Length).TrimStart('\', '/')) -replace '\\', '/'
+        # -Raw on an empty file yields $null, and there is nothing to redact or scan in one.
+        if (-not $body) { continue }
+        $rel = ($f.FullName.Substring($outputRootFull.Length).TrimStart('\', '/')) -replace '\\', '/'
+
+        if ($wslHomePattern -and $body -cmatch $wslHomePattern) {
             throw "Refusing to complete the export: '$rel' still carries the WSL home literal after folding. No fold pass covers {{WSL_HOME}} there -- Copy-AccountTree copies verbatim, and a templated file is folded only for the tokens its own AccountTemplatedFiles row names, none of which is WSL_HOME. Remove it at source, or add the file to AccountTemplatedFiles with a WSL_HOME row."
+        }
+
+        # Write back only when something actually changed. On a real export that is 6 files out of
+        # 218, so the other 212 keep the exact bytes Copy-Item gave them -- which is what keeps the
+        # idempotence guarantee ("a second export with nothing changed writes identical bytes")
+        # true without this pass having to reason about encodings it never touches.
+        $redacted = [regex]::Replace($body, $userRedactPattern, $userPlaceholder, $ignoreCase)
+        if ($redacted -ne $body) {
+            $n = @([regex]::Matches($body, $userRedactPattern, $ignoreCase)).Count
+            Set-Content -LiteralPath $f.FullName -Value $redacted -NoNewline
+            # Reported, not silent, and this line is the mechanism's only audit trail. A redaction
+            # inside settings.account.json or mcp-servers.json would mean a machine path the fold
+            # table has no rule for, and rewriting it there produces a config that is wrong on the
+            # receiver rather than merely neutral. Naming every redacted file makes that visible in
+            # the export output beside the six prose files expected there, so the count itself is a
+            # regression detector. Rejected making those two files a gate instead of a redaction:
+            # that is a per-file rule for a failure with no live instance, and this line surfaces
+            # it for one line of code and no new table.
+            Write-Host "  ${rel}: redacted $n workstation-username occurrence(s)"
+            $body = $redacted
+        }
+
+        foreach ($check in $identityChecks) {
+            if ([regex]::IsMatch($body, $check.Regex, $ignoreCase)) {
+                # Names the file and the CLASS, never the matched value. Printing it would put the
+                # string this gate exists to contain into console output, CI logs and any transcript
+                # of the run -- the mandate covers every channel, not only the committed file. The
+                # WSL gate above prints its match on purpose and the difference is deliberate: a
+                # WSL home is a path the operator must locate and edit, an identity string is one
+                # they already know and must not see copied around.
+                throw "Refusing to complete the export: '$rel' carries the $($check.Class). Identifying information must never reach a remote repository (security.md), and only a human can waive that -- this script cannot. The matched value is deliberately not printed. Remove it at source under '$ClaudeHome', then re-run."
+            }
         }
     }
 }
