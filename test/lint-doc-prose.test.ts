@@ -315,11 +315,22 @@ const TS_EXTRAS = ["docs/assets"];
 const PRE_COMMIT_EXTRAS: string[] = [];
 const ACCOUNT_EXTRAS = ["obsidian vault/claude code", "node_modules", ".git", ".obsidian"];
 
+// The only lookahead any SKIP_PATHS entry is allowed to carry. A worktree
+// checkout under .claude/ is a real repo, not agent traffic (see "a worktree
+// checkout is not internal traffic" above); every other segment is agent
+// traffic all the way down and narrowing it needs the same scrutiny, not a
+// silent regex edit that this suite's segment-name comparison cannot see.
+const TS_EXPECTED_LOOKAHEAD_TAILS = ["(?!worktrees\\/)"];
+
 /** A SKIP_PATHS regex source reduced to the segment it matches:
  * "(^|\\/)\\.claude\\/(?!worktrees\\/)" ⇒ ".claude". The worktree lookahead is
  * dropped on purpose — it is behaviour, and the four worktree cases above pin
  * it directly. Throws on an entry that is not separator-anchored rather than
- * inventing a segment name for it. */
+ * inventing a segment name for it. What this drops is not unchecked: any
+ * "(?..." tail is asserted separately below by tsLookaheadTail(), so a
+ * lookahead added to a DIFFERENT entry (one with no dedicated behavioural
+ * test of its own) still shows up as a set-membership change instead of
+ * disappearing into this truncation. */
 function tsSegment(src: string): string {
   const anchor = "(^|\\/)";
   if (!src.startsWith(anchor)) {
@@ -331,6 +342,15 @@ function tsSegment(src: string): string {
     .replace(/\\([./])/g, "$1")
     .replace(/\/+$/, "")
     .toLowerCase();
+}
+
+/** Whatever tsSegment() truncated off a SKIP_PATHS entry — the "(?..." tail,
+ * or null when the entry carries none. A narrowing lookahead on any entry,
+ * not only .claude, has to appear somewhere or it is invisible to every test
+ * in this file; this is where it appears. */
+function tsLookaheadTail(src: string): string | null {
+  const idx = src.indexOf("(?");
+  return idx < 0 ? null : src.slice(idx);
 }
 
 /** pre-commit's arms reduced to segments, kept as two sets because the root
@@ -401,10 +421,10 @@ describe("prose-lint exemption — the three mechanisms carry one segment set", 
 // same shape as items 17 and 22, a segment in some mechanisms and absent from
 // another. So the subset check cannot fail on the drift it exists to stop.
 //
-// The three cases below compare each mechanism's WHOLE parsed list against one
-// expected set, so an addition to one mechanism reddens as loudly as a removal
-// from it. That is what makes "a change to one is a change to the others"
-// enforceable in both directions.
+// The four cases below compare each mechanism's WHOLE parsed list (plus, for
+// the TS hook, its lookahead tails) against one expected set, so an addition
+// to one mechanism reddens as loudly as a removal from it. That is what makes
+// "a change to one is a change to the others" enforceable in both directions.
 //
 // Rejected as the simpler alternative: filtering each list down to the seven
 // before comparing. That is the subset check, and it is what failed. Also
@@ -416,9 +436,27 @@ describe("prose-lint exemption — the three mechanisms carry one segment set", 
 // than against another mechanism: a normaliser that collapsed every entry to ""
 // yields a one-element set, never the seven named above, so a broken parser or
 // normaliser fails here instead of making all three agree on nothing.
+//
+// tsSegment() throws away everything after "(?", which means a narrowing
+// lookahead is invisible to the comparison above regardless of which of the
+// seven entries carries it. .claude/'s worktree lookahead happens to be pinned
+// anyway, by the four behavioural shouldLint() cases earlier in this file —
+// but that is specific to .claude, not a property of the segment-set check.
+// Measured: changing memory/'s SKIP_PATHS entry from /(^|\/)memory\// to
+// /(^|\/)memory\/(?!important\/)/ — a real behaviour change, memory/important/
+// would start linting — left every case above green. The lookahead-tail test
+// below is what catches it, on any entry, by asserting the truncated part
+// against a declared set the same way TS_EXTRAS declares docs/assets.
 describe("prose-lint exemption — no mechanism carries an undeclared segment", () => {
   test("lint-doc-prose.ts carries the seven and docs/assets, nothing else", () => {
     expect(sorted(tsSkipSources().map(tsSegment))).toEqual(expectedSegments(TS_EXTRAS));
+  });
+
+  test("lint-doc-prose.ts carries exactly the declared lookahead, nothing else", () => {
+    const tails = tsSkipSources()
+      .map(tsLookaheadTail)
+      .filter((t): t is string => t !== null);
+    expect(sorted(tails)).toEqual(sorted(TS_EXPECTED_LOOKAHEAD_TAILS));
   });
 
   test("pre-commit carries the seven at root and nested, nothing else", () => {
