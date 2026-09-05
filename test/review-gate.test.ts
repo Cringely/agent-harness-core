@@ -222,8 +222,9 @@ describe("parseGitCommitInvocation() — F-R3-1: --dry-run exemption reverted", 
 // removed the ambiguity and also removed the gate, because the ambiguity was load-bearing:
 // scrubQuotesAndHeredocs() blanks a quoted span to spaces, so in `git -C "$PWD" commit` the
 // argument is not a token by the time the regex runs. Under the first fix the pair alternative
-// swallowed `commit` as the repo path and the match failed, and review-gate.ts:485 and :679 both
-// read isCommit false as allow — so a quoted `-C` argument walked past the gate. The suite went
+// swallowed `commit` as the repo path and the match failed, and both decide() and main() in
+// review-gate.ts read isCommit false as allow — so a quoted `-C` argument walked past the gate.
+// The suite went
 // 456/0 through that, because no test on any branch covered a quoted option argument.
 //
 // The shipped fix keeps the ambiguity where it is harmless and removes it where it is not: `-C`
@@ -273,7 +274,7 @@ describe("parseGitCommitInvocation() — item 37: a quoted option argument still
   // reading only `-{1,2}[A-Za-z]` blocks the pair alternative on it — but the generic
   // alternative cannot consume it either, because `[\w-]*` stops at the `.` and there is no `=`
   // for `(?:=\S+)?` to take. Neither alternative crosses the token, the star cannot advance, and
-  // the whole match is lost, which :485 and :679 read as ALLOW. Every case below is one master
+  // the whole match is lost, which decide() and main() read as ALLOW. Every case below is one master
   // matched. They are the shapes an alphabet of `-a`, `--no-pager` and `--flag=v` cannot express.
   test.each([
     ["git -C -a.b commit", "a -C argument with a dot"],
