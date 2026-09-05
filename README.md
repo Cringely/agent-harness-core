@@ -120,7 +120,7 @@ pwsh -NoProfile -File install/Export-Account.ps1
 ```
 
 It mirrors an allowlisted subset of `~/.claude/` into `account/claude/`, folding this machine's
-absolute paths into five placeholder tokens. A second export with nothing changed produces no
+absolute paths into six placeholder tokens. A second export with nothing changed produces no
 diff, so `git status account/claude` after a run is a usable review of what moved. It refuses
 to write an `mcpServers` entry carrying anything the memory secret scanner recognises.
 
@@ -130,8 +130,9 @@ Install, on any machine, after a `git pull`:
 pwsh -NoProfile -File install/Install-Account.ps1
 ```
 
-It copies the payload over `~/.claude/`, expands the tokens from the receiver's own
-environment, rewrites PowerShell hook invocations for a non-Windows target, deep-merges
+It copies the payload over `~/.claude/`, expands five of the six tokens from the receiver's own
+environment (`{{WSL_HOME}}` has no receiver-side answer and is left as shipped), rewrites
+PowerShell hook invocations for a non-Windows target, deep-merges
 `settings.json` rather than replacing it (Claude Code writes that file itself, and an overwrite
 would revert every `/plugin` toggle on every pull), adds missing `mcpServers` entries to
 `~/.claude.json` without touching an existing one, and prints every command still carrying a
