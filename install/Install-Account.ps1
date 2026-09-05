@@ -142,80 +142,35 @@ $ClaudeJson  = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFrom
 $onWindowsHost = ($PSVersionTable.PSVersion.Major -lt 6) -or $IsWindows
 
 # Backlog item 19: the comparison below is only as good as the spelling it is handed, and three
-# spellings reach the same directory without matching as strings. Reproduced on this tree before
-# the fix, not inferred: -ClaudeHome spelled as an NTFS junction whose target is
-# <PayloadRoot>\rules\nested walked straight past the old string guard, and the copy then wrote
-# its own destination back into its own source -- 22, 33, 44, 55 files over four consecutive
-# runs, one more rules\nested\ level each time, deepest path
-# rules\nested\rules\nested\rules\nested\rules\nested\skills\prose-lint. An 8.3 short component
-# and a \\?\ extended-length prefix get past it the same way, without compounding.
+# spellings reach the same directory without matching as strings -- an NTFS junction, an 8.3 short
+# component, and a \\?\ extended-length prefix. Resolve-ContainmentPath canonicalises each one.
+# It lives in AccountShared.ps1, not here, because Export-Account.ps1's -OutputRoot guard has the
+# identical gap and a copy in either script would leave the other comparing raw strings; the
+# reproduction that motivates it, the alternatives measured and rejected, and the decision on a
+# reparse point found inside one of the trees are all recorded with the function.
 #
-# Resolved by asking the filesystem what each path component really is, rather than by adding
-# more string cases. Walking one component at a time from the root is what makes an
-# INTERMEDIATE reparse point visible: measured, ResolveLinkTarget on a path below a junction
-# returns null, because only the junction itself is a link. Get-Item's FullName expands an 8.3
-# component on the way past (measured: ...\PROBE-~1\REALTA~1 comes back fully spelled), so that
-# case needs no separate handling.
+# -OnWindows is passed rather than left to the function to find, so the guard cannot start
+# depending on where a caller happens to assign its platform flag. See the parameter's own
+# comment in AccountShared.ps1 for the failure that shape produces.
 #
-# Two simpler alternatives were measured and rejected. [System.IO.Path]::GetFullPath and
-# Convert-Path both leave a junction spelled as the junction, so neither closes the case that
-# compounds. Refusing any reparse point found under either root, which backlog item 19 floats
-# as the cheaper option, would refuse the install outright on a machine whose ~/.claude is
-# itself a junction -- a layout this tool has no reason to reject, and one the operator would
-# hit as a hard failure rather than as a warning.
-#
-# Components that do not exist yet are appended verbatim: -ClaudeHome routinely does not exist
-# before the first install, and nothing can be reparsed through a directory that is not there.
-#
-# Belongs in AccountShared.ps1 as one helper both scripts call, since Export-Account.ps1's
-# -OutputRoot guard has the identical gap. Left here because that file and Export-Account.ps1
-# are owned by another agent on this burn-down; hoisting it is a follow-up, not a rewrite.
-function Resolve-ContainmentPath {
-    param([string]$Path)
-    $p = $Path
-    # Stripped rather than resolved: every API measured (GetUnresolvedProviderPathFromPSPath,
-    # Get-Item.FullName, Convert-Path, GetFullPath) carries a \\?\ prefix through verbatim, so
-    # leaving one on turns every later comparison into a mismatch. Windows-only, since a
-    # backslash is an ordinary filename character on Linux.
-    if ($onWindowsHost) {
-        if ($p.StartsWith('\\?\UNC\')) { $p = '\\' + $p.Substring(8) }
-        elseif ($p.StartsWith('\\?\')) { $p = $p.Substring(4) }
-    }
-    $p = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($p)
-
-    $root = [System.IO.Path]::GetPathRoot($p)
-    if (-not $root) { return $p.TrimEnd('\', '/') }
-    $seps = [char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
-    $cur = $root
-    foreach ($part in $p.Substring($root.Length).Split($seps, [System.StringSplitOptions]::RemoveEmptyEntries)) {
-        $next = Join-Path $cur $part
-        $item = Get-Item -LiteralPath $next -Force -ErrorAction SilentlyContinue
-        if (-not $item) { $cur = $next; continue }
-        $cur = $item.FullName
-        # $true, not $false: a junction can point at another junction, and the final target is
-        # the only spelling that compares. Measured safe on a DANGLING junction (target already
-        # deleted): it returns the recorded target rather than throwing, so no try/catch here.
-        $link = $item.ResolveLinkTarget($true)
-        if ($link) { $cur = $link.FullName }
-    }
-    return $cur.TrimEnd('\', '/')
-}
-
 # Resolved for the comparison only. $ClaudeHome, $PayloadRoot and $ClaudeJson keep the spelling
-# the caller passed, so every path this script prints, copies to, and writes is still the one
-# the operator named.
-$claudeHomeReal = Resolve-ContainmentPath $ClaudeHome
-$payloadRootReal = Resolve-ContainmentPath $PayloadRoot
-$claudeJsonReal = Resolve-ContainmentPath $ClaudeJson
+# the caller passed, so every path this script prints as progress, copies to, and writes is still
+# the one the operator named. The two throws below are the deliberate exception and name both
+# spellings: an operator who typed a junction, an 8.3 name or a \\?\ prefix needs their own
+# spelling back to recognise which argument was refused, and needs the directory it resolves to
+# in order to see why it was.
+$claudeHomeReal = Resolve-ContainmentPath -Path $ClaudeHome -OnWindows $onWindowsHost
+$payloadRootReal = Resolve-ContainmentPath -Path $PayloadRoot -OnWindows $onWindowsHost
+$claudeJsonReal = Resolve-ContainmentPath -Path $ClaudeJson -OnWindows $onWindowsHost
 
 $pathComparison = if ($onWindowsHost) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
 $sep = [System.IO.Path]::DirectorySeparatorChar
 if ($payloadRootReal.Equals($claudeHomeReal, $pathComparison) -or
     $payloadRootReal.StartsWith("$claudeHomeReal$sep", $pathComparison) -or
     $claudeHomeReal.StartsWith("$payloadRootReal$sep", $pathComparison)) {
-    throw "-PayloadRoot ('$payloadRootReal') and -ClaudeHome ('$claudeHomeReal') must not be the same " +
+    throw "-PayloadRoot ('$PayloadRoot') and -ClaudeHome ('$ClaudeHome') must not be the same " +
         "directory or nested inside each other; the copy reads recursively from one while " +
-        "writing into the other."
+        "writing into the other. They resolve to '$payloadRootReal' and '$claudeHomeReal'."
 }
 
 # Backlog item 20: -ClaudeJson sat outside the guard entirely, so a caller could point the
@@ -226,8 +181,9 @@ if ($payloadRootReal.Equals($claudeHomeReal, $pathComparison) -or
 # above still reports its own message for a call that violates both.
 if ($claudeJsonReal.Equals($payloadRootReal, $pathComparison) -or
     $claudeJsonReal.StartsWith("$payloadRootReal$sep", $pathComparison)) {
-    throw "-ClaudeJson ('$claudeJsonReal') must not sit inside -PayloadRoot ('$payloadRootReal'); " +
-        "the mcpServers merge would write into the payload tree this install reads from."
+    throw "-ClaudeJson ('$ClaudeJson') must not sit inside -PayloadRoot ('$PayloadRoot'); " +
+        "the mcpServers merge would write into the payload tree this install reads from. " +
+        "They resolve to '$claudeJsonReal' and '$payloadRootReal'."
 }
 
 # Same reasoning and same placement as Export-Account.ps1's guard: right after the defaults
