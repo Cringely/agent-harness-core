@@ -1231,6 +1231,65 @@ exit 0
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
     }
 
+    It "completes when a payload file names the WSL home as prose rather than as a path" {
+        # Review round 3, the blocking defect, reproduced against a0ff0ab:
+        #
+        #   pwsh -NoProfile -File install/Export-Account.ps1 -OutputRoot <tmp> -WslHome '/root' -SkipMcp
+        #
+        # exited 1 with "'skills/owasp-mcp/references/05-command-injection-execution.md' still
+        # carries the WSL home literal after folding", having written 216 files and no marker. That
+        # file is vendored third-party OWASP documentation and its line 79 reads
+        # "Access to sensitive paths (/etc/passwd, /root, /proc/, ~/.ssh)." -- /root there is not a
+        # machine path at all. /root is also one of the four shapes $script:PosixHomeShape declares
+        # supported, and it is what `wsl --import` gives its default user, so every machine whose
+        # WSL default user is root had a bricked exporter whose own failure message told the
+        # operator to edit an OWASP document.
+        #
+        # The fixture copies that OWASP line verbatim rather than paraphrasing it: the payload's
+        # only /root occurrence is that one line (grepped on the live tree), and the comma after
+        # /root is the whole reason a bare .Contains fires.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            'Access to sensitive paths (/etc/passwd, /root, /proc/, ~/.ssh).' |
+                Set-Content (Join-Path $ch 'rules/security.md')
+
+            & $script:export -ClaudeHome $ch -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -WslHome '/root' -SkipSettings -SkipMcp | Out-Null
+
+            Test-Path -LiteralPath (Join-Path $out '.export-account-marker') |
+                Should -BeTrue -Because "the marker is written only once every gate has passed"
+            (Get-Content (Join-Path $out 'rules/security.md') -Raw) | Should -Match '/root,' `
+                -Because "a copied third-party document is not the exporter's to rewrite"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "still fails closed on /root when it is a real path segment, not prose" {
+        # The falsifying half of the boundary above, and the negative space the blocking fix has to
+        # keep: a WSL root account's home reaching a copied file must still abort the export.
+        # Reverting the boundary leaves this green (a bare .Contains also fires here), so its
+        # ablation is the over-permissive mutation -- requiring a '/' after the literal, or dropping
+        # the scan -- not the revert.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            'the launcher lives at /root/code-context-mcp.sh' |
+                Set-Content (Join-Path $ch 'rules/security.md')
+
+            { & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -WslHome '/root' -SkipSettings -SkipMcp } |
+                Should -Throw -ExpectedMessage '*rules/security.md*WSL home literal*'
+            Test-Path -LiteralPath (Join-Path $out '.export-account-marker') |
+                Should -BeFalse -Because "a gate that threw must not have written the marker"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
     It "resolves -WslHome from wsl when the caller omits the parameter" {
         # Backlog item 24: ablating the default-resolution block left the whole suite green,
         # because every test touching the parameter passed it explicitly -- a populated path in
