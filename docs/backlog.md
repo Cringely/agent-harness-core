@@ -1059,6 +1059,12 @@ This belongs as a decision note under `change-management.md`'s security-tradeoff
 reasoning survives independently of the notice text. A ruling recorded only inside the artifact it
 authorises cannot be found by anyone asking whether it was ever made.
 
+**Status:** closed 2026-09-05. Note written as `ship-unlicensed-vendored-trees` under the
+`E--projects-agent-harness-core` memory scope, indexed in that scope's `MEMORY.md` Decisions group,
+`status: proposed` pending the operator's ratification. It records both directories, the rejected
+`$script:AccountSkipDirs` alternative, and an explicit non-extension clause: a third unlicensed tree
+triggers a standing policy rather than an amendment to this note.
+
 ## 35. Nothing verifies that the committed payload matches a fresh export
 
 `README.md:112-114` and `account/claude/rules/harness-core.md` both state the one-direction rule and
