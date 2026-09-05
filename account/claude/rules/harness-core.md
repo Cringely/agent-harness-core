@@ -30,8 +30,14 @@ After changing anything under `~/.claude/rules/`, `agents/`, `skills/`, `hooks/`
 pwsh -NoProfile -File {{CORE_REPO}}/install/Export-Account.ps1
 ```
 
-Then review `git status account/claude` in the core repo and commit. A second export with
-nothing changed produces no diff, so anything the status shows is a real change.
+Then review `git diff account/claude` in the core repo and commit. A second export with
+nothing changed produces no content diff, so anything the diff shows is a real change.
+
+Use `git diff` here and not `git status`. The export writes LF, a Windows checkout writes CRLF,
+and a no-change re-export therefore flips the working-tree line endings without touching the
+index. Measured 2026-09-05 on a clean tree: `git status --short` listed 203 modified paths where
+`git diff --exit-code` returned 0. To put the endings back afterwards, run
+`git checkout -- account/claude`; the content is identical, so nothing is lost.
 
 On a second machine, after `git pull` in the core repo:
 

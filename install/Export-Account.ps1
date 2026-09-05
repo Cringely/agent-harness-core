@@ -13,8 +13,16 @@
     *.bak.* (change-management.md's timestamped convention) and every plain *.bak (an older,
     untimestamped backup predating that convention) is dropped.
 
-    A second export with nothing changed produces no diff, which makes `git status` after an
-    export a usable review of what changed in the account layer.
+    A second export with nothing changed produces no content diff, which makes `git diff
+    account/claude` after an export a usable review of what changed in the account layer.
+
+    Use `git diff` and not `git status` for that review. On a Windows clone with
+    core.autocrlf=true the checkout filter writes CRLF while this script writes LF, so a
+    no-change re-export leaves the index untouched but flips the working-tree line endings,
+    and `git status` then lists every file it rewrote. Measured 2026-09-05 against a clean
+    tree: `git status --short` reported 203 modified paths where `git diff --exit-code`
+    returned 0. `git ls-files --eol account/claude` shows the same transition as
+    i/lf w/crlf becoming i/lf w/lf.
 
 .PARAMETER ClaudeHome
     The account home to export. Defaults to $HOME/.claude.
@@ -624,5 +632,5 @@ Set-Content -LiteralPath $exportMarker -Value (
 # the file does not change whether it runs. This -not $WhatIfPreference guard is what actually
 # suppresses it; the position move above is only about ordering relative to the marker write.
 if (-not $WhatIfPreference) {
-    Write-Host "Export complete. Review with: git status account/claude"
+    Write-Host "Export complete. Review with: git diff account/claude"
 }
