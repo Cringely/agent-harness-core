@@ -127,6 +127,16 @@ CRLF, so a no-change re-export flips working-tree line endings and `git status` 
 it rewrote. It refuses to write an `mcpServers` entry carrying anything the memory secret scanner
 recognises.
 
+It also refuses to finish at all when any file in the written payload still carries an identifying
+string, in one of three classes: the workstation username, the operator's legal name, or a personal
+email address. The username is derived from `$HOME` and redacted to a neutral placeholder wherever
+it sits in a profile path, so a sentence naming this machine's layout keeps its shape and stops
+naming a person. The other two cannot be derived, so they are declared in
+`$HOME/.claude-account-identity.json` as `{"names": [...], "emails": [...]}`. That file sits outside
+both this repo and `~/.claude` on purpose: a declaration list inside either one would publish the
+strings it exists to catch. Without it the run warns and checks the username alone, which is a
+narrower gate rather than no gate.
+
 Install, on any machine, after a `git pull`:
 
 ```

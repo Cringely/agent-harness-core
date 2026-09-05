@@ -77,6 +77,21 @@ Describe "Account hooks" {
                 param([Parameter(ValueFromRemainingArguments)]$Parts)
                 (@($Parts) -join '/')
             }
+            # -Scope Local does NOT shadow $HOME here, it writes through to the global copy and
+            # the POSIX value outlives this function -- and outlives this FILE, because Pester
+            # runs every file in one runspace. Verified on pwsh 7: a function doing exactly this
+            # leaves $HOME at the assigned value after it returns, both when called directly and
+            # when called from a nested scope. Automatic variables already exist in an ancestor
+            # scope, and Set-Variable -Force updates that one instead of creating a local. So it
+            # is saved and restored below, the same way the environment variables are.
+            #
+            # Pre-existing, and invisible until the first test that reads the real $HOME arrived
+            # next door in Export-Account.Tests.ps1. That test then saw leaf 'u' from '/home/u',
+            # wrote C:\Users\u\Documents, and the redaction to C:\Users\user\Documents left the
+            # single character 'u' in the output -- a Contains($leaf) failure with nothing wrong
+            # in the exporter at all. It passed alone and per-file, red only in a whole-directory
+            # run, which is the signature of leaked global state rather than a defect under test.
+            $savedHome = $HOME
             Set-Variable -Name HOME -Value $HomeValue -Scope Local -Force
             # Save every distinct name once, before either mutation touches it. A name that
             # appears in both -ClearEnv and -SetEnv must still yield its one true original
@@ -89,6 +104,7 @@ Describe "Account hooks" {
             foreach ($k in @($SetEnv.Keys)) { Set-Item "Env:$k" -Value $SetEnv[$k] }
             try { return (& ([scriptblock]::Create($Expression))) }
             finally {
+                Set-Variable -Name HOME -Value $savedHome -Scope Local -Force
                 foreach ($k in $keys) {
                     if ($null -eq $saved[$k]) { Remove-Item "Env:$k" -ErrorAction SilentlyContinue }
                     else { Set-Item "Env:$k" -Value $saved[$k] }
