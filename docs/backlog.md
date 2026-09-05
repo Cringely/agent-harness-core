@@ -1377,6 +1377,11 @@ the assertion.
 
 ## 42. `core.quotePath` is dead code, and a test defends it
 
+**Status:** closed 2026-09-05. Flag removed from `getStagedAbsPaths()`, and the test that named it
+was retitled to credit `-z`, which is what actually suppresses the quoting. Re-verified live during
+review: with `core.quotePath=true` and no `-z`, git returns `"caf\303\251.ts"`; with `-z` it returns
+`café.ts`. One call site, and it passes `-z`.
+
 `getStagedAbsPaths()` in `core/claude/hooks/review-gate.ts` runs `git diff --cached --name-only -z`
 with `-c core.quotePath=false`. Verified live in a throwaway repo: with `-z`, git does not C-quote a
 non-ASCII filename regardless of `core.quotePath`'s value; only without `-z` does `café.ts` come
@@ -1389,6 +1394,16 @@ citation for why the flag was added, and losing that context while the flag surv
 relocate the confusion.
 
 ## 43. `repoPath` is lost whenever `-C` is not the last option token
+
+**Status:** closed 2026-09-05. `repoPathFromOptionRun()` rescans group 1, which is captured outside
+the repetition and so escapes the per-iteration reset. Ablated: reverting reddens the new case and
+nothing else.
+
+Closing it surfaced a second defect in the same function, filed below as item 44 and fixed in the
+same branch. Worth recording that order: the fix changed one shape of the chained-`-C` bug from
+"silently reviews the session cwd" to "silently reviews a path git never named", so a repair made
+a latent bug worse before a review caught it. Neither the fix nor its test was wrong about what it
+claimed; the claim was just narrower than the function.
 
 `GIT_COMMIT_RE`'s starred alternation group repeats, and each alternative that captures does so
 into the same group number, so `RegExp.exec()` keeps only the last repetition's capture. Reproduced
@@ -1408,3 +1423,84 @@ Pre-existing, unchanged by item 37's ReDoS fix: verified against `fix/hook-secur
 same behaviour. Fixing it means capturing into distinct groups per alternative, or switching to a
 manual token walk, rather than relying on a single numbered group across a quantified alternation,
 the same class of regex-authoring trap item 37 fixed a different instance of, in the same file.
+
+## 44. Repeated `-C` was tie-broken rather than chained
+
+**Status:** closed 2026-09-05, same branch that closed item 43.
+**Surfaced:** 2026-09-05, review of the item 43 fix.
+
+git resolves each `-C` against the one before it, so `git -C /a -C b commit` runs in `/a/b`. The
+gate took the last occurrence and handed back a bare `b`, which `main()` resolved against the
+session cwd. Both ways of being wrong are silent, which is what raised it above its likelihood: a
+path that does not exist throws into the outer catch and exits 0, and one that exists with nothing
+staged reaches `decide()`'s bare `ALLOW`, which carries no `reason` and so never reaches the
+announcement branch. Fixed with `resolve()`, which is git's rule already.
+
+## 45. Doc claims that survived the 2026-09-05 drift pass
+
+**Status:** proposed.
+**Surfaced:** 2026-09-05, review of the drift-repair commit.
+
+Three inventory statements are still loose after the pass that repaired eight others. `README.md:17`
+says the installer applies all four templates; `ceremony-ledger.template.json` is applied only under
+`-IncludeCeremonies` (`install/Install-Harness.ps1:811`). `README.md:19` inventories four of the
+five files in `install/`, omitting `AccountShared.ps1`. That last one is defensible, since it is a
+library rather than a script an operator runs, except the row's stated job is to inventory the
+directory. `CONTRIBUTING.md:45` calls the drift-check hook `-Audit`'s "one caller", true of the
+hooks the repository installs and not of `Install-Harness.Tests.ps1`, which invokes it about twenty
+times.
+
+Also: a doc names 517 tests where the suite now measures 521. A count in prose goes stale on the
+next commit, which is an argument for citing the command rather than its output.
+
+## 46. Nothing pins the fold output for a trailing-slash `-WslHome`
+
+**Status:** proposed.
+**Surfaced:** 2026-09-05, exporter review round 2.
+
+Normalising `/home/user/` improved the fold from `{{WSL_HOME}}x.sh` to `{{WSL_HOME}}/x.sh`, and no
+test asserts it. A silent revert would write a malformed path into a generated config, which fails
+loudly at the consumer rather than quietly at the gate. That is a different risk class from the
+export-completes-anyway failures that branch was closing, and the reason this is filed rather than
+fixed in that round.
+
+## 47. The export identity gate covers the payload and nothing else
+
+**Status:** proposed.
+**Surfaced:** 2026-09-05, pre-push identity audit.
+
+`Export-Account.ps1:1005` walks the payload subtree and throws on an identity match. `core/`,
+`install/`, `docs/`, `patterns/`, `test/`, and the root markdown files have no automated identity
+check at all, and neither does commit metadata or a commit message. Every scan of those channels so
+far has been a person or an agent running greps by hand, which is exactly the arrangement that lets
+a clean result mean "nobody looked". Measured this session: MSYS `grep -F` aborted mid-scan and the
+surrounding `|| echo NONE` printed a pass over the top of it. Any replacement needs a positive
+control that must match, or it inherits the same defect.
+
+## 48. This clone has no commit-time gate installed
+
+**Status:** proposed.
+**Surfaced:** 2026-09-05, pre-push identity audit.
+
+`.git/hooks/` holds only the fifteen stock `*.sample` files. The repository ships
+`core/claude/hooks/pre-commit`, and nothing in this clone is wired to it, so the prose lint and
+whatever else that hook enforces have never run here on a commit. Same shape as the memory note on
+forcing functions that are authored but not registered: the artifact exists, the enforcement does
+not, and the gap is invisible from reading the repository.
+
+## 49. Personal and homelab detail in the published account payload
+
+**Status:** proposed. Needs an operator ruling, not an agent's.
+**Surfaced:** 2026-09-05, pre-push identity audit.
+
+Nothing here breaches the identity mandate as written. There is no name, username, hostname, IP, or
+domain, so this is a question about what else the operator wants public, which is theirs to answer.
+`account/claude/rules/` names the homelab service inventory (Authentik, Traefik, TrueNAS, Tailscale,
+Grafana with a version, the SSH key filename) and two production failures. `mcp-servers.json`
+carries a fitness-device server and an untokenized 1Password path. The two wiring diagrams under
+`skills/wiring-diagram/examples/` identify an air-conditioner model and a home-automation stack.
+`README.md:165` and two HTML artifacts name sibling private projects and the drive layout.
+
+Most of it likely predates the current branch; `git diff origin/master..HEAD -- account/claude/rules/`
+separates what is new from what is already public, and is worth running before treating any of it as
+this branch's doing.
