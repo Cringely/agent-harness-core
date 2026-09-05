@@ -35,7 +35,11 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const COUNT = String.raw`\d[\d,]*|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve`;
+// The digit arm excludes a digit preceded by another digit, a dot or a hyphen,
+// so a version tail or a licence identifier's trailing digit can't start a
+// match: "OGL-UK-3.0 files" and "CC-BY-4.0 skills" stop at the run-in digit
+// instead of reading it as a fresh count of "0 files" / "0 skills".
+const COUNT = String.raw`(?<![\d.\-])\d[\d,]*|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve`;
 // What this notice could be counting: the trees and files of a generated tree.
 const PAYLOAD = String.raw`files?|trees?|director(?:y|ies)|skills?|documents?`;
 // One optional word between the two, so "six OWASP trees" is caught alongside
@@ -61,5 +65,15 @@ describe("NOTICE — no hard-coded measurement of the generated payload", () => 
     // The two version strings the notice legitimately carries stay clean.
     expect(found("`license: OGL-UK-3.0 AND CC-BY-4.0`")).toEqual([]);
     expect(found("vale-ai-tells at v1.21.2, pinned by release URL")).toEqual([]);
+  });
+
+  // A licence identifier or version number immediately followed by a payload
+  // noun used to read as a count of that noun: the digit arm stopped at the
+  // version tail's own trailing digit rather than at the identifier's start.
+  test("a version tail followed by a payload noun is not a count", () => {
+    const found = (s: string) => [...s.matchAll(COUNTED)].map((m) => m[0]);
+    expect(found("the OGL-UK-3.0 files carry no marker")).toEqual([]);
+    expect(found("CC-BY-4.0 skills ship with attribution")).toEqual([]);
+    expect(found("SPDX 2.3 document format")).toEqual([]);
   });
 });
