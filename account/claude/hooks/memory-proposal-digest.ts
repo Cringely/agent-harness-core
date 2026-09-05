@@ -210,7 +210,9 @@ function selftest(): void {
     mkdirSync(projA, { recursive: true });
     mkdirSync(projB, { recursive: true });
     mkdirSync(join(root, "P--no-memory"), { recursive: true });
-    mkdirSync(empty, { recursive: true });
+    // No mkdirSync(empty) here: mkdtempSync above already created it. The call was left behind by
+    // the mkdtempSync change and is inert under recursive:true, but it reads as though `empty`
+    // still needs creating, which is the opposite of the invariant that change established.
 
     // CRLF throughout, quoted description: the shape that a bare "\n" split breaks.
     writeFileSync(
