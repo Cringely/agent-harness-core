@@ -1145,9 +1145,88 @@ exit 0
             { & $script:export -ClaudeHome $ch -ClaudeJson $cj -OutputRoot $out `
                     -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
                     -VaultPath 'C:/vault' -WslHome '' -SkipSettings } |
-                Should -Throw -ExpectedMessage '*code-context*unfolded WSL home path*'
+                Should -Throw -ExpectedMessage '*code-context*unfolded POSIX home path*/home/wsluser*'
             Test-Path -LiteralPath (Join-Path $out 'mcp-servers.json') |
                 Should -BeFalse -Because "a failed gate must leave nothing behind to commit"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    # Backlog item 23, first direction. The gate above keyed on a `/home/` prefix, which is one
+    # of four spellings a WSL home takes, so its name promised more than its pattern delivered.
+    # One It per shape rather than a loop inside one: Pester stops an It at its first failing
+    # Should, and a single It here would report the first shape that regressed and stay silent
+    # about the other two, which is the F2/F6 defect the two Contexts in this file were split for.
+    It "fails closed on an unfolded <Name> in mcpServers" -ForEach @(
+        @{ Name = 'WSL root home';         Path = '/root/code-context-mcp.sh';              Shown = '/root' }
+        @{ Name = 'distro /Users home';    Path = '/Users/wsluser/code-context-mcp.sh';     Shown = '/Users/wsluser' }
+        @{ Name = 'WSL path into Windows'; Path = '/mnt/c/Users/winuser/code-context.sh';   Shown = '/mnt/c/Users/winuser' }
+    ) {
+        # The third is the one that motivated the item: it carries the WINDOWS username and
+        # escapes both sides -- the WSL gate did not know the prefix, and the Windows folds match
+        # on backslashes.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            $cj = Join-Path $stand '.claude.json'
+            @{ mcpServers = @{
+                    'code-context' = @{ type = 'stdio'; command = 'wsl'
+                        args = @('-e', $Path); env = @{} }
+                } } | ConvertTo-Json -Depth 20 | Set-Content $cj
+
+            { & $script:export -ClaudeHome $ch -ClaudeJson $cj -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -WslHome '' -SkipSettings } |
+                Should -Throw -ExpectedMessage "*code-context*unfolded POSIX home path*$Shown*"
+            Test-Path -LiteralPath (Join-Path $out 'mcp-servers.json') |
+                Should -BeFalse -Because "a failed gate must leave nothing behind to commit"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "does not read a forward-slashed Windows path as a POSIX home" {
+        # The falsifying half of the shape list above. `/Users/<name>` and `/home/<user>` are
+        # substrings of `C:/Users/<name>` and `C:/home/<name>`, and an mcpServers entry is free to
+        # carry a forward-slashed Windows path that no fold happens to own. Without the
+        # drive-letter lookbehind in $script:PosixHomeShape this entry throws and a legitimate
+        # export dies on a path that is not a POSIX home at all.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            $cj = Join-Path $stand '.claude.json'
+            @{ mcpServers = @{
+                    winpath = @{ type = 'stdio'; command = 'node'
+                        args = @('C:/Users/winuser/tools/srv.js'); env = @{} }
+                } } | ConvertTo-Json -Depth 20 | Set-Content $cj
+
+            & $script:export -ClaudeHome $ch -ClaudeJson $cj -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -WslHome '' -SkipSettings | Out-Null
+
+            $m = Get-Content (Join-Path $out 'mcp-servers.json') -Raw | ConvertFrom-Json
+            @($m.mcpServers.winpath.args)[0] | Should -Be 'C:/Users/winuser/tools/srv.js'
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "fails closed on a WSL home literal carried by a copied file, not only by mcpServers" {
+        # Backlog item 23, second direction. The gate inside the mcpServers loop reads mcpServers
+        # strings only, and the same literal reaches the payload through a rules file, a settings
+        # hook command, or any templated file. -SkipMcp here so mcpServers is never read at all:
+        # this can only pass on the whole-payload scan, not on the loop gate.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            'the launcher lives at /home/wsluser/code-context-mcp.sh' |
+                Set-Content (Join-Path $ch 'rules/security.md')
+
+            { & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -WslHome '/home/wsluser' -SkipSettings -SkipMcp } |
+                Should -Throw -ExpectedMessage '*rules/security.md*WSL home literal*'
         }
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
     }

@@ -47,6 +47,12 @@
     {{WSL_HOME}} unexpanded on purpose, since a receiver may have no WSL at all and guessing a
     username would make a dead entry look resolved.
 
+    The FOLD applies to mcpServers strings. The GATE that catches an unfolded WSL home applies to
+    every file the export writes: the same literal reaches the payload through a rules file, a
+    settings hook command or a templated file just as easily. Where -WslHome resolved, the gate
+    scans for that literal exactly; where it did not, the mcpServers gate falls back to the
+    POSIX-home shapes enumerated at $script:PosixHomeShape.
+
 .PARAMETER VaultPath
     The literal folded into {{OBSIDIAN_VAULT}}. Defaults to $env:CLAUDE_OBSIDIAN_VAULT, else
     $HOME/Documents/Obsidian Vault/Claude Code.
@@ -482,6 +488,27 @@ if ($PSCmdlet.ShouldProcess($OutputRoot, 'fold model-read machine paths')) {
     }
 }
 
+# --- POSIX home shapes -------------------------------------------------------
+# The shapes a WSL home takes, for the gate that runs when -WslHome did not resolve and there is
+# therefore no literal to scan for. Enumerated rather than keyed on `/home/`, which was one of
+# four spellings and named the gate after the narrowest of them (backlog item 23):
+#
+#   /home/<user>          the default for a distro-created user account
+#   /root                 a WSL root account, which has no /home entry at all
+#   /Users/<name>         distro images that mirror the macOS layout
+#   /mnt/<drive>/Users/<name>   a WSL path reaching back into Windows. This is the awkward one:
+#                         it carries the WINDOWS username, and it escapes both sides -- this gate
+#                         did not know the prefix, and the Windows folds match on backslashes.
+#
+# The drive-letter lookbehind keeps a forward-slashed Windows path out of it: `C:/Users/<name>`
+# is not a POSIX home and an mcpServers entry is free to carry one. `--flag=/home/<user>` still
+# matches, which a whitespace-or-quote lookbehind would have missed.
+#
+# Two-valued over an unenumerated domain is the failure change-management.md's scope-filter
+# invariant records, so the enumeration is the fix and this comment is the enumeration.
+$script:PosixHomeShape =
+    '(?<![A-Za-z]:)(?:/mnt/[A-Za-z]/Users/[^/"''\s]+|/home/[^/"''\s]+|/Users/[^/"''\s]+|/root(?![^/"''\s]))'
+
 # --- mcpServers --------------------------------------------------------------
 # The pattern table is read out of the live secret scanner rather than copied, so the gate here
 # and the gate on every memory write are the same seven patterns. A copy would drift, and the
@@ -631,12 +658,16 @@ if (-not $SkipMcp) {
                     # username verbatim with exit 0 and no warning naming {{WSL_HOME}}. Gating on
                     # "$WslHome is falsy" directly would need this file to reason about every
                     # falsy shape ($null, '', a value that resolves but happens not to match)
-                    # separately. Scanning the actual post-fold string for the one shape that must
-                    # never survive a successful fold -- a bare /home/<user> segment -- covers all
-                    # of those at once, and reuses the same scan-and-throw shape the secret gate
-                    # right above already established, rather than adding a second kind of gate.
-                    if ($s -match '/home/[^/"''\s]+') {
-                        throw "Refusing to export mcpServers entry '$name': carries an unfolded WSL home path ('$($Matches[0])'). -WslHome did not resolve (wsl absent, the distro stopped, or an empty override) so the fold could not apply; pass a real -WslHome, or fix the account layer's WSL entry, before exporting."
+                    # separately. Scanning the post-fold string for the shapes that must never
+                    # survive a successful fold covers all of those at once, and reuses the same
+                    # scan-and-throw shape the secret gate right above already established,
+                    # rather than adding a second kind of gate.
+                    #
+                    # Backlog item 23: the shape list used to be `/home/<user>` alone, which is
+                    # one of four spellings a WSL home takes. $script:PosixHomeShape carries the
+                    # enumeration and the reason for each entry.
+                    if ($s -match $script:PosixHomeShape) {
+                        throw "Refusing to export mcpServers entry '$name': carries an unfolded POSIX home path ('$($Matches[0])'). -WslHome did not resolve (wsl absent, the distro stopped, or an empty override) so the fold could not apply; pass a real -WslHome, or fix the account layer's WSL entry, before exporting."
                     }
                 }
             }
@@ -644,6 +675,41 @@ if (-not $SkipMcp) {
             [pscustomobject]@{ mcpServers = $servers } | ConvertTo-Json -Depth 20 |
                 Set-Content -LiteralPath (Join-Path $OutputRoot 'mcp-servers.json') -Encoding utf8
             Write-Host "  mcp-servers.json: $(@($serverNames).Count) server(s)$dryRun"
+        }
+    }
+}
+
+# --- residual WSL home, whole payload ----------------------------------------
+# The gate inside the mcpServers loop sees mcpServers strings and nothing else. The same WSL home
+# literal can reach the payload through a settings hook command, through a copied rules file, or
+# through any templated file, and every one of those is on disk by the time this runs. That was
+# the second half of backlog item 23: the gate's guarantee read wider than its scope.
+#
+# Scans for the resolved LITERAL, not for $script:PosixHomeShape. The shape cannot be used over
+# the whole tree: the payload legitimately names POSIX home paths in prose, and
+# skills/owasp-mcp/references/05-command-injection-execution.md names /root beside /etc/passwd
+# and /proc, so a shape scan across 218 files fails on documentation rather than on drift.
+# Measured on the live payload before choosing this: an exact-literal scan for the WSL home
+# matches nothing there, and the same scan for {{CORE_REPO}} or {{CLAUDE_HOME}} matches nine
+# prose-lint calibration comments that carry those paths on purpose -- which is why this scans
+# for the one literal that must never survive and not for every fold literal.
+#
+# When -WslHome did not resolve there is no literal to scan for, and the shape gate on mcpServers
+# is what stands. The two are complements: exact where a literal exists, shape where none does.
+#
+# Throws after the copy rather than before it, unlike the mcpServers gate. Rejected the
+# alternative of staging the payload in a temp tree and moving it on success: the marker below is
+# what a repeat export trusts, it is written only once every gate has passed, and a destination
+# left without one already demands -Force. The cost of the small fix is a partially written
+# -OutputRoot on a failed run; the cost of the large one is copying 218 files twice on every run.
+if ($WslHome -and -not $WhatIfPreference) {
+    # $outputRootFull, not $OutputRoot: FullName below is absolute, and -OutputRoot may be
+    # relative, so the Substring that builds $rel has to be taken against the resolved root.
+    foreach ($f in @(Get-ChildItem -LiteralPath $outputRootFull -Recurse -File -Force)) {
+        $body = Get-Content -LiteralPath $f.FullName -Raw
+        if ($body -and $body.Contains($WslHome)) {
+            $rel = ($f.FullName.Substring($outputRootFull.Length).TrimStart('\', '/')) -replace '\\', '/'
+            throw "Refusing to complete the export: '$rel' still carries the WSL home literal after folding. {{WSL_HOME}} is folded in mcpServers only, so a copy of that path in a rules file, a hook command or a templated file ships verbatim. Remove it at source, or add the file to AccountTemplatedFiles with a WSL_HOME row."
         }
     }
 }
