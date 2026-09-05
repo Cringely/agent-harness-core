@@ -308,9 +308,92 @@ export function scrubQuotesAndHeredocs(command: string): string {
  * asked to recognize: `git commit`, `git -C <path> commit`, and either with flags, including
  * `git -c user.name=x commit` (the detached-value form of `-c` is common enough in practice to be
  * worth its own alternative, unlike other detached-value short flags this heuristic still misses).
+ *
+ * The `(?!-{1,2}[A-Za-z][\w-]*(?:=\S+)?(?=\s|$))` guard on the two pair alternatives is
+ * load-bearing (backlog item 37). Three things about it matter and each has been got wrong on a
+ * branch already: that it sits THERE and not on the generic alternative, that it tests the WHOLE
+ * token rather than the two characters that make a token look like an option, and that the
+ * generic alternative stays byte-identical to master's. Read the three notes below before
+ * touching it — both simplifications have shipped once and both turned the gate off.
+ *
+ * Half one, the backtracking. Without any guard, a bare `-C` matched two alternatives that
+ * consume different token counts — the pair form swallowing the next token, the generic form
+ * taking the flag alone — so a run of n option-shaped tokens tiled Fibonacci(n+1) ways and the
+ * engine walked every tiling once the trailing `\s+commit` failed. `git -C` repeated 40 times is
+ * 125 characters and took 1878 ms through parseGitCommitInvocation on bun, unbounded on node.
+ * With the guard, `-C`/`-c` cannot take as their argument a token the generic alternative would
+ * consume whole, so at a `-C` followed by one there is exactly one viable alternative and the
+ * ReDoS is gone. Two forks survive and neither can accumulate. A `-C` followed by a PLAIN word:
+ * the generic branch consumes `-C` alone, the star then stops (a plain word is not option-shaped)
+ * and the tail either matches that word or fails at once. A `-C` followed by a token that starts
+ * option-shaped but is not consumable whole (`-a.b`): the generic branch consumes the `-a` prefix
+ * and stops mid-token, where the star cannot iterate and the tail cannot match, so that branch
+ * dies at once too. Both forks resolve in O(1). Measured flat to n=25600 (325 KB of command text)
+ * across EIGHT of nine attack shapes, four of them built to drive the second fork: worst cell
+ * 53.8 ms, linear across the last doubling. The ninth shape is the pre-existing quadratic
+ * described in the next paragraph, which is neither flat nor bounded by that number — 53.8 ms is
+ * the worst of eight, not of nine. Several shapes show a one-time step of 19x to 75x somewhere
+ * between 9 and 102 KB; the pattern this replaces shows the same step at the same sizes and both
+ * are linear on either side of it, so it is an engine threshold and not backtracking.
+ *
+ * "Linear" above is the per-start-position walk, and the whole-string scan is not linear — a
+ * separate, pre-existing property this change neither causes nor fixes. The pattern is unanchored
+ * and `[\w-]*` can swallow later `git` tokens, so each `\bgit(?=\s)` start position can run the
+ * star to end of string. `"git -a-a-a-".repeat(n) + " x"` costs about 4x per doubling on this
+ * pattern, on the one it replaces, and on master alike — 70 KB of command text is about 2
+ * seconds. Polynomial, not exponential, and out of scope here; do not read the paragraph above as
+ * saying the scan is bounded.
+ *
+ * Half two, why the guard is not on the generic alternative. scrubQuotesAndHeredocs() runs
+ * first and blanks a quoted span to spaces, so `git -C "$PWD" commit` reaches this pattern as
+ * `git -C         commit` and the argument is no longer a token at all. The gate depends on the
+ * generic alternative matching that bare `-C` and the tail finding `commit` across the blanks.
+ * Blocking the generic alternative from ever matching a bare `-C` (shipped once, reverted here)
+ * makes the pair alternative swallow `commit` as the repo path, the match fail, and
+ * `parseGitCommitInvocation` return isCommit false — which `decide()` and `main()` both read as
+ * ALLOW. A quoted `-C` argument then walks past the gate, which is worse than the stall it was
+ * fixing.
+ *
+ * Half three, why the lookahead reads the whole token. A token like `-a.b`, `-a/b` or `-a:b`
+ * starts option-shaped and is NOT consumable whole by the generic alternative, because `[\w-]*`
+ * stops at the punctuation and there is no `=` for `(?:=\S+)?` to take. A lookahead that only
+ * asked whether the argument LOOKS like an option (`(?!-{1,2}[A-Za-z])`, shipped once) therefore
+ * refused the pair reading on those tokens while the generic reading did not exist either: no
+ * alternative crossed the token, the star could not advance, and the whole match was lost — the
+ * same fail-open as half two, narrower. Testing the whole token is what makes the premise true:
+ * the pair form is blocked only where the generic form can take the token instead.
+ *
+ * That premise is also the correctness argument, and it is structural rather than measured. Each
+ * alternative here is a subset of master's corresponding one (the two pair forms narrowed by a
+ * lookahead, the generic form byte-identical), so every match here is a match on master. And the
+ * lookahead fires only where the blocked token is one the generic alternative consumes whole, so
+ * wherever the pair reading is refused the generic reading exists and the star still crosses the
+ * token: every match on master is a match here. The languages are equal. The one behavioural
+ * divergence left is which token group 2 captures: where master captured an option-shaped token
+ * as if it were a directory, this pattern leaves it uncaptured, because `main()` resolves that
+ * capture and hands it to git as a cwd that does not exist, so getStagedAbsPaths throws and the
+ * hook fails OPEN. Uncaptured keeps gitCwd at the session directory, where the gate can see the
+ * staged files.
+ *
+ * An earlier revision of this comment cited a differential-corpus count here instead, and it is
+ * gone on purpose. The generator behind it enumerated no option-shaped token carrying a character
+ * outside `[\w-]` before an `=`, which is exactly the class the narrow lookahead lost, so its
+ * zero measured the alphabet of the generator rather than the behaviour of the pattern. A
+ * property the next reader can check against the two patterns outlives a number nobody can
+ * re-derive.
+ *
+ * Rejected, with the reason. Blocking the generic alternative from a bare `-C`/`-c`
+ * (`(?!-[Cc]\s)`) loses every quoted `-C` argument, which is half two. Narrowing the pair
+ * lookahead to `(?!-{1,2}[A-Za-z])` loses the `-a.b` class, which is half three. Blocking the
+ * generic alternative only when `-C` has a real non-`commit` argument
+ * (`(?!-[Cc]\s+(?!commit(?=\s|$))\S)`) kills the ReDoS and keeps every repo path but still loses
+ * `git -C "$PWD" -c user.name=CI commit`, the half-two class one step rarer. Requiring the pair
+ * argument to be non-`-` (`(?!-)`) loses more of the same. An input-length cap or a timeout
+ * around exec() was never considered: both guard the consumer and leave the pattern wrong
+ * (~/.claude/rules/fix-quality.md).
  */
 const GIT_COMMIT_RE =
-  /\bgit(?=\s)((?:\s+-C\s+(\S+)|\s+-c\s+\S+|\s+-{1,2}[A-Za-z][\w-]*(?:=\S+)?)*)\s+commit(?=\s|$)/;
+  /\bgit(?=\s)((?:\s+-C\s+(?!-{1,2}[A-Za-z][\w-]*(?:=\S+)?(?=\s|$))(\S+)|\s+-c\s+(?!-{1,2}[A-Za-z][\w-]*(?:=\S+)?(?=\s|$))\S+|\s+-{1,2}[A-Za-z][\w-]*(?:=\S+)?)*)\s+commit(?=\s|$)/;
 
 /**
  * True (with the `-C` path, if any) when `command` invokes `git commit`, after blanking quoted
