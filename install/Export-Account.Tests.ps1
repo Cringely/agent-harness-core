@@ -1354,6 +1354,70 @@ exit 0
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
     }
 
+    It "fails closed on a WSL home literal closed by a bracket, backtick, or markdown link" {
+        # Review round 4, F1: the boundary's negated class stopped at '/', '"', "'" and whitespace,
+        # so a literal immediately followed by ')', ']', a backtick, or '>' read as clean --
+        # '(/root)', '[/root]' and a code span all missed, and a code span is the single most likely
+        # way a bare home path lands in a rules or skills file. Reverting the widened class (back to
+        # '(?![^/"''\s])') leaves this green: neither shape below satisfies the narrower boundary.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            'see the launcher config (/home/wsluser) or `/home/wsluser` for details' |
+                Set-Content (Join-Path $ch 'rules/security.md')
+
+            { & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -WslHome '/home/wsluser' -SkipSettings -SkipMcp } |
+                Should -Throw -ExpectedMessage '*rules/security.md*WSL home literal*'
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "fails closed on a WSL home literal at end of line, not only when a path separator follows" {
+        # Review round 4, F2: every whole-payload fixture in this file puts a '/' right after the
+        # literal ('/home/wsluser/code-context-mcp.sh', '/root/code-context-mcp.sh'), so nothing
+        # exercised the quote/whitespace/EOF arm of the boundary. Narrowing
+        # '(?![^/"''\s)\]`>])' to the single arm '(?=/)' still passes every other It in this file but
+        # leaves this one green, because a bare literal at end of line has no '/' after it. The two
+        # code comments at :739-742 and :744-749 assert that ablation is caught; this It is what
+        # makes that true.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            'the wsl user is /home/wsluser' | Set-Content (Join-Path $ch 'rules/security.md')
+
+            { & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -WslHome '/home/wsluser' -SkipSettings -SkipMcp } |
+                Should -Throw -ExpectedMessage '*rules/security.md*WSL home literal*'
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "still fails closed on a copied-file literal when -WslHome carries a trailing slash" {
+        # Review round 4, F3: an operator typo, '-WslHome /home/wsluser/' instead of
+        # '/home/wsluser', made the escaped literal end in '/', so the boundary after it then
+        # demanded a SECOND separator that a real path never has ('//code-context-mcp.sh' does not
+        # occur), and the gate went from fail-closed to a near-total no-op with no error. Dropping
+        # the TrimEnd('/') before the pattern is built leaves this green.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            'the launcher lives at /home/wsluser/code-context-mcp.sh' |
+                Set-Content (Join-Path $ch 'rules/security.md')
+
+            { & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -WslHome '/home/wsluser/' -SkipSettings -SkipMcp } |
+                Should -Throw -ExpectedMessage '*rules/security.md*WSL home literal*'
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
     It "does not text-decode a binary payload file looking for the WSL home" {
         # Review round 3: the scan read every payload file with Get-Content -Raw, including the two
         # PNGs under skills/wiring-diagram/examples/ (600 KB between them). Decoding megabytes of
