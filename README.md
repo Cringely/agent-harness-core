@@ -121,8 +121,11 @@ pwsh -NoProfile -File install/Export-Account.ps1
 
 It mirrors an allowlisted subset of `~/.claude/` into `account/claude/`, folding this machine's
 absolute paths into six placeholder tokens. A second export with nothing changed produces no
-diff, so `git status account/claude` after a run is a usable review of what moved. It refuses
-to write an `mcpServers` entry carrying anything the memory secret scanner recognises.
+content diff, so `git diff account/claude` after a run is a usable review of what moved. Read
+that with `git diff` and not `git status`: the export writes LF where a Windows checkout writes
+CRLF, so a no-change re-export flips working-tree line endings and `git status` lists every file
+it rewrote. It refuses to write an `mcpServers` entry carrying anything the memory secret scanner
+recognises.
 
 Install, on any machine, after a `git pull`:
 

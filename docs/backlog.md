@@ -1096,8 +1096,26 @@ triggers a standing policy rather than an amendment to this note.
 ## 35. Nothing verifies that the committed payload matches a fresh export
 
 `README.md:112-114` and `account/claude/rules/harness-core.md` both state the one-direction rule and
-"never hand-edited" as prose. `README.md:123-124` names the procedure: re-export, then read
-`git status account/claude`. Every one of those is prose; the enforcement is a person remembering.
+"never hand-edited" as prose. README's "Export, on this workstation" section names the procedure:
+re-export, then read the result. Every one of those is prose; the enforcement is a person
+remembering.
+
+**Measured 2026-09-05.** The check was run by hand for the first time, and the payload passes: a
+fresh export produces 218 files against the committed 218, nothing added or removed, and
+`git diff --exit-code` on the re-exported tree returns 0. What failed was the documented procedure
+itself. `git status --short` reported 203 modified paths on that same zero-content-diff tree,
+because the export writes LF where a Windows checkout writes CRLF, so a no-change re-export flips
+working-tree endings without touching the index. `Export-Account.ps1` told a reader to trust that
+output twice, in its `.DESCRIPTION` and in its closing `Write-Host`; README told them the same, and
+so did `~/.claude/rules/harness-core.md`, which went furthest with "anything the status shows is a
+real change." Every one of those now says `git diff`. The item stays open because the check remains
+manual; what changed is that the instrument it names is no longer the wrong one.
+
+One unrelated defect surfaced in the same run.
+`account/claude/tools/prose-lint/styles/Cringely/Vocabulary.yml` carries one CRLF among 38 LF, and
+the source under `~/.claude/` is byte-identical, so `Build-CringelyStyle.ps1` emits the stray ending
+rather than the export introducing it. Cosmetic, unfixed, noted here so the next reader of
+`git ls-files --eol` does not chase it as export drift.
 
 Item 25 already leans on the invariant as though it were enforced, saying a hand edit under
 `account/claude/` is reverted by the next export. That is true only if someone re-exports.
