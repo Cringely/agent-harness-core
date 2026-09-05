@@ -49,6 +49,18 @@ $script:AccountSkipDirs = @('skills/appsec-kpi-deck')
 # the model on this box. Export folds, install expands. The table is an allowlist for the same
 # reason the tree is: rules/ssh.md and rules/change-management.md name this machine on purpose
 # and must not be touched.
+#
+# "Must not be touched" scopes to FOLDING, which is what this table does, and not to the identity
+# redaction Export-Account.ps1 runs over the whole payload. The two do not conflict, and the
+# distinction is worth stating because both files do get rewritten on the way out. A fold replaces
+# a machine path with a token the installer expands to the RECEIVER's answer, and that is exactly
+# what these two must not have: "where Git Bash puts $HOME on this workstation" and "where the ssh
+# config lives" are measured claims about this box, and expanding them elsewhere would make them
+# false. A redaction replaces only the username with a neutral placeholder and expands to nothing
+# anywhere, so the sentence keeps naming this machine's path shape and stops naming the person.
+# The allowlist here stays an allowlist; the redaction is unconditional, because an allowlist for
+# a REDACTION would fail open -- a new file would leak by default, which is the inverse of why
+# excluding by default is right for this table and for $AccountTreeDirs.
 $script:AccountTemplatedFiles = [ordered]@{
     'rules/harness-core.md'              = @('CORE_REPO')
     'hooks/harness-core-reminder.sh'     = @('CORE_REPO')
