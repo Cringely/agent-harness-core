@@ -1231,6 +1231,52 @@ exit 0
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
     }
 
+    It "resolves -WslHome from wsl when the caller omits the parameter" {
+        # Backlog item 24: ablating the default-resolution block left the whole suite green,
+        # because every test touching the parameter passed it explicitly -- a populated path in
+        # the folding Context above and an empty string in the fail-closed It above it. Neither
+        # reaches the `if (-not $PSBoundParameters.ContainsKey('WslHome'))` branch.
+        #
+        # A stub `wsl` prepended to PATH, not the real one: the real answer is this machine's WSL
+        # username, which is the literal this whole fold exists to keep out of the payload, and a
+        # test asserting against it would put it in the test name on the first failure. The stub
+        # makes the expected value a fixture value the repo can print.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        $stubDir = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-wslstub-" + [guid]::NewGuid())
+        $oldPath = $env:PATH
+        try {
+            New-Item -ItemType Directory -Path $stubDir -Force | Out-Null
+            # .cmd, not .ps1: a .ps1 that never calls exit leaves $LASTEXITCODE at whatever the
+            # previous native command set, and the resolution block reads $LASTEXITCODE.
+            "@echo off`r`necho /home/stubwsl`r`n" |
+                Set-Content -LiteralPath (Join-Path $stubDir 'wsl.cmd') -NoNewline
+            $env:PATH = $stubDir + [System.IO.Path]::PathSeparator + $oldPath
+
+            $ch = (Join-Path $stand '.claude')
+            $cj = Join-Path $stand '.claude.json'
+            @{ mcpServers = @{
+                    'code-context' = @{ type = 'stdio'; command = 'wsl'
+                        args = @('-e', '/home/stubwsl/code-context-mcp.sh'); env = @{} }
+                } } | ConvertTo-Json -Depth 20 | Set-Content $cj
+
+            # -CoreRepo and -NpmGlobal stay explicit so nothing else shells out to PATH; -WslHome
+            # is the one parameter deliberately omitted.
+            & $script:export -ClaudeHome $ch -ClaudeJson $cj -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipSettings | Out-Null
+
+            $m = Get-Content (Join-Path $out 'mcp-servers.json') -Raw | ConvertFrom-Json
+            @($m.mcpServers.'code-context'.args) |
+                Should -Contain '{{WSL_HOME}}/code-context-mcp.sh' `
+                -Because "the fold can only land if the omitted -WslHome resolved from wsl"
+        }
+        finally {
+            $env:PATH = $oldPath
+            Remove-Item -Recurse -Force $stand, $out, $stubDir -ErrorAction SilentlyContinue
+        }
+    }
+
     It "fails closed when any mcpServers string trips the secret scanner's own patterns" {
         # Server entries reach secrets through 1Password or an environment variable, never
         # inline. Measured against today's live mcpServers: all 15 strings clean, 0 hits.
