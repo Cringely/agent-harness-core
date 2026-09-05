@@ -53,6 +53,16 @@ describe("isValidAgentName() — rejected", () => {
   });
 
   // The field comes out of JSON.parse on hook stdin, so its type is whatever the payload said.
+  //
+  // Five of these seven redden on their own if the `typeof name === "string"` check is dropped:
+  // `null`, `undefined`, `42`, `true` and `["task-reviewer"]` all stringify to something the
+  // anchored regex accepts. `{}` and `[]` survive that single mutation, and they are NOT the same
+  // strength, so do not read them as a pair. Measured against the realistic combined regression, a
+  // rewrite to `String(name).match(/[A-Za-z0-9][A-Za-z0-9_-]*/)` that drops the type check and the
+  // anchors together: `{}` stringifies to `"[object Object]"`, matches unanchored, and reddens.
+  // `[]` stringifies to `""`, which fails even unanchored, so no mutation tried against this file
+  // kills it. `{}` earns its row; `[]` is kept as documentation of the payload contract, and is
+  // the weakest row here.
   test.each([[null], [undefined], [42], [true], [{}], [[]], [["task-reviewer"]]])(
     "non-string %p",
     (value) => {
