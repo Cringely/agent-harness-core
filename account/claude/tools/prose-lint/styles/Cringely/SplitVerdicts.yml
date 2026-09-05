@@ -1,0 +1,156 @@
+---
+# A whole document sealed inside one code fence.
+#
+# The failure: an agent answers in a chat register, the reply arrives wrapped in
+# ```markdown ... ```, and the wrapper survives into the file. The document then
+# renders as one grey box, and — the part that matters here — every prose rule in
+# this kit goes silent on it, because Vale skips fenced content by default.
+#
+# That silencing is measured, not assumed. The fixture
+# scratchpad\fix-split-wrapped.md carries six banned words in one sentence
+# ("delve", "comprehensive", "tapestry", "leverage", "robust", "paradigm") and
+# under the full config with all 63 upstream rules plus every sibling Cringely
+# rule it produced ZERO findings and exit 0. That run is also this rule's
+# ablation: the file was silent before the token below existed and fires at 1:1
+# after, so the fixture discriminates.
+#
+# So this is not a style rule and there is no register in which it is wrong. It
+# is a structural check on a file that has stopped being a markdown document,
+# and its real value is restoring the other seventy rules' coverage on it.
+#
+# ---------------------------------------------------------------------------
+# WHY scope: raw, AND WHY raw IS SAFE HERE AND ALMOST NOWHERE ELSE.
+# ---------------------------------------------------------------------------
+# Default scope cannot see this at all: the whole file is a code block, so the
+# text Vale matches against is empty. `scope: raw` hands the check the file's
+# raw bytes, and `\A` then anchors at byte 0 of the FILE, not of each block —
+# verified: fix-split.md has a fence at line 25 and stays silent, the wrapped
+# fixture fires at 1:1.
+#
+# Two defects in `scope: raw` were measured this session (Vale 3.15.1), and both
+# are why raw must not be reached for casually:
+#
+#   1. It SILENTLY DROPS MATCHES when a document holds several. A draft of this
+#      file carried the AI-referral-tail tokens instead; on fix-split.md eleven
+#      raw matches produced nine alerts, and the two missing ones (lines 31, 33)
+#      were reproducible across runs. An identically-shaped line in
+#      fix-split-d.md fired, so it is not the code span, not the token, and not
+#      a race. Cause unidentified. A detector that misses without saying so is
+#      worse than no detector.
+#   2. It BYPASSES the in-file disable comment. On fix-split.md line 38, sitting
+#      between `<!-- vale Cringely.SplitVerdicts = NO -->` and its `= YES`
+#      partner, the draft rule was silent under default scope and fired TWICE
+#      under raw. Under raw there is no in-file carve-out at all.
+#
+# Neither defect can bite this rule. The token is anchored `\A ... \z`, so it
+# matches at most once per document, which puts defect 1 out of reach. And a
+# file that is entirely one fence cannot host a disable comment anyway — the
+# comment would be inside the fence — so defect 2 costs nothing that was
+# available. The escape hatch, if a legitimately fence-wrapped .md ever appears,
+# is a path section in .vale.ini, not an in-file comment.
+#
+# ---------------------------------------------------------------------------
+# THE PAIRED FORM, AND THE OPENING-ONLY FORM THAT WAS REJECTED.
+# ---------------------------------------------------------------------------
+# The obvious token is `\A``` — the document begins with a fence. Rejected on
+# measurement: it fires on scratchpad\fix-split-e.md, a document that opens with
+# a PowerShell block and then carries on as ordinary prose. That is a real
+# document shape and it is not this failure. Requiring the closing fence at EOF
+# costs one thing — an agent that truncates before emitting the closing fence
+# goes uncaught — and buys silence on every snippet-first document.
+#
+# `\r?\n` on both ends, and `\s*\z` rather than `\n?\z`, because this workstation
+# runs core.autocrlf=true and a matcher anchored on a bare `\n` is the failure
+# this house has been bitten by three times. Verified against a byte-checked CRLF
+# fixture (fix-split-crlf.md, first bytes 60 60 60 6D ... 0D 0A): fires. The
+# greedy `.*` under `(?s)` reaches the LAST fence in the file, so a wrapped
+# document containing its own code block is still caught (fix-split-inner.md:
+# fires).
+#
+# NO NEGATIVE LOOKAHEAD. Measured on 3.15.1 this session, `foo(?! )` behaves as
+# `foo\b` and `foo(?!bar)` misses `foobaz`, with exit 0 and no diagnostic. There
+# is none here and none is needed: the anchors do the narrowing.
+#
+# NO exceptions:. Nothing legitimate matches, so there is nothing to carve out.
+# If that ever stops being true the answer is a .vale.ini path section, per the
+# raw-scope note above.
+#
+# KNOWN GAP, deliberate: the tilde fence. `~~~markdown ... ~~~` wrapping a whole
+# file produces the identical silencing (fix-split-tilde.md: zero findings) and
+# is NOT matched here. Backticks are what chat surfaces emit; a tilde wrapper has
+# never been seen in this corpus, and a second token for an unmeasured case is
+# the kind of speculative width this kit keeps out. Add it the first time one
+# appears, not before.
+#
+# WHAT THIS CANNOT SEE. `.vale.ini` binds one format section, `[*.md]`. The same
+# wrapper around a .ps1, .ts or .json file is invisible, and there is no
+# commit-msg hook anywhere, so a fenced or bolded commit body is invisible too.
+#
+# NAMING. The identifier is Cringely.SplitVerdicts because that filename was
+# assigned; it describes the batch this rule came out of, not the rule. On merge,
+# rename the file to FencedWrapper.yml if nothing has come to depend on the
+# identifier — the message carries the meaning, but the rule name prints in every
+# alert and currently tells the reader nothing.
+#
+# ---------------------------------------------------------------------------
+# DROPPED FROM THE SAME BATCH. Kept here because each will be proposed again.
+# ---------------------------------------------------------------------------
+#   unveil / unveils / unveiled / unveiling
+#       Measured 2026-08-14 over 438 .md files (~/.claude/rules, ~/.claude/skills,
+#       E:\projects\agent-harness-core minus worktrees, ~/.claude/projects/*/memory):
+#       ZERO occurrences, in either sense. The word is in Kobak's excess list beside
+#       "unravel", which upstream does ban and which does fire — so the tell is real
+#       and simply absent from this operator's writing. What is NOT absent is the
+#       false-positive frame: vendor-launch summaries are a live genre here
+#       (steam-machine-amd-soc-gpu-comparison.md, mdash-project-perception.md), and
+#       "Valve unveiled the Steam Machine" is correct English. The spec required
+#       exempting release notes and vendor summaries, and that exemption is not
+#       expressible: `exceptions:` matches phrases, not document classes, and the
+#       vendor-name set is unbounded. Zero measured demand against a live and
+#       un-carve-out-able false-positive frame is a drop, not a narrowing.
+#
+#   utm_source=chatgpt.com / =openai / =copilot.com, referrer=grok.com
+#       Dropped as a Vale rule; the pre-commit hook is the right home. Under
+#       DEFAULT scope, measured on fix-split.md, the rule reached 3 of 11
+#       placements: it fired only on a bare query fragment loose in a sentence,
+#       and missed the bare URL, the markdown link, the backticked URL, the
+#       table-cell URL, the reference definition and the fenced command. A leaked
+#       tail always arrives attached to a URL, so default scope catches the form
+#       in which the tail is DISCUSSED and misses the form in which it LEAKS —
+#       exactly backwards. Under `scope: raw` coverage reached 9 of 11, but that
+#       is where both raw defects above were measured, including the disable
+#       comment firing twice inside its own off-region. Zero occurrences in the
+#       438-file corpus, so nothing was lost by declining. Vale also never sees a
+#       .ps1 comment or a commit message, which is where these tails also land.
+#       Adjacent and NOT duplicated: Cringely.MachineResidue covers vendor
+#       citation artifacts (oaicite, citeturn, grok_card) and holds no URL
+#       parameter token. If these are ever wanted, they belong in that file.
+#
+#   **bold** in a medium that does not render it
+#       Dead on arrival under a `[*.md]`-only binding, and dropped for that alone:
+#       markdown renders emphasis, so every file Vale is handed is one where bold
+#       is correct. The dangerous half of the spec — telling `**bold**` from
+#       `**/*.ts`, `**kwargs`, and two globs in one message forming a spurious
+#       pair — never got a chance to be wrong, because the rule can do no work
+#       here at any precision. The home for it is a commit-msg hook, which does
+#       not exist. Do not add a dead rule to stand in for a missing hook.
+#
+# ---------------------------------------------------------------------------
+# Calibration (2026-08-14). Corpus: 435 .md files swept under the full .vale.ini
+# with every upstream and sibling rule active — ~/.claude/rules (11 files, 86
+# alerts), ~/.claude/skills (931 alerts), E:\projects\agent-harness-core minus
+# worktrees (32 files, 9 alerts), ~/.claude/projects/*/memory (293 files, 2763
+# alerts). 3789 alert lines total, of which THIS RULE produced ZERO. Three memory
+# files were excluded because malformed YAML frontmatter makes Vale abort the run
+# (E201): feedback_warning_labels.md, project_garmin-training-analysis.md,
+# compaction-handoff-protocol.md. Zero is the expected and required number: a
+# nonzero count would have meant the anchors were loose, not that the corpus was
+# bad. There is no threshold in this rule — it is presence/absence.
+extends: existence
+message: "Fenced wrapper: the whole document sits inside one code fence. Strip the outer fence lines. As written, this file renders as one code block and every prose rule in this kit goes silent on it."
+level: error
+scope: raw
+nonword: true
+ignorecase: false
+tokens:
+  - '(?s)\A```[A-Za-z0-9+-]*\r?\n.*\r?\n```\s*\z'

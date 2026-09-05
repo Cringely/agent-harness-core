@@ -1,0 +1,82 @@
+{
+  "title": "CYT1070 hand-wire aide — faikin32 (Daikin S21 to XIAO ESP32-C6)",
+  "subtitle": "Hold your module the same way as this drawing (Chan1 left, Chan2 right; top row = HV, bottom = LV). Use the two TXI/TXO columns; leave the RX columns empty.",
+  "canvas": { "w": 1060, "h": 716 },
+
+  "board": {
+    "x": 260, "y": 150, "w": 520, "h": 176,
+    "cols": 6,
+    "rows": [
+      { "label": "HV", "callout_dir": "up" },
+      { "label": "LV", "callout_dir": "down" }
+    ]
+  },
+
+  "groups": [
+    { "label": "Chan 1", "cols": [0, 1, 2] },
+    { "label": "Chan 2", "cols": [3, 4, 5] }
+  ],
+
+  "pads": [
+    { "row": 0, "col": 0, "silk": "TXO",
+      "callout": { "kind": "elbow", "side": "left", "color": "#2e9b3c",
+        "series": { "text": "100-220Ω" }, "label": "S21 pin 3 (Rx to aircon)" } },
+    { "row": 0, "col": 1, "silk": "RXI", "used": false },
+    { "row": 0, "col": 2, "silk": "HV",
+      "callout": { "kind": "stub", "color": "#d33", "label": "5 V" } },
+    { "row": 0, "col": 3, "silk": "GND",
+      "callout": { "kind": "stub", "color": "#222", "label": "GND" } },
+    { "row": 0, "col": 4, "silk": "RXI", "used": false },
+    { "row": 0, "col": 5, "silk": "TXO",
+      "callout": { "kind": "elbow", "side": "right", "color": "#2b6fd6",
+        "series": { "text": "100-220Ω" }, "label": "S21 pin 2 (Tx from aircon)" } },
+
+    { "row": 1, "col": 0, "silk": "TXI",
+      "callout": { "kind": "elbow", "side": "left", "color": "#2e9b3c",
+        "label": "XIAO  D6 / GPIO16 (TX)" } },
+    { "row": 1, "col": 1, "silk": "RXO", "used": false, "note": "leave empty" },
+    { "row": 1, "col": 2, "silk": "LV",
+      "callout": { "kind": "stub", "color": "#ef7d1a", "label": "3.3 V" } },
+    { "row": 1, "col": 3, "silk": "GND",
+      "callout": { "kind": "stub", "color": "#222", "label": "GND" } },
+    { "row": 1, "col": 4, "silk": "RXO", "used": false, "note": "leave empty" },
+    { "row": 1, "col": 5, "silk": "TXI",
+      "callout": { "kind": "elbow", "side": "right", "color": "#2b6fd6",
+        "label": "XIAO  D7 / GPIO17 (RX)" } }
+  ],
+
+  "power_path": {
+    "x": 60, "y": 430, "w": 712, "h": 88, "title": "Power path",
+    "boxes": [
+      { "label": "S21 pin 4", "sublabel": "~12 V", "stroke": "#6a1b9a", "text_fill": "#6a1b9a", "w": 92 },
+      { "label": "250 mA", "sublabel": "PTC fuse", "w": 90, "link_color": "#6a1b9a" },
+      { "label": "MP1584 buck", "sublabel": "set to 5.0 V out", "w": 126, "link_color": "#6a1b9a" },
+      { "label": "5 V rail", "sublabel": "to HV + XIAO VBUS", "stroke": "#c22", "text_fill": "#c22", "w": 128, "link_color": "#d33" }
+    ],
+    "notes": ["S21 pin 5 = GND", "(star ground at pin 5)"]
+  },
+
+  "legend": {
+    "x": 800, "y": 454, "columns": 1, "title": "Wire colours",
+    "items": [
+      { "color": "#2e9b3c", "text": "XIAO TX line (to aircon Rx)" },
+      { "color": "#2b6fd6", "text": "aircon Tx line (to XIAO RX)" },
+      { "color": "#d33", "text": "5 V" },
+      { "color": "#ef7d1a", "text": "3.3 V" },
+      { "color": "#222", "text": "GND" },
+      { "color": "#6a1b9a", "text": "12 V" }
+    ]
+  },
+
+  "key_points": {
+    "x": 60, "y": 566, "title": "Key points",
+    "items": [
+      "Put a 100-220 Ω resistor in each signal line, on the HV side (top row, the small boxes near S21 pins 2 and 3).",
+      "Only the two TXI / TXO (MOSFET) columns carry signal. The RXI / RXO divider columns stay empty.",
+      "Top row = HV side (5 V, faces aircon); bottom row = LV side (3.3 V, faces XIAO). Both GND pads are in column 4.",
+      "Firmware: invert false, UART on GPIO16 / 17 for this hand-wire build. S21 pin 1 (5 V ref) stays unused.",
+      "Both TX columns are bidirectional MOSFET lines, so there is no channel-direction trap as long as signals stay off the RX pads.",
+      "The XIAO 5 V power pad is silk-labeled **VBUS** on current units (same pad, USB 5 V)."
+    ]
+  }
+}

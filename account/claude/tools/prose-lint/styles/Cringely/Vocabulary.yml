@@ -1,0 +1,39 @@
+extends: existence
+message: "Banned vocabulary (AI tell): '%s'. See beautiful_prose contract."
+level: warning
+ignorecase: true
+tokens:
+  - comprehensive
+  - crucial
+  - cutting-edge
+  - delve
+  - dive into
+  - ecosystem
+  - empower
+  - essential
+  - facilitate
+  - foster
+  - game-changer
+  - harness
+  - highlight
+  - holistic
+  - innovative
+  - landscape
+  - leverage
+  - nuanced
+  - operationalize
+  - paradigm
+  - pivotal
+  - realm
+  - revolutionary
+  - robust
+  - seamless
+  - state-of-the-art
+  - streamline
+  - synergy
+  - tapestry
+  - transformative
+  - underscore
+  - unprecedented
+  - utilize
+  - vital

@@ -1,0 +1,41 @@
+---
+# The ablation tic, specifically.
+#
+# "Ablate / ablation / ablative" is a genuinely useful word: it distinguishes
+# "I ran the tests" from "I proved the test would catch the failure." Keep it
+# where that distinction is the point: an agent brief, a review verdict.
+#
+# But it is a fashionable word right now, it reads as borrowed lab-coat register
+# in human-facing prose, and said three times in one breath it stops carrying
+# meaning at all. Plain English does the same work for a reader who is not an ML
+# researcher:
+#   "ablate the fix"          -> "remove the fix and check the test fails"
+#   "an ablation confirmed X" -> "we broke X on purpose; the test caught it"
+#   "ablation-verified"       -> "verified by deleting it and watching it fail"
+#
+# SCOPE, PRECISELY (verified by experiment, Vale 3.15.1):
+#   `scope: text` counts occurrences PER PARAGRAPH, not per document. The same
+#   nine hits in one paragraph raise one alert; split three-and-three-and-three
+#   across three paragraphs they raise three (at max: 2), and at a two-per-
+#   paragraph drip they raise none. `scope: raw` is the only per-document
+#   aggregation Vale offers, and it counts the raw bytes: code fences, inline
+#   code, and link URLs all score. It also measures LENGTH, not density, so on
+#   an append-only log (decisions.md: 20k words, 51 honest uses) any per-document
+#   cap either sits above every real file or fires forever. Rejected on both
+#   counts.
+#
+# So this rule catches ONE thing, and catches it well: a single paragraph that
+# leans on the word three or more times. It does NOT catch a word that recurs at
+# a steady drip across a whole file. That judgment stays with the writer; see the
+# "Jargon and Lexical Fatigue" section of ~/.claude/rules/writing-style.md.
+#
+# Calibration (2026-07-14, whole of E:\projects\spacemolt\docs + README):
+# the worst paragraph in the repo uses it twice. max: 2 is therefore silent on
+# every healthy document we have and fires on the third use in one paragraph.
+extends: occurrence
+message: "'ablate/ablation' used %d times in this paragraph. It is a current AI tic and reads as borrowed lab register. Say what you actually did: delete the thing, confirm the test fails."
+level: warning
+scope: text
+ignorecase: true
+max: 2
+token: '\bablat(?:e|es|ed|ing|ion|ions|ive)\b'

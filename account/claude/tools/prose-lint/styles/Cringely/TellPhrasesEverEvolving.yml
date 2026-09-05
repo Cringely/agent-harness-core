@@ -1,0 +1,68 @@
+---
+# The generalized "ever-<participle>" opener prefix.
+#
+# SPLIT FROM TellPhrases.yml FOR ONE REASON: level: is per-rule and Vale 3.15.1
+# has no per-token severity. This family is error; everything in TellPhrases.yml
+# is warning. Same author, same fixture, same run.
+#
+# WHAT UPSTREAM ALREADY HAS (read, not assumed):
+#   OpeningCliches.yml:15  "In the ever-evolving landscape"
+#   OpeningCliches.yml:10  "In today's ever-changing"
+# Both pin a single completion. The frequency argument behind the cliche is
+# computed on the four-word prefix, and the head noun after it varies freely:
+# world, space, field, domain, arena, market. So the upstream tokens catch the
+# one spelling that got quoted in the style guides and miss the family.
+#
+# THE COMPLETION 'evolving' IS DELIBERATELY EXCLUDED. Measured 2026-08-14
+# against the full config, before this file existed:
+#   "In the ever-evolving world of tooling."
+#     -> 1 alert, ai-tells.OverusedVocabulary: 'evolving' (col 13)
+#   "In the ever-evolving landscape of AI."
+#     -> 3 alerts: ai-tells.OpeningCliches (col 1),
+#        ai-tells.OverusedVocabulary 'evolving' (col 13),
+#        Cringely.Vocabulary 'landscape' (col 22)
+#   "Amid the ever-shifting demands."      -> 0 alerts
+#   "Within the ever-expanding surface."   -> 0 alerts
+# Every "ever-evolving" already raises at least one finding because
+# OverusedVocabulary flags the bare word unconditionally. Including it here
+# would add a second finding to a span that already has one, and a fourth to the
+# landscape spelling. Two findings on one span is the measured noise pattern
+# that gets an entire style disabled, and the sentence is not silently passing
+# without me: the writer still gets told. What is lost is message precision on
+# that one completion. What is bought is zero double-reporting anywhere in this
+# rule.
+#
+# The genuine gap is therefore exactly changing|shifting|expanding after
+# "in|amid|within the ever-", which measured zero alerts before this file.
+#
+# REJECTED ALTERNATIVE: keep 'evolving' and suppress the clash with
+# exceptions: ['In the ever-evolving landscape']. It cannot work. The clash is
+# not with one phrase, it is with the bare word 'evolving' in a different rule,
+# which fires on every completion. exceptions: would have to suppress the whole
+# arm, which is what excluding the completion does directly and legibly.
+#
+# 'In today's ever-changing' does NOT clash: that token needs "today's", this
+# one needs "the". Different strings, and a sentence containing one cannot
+# contain the other.
+#
+# ERROR level, matching OpeningCliches.yml, because this is the same defect as
+# the token it generalizes and severity should not depend on which head noun the
+# writer picked.
+#
+# nonword: true is not strictly needed (no punctuation in the token) but \b is
+# written explicitly so the rule reads the same as its sibling file.
+#
+# This file also carried the exceptions:-semantics experiment recorded in the
+# task report: a PROBE rule was temporarily written here, measured, and
+# reverted. Result on vale 3.15.1: exceptions: DO match context beyond the
+# matched token (on both nonword: true and nonword: false) and DO accept regex
+# metacharacters, but they are CASE-SENSITIVE and do NOT inherit
+# ignorecase: true. A lowercase exception against sentence-initial text
+# silently fails to suppress, with exit code 0 and no diagnostic.
+extends: existence
+message: "AI opening cliche: '%s'. Start with the actual point. The head noun after this prefix does not rescue it."
+level: error
+ignorecase: true
+nonword: true
+tokens:
+  - '\b(?:in|amid|amidst|within) the ever-(?:changing|shifting|expanding)\b'

@@ -1,0 +1,101 @@
+# WireViz cable-harness spec: the "build this cable" view (colours, gauges, pin-to-pin, BOM).
+# Render with:  ./render_harness.sh examples/cyt1070.harness.yml
+# GOTCHA: never write a bare 3.3V in a label -- graphviz reads it as a malformed number.
+# Use 3V3 (below) or a spaced "3.3 V".
+templates:
+  - &hookup
+    gauge: 26 AWG
+    category: bundle
+
+connectors:
+  AC:
+    type: Daikin S21 port
+    subtype: S5B-EH (JST EH 2.5mm)
+    pinlabels: [5V ref (UNUSED), Tx from aircon (5V), Rx to aircon (5V), Power ~12V, GND]
+    notes: S21 only — never S403 (mains) or X50A. Pin 1 left unconnected.
+  F1:
+    type: PTC fuse
+    subtype: 250 mA hold
+    pinlabels: [IN, OUT]
+    notes: series on S21 pin 4 (alt. 500 mA fast fuse)
+  U1:
+    type: MP1584EN buck
+    subtype: set 5.0 V out
+    pinlabels: [IN+, IN-, OUT+, OUT-]
+    notes: input cap 25 V min; mount 25 mm min from XIAO antenna; ferrite + 10uF on 5V out
+  LS:
+    type: BSS138 level shifter
+    subtype: 4-ch, 2 used
+    pinlabels: [HV, HV1, HV2, GND(HV), LV, LV1, LV2, GND(LV)]
+    notes: non-inverting; 100-220 ohm series R on HV1/HV2 toward S21; ch 3-4 unused
+  XIAO:
+    type: Seeed XIAO ESP32-C6
+    subtype: ESPHome + Zigbee
+    pinlabels: [5V, GND, 3V3, D6 GPIO16 TX, D7 GPIO17 RX]   # 3V3 not 3.3V (graphviz gotcha)
+    notes: UART 2400 8E2, invert false
+
+cables:
+  W1:
+    type: S21 lead (JST-EH 5p)
+    gauge: 24 AWG
+    length: 0.3 m
+    wirecount: 4
+    notes: BRP069B41/C41 Wi-Fi module lead fits
+  W2:
+    <<: *hookup
+    wirecount: 2
+    colors: [RD, BK]
+  W3:
+    <<: *hookup
+    wirecount: 5
+    colors: [RD, RD, OG, BK, BK]
+  W4:
+    <<: *hookup
+    wirecount: 2
+    colors: [YE, GN]
+
+connections:
+  # S21 lead: signals to shifter HV side, power to fuse, ground to buck
+  - - AC: [2]
+    - W1: [1]
+    - LS: [3]        # aircon Tx -> HV2
+  - - AC: [3]
+    - W1: [2]
+    - LS: [2]        # aircon Rx <- HV1
+  - - AC: [4]
+    - W1: [3]
+    - F1: [1]
+  - - AC: [5]
+    - W1: [4]
+    - U1: [2]        # star ground entry at buck IN-
+  # fused 12V into buck
+  - - F1: [2]
+    - W2: [1]
+    - U1: [1]
+  # W2 wire 2 = buck OUT- to XIAO GND
+  - - U1: [4]
+    - W2: [2]
+    - XIAO: [2]
+  # 5V rail: buck -> XIAO 5V and shifter HV; 3V3: XIAO -> shifter LV; grounds
+  - - U1: [3]
+    - W3: [1]
+    - XIAO: [1]
+  - - U1: [3]
+    - W3: [2]
+    - LS: [1]        # HV ref
+  - - XIAO: [3]
+    - W3: [3]
+    - LS: [5]        # LV ref
+  - - U1: [4]
+    - W3: [4]
+    - LS: [4]        # GND(HV)
+  - - XIAO: [2]
+    - W3: [5]
+    - LS: [8]        # GND(LV)
+  # UART LV side, crossed: XIAO TX -> HV1 path (aircon Rx), XIAO RX <- HV2 (aircon Tx)
+  - - LS: [6]
+    - W4: [1]
+    - XIAO: [4]      # LV1 <-> D6 GPIO16 TX
+  - - LS: [7]
+    - W4: [2]
+    - XIAO: [5]      # LV2 <-> D7 GPIO17 RX

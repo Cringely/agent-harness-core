@@ -1,0 +1,220 @@
+---
+# Multi-word AI tells that survive the 63 upstream ai-tells rules.
+#
+# EVERY token below was probed against the FULL active config before it was
+# written, and the probe is the whole point of the file: most of the candidates
+# handed to this rule were already covered upstream and were dropped rather than
+# added. Probe fixture and raw output are recorded in the task report; the
+# dropped set is listed at the bottom of this comment so nobody re-adds them.
+#
+# LEVEL: warning, not error. Each family here is a register tell rather than a
+# factual defect, and every one of them is writable on purpose by a person who
+# means it. Warning keeps them visible without failing the pre-commit gate.
+#
+# nonword: true because three tokens end in punctuation ('deeper?') or contain
+# an apostrophe. Vale's default word-boundary wrapping puts a \b after the final
+# character, and a \b after '?' demands a word character next, so the token
+# silently never matches. RhetoricalSelfAnswer.yml uses nonword for the same
+# reason. Every word-shaped token therefore carries its own explicit \b.
+#
+# NEGATIVE LOOKAHEAD IS NOT AVAILABLE. Measured on vale 3.15.1: 'foo(?!bar)'
+# against "foobar and foobaz and foo" matched only the bare foo and missed
+# foobaz, and vale exited 0 with no diagnostic. Carve-outs use exceptions: or
+# they do not exist.
+#
+# exceptions: IS CASE-SENSITIVE AND DOES NOT INHERIT ignorecase: true.
+# Measured 2026-08-14 on this rule and confirmed on an isolated probe rule:
+#   exceptions: ['ever-changing set'] suppressed "the ever-changing set of
+#     upstream tokens" and left "an ever-changing thing" firing.
+#   exceptions: ['EVER-changing set'] suppressed NOTHING; both fired.
+# Confirmed on nonword: true and nonword: false, and regex metacharacters do
+# work inside an exception ('ever-changing [^.!?]*upstream' suppressed
+# correctly). So an exception written in lowercase against sentence-initial
+# prose fails silently, exit 0, no diagnostic. That is exactly how the carve-out
+# below failed on its first two drafts. Every exception here therefore carries an
+# explicit [Yy]-style case class rather than relying on the rule's ignorecase.
+#
+# ---------------------------------------------------------------------------
+# 1. HEDGE CASCADE. Two hedges stacked on one verb.
+#    "could potentially", "might possibly", "may possibly",
+#    "can sometimes tend to".
+#
+#    Stacked means adjacent, so this is a plain sequence match with no
+#    denominator. It is deliberately NOT an occurrence rule: a document may
+#    hedge as often as the evidence is thin, and 'no-overclaim.md' actively
+#    requires hedging where evidence is weak. What it may not do is spend two
+#    words on one unit of uncertainty.
+#
+#    A LONE HEDGE MUST KEEP PASSING. That is the entire shape of the rule.
+#    Fixture proves "The change could break the build." raises nothing.
+#
+#    DROPPED: 'may be able to'. Capability and permission are a real
+#    distinction, and "the container may be able to read the socket" is a
+#    security claim, not a hedge stack. Fixture keeps it as a must-not-fire.
+#
+#    No upstream overlap. Probed 2026-08-14: all four raise zero alerts against
+#    the full config. FillerPhrases.yml has 'tends to' and 'has the potential
+#    to' but neither reaches these.
+#
+# ---------------------------------------------------------------------------
+# 2. PAYOFF-ANNOUNCEMENT PIVOTS. Only the measured gaps survive here.
+#
+#    The coverage dispute in the brief is settled by measurement, not by
+#    reading. Probed 2026-08-14 against the full config, DROPPED as already
+#    covered:
+#      "Here's the kicker."        -> ai-tells.AffirmativeFormulas ("Here's the
+#                                     kicker", AffirmativeFormulas.yml:35)
+#      "The best part? You get..." -> ai-tells.RhetoricalSelfAnswer
+#                                     ("The best part\? [A-Z]", :19)
+#      "But here's the thing."     -> ai-tells.AffirmativeFormulas ("But here's
+#                                     the thing", :77, and ":31" bare)
+#    The scout who read AffirmativeFormulas.yml directly was right; the two
+#    working from a flat token list were wrong. That file carries
+#    here's the thing|deal|truth|reality|kicker|catch|secret at lines 31-37,
+#    plus And/But-prefixed variants at 76-77.
+#
+#    KEPT, each measured as raising zero alerts before this file existed:
+#      buckle up
+#      here's where it gets good|interesting
+#        (Metacommentary.yml:110-111 pins only "This is where it gets
+#         interesting" / "This is where things get interesting". The
+#         "Here's where" spelling escapes it.)
+#      here's the part most people miss
+#        (FalseExclusivity.yml:23 has "what most people miss" and :39
+#         "here's what most people miss". "the part most people miss" is a
+#         different string and escapes both.)
+#      I'm going to state this as clearly as possible
+#        (RestatementMarkers.yml:15 has "To state this plainly", which does
+#         not reach it.)
+#
+#    CODE-COMMENT EXEMPTION: not needed, and not implemented. Fenced code
+#    blocks are already skipped by Vale's markdown parser, so a code comment
+#    inside a fence needs no carve-out. Fixture proves it: a powershell fence
+#    containing "# But here's the thing: ... The retry could potentially bridge
+#    the gap. Buckle up." raises zero alerts. Note this covers the FENCED form
+#    only; an inline code span is masked rather than skipped (see below).
+#
+#    BLOCKQUOTE EXEMPTION: implemented as scope: ~blockquote, measured before
+#    shipping. On a fixture carrying the token in a heading, a paragraph, a
+#    list item, a table cell and a blockquote:
+#      no scope:            5 hits
+#      scope: ~blockquote:  4 hits, the blockquote one dropped
+#    Headings, list items and table cells all keep firing, which is what makes
+#    the setting safe here: most of this operator's prose lives in bullets and
+#    tables, and a scope selector that quietly dropped those would cost far
+#    more than the quoted speech it protects.
+#
+#    INLINE CODE SPANS ARE MASKED, NOT SKIPPED. Vale replaces a span with a run
+#    of '*' of equal length and matches the masked text, which turns any
+#    rule matching a word plus an adjacent token into a false-positive
+#    generator on prose full of backticked paths. Measured for every multi-word
+#    token here (fixture section 7): token followed by a backticked identifier
+#    raises exactly one alert, the same one it raises without the code span, and
+#    a token written INSIDE a span raises none. That result is structural, not
+#    luck: every token in this file is a fully specified sequence of literal
+#    words with no trailing wildcard, so no position in any of them can be
+#    satisfied by a run of asterisks. Keep it that way. The moment a token here
+#    ends in \w+ or [^.!?]+, the mask becomes matchable and this note stops
+#    being true.
+#
+# ---------------------------------------------------------------------------
+# 3. THERAPEUTIC VALIDATION. "You're not broken", "You're not crazy",
+#    "You're not imagining it".
+#
+#    EVIDENCE TIER, stated plainly because it is weak: a Reddit attribution
+#    relayed by Forbes that the researcher could not locate. Community tier at
+#    two removes. This is the weakest-sourced family in the file and the first
+#    one to delete if it ever misfires. It is here because the family head
+#    "You're not alone" is already an upstream token (OpeningCliches.yml:76-77)
+#    and these three escape it, so the upstream author drew the line in a place
+#    that leaks.
+#
+#    KNOWN FALSE POSITIVE, carved out: "You're not imagining it, p99 really did
+#    double." A person writes that in a retrospective. The discriminator is
+#    structural and a regex CAN see it: the tell is a standalone sentence, and
+#    the honest version continues past a comma with the evidence. The exception
+#    below is exactly that shape, and both directions are fixture-proven:
+#      "You're not imagining it."                       -> fires
+#      "You're not imagining it, p99 really did double." -> silent
+#    What it does NOT do is check that the continuation is evidence. "You're
+#    not imagining it, and that's okay." escapes. Accepted: the continuation is
+#    the honest signal being bought, and a tighter proxy (requiring
+#    really|actually|indeed) was tried and rejected as arbitrary, since "the
+#    p99 doubled" carries no such word.
+#
+# ---------------------------------------------------------------------------
+# 4. COACHING CLOSER. One literal.
+#
+#    THIS IS YIELD-LIMITED, NOT PRECISE, AND IT IS NOT COVERAGE. The general
+#    move (a chatbot closing by offering to continue) is not expressible as a
+#    pattern; the phrasings are unbounded and only the shape is constant. What
+#    is here is one literal string, which catches exactly that string and
+#    nothing adjacent to it. Read it as a tripwire, never as a check that the
+#    closer family is policed.
+#
+#    DROPPED: "Do you want to sit with that for a while?" Probed 2026-08-14, it
+#    already raises ai-tells.FigurativeSits ('sit with', FigurativeSits.yml:42,
+#    whose \bsit(?:s|ting)? with\b matches the bare infinitive). Adding it would
+#    put two findings on one span, which is the measured noise pattern that gets
+#    a whole style switched off.
+#
+# ---------------------------------------------------------------------------
+# 5. BRIDGE THE GAP. This is a DRIFT FIX, not a proposal.
+#
+#    ~/.claude/rules/writing-style.md already lists "Bridging the gap
+#    between..." under "Filler phrases (delete entirely)". The compiled style
+#    does not implement it, so today the linter silently disagrees with the
+#    written contract. Probed 2026-08-14: "This will bridge the gap between the
+#    two teams." raises zero alerts. Closing that gap is the whole justification;
+#    no external corpus is claimed for it.
+#
+#    EXTERNAL MEASUREMENT IS THIN and is not being oversold: absent from
+#    Kobak's excess-vocabulary set, absent from ContentBeta's 300-item list.
+#    The contract is the evidence here, not a frequency ratio.
+#
+#    NO DOUBLE-REPORT with ServesAsDodge.yml. Probed: "It serves as a bridge
+#    between the two teams." raises ai-tells.ServesAsDodge on 'serves as a' and
+#    nothing from this rule, because the token requires "bridge the gap|divide"
+#    and that sentence has neither. The two rules aim at different strings.
+#
+#    LEGITIMATE USE THAT WILL STILL FIRE: a sentence that names and sizes the
+#    gap. Regex cannot see the difference. Warning level is chosen for exactly
+#    this reason.
+#
+# ---------------------------------------------------------------------------
+extends: existence
+message: "AI tell phrase: '%s'. State the claim plainly: name the uncertainty, the gap, or the point instead of announcing it."
+level: warning
+nonword: true
+ignorecase: true
+# Quoted speech survives. Measured to drop blockquotes ONLY: headings, list
+# items and table cells still fire. See the payoff-pivot section above.
+scope: ~blockquote
+exceptions:
+  # Narrow carve-out for the honest retrospective sense of "You're not
+  # imagining it", where a measurement follows in the same sentence.
+  # exceptions: is the ONLY working carve-out mechanism here; lookahead
+  # degrades to \b silently (see header).
+  - '[Yy]ou(?:''|’)?re not imagining (?:it|this|things), \w+'
+tokens:
+  # --- 1. Hedge cascade -------------------------------------------------
+  - '\bcould potentially\b'
+  - '\bmight possibly\b'
+  - '\bmay possibly\b'
+  - '\bcan sometimes tend to\b'
+
+  # --- 2. Payoff-announcement pivots (measured gaps only) ---------------
+  - '\bbuckle up\b'
+  - '\bhere(?:''|’)?s where it gets (?:good|interesting)'
+  - '\bhere(?:''|’)?s the (?:part|bit) (?:that )?(?:most people|nobody|no one) (?:miss|misses|overlook|overlooks)\b'
+  - '\b(?:i(?:''|’)?m|i am) going to (?:state|say|put) this as (?:clearly|plainly|simply|bluntly) as (?:possible|i can)\b'
+
+  # --- 3. Therapeutic validation (community tier, two removes) ----------
+  - '\byou(?:''|’)?re not (?:broken|crazy)\b'
+  - '\byou(?:''|’)?re not imagining (?:it|this|things)\b'
+
+  # --- 4. Coaching closer (one literal; yield-limited, not coverage) ----
+  - '\bare you ready to go deeper\?'
+
+  # --- 5. Bridge the gap (drift fix against writing-style.md) -----------
+  - '\bbridg(?:e|es|ed|ing) the (?:gap|divide)s?\b'

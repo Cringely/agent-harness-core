@@ -1,0 +1,33 @@
+{
+  "mcpServers": {
+    "1password": {
+      "type": "stdio",
+      "command": "C:\\Program Files\\WindowsApps\\Agilebits.1Password_8.12.26.40_x64__amwd9z03whsfe\\onepassword-mcp.exe",
+      "args": [],
+      "env": {}
+    },
+    "code-context": {
+      "type": "stdio",
+      "command": "wsl",
+      "args": [
+        "-e",
+        "{{WSL_HOME}}/code-context-mcp.sh"
+      ],
+      "env": {}
+    },
+    "garmin": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--python",
+        "3.12",
+        "--with",
+        "mcp<2.0",
+        "--from",
+        "git+https://github.com/Taxuspt/garmin_mcp",
+        "garmin-mcp"
+      ],
+      "env": {}
+    }
+  }
+}
