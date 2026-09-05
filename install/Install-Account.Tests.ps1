@@ -249,6 +249,29 @@ Describe "Install-Account" {
         finally { Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue }
     }
 
+    It "refuses genuine nesting when -ClaudeHome carries a trailing separator the guard must strip" {
+        # F1, final review round. This guard has three checks, not two (Equals, plus both
+        # StartsWith directions), and that third check happens to catch the simple "-PayloadRoot
+        # equals -ClaudeHome, one of them with a trailing separator" shape on its own even
+        # without .TrimEnd: reconstructing "$PayloadRoot$sep" from the untrimmed -ClaudeHome's
+        # own trailing separator makes it match trivially. Confirmed live, not assumed: that
+        # shape stayed green under an ablated TrimEnd. The gap TrimEnd actually closes here is
+        # a genuinely NESTED -PayloadRoot combined with a trailing separator on -ClaudeHome:
+        # PayloadRoot.StartsWith("$ClaudeHome$sep") then compares against a doubled separator
+        # ("<home>\\" rather than "<home>\"), which the real subdirectory name never matches, so
+        # none of the three checks fire and the install proceeds to read from inside the
+        # directory it is writing into. Demonstrated live: this exact pair produced
+        # "NO EXCEPTION THROWN" and a completed install before the fix.
+        $h = New-StandInClaudeHome
+        $nestedPayload = Join-Path $h 'payload'
+        New-Item -ItemType Directory -Path $nestedPayload -Force | Out-Null
+        try {
+            { & $script:install -PayloadRoot $nestedPayload -ClaudeHome "$h\" -SkipPreflight } |
+                Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
+        }
+        finally { Remove-Item -Recurse -Force $h -ErrorAction SilentlyContinue }
+    }
+
     # Round 3, item B: $sep anchors the StartsWith comparisons above so a raw name-prefix match
     # ('.claude-backup' textually starts with '.claude') is not mistaken for real nesting. Two
     # sibling directories under one parent, sharing a name prefix without either containing the
@@ -327,6 +350,33 @@ Describe "Install-Account" {
             & $script:install -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -WhatIf | Out-Null
             Test-Path -LiteralPath (Join-Path $h 'rules/security.md') | Should -BeFalse
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "marks the per-directory file count with (dry run) under -WhatIf" {
+        # F4, final review round: Copy-PayloadTree's $copied counter increments once per source
+        # file regardless of whether Copy-Item actually ran, so under -WhatIf it still reported
+        # the real file count with nothing said about none of it having landed. Same defect,
+        # same fix, as Export-Account.ps1's equivalent line.
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -WhatIf *>&1 | Out-String
+            $out | Should -Match 'rules: \d+ files \(dry run\)'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "does not print the completion message under -WhatIf" {
+        # F4, final review round: "Install complete. Restart Claude Code..." used to print
+        # unconditionally, after -WhatIf had written nothing. Full gate, not a suffix, matching
+        # Export-Account.ps1's own "does not print the completion message under -WhatIf" test.
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -WhatIf *>&1 | Out-String
+            $out | Should -Not -Match 'Install complete'
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
@@ -1120,6 +1170,62 @@ Describe "Install-Account" {
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
 
+    # F3, final review round: permissions.defaultMode and skipDangerousModePermissionPrompt both
+    # take the "replaced wholesale" path any ordinary scalar takes, with nothing printed even
+    # though changing either changes what runs without confirmation. Verified live: installing
+    # onto a conservative stand-in flipped defaultMode from default to auto and
+    # skipDangerousModePermissionPrompt from false to true, silently. Not made receiver-wins,
+    # since whether the account layer should be allowed to set either is the operator's call and
+    # is being put to them separately; warned instead, correct under either answer.
+    It "warns when the payload changes permissions.defaultMode from a receiver's own value" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            '{"permissions":{"defaultMode":"default"}}' | Set-Content (Join-Path $h 'settings.json')
+            @{ permissions = @{ defaultMode = 'auto' } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -SkipPreflight *>&1 | Out-String
+
+            $out | Should -Match "permissions\.defaultMode changes from 'default' to 'auto'"
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "warns when the payload changes skipDangerousModePermissionPrompt from a receiver's own value" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            '{"skipDangerousModePermissionPrompt":false}' | Set-Content (Join-Path $h 'settings.json')
+            @{ skipDangerousModePermissionPrompt = $true } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -SkipPreflight *>&1 | Out-String
+
+            $out | Should -Match 'skipDangerousModePermissionPrompt changes from False to True'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "does not warn about either key when the payload's value already matches the receiver's" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            '{"permissions":{"defaultMode":"auto"},"skipDangerousModePermissionPrompt":true}' |
+                Set-Content (Join-Path $h 'settings.json')
+            @{ permissions = @{ defaultMode = 'auto' }; skipDangerousModePermissionPrompt = $true } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -SkipPreflight *>&1 | Out-String
+
+            $out | Should -Not -Match 'defaultMode changes|skipDangerousModePermissionPrompt changes'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
     # Task 10 review, finding 1: "hooks": null and "permissions": null at the top of an existing
     # settings.json crashed the merge with "Cannot index into a null array", since the hooks and
     # permissions branches assume $ev has properties to look up. A receiver-only key alongside
@@ -1305,6 +1411,48 @@ Describe "Install-Account" {
                 -SkipPreflight *>&1 | Out-String
 
             $out | Should -Match 'Unexpanded placeholder\(s\) in settings\.json: \{\{MYSTERY\}\}'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # F2, final review round: Get-ResidualToken's catch-all is deliberately generic ([A-Z_]+),
+    # by its own comment, specifically to catch a STALE or RENAMED token this script does not
+    # know about. harness-core.md:13 names {{PROJECT}} in prose, inside a markdown code span, as
+    # a placeholder belonging to Install-Harness.ps1's per-project templating, not to this
+    # script's own five. A backtick-wrapped-match skip was considered and rejected: the same
+    # file's real {{CORE_REPO}} substitution is ALSO backtick-wrapped at one of its occurrences,
+    # so a blanket exemption on backticks would have a blind spot there if a future edit ever
+    # made every {{CORE_REPO}} mention in the file backtick-styled. An explicit exemption keyed
+    # to the specific known-harmless literal does not narrow the general pattern at all.
+    It "does not warn about a known non-account placeholder named in prose inside a templated file" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            'Core repo: `{{CORE_REPO}}`. Fill in `{{PROJECT}}` placeholders after install.' |
+                Set-Content (Join-Path $p 'rules/harness-core.md')
+
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -SkipPreflight *>&1 | Out-String
+
+            $out | Should -Not -Match 'Unexpanded placeholder'
+            (Get-Content -LiteralPath (Join-Path $h 'rules/harness-core.md') -Raw) |
+                Should -Match ([regex]::Escape('{{PROJECT}}')) `
+                -Because "the token itself must survive verbatim in the installed file, only the warning is suppressed"
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "still warns about a genuinely stale or renamed token in a templated file" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            'Core repo: {{CORE_REPO}}. See {{RENAMED_TOKEN}} for details.' |
+                Set-Content (Join-Path $p 'rules/harness-core.md')
+
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -SkipPreflight *>&1 | Out-String
+
+            $out | Should -Match 'Unexpanded placeholder\(s\) in rules/harness-core\.md: \{\{RENAMED_TOKEN\}\}'
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }

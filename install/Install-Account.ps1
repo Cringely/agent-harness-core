@@ -242,12 +242,20 @@ function Copy-PayloadTree {
 # left half-installed. One message, one meaning, wherever the run stops.
 $mixedStateWarning = "Install failed partway through: '$ClaudeHome' is left in a mixed state, holding some content from before this run alongside whatever copied before the failure. The install did not complete. Re-run this script: every copy above is an unconditional overwrite, so re-running is idempotent and finishes what this one left unfinished."
 
+# F4, final review round: Copy-Item/New-Item/Set-Content are ShouldProcess-aware and no-op under
+# -WhatIf on their own, but the status lines below are plain Write-Host built from script counters
+# ($copied, $n, $added.Count) that are computed whether or not the underlying cmdlet actually
+# wrote anything, so they read as completed work under a dry run unless told otherwise. One flag
+# computed once at script scope, reused at every status line below rather than re-testing
+# $WhatIfPreference at each site. Same pattern as Export-Account.ps1's own $dryRun.
+$dryRun = if ($WhatIfPreference) { ' (dry run)' } else { '' }
+
 try {
     $null = New-Item -ItemType Directory -Path $ClaudeHome -Force
 
     foreach ($d in $script:AccountTreeDirs) {
         $n = Copy-PayloadTree -PayloadRoot $PayloadRoot -ClaudeHome $ClaudeHome -Relative $d
-        Write-Host "  ${d}: $n files"
+        Write-Host "  ${d}: $n files$dryRun"
     }
     foreach ($f in $script:AccountRootFiles) {
         $src = Join-Path $PayloadRoot $f
@@ -263,7 +271,7 @@ try {
     if (Test-Path -LiteralPath $gateSrc) {
         $null = New-Item -ItemType Directory -Path (Join-Path $ClaudeHome 'hooks') -Force
         Copy-Item -LiteralPath $gateSrc -Destination (Join-Path $ClaudeHome 'hooks/model-tier-gate.ts') -Force
-        Write-Host '  hooks/model-tier-gate.ts: from core'
+        Write-Host "  hooks/model-tier-gate.ts: from core$dryRun"
     }
     else {
         Write-Warning "Absent: $gateSrc. The model-tier gate will not be installed, and a model-less Agent dispatch will not be blocked."
@@ -346,11 +354,24 @@ function Expand-AccountToken {
 # A payload can name a token this script does not know: a stale placeholder from a plan that
 # renamed one, or a typo. Passthrough stays deliberate rather than a hard stop, since a receiver
 # still gets an install over one bad file, but a silent survivor lands in a model-read file or a
-# hook command that cannot run, so it is reported instead of left invisible.
+# hook command that cannot run, so it is reported instead of left invisible. The pattern stays
+# the general [A-Z_]+ on purpose, not narrowed to Get-AccountTokenMap's five keys, because a
+# renamed or mistyped token is by definition not one of the five this script already knows.
+#
+# F2, final review round: rules/harness-core.md:13 names {{PROJECT}} in prose, inside a markdown
+# code span, describing Install-Harness.ps1's own per-project placeholder convention rather than
+# anything this script folds. A blanket "skip a backtick-wrapped match" rule was considered and
+# rejected: that same file's real {{CORE_REPO}} substitution is ALSO backtick-wrapped at one of
+# its occurrences (line 3), so a backtick exemption would carry a blind spot for that exact
+# occurrence if a future edit ever made every {{CORE_REPO}} mention backtick-styled -- silent,
+# and in the direction a genuine renamed-token warning exists to catch. An exemption keyed to
+# the specific known-harmless literal does not touch the general pattern at all.
+$script:AccountResidualExemptLiterals = @('{{PROJECT}}')
 function Get-ResidualToken {
     param([string]$Text)
     if (-not $Text) { return @() }
-    return @(([regex]::Matches($Text, '\{\{[A-Z_]+\}\}') | ForEach-Object { $_.Value } | Select-Object -Unique))
+    $found = [regex]::Matches($Text, '\{\{[A-Z_]+\}\}') | ForEach-Object { $_.Value } | Select-Object -Unique
+    return @($found | Where-Object { $script:AccountResidualExemptLiterals -notcontains $_ })
 }
 
 # Parameters, not locals. A test drives this script as a child process with a stand-in $HOME
@@ -534,6 +555,16 @@ function Merge-AccountSettings {
             # dropped with no warning and an exit-0 "settings.json: merged". Nothing below this
             # point can descend into a value that is not an object, so it is replaced instead,
             # the same way the else branch at the bottom already replaces an ordinary scalar.
+            #
+            # F3, final review round: skipDangerousModePermissionPrompt is the one top-level
+            # scalar whose replacement changes what the receiver is protected against, the same
+            # class of change as permissions.defaultMode below. Verified live: installing onto a
+            # conservative stand-in flipped it from false to true with nothing printed. Not made
+            # receiver-wins, since that is the operator's call and is being put to them
+            # separately; a warning is correct either way that gets decided.
+            if ($name -eq 'skipDangerousModePermissionPrompt' -and $ev -ne $pv) {
+                Write-Warning "settings.json: skipDangerousModePermissionPrompt changes from $ev to $pv (the account layer's value overwrites the receiver's own)."
+            }
             $Existing.$name = $pv
         }
         elseif ($name -eq 'hooks') {
@@ -586,6 +617,15 @@ function Merge-AccountSettings {
                     # Every other permissions sub-key (defaultMode, and anything not yet
                     # invented) is a scalar or otherwise not a grant/deny list, so there is
                     # nothing to union: replaced wholesale, same as an ordinary settings key.
+                    #
+                    # F3, final review round: defaultMode governs whether a tool call runs
+                    # unattended, so a silent replace here is the same class of change as
+                    # skipDangerousModePermissionPrompt above. Verified live: installing onto a
+                    # conservative stand-in flipped it from default to auto with nothing printed.
+                    # Warned, not made receiver-wins, for the same reason.
+                    if ($sub -eq 'defaultMode' -and $ev.PSObject.Properties[$sub] -and $ev.$sub -ne $pv.$sub) {
+                        Write-Warning "settings.json: permissions.defaultMode changes from '$($ev.$sub)' to '$($pv.$sub)' (the account layer's value overwrites the receiver's own)."
+                    }
                     $ev | Add-Member -NotePropertyName $sub -NotePropertyValue $pv.$sub -Force
                 }
             }
@@ -683,7 +723,7 @@ if (Test-Path -LiteralPath $settingsSrc) {
         $merged = Merge-AccountSettings -Payload $payloadSettings -Existing $existing
         $settingsJson = $merged | ConvertTo-Json -Depth 20
         $settingsJson | Set-Content -LiteralPath $liveSettings -Encoding utf8
-        Write-Host '  settings.json: merged'
+        Write-Host "  settings.json: merged$dryRun"
     }
     catch {
         Write-Warning $mixedStateWarning
@@ -818,8 +858,8 @@ if (Test-Path -LiteralPath $mcpSrc) {
         # Review F8: the count is computed before Merge-McpServer's own gated Set-Content, so it
         # is a prediction under -WhatIf, not a report of what landed on disk. House style, per
         # Task 10's own equivalent ("under -WhatIf, does not claim a backup it never made"), is
-        # to say so rather than let it read as a claim.
-        $dryRun = if ($WhatIfPreference) { ' (dry run)' } else { '' }
+        # to say so rather than let it read as a claim. $dryRun itself is now hoisted to script
+        # scope, alongside $mixedStateWarning, and reused by every status line in this file.
         Write-Host "  mcpServers: $($added.Count) added$(if ($added.Count) { " ($($added -join ', '))" })$dryRun"
     }
     catch {
@@ -965,5 +1005,10 @@ if ($residuals.Count -gt 0) {
     }
     Write-Host 'Expected here: mcpServers.1password (a Store path with an embedded version) and mcpServers.code-context (a WSL launcher into another user home). Anything else on this list is an exporter bug.'
 }
-Write-Host ''
-Write-Host 'Install complete. Restart Claude Code to pick up the new settings.'
+# F4, final review round: unlike the status lines above, "Install complete" is not a report that
+# can be softened with a "(dry run)" suffix; it claims the whole run finished. Full gate, not a
+# suffix, matching Export-Account.ps1's own "Export complete" guard.
+if (-not $WhatIfPreference) {
+    Write-Host ''
+    Write-Host 'Install complete. Restart Claude Code to pick up the new settings.'
+}

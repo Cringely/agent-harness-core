@@ -236,19 +236,26 @@ function Copy-AccountTree {
     return $copied
 }
 
+# F4, final review round: Copy-Item/New-Item/Remove-Item are ShouldProcess-aware and no-op under
+# -WhatIf on their own, but the status lines below are plain Write-Host built from script counters
+# ($copied, $n) that increment whether or not the underlying cmdlet actually wrote anything, so
+# they read as completed work under a dry run unless told otherwise. One flag computed once,
+# reused at every status line rather than re-testing $WhatIfPreference at each site.
+$dryRun = if ($WhatIfPreference) { ' (dry run)' } else { '' }
+
 $null = New-Item -ItemType Directory -Path $OutputRoot -Force
 
 foreach ($d in $script:AccountTreeDirs) {
     $n = Copy-AccountTree -SourceRoot $ClaudeHome -DestRoot $OutputRoot `
         -Relative $d -SkipRelative $script:AccountSkipFiles -SkipDirs $script:AccountSkipDirs
-    Write-Host "  ${d}: $n files"
+    Write-Host "  ${d}: $n files$dryRun"
 }
 
 foreach ($f in $script:AccountRootFiles) {
     $src = Join-Path $ClaudeHome $f
     if (Test-Path -LiteralPath $src) {
         Copy-Item -LiteralPath $src -Destination (Join-Path $OutputRoot $f) -Force
-        Write-Host "  ${f}: copied"
+        Write-Host "  ${f}: copied$dryRun"
     }
     else { Write-Warning "absent, skipping: $src" }
 }
@@ -382,7 +389,7 @@ if (-not $SkipSettings) {
 
         $settings | ConvertTo-Json -Depth 20 |
             Set-Content -LiteralPath (Join-Path $OutputRoot 'settings.account.json') -Encoding utf8
-        Write-Host '  settings.account.json: written'
+        Write-Host "  settings.account.json: written$dryRun"
     }
 }
 
@@ -429,7 +436,7 @@ if ($PSCmdlet.ShouldProcess($OutputRoot, 'fold model-read machine paths')) {
             }
         }
         Set-Content -LiteralPath $target -Value $text -NoNewline
-        Write-Host "  ${rel}: folded $substituted of $(@($rowFolds).Count) token(s)"
+        Write-Host "  ${rel}: folded $substituted of $(@($rowFolds).Count) token(s)$dryRun"
     }
 }
 
@@ -594,7 +601,7 @@ if (-not $SkipMcp) {
 
             [pscustomobject]@{ mcpServers = $servers } | ConvertTo-Json -Depth 20 |
                 Set-Content -LiteralPath (Join-Path $OutputRoot 'mcp-servers.json') -Encoding utf8
-            Write-Host "  mcp-servers.json: $(@($serverNames).Count) server(s)"
+            Write-Host "  mcp-servers.json: $(@($serverNames).Count) server(s)$dryRun"
         }
     }
 }

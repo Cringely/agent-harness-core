@@ -317,6 +317,36 @@ exit 0
         }
     }
 
+    It "refuses when -OutputRoot equals -ClaudeHome even with a trailing separator on only one of them" {
+        # F1, final review round: $claudeHomeFull and $outputRootFull are each
+        # GetUnresolvedProviderPathFromPSPath output with .TrimEnd('\', '/') applied. Without
+        # that TrimEnd, a -ClaudeHome carrying a trailing separator and a -OutputRoot without one
+        # (or vice versa) defeats both Equals and StartsWith("$claudeHomeFull$sep"): neither
+        # string is a match for the other once exactly one of them carries the extra separator.
+        # Demonstrated live: this exact pair reached Copy-AccountTree and took a stand-in from
+        # eight files to three before the fix.
+        #
+        # -ExpectedMessage pinned to the containment guard's own text, not a bare Should -Throw:
+        # -OutputRoot here is $claude itself, a non-empty directory with no export marker, so the
+        # unrelated "already exists ... carries no marker" guard a few lines below also throws
+        # once the containment check stops catching it first. A bare Should -Throw passed under
+        # the ablation this test exists to catch, on that second guard's message instead of this
+        # one's, which would have hidden exactly the regression this test is for.
+        $stand = New-StandInHome
+        $claude = Join-Path $stand '.claude'
+        try {
+            { & $script:export -ClaudeHome "$claude\" -OutputRoot $claude `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp } |
+                Should -Throw -ExpectedMessage '*must not be the account home or a path inside it*'
+            Test-Path -LiteralPath (Join-Path $claude 'rules/security.md') | Should -BeTrue
+            Test-Path -LiteralPath (Join-Path $claude 'agents/appsec-sme.md') | Should -BeTrue
+        }
+        finally {
+            Remove-Item -Recurse -Force $stand -ErrorAction SilentlyContinue
+        }
+    }
+
     It "supports -WhatIf, leaving the destination untouched" {
         $stand = New-StandInHome
         $out = New-OutputRoot
@@ -346,6 +376,26 @@ exit 0
                 -VaultPath 'C:/vault' -SkipSettings -SkipMcp -WhatIf `
                 -InformationVariable info -InformationAction SilentlyContinue | Out-Null
             (@($info) -join "`n") | Should -Not -Match 'Export complete'
+        }
+        finally {
+            Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "marks the per-directory file count with (dry run) under -WhatIf" {
+        # F4, final review round: Copy-AccountTree's $copied counter increments once per
+        # source file regardless of whether Copy-Item actually ran, so under -WhatIf it still
+        # reports the real file count with nothing said about none of it having been written.
+        # Demonstrated live: "rules: 1 files" printed under -WhatIf before this fix, identical
+        # to the non-dry-run wording.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            & $script:export -ClaudeHome (Join-Path $stand '.claude') -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipSettings -SkipMcp -WhatIf `
+                -InformationVariable info -InformationAction SilentlyContinue | Out-Null
+            (@($info) -join "`n") | Should -Match 'rules: \d+ files \(dry run\)'
         }
         finally {
             Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue
