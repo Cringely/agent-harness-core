@@ -1663,10 +1663,27 @@ exit 0
                 -VaultPath 'C:/vault' -SkipSettings -SkipMcp -IdentityFile $ident | Out-Null
 
             $ssh = Get-Content (Join-Path $out 'rules/ssh.md') -Raw
-            $ssh.Contains('C:\Users\user\Documents') |
-                Should -BeTrue -Because "the default -AccountUser must resolve to this machine's profile leaf"
-            $ssh.Contains($leaf) |
-                Should -BeFalse -Because "no spelling of the username may survive into the payload"
+
+            # Exact equality, wrapped in a boolean. Contains($leaf) had a false-negative mode
+            # independent of the exporter: any leaf that is a substring of the replacement
+            # literal -- 'u', 'se', 'user' itself -- can never come back false, so a correct
+            # redaction fails the assertion. That fired for real. Account-Hooks.Tests.ps1 leaked
+            # $HOME='/home/u' across the whole runspace, this test read leaf 'u', wrote
+            # C:\Users\u\Documents, and the correctly redacted C:\Users\user\Documents still
+            # contains 'u'. Red only in a whole-directory run, green alone and green per-file,
+            # which is what leaked global state looks like from here. The leak is fixed next
+            # door; this assertion is hardened so the next one reads as a leak and not as a hole
+            # in the gate.
+            #
+            # Comparing the WHOLE line is also strictly stronger than the two Contains calls it
+            # replaces: it fails on any surviving spelling of the username anywhere in the file,
+            # including one the redaction mangled rather than removed.
+            #
+            # Boolean, for the reason the original gave: a failed -Be prints its actual operand,
+            # which on a real regression is the operator's username in the suite's output. -ceq
+            # so a case-only survival is a failure too.
+            ($ssh.Trim() -ceq 'profile lives at C:\Users\user\Documents') |
+                Should -BeTrue -Because "the default -AccountUser must resolve to this machine's profile leaf, and no spelling of the username may survive into the payload"
         }
         finally { Remove-Item -Recurse -Force $stand, $out, $ident -ErrorAction SilentlyContinue }
     }
