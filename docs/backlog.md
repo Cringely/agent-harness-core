@@ -824,28 +824,32 @@ tree, or take the gap upstream to `microsoft/hve-core`, then re-export.
 
 ## 26. Three unpinned guards and one assertion that passes on an empty output
 
-The whole-branch review ablated twelve production lines and found four more that no test notices.
-None is a wrong line; each is a correct line with nothing behind it.
+The whole-branch review ablated twelve production lines and found four more gaps that no test
+notices: three correct production lines with nothing behind them, and one assertion satisfied by an
+empty string.
+
+Line numbers below are at `0911ab0`. Suite baselines are Export-Account 58 pass, 0 fail and
+Install-Account 96 pass, 0 fail.
 
 `Export-Account.ps1:164` anchors the containment comparison with
 `$sep = [System.IO.Path]::DirectorySeparatorChar`, so a sibling that shares a name prefix is not
-mistaken for a nested path. Setting `$sep = ""` leaves the suite at 56 pass, 0 fail, and exporting
+mistaken for a nested path. Setting `$sep = ""` leaves the suite at 58 pass, 0 fail, and exporting
 to `.claude-payload` beside `.claude` is then refused with a message that is false.
-`Install-Account.Tests.ps1:257` and `:271` already pin this on the installer's identical guard, in
+`Install-Account.Tests.ps1:284` and `:298` already pin this on the installer's identical guard, in
 both directions. Port the pair across.
 
-`Export-Account.ps1:542` filters the server list with `| Where-Object { $_ }`. Dropping it leaves
-56 pass, 0 fail, and `"mcpServers": {}` then reports one server and proceeds on a phantom entry,
+`Export-Account.ps1:549` filters the server list with `| Where-Object { $_ }`. Dropping it leaves
+58 pass, 0 fail, and `"mcpServers": {}` then reports one server and proceeds on a phantom entry,
 because `.PSObject.Properties.Name` on an empty object is `$null` and `@($null)` holds one element.
 `change-management.md` records that trap as having bitten four times.
 
-`Install-Account.ps1:353` de-duplicates residual tokens with `| Select-Object -Unique`. Dropping it
-leaves 88 pass, 0 fail, and a file carrying one token twice reports it twice. Cosmetic, but stated
+`Install-Account.ps1:373` de-duplicates residual tokens with `| Select-Object -Unique`. Dropping it
+leaves 96 pass, 0 fail, and a file carrying one token twice reports it twice. Cosmetic, but stated
 behaviour with nothing behind it.
 
-`Install-Account.Tests.ps1:439` asserts only that the output does not match `\bjq\b`. Its sibling
-at `:462` asserts the same negative but guards it with a positive control first. Making
-`Test-Prerequisite` return an empty list reddens eight tests including that sibling, while `:439`
+`Install-Account.Tests.ps1:494` asserts only that the output does not match `\bjq\b`. Its sibling
+at `:531` asserts the same negative but guards it with a positive control first. Making
+`Test-Prerequisite` return an empty list reddens eight tests including that sibling, while `:494`
 stays green: an empty string satisfies it, so it cannot tell whether the npm probe found anything,
 which is the only thing it claims to prove. Add the same `Should -Match '\bvale\b'` control.
 
@@ -854,14 +858,14 @@ which is the only thing it claims to prove. Add the same `Should -Match '\bvale\
 Distinct from item 26. These two tests do redden, and neither reddening means what it appears to.
 
 `AccountShared.ps1:21` throws when the AST lift finds no function, converting a rename in
-`Restore-ClaudeProject.ps1` into a loud failure. Replacing the throw with `if ($false)` leaves 56
+`Restore-ClaudeProject.ps1` into a loud failure. Replacing the throw with `if ($false)` leaves 58
 pass, 0 fail. That is the correct outcome rather than a defect, because the failure the guard
 exists for needs the rename and not the guard's removal. `FIXTURE-ONLY-MARKER` proves the lift happens;
 nothing proves it fails loudly. An honest test renames a function in a fixture copy and asserts the
 throw.
 
-`Export-Account.Tests.ps1:1035-1037` asserts that `args` contains `{{WSL_HOME}}/code-context-mcp.sh`
-and then that it does not contain the raw `/home/wsluser/` form. The fixture's `args` has two
+`Export-Account.Tests.ps1:1083` asserts that `args` contains `{{WSL_HOME}}/code-context-mcp.sh`
+and `:1086` that it does not contain the raw `/home/wsluser/` form. The fixture's `args` has two
 elements, so the second assertion cannot fail unless the first already has. Deleting the
 `{{WSL_HOME}}` fold row does redden the Context, but through its `BeforeAll`: the fail-closed gate
 throws before the file is written, so neither `It` body runs. Neither assertion has been observed to
@@ -873,7 +877,9 @@ fixture turns both assertions live for the first time, with no evidence they wor
 ## 28. Add a `.gitattributes` rule normalising the payload to LF
 
 `account/claude/` is written LF by the exporter and checked out CRLF under `core.autocrlf=true`, so
-a fresh clone can show up to 205 of the 218 payload files as modified with no content difference.
+a fresh clone can show 212 of the 218 payload files as modified with no content difference.
+`git ls-files --eol account/claude` measures the split directly: 212 files are `i/lf w/crlf`, 4 are
+`i/lf w/lf` (the `.sh` files the current rules already cover) and 2 are binary.
 The current `.gitattributes` covers `*.sh` and `core/claude/hooks/pre-commit` only.
 
 `7b1497e`'s commit message describes the symptom at length, which means the knowledge exists but
@@ -885,8 +891,8 @@ failing test. A matcher that breaks on line endings gets fixed in the matcher.
 
 ## 29. Make the exporter's zero-fold report fatal where a fold is required
 
-`Export-Account.ps1:432` prints `folded $substituted of N token(s)` as a plain `Write-Host`, and
-`:428` warns per token. A file that folds zero of its tokens is reported in the same register as one
+`Export-Account.ps1:439` prints `folded $substituted of N token(s)` as a plain `Write-Host`, and
+`:435` warns per token. A file that folds zero of its tokens is reported in the same register as one
 that folds all of them.
 
 For the two files where a fold is required rather than incidental, a zero count means the fold table
@@ -920,3 +926,22 @@ that makes it falsifiable: "Anything else on this list is an exporter bug." A dr
 returns a shorter list weakens exactly that claim. Fixing it means reporting against what the
 install would write rather than against what is on disk, which is a larger change than the status
 lines needed and is why it is here rather than in that commit.
+
+## 32. Two leftovers from the fix round that closed items F1 through F6
+
+Neither blocks anything. Both were found by the re-review of the fix itself and left deliberately,
+rather than widening a commit whose message promised a narrow change.
+
+The residual-token exemption list is global. `$script:AccountResidualExemptLiterals` filters all
+three `Get-ResidualToken` call sites: the templated-file loop, the `settings.json` check and the
+`mcpServers` check. Only the first needs it. A real `{{PROJECT}}` appearing in a hook command or
+a server argument would now be dropped without a warning, which is the same class of silence the
+exemption was added to prevent, just moved. No such token exists in the payload today. The narrower
+fix passes the list as a parameter and supplies it at the one call site.
+
+The new Export containment test closes with two `Test-Path` assertions on installed files. Under
+the ablation the test targets, the marker guard fails closed and the fixture never changes, so both
+assertions pass while the test fails on its message. They are entailed by the `-ExpectedMessage`
+assertion and have never discriminated anything. They were copied from the pre-existing sibling
+test rather than written for this one, so the sibling carries the same pair. Worth knowing before
+anyone cites either as coverage; item 27 is the same shape.
