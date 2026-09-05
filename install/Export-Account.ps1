@@ -175,6 +175,33 @@ if (-not $PSBoundParameters.ContainsKey('WslHome')) {
     } else { $null }
 }
 
+# Validate a SUPPLIED -WslHome here, at the producer, rather than where the literal is consumed
+# ~770 lines below. Two consumers read this one value in contradictory ways: the fold table takes
+# it as a path literal with IsPath = $true, and the residual scan takes it as the thing to search
+# for. A degenerate value satisfies the first and defeats the second, so by the time the scan
+# could notice, every separator in the payload has already been rewritten by the fold.
+#
+# Measured, against the merged exporter with -WslHome '/': the export COMPLETES, writes its
+# marker, ships '/home/wsluser/code-context-mcp.sh' verbatim in a copied rules file, and rewrites
+# mcp-servers.json args to "C:{{WSL_HOME}}tools{{WSL_HOME}}srv.js". The mcpServers shape gate does
+# not catch it either -- the '/' fold rewrites every separator, so $script:PosixHomeShape finds no
+# POSIX home left to match. Both gates off, one silent success, which is the exact outcome the
+# residual scan exists to prevent.
+#
+# Trailing whitespace is the same bug wearing different clothes. The auto-resolution branch above
+# calls .Trim(); the explicit-parameter path did not, so -WslHome '/home/wsluser ' built the
+# pattern '/home/wsluser\ (?!...)' and degraded the scan to a near-total no-op, completing the
+# export with the literal shipped.
+#
+# An UNRESOLVED -WslHome is a different case and stays legal: $null means this machine has no WSL
+# and there is nothing to fold or scan for. Only a value the caller actually supplied is judged.
+if ($PSBoundParameters.ContainsKey('WslHome') -and $WslHome) {
+    $WslHome = $WslHome.Trim().TrimEnd('/')
+    if ($WslHome -notmatch '^/[^/]') {
+        throw "-WslHome must name an absolute POSIX directory, and '$($PSBoundParameters['WslHome'])' does not. It is used both as a fold literal and as the string the residual scan searches for; a value that trims to nothing, or that is a bare '/', folds every separator in the payload and leaves the scan with nothing to match, so the export completes while shipping the WSL home it was meant to catch. Pass a path like '/home/<user>', or omit -WslHome to let this script resolve it."
+    }
+}
+
 if (-not (Test-Path -LiteralPath $ClaudeHome)) { throw "No account layer at '$ClaudeHome'." }
 
 # Copy-AccountTree removes each allowlisted directory under -OutputRoot before recopying it;
@@ -908,10 +935,17 @@ if (-not $WhatIfPreference) {
     # /root supported; direction 2 made it fatal. The literal scan chosen above is still the right
     # scan -- it is the BOUNDARY that was missing, not the mechanism.
     #
-    # Same idiom $script:PosixHomeShape already uses on its own /root arm, so the two gates agree
-    # on where a POSIX home ends: the next character must be a separator, a quote, whitespace,
-    # a closing bracket or backtick, or nothing at all. `/root/x` and a bare `/root` at end of
-    # line still fire; `/root,` and `/rootkit` do not.
+    # Same idiom $script:PosixHomeShape uses on its own /root arm, but NOT the same class: this
+    # scan's boundary was widened to cover a closing bracket, a backtick and '>', and that arm was
+    # not. So the two gates no longer agree on where a POSIX home ends, and a `(/root)` or a
+    # backticked `/root` fires here and not there. Deliberate, and left that way: widening a second
+    # gate is a behaviour change that needs its own fixtures, and this scan is the one that runs
+    # over every copied file. Recorded rather than quietly tolerated, because an earlier version of
+    # this comment claimed the two agreed and was wrong after the widening landed.
+    #
+    # Here, the next character must be a separator, a quote, whitespace, a closing bracket or
+    # backtick, '>', or nothing at all. `/root/x` and a bare `/root` at end of line still fire;
+    # `/root,` and `/rootkit` do not.
     #
     # Review round 4: the boundary as first shipped closed on `,`, `;`, `:` and friends but not on
     # `)`, `]`, a backtick, or `>` -- so `(/root)`, `[/root]`, `` `/root` `` and a markdown link
@@ -928,22 +962,22 @@ if (-not $WhatIfPreference) {
     # -cmatch and not -match: POSIX paths are case-sensitive and .Contains was ordinal, so the
     # case-insensitive default would widen the gate past the boundary this is here to add.
     #
-    # TrimEnd('/'): -WslHome is a public parameter and nothing upstream can put a trailing slash on
-    # the value this script resolves at :150-152, but the branch's own tests pass one explicitly.
-    # A trailing slash makes the escaped literal end in '/', so the boundary after it demands a
-    # second separator that a real path never has ('/home/user//launcher.sh' does not exist) and
-    # the gate goes from fail-closed to a near-total no-op on every copied file, with no error.
+    # $WslHome is already trimmed of whitespace and of a trailing '/' by the validation at :198-203,
+    # which also refuses a supplied value that does not name an absolute POSIX directory. So the
+    # only thing left to distinguish here is present from absent. A trailing slash would otherwise
+    # make the escaped literal end in '/', the boundary would demand a second separator that a real
+    # path never has ('/home/user//launcher.sh' does not exist), and the scan would degrade from
+    # fail-closed to a near-total no-op on every copied file, with no error.
     #
-    # Null when -WslHome did not resolve. The WSL arm below is skipped in that case, exactly as
-    # the old `$WslHome -and` loop condition skipped the whole loop; the mcpServers shape gate is
-    # what stands there, as its own comment records.
+    # Null when -WslHome did not resolve, meaning the machine has no WSL. The arm below is skipped
+    # in that case, exactly as the old `$WslHome -and` loop condition skipped the whole loop.
     #
-    # Null a second way, which neither branch had on its own: a bare '/' trims to the empty string,
-    # and an empty literal escapes to an empty pattern that the boundary then matches against every
-    # absolute path in the payload. Skipping the arm is the fail-safe reading of a -WslHome that
-    # names no directory; redacting on it would rewrite the whole tree.
-    $wslHomeLiteral = if ($WslHome) { $WslHome.TrimEnd('/') } else { $null }
-    $wslHomePattern = if ($wslHomeLiteral) { [regex]::Escape($wslHomeLiteral) + '(?![^/"''\s)\]`>])' } else { $null }
+    # An earlier resolution of this merge nulled the pattern for a degenerate value too, calling
+    # that fail-safe. Review measured it fail-OPEN: -WslHome '/' then completed the export, wrote
+    # its marker, and shipped the WSL home verbatim. The producer-side throw replaces it, which is
+    # also the right locus -- a '/' is consumed as a fold literal some 770 lines before anything
+    # here could object to it.
+    $wslHomePattern = if ($WslHome) { [regex]::Escape($WslHome) + '(?![^/"''\s)\]`>])' } else { $null }
     $ignoreCase = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
     # One buffer for the whole scan, not one per file. IndexOf below is bounded by $read, so bytes
     # left over from a longer previous file are never looked at.
