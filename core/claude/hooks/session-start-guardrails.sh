@@ -12,6 +12,13 @@
 # unmodified in any project it's installed into — no repo name hardcoded here.
 
 set -eu
+# pipefail where the shell has it, so a failing command in a pipeline cannot be masked by a
+# succeeding tail. Guarded rather than bare, and for the reason session-start-drift-check.sh
+# states at length: `set -o pipefail` predates POSIX Issue 8, older /bin/sh implementations
+# reject the option, and `set` is a special builtin whose error aborts a non-interactive
+# shell. Bare, this hook would die on this line on such a host and take the session start
+# with it. The subshell absorbs that abort.
+if (set -o pipefail) 2>/dev/null; then set -o pipefail; fi
 
 root="${CLAUDE_PROJECT_DIR:-.}"
 catalog="$root/.claude/guardrails.md"
