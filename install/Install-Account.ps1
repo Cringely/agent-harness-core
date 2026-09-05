@@ -318,6 +318,14 @@ function Get-AccountTokenMap {
         [string]$VaultPath,
         [string]$HomeSlug
     )
+    # {{WSL_HOME}} is deliberately absent from this map. Export-Account.ps1 folds a WSL user's
+    # $HOME into that token wherever it appears in mcpServers (today, only code-context's
+    # launcher), but the other five tokens here all have a receiver-side answer this process can
+    # derive from something present on ANY host: $HOME, npm, git, an env var. A receiver's WSL
+    # username has none of that; many receivers have no WSL at all, and guessing one (this
+    # machine's, or the receiver's Windows username) would make a dead entry look resolved,
+    # which is worse than naming it. The residual-token check right after Expand-McpServer below
+    # reports it explicitly instead of silently expanding it to something untested.
     return @{
         '{{CLAUDE_HOME}}'    = ($ClaudeHome -replace '\\', '/')
         '{{NPM_GLOBAL}}'     = ($NpmGlobal  -replace '\\', '/')
@@ -781,6 +789,31 @@ if (Test-Path -LiteralPath $mcpSrc) {
     try {
         $payloadServers = Expand-McpServer -Tokens $tokens `
             -Servers ((Get-Content -LiteralPath $mcpSrc -Raw | ConvertFrom-Json).mcpServers)
+        # {{WSL_HOME}} has no entry in $tokens (Get-AccountTokenMap says why), so it survives
+        # Expand-McpServer verbatim on the one entry the exporter folds it into today,
+        # code-context's WSL launcher. The residual-path report further down still catches the
+        # dead path this leaves behind, but only as a truncated fragment after the token -- the
+        # regex there is path-shaped, not token-aware, and stops matching at the { that starts
+        # the placeholder. This check names the actual token directly, on the same fields
+        # Expand-McpServer just walked, so an operator sees the real cause instead of only a
+        # partial path.
+        $mcpResidual = @()
+        if ($payloadServers) {
+            foreach ($name in @($payloadServers.PSObject.Properties.Name | Where-Object { $_ })) {
+                $srv = $payloadServers.$name
+                $mcpResidual += Get-ResidualToken -Text $srv.command
+                foreach ($a in @($srv.args)) { $mcpResidual += Get-ResidualToken -Text $a }
+                if ($srv.env) {
+                    foreach ($k in @($srv.env.PSObject.Properties.Name | Where-Object { $_ })) {
+                        $mcpResidual += Get-ResidualToken -Text $srv.env.$k
+                    }
+                }
+            }
+        }
+        $mcpResidual = @($mcpResidual | Select-Object -Unique)
+        if ($mcpResidual.Count -gt 0) {
+            Write-Warning "Unexpanded placeholder(s) in mcpServers: $($mcpResidual -join ', '). Left verbatim; this entry cannot run as shipped on this host."
+        }
         $added = @(Merge-McpServer -PayloadServers $payloadServers -ClaudeJsonPath $ClaudeJson)
         # Review F8: the count is computed before Merge-McpServer's own gated Set-Content, so it
         # is a prediction under -WhatIf, not a report of what landed on disk. House style, per
@@ -804,7 +837,7 @@ if (Test-Path -LiteralPath $mcpSrc) {
 # ("names 1password and code-context; anything else it names is an exporter bug") cannot hold
 # under it in either direction. On a Windows receiver every correctly expanded command carries a
 # drive letter, so a drive-letter rule reports all of them and the report stops meaning
-# anything. And it never fires on code-context's `wsl -e /home/prior/code-context-mcp.sh`, which
+# anything. And it never fires on code-context's `wsl -e /home/wsluser/code-context-mcp.sh`, which
 # has no drive letter and no USERPROFILE, so one of the two entries the report exists to name is
 # invisible to it. Test-ResidualWindowsPath is kept as the classifier on the printed line, which
 # is what tells the operator whether a dead path is Windows-shaped.
