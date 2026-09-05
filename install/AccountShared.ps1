@@ -33,6 +33,17 @@ $script:AccountRootFiles = @('statusline-command.ps1', 'statusline-command.sh')
 # The HANDOFF is internal agent traffic naming a script that no longer exists under that name.
 $script:AccountSkipFiles = @('hooks/model-tier-gate.ts', 'hooks/Guard-ModelTier.HANDOFF.md')
 
+# Payload-relative directory prefixes that never travel, whole subtree, regardless of what
+# files end up inside them. Operator ruling on the review's N1 finding: skills/appsec-kpi-deck
+# is a spec for a corporate deliverable and must not be published, but the operator keeps using
+# it locally, so it stays in ~/.claude and is excluded only at export -- the same deliberate
+# live-tree-versus-payload divergence Copy-AccountTree already carries for .git internals and
+# every *.bak file, just declared here instead of hardcoded into that function, since a whole
+# skill is a policy decision rather than a file-shape rule. A prefix match rather than the two
+# exact files it holds today: a future file added under this skill (a second reference doc, an
+# asset) must not need a second entry here to stay excluded.
+$script:AccountSkipDirs = @('skills/appsec-kpi-deck')
+
 # Model-read text carrying machine paths. A hook derives its paths at run time and is fixed at
 # source; these cannot be, because a placeholder written into the live file is read literally by
 # the model on this box. Export folds, install expands. The table is an allowlist for the same
