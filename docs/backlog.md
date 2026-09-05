@@ -10,6 +10,13 @@ patterns to extract, or unresolved decisions surfaced during real sessions.
 
 **Status:** proposed. Promote on second recurrence, per `harness-core.md` findings flow.
 **Surfaced:** 2026-08-04, TrueNAS HAOS zvol forensics session.
+**Premises corrected 2026-09-05.** Two statements below went false with `7b1497e`. Core does now
+keep a canonical copy of the account rules: `account/claude/rules/` holds all eleven as tracked
+content, `agent-usage.md` among them. And `install/` does have an exporter,
+`install/Export-Account.ps1`, registered at `README.md:116-125`; the "assembled by hand" claim is
+now true only of the three-directory bundle `Restore-ClaudeProject.ps1` consumes, a different
+artifact. This opens a fourth option the item does not list: put the reconciliation in the payload,
+which `Install-Account.ps1` already distributes. The item's own recurrence bar is unaffected.
 
 ### What happened
 
@@ -123,7 +130,12 @@ the more specific statement. Scope this item to the other two templates.
 
 ## 4. Audit actuation: map each class to repair-or-report
 
-**Status:** proposed.
+**Status:** closed 2026-09-05. The class-to-action mapping this item asks for is at
+`Install-Harness.ps1:602-609`, added by `8577ae4`, printed in the audit output and commented
+against `CONTRIBUTING.md`'s drift gate. Two premises below are false as written. `-Audit` is
+invoked, by `core/claude/hooks/session-start-drift-check.sh:114`, which is wired on `SessionStart`
+in `core/claude/templates/settings.hooks.json`. And it is named outside the script, at
+`CONTRIBUTING.md:45`.
 **Surfaced:** 2026-08-04, SRS tenets pass (T3), from *Building Secure and Reliable Systems* ch 9.
 
 `.harness-manifest.json` plus `Install-Harness.ps1 -Audit` is a working drift detector with a
@@ -167,7 +179,13 @@ would satisfy it sit in files this pass did not own.
 
 ## 6. Remediation in the worktree gate's deny payload
 
-**Status:** proposed.
+**Status:** half closed 2026-09-05. The deny payload already carries the corrected dispatch, at
+`core/claude/hooks/agent-worktree-gate.ts:224`, including the auto-clean note and the `remote`
+alternative, and has since before the account-layer work. So the first sentence below is false as
+written. What stays open is deleting the compensating line from the rules file, now at
+`~/.claude/rules/harness-core.md:19` and also committed into the payload at
+`account/claude/rules/harness-core.md:19`. That second copy is new, so closing this item now means
+editing the live tree and re-exporting rather than a one-line deletion.
 **Surfaced:** 2026-08-04, SRS tenets pass (T5).
 
 The gate denies an unisolated write-agent dispatch without telling the caller how to comply. The
@@ -306,9 +324,14 @@ first and it is the same hand-verification that let the word go missing in the f
 
 ## 12. Failures that do not propagate: pipefail, and the installer's unchecked git write
 
-**Status:** partially fixed. Both PowerShell sites are closed; the two shell hooks remain open. The
+**Status:** partially fixed. Both PowerShell sites are closed; the shell hooks remain open. The
 diagnosis below is a record of what the audit found, written in past tense; the current state is at
 the end of the item.
+**File list corrected 2026-09-05.** The item names two shell hooks. There is a third:
+`core/claude/hooks/session-start-drift-check.sh:29` sets the same `set -eu` without `-o pipefail`,
+and it carries the repo's only real shell pipeline, at `:124`. The item's "no live instance"
+verdict survives, because that pipeline is terminal and nothing chains off it, but the file list
+does not.
 **Surfaced:** 2026-08-04, wave-2 review. Audit of `install/` and the shell hooks run while writing
 `patterns/ablation-verification.md`'s empty-check section.
 
@@ -760,6 +783,13 @@ detail rather than the outcome.
 
 ## 22. The prose-lint skip lists do not match `.superpowers/`
 
+**Status:** closed 2026-09-05 as a duplicate of item 17. Same defect, same two files, same fix.
+Item 17 survives because it carries the observation date, the symptom someone actually saw, and the
+instruction to check `pre-commit` as well. This item was written during the account-layer review
+without checking whether the finding already existed, which is the same failure as the stale
+citations in items 26 through 31: acting on a list without first reading it. Left in place rather
+than deleted, because items are referenced by number.
+
 `Lint-DocumentProse.ps1` and `core/claude/hooks/lint-doc-prose.ts` both skip `/memory/`,
 `/handoffs/`, `/scratchpad/`, `/.scratch/`, `/council-transcripts/` and `/.claude/`, which is
 `writing-style.md`'s row 5 exemption for internal agent traffic.
@@ -796,8 +826,15 @@ passes through, rather than at the one file that happened to carry the literal f
 ## 24. The `-WslHome` default-resolution block cannot be reddened
 
 Ablating the block that resolves `-WslHome` when the caller supplies no value leaves the
-Export-Account suite at 56 passing and 0 failing. No assertion names the behaviour, so a
-regression in it would ship green.
+Export-Account suite fully green. No assertion names the behaviour, so a regression in it would
+ship green too. Verifiable without an ablation: the block is `Export-Account.ps1:132-137`, and
+every test touching the parameter passes it explicitly, a populated path at
+`Export-Account.Tests.ps1:1074` and an empty string at `:1108`. No case omits it.
+
+The baseline this item first quoted, 56 passing, was already a commit out of date when it was
+written, and the correction sweep across items 26 through 31 missed this one because it swept the
+items it was thinking about rather than every item carrying a count. Suite figures are deliberately
+left out above for that reason; the citation is what stays true.
 
 This is the fifth instance on this branch of a test that could not fail, and the fourth found by
 ablation rather than by reading. The pattern is consistent enough to be worth stating as a habit
@@ -945,3 +982,69 @@ assertions pass while the test fails on its message. They are entailed by the `-
 assertion and have never discriminated anything. They were copied from the pre-existing sibling
 test rather than written for this one, so the sibling carries the same pair. Worth knowing before
 anyone cites either as coverage; item 27 is the same shape.
+
+## 33. `NOTICE` hard-codes eleven measurements of a generated directory
+
+`NOTICE` states 218, 153, 85, 72, 13, 52, 33, 63, 2, 3 and 65 as file counts. Every one measures
+`account/claude/`, which `Export-Account.ps1` regenerates from `~/.claude/`. All eleven are correct
+as of `3b698b7`, and `360e2e3` is the record of four of them having been wrong once already.
+
+`CONTRIBUTING.md:41` forbids this directly: file counts "belong with the file that carries them or
+in a doc whose author controls that file." Nobody controls `account/claude/`; the exporter writes
+it. The rule's escape hatch is to round the figure and label it as rounded, which the first draft of
+this notice did and the correction removed in favour of exact counts.
+
+Nothing re-checks them. Not `test/`, not the Pester suites, not the export procedure at
+`README.md:116-125`, and there is no CI. The next export that adds or drops one skill falsifies a
+licence attribution silently, which is worse than the same drift in prose.
+
+The repo-idiomatic close is a test rather than a rounding: assert each count against `git ls-files`
+so an export that moves a number fails a gate instead of shipping. That also closes the drift
+exposure permanently, where rounding only widens the tolerance. Sequence it with item 36, which is
+about nothing running any test at all.
+
+## 34. Two vendored trees ship without stated permission, recorded as prose and not as a decision
+
+`NOTICE` discloses that `account/claude/skills/beautiful_prose/` (2 files, upstream states no
+licence) and `account/claude/skills/filesystem-context/` (3 files, an author line and nothing else)
+are redistributed with attribution but without stated permission, and offers removal on request.
+That disclosure is honest and it is not a decision.
+
+The operator ruled to ship both, applying one precedent across two identical cases. Nothing tracks
+the alternative, which is one `$script:AccountSkipDirs` entry each: that table exists at
+`AccountShared.ps1:45` and already carries a policy exclusion of exactly this kind for
+`skills/appsec-kpi-deck`. `filesystem-context` is the closer call of the two, since
+`settings.account.json` shows it disabled locally, so the payload carries a skill the operator has
+switched off.
+
+This belongs as a decision note under `change-management.md`'s security-tradeoff category, where the
+reasoning survives independently of the notice text. A ruling recorded only inside the artifact it
+authorises cannot be found by anyone asking whether it was ever made.
+
+## 35. Nothing verifies that the committed payload matches a fresh export
+
+`README.md:112-114` and `account/claude/rules/harness-core.md` both state the one-direction rule and
+"never hand-edited" as prose. `README.md:123-124` names the procedure: re-export, then read
+`git status account/claude`. Every one of those is prose; the enforcement is a person remembering.
+
+Item 25 already leans on the invariant as though it were enforced, saying a hand edit under
+`account/claude/` is reverted by the next export. That is true only if someone re-exports.
+
+This is the shape the repo's own findings flow calls a forcing function authored but not registered:
+a rule with no mechanism. Note the check is not free, because `core.autocrlf=true` makes
+`git status` the wrong instrument, per item 28. A real check compares blob hashes through git's
+filters, which is what the branch's final review did by hand and nothing does automatically.
+
+## 36. The repository has no automated test run
+
+`.github/` holds `ISSUE_TEMPLATE/promotion.md` and nothing else. Five Pester suites and `bun test`
+exist, 647 tests between them, and all six run only when a person remembers to run them.
+
+Four items in this file (24, 26, 27, 32) are about individual tests that cannot fail. The gap above
+all four is that nothing runs any of them unless invoked by hand, on a repository whose stated
+subject is gates that cannot silently pass.
+
+Whether that is deliberate for a process-layer repo is worth asking rather than assuming: the suites
+need `pwsh`, `bun` and a populated `~/.claude` to exercise anything, and a CI runner has none of the
+third. Worth a decision note recording the answer either way, since the current state reads
+as an oversight and may not be one.
