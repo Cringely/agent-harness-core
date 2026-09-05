@@ -107,13 +107,16 @@ user" trigger.
 
 What comes back, in what shape, and where it goes. Cover:
 
-- **Return channel.** A message back to the dispatcher, a written scratch file with a pointer
-  message, or both. Per `~/.claude/rules/agent-usage.md`: a scratch file only for bulk the
-  dispatcher wants a pointer to, never for something that would have fit in the final message.
+- **Return channel.** A scratch file at the absolute path the brief names, always, whatever the
+  size of the result. Per `~/.claude/rules/agent-usage.md` the channel runs one way: the
+  dispatcher reaches the agent through `SendMessage`, and the agent never messages back. A def
+  whose `tools:` line holds no Write tool cannot use this channel at all; its well-behaved failure
+  is to report BLOCKED ON DELIVERY and hand the full body back for the dispatcher to save.
 - **Delivery path for background/teammate dispatches.** If this agent can run detached, its final
-  message never reaches the dispatcher on its own. The def must name `SendMessage` to `main` as
-  the explicit delivery path, or the result is silently lost (bitten three times per
-  `~/.claude/rules/subagent-prompting.md`).
+  message never reaches the dispatcher on its own, so a def that says "report in your final
+  message" produces an agent that does real work and delivers nothing (five times at the last
+  count in `~/.claude/rules/agent-usage.md`). The scratch-file path above is the delivery path;
+  `SendMessage` back to the dispatcher is not a substitute for it.
 - **Shape.** Verdict token, severity counts, one line per finding, a table, whatever this
   agent's consumers actually parse. Say it precisely enough that a downstream agent or hook could
   depend on the shape.
