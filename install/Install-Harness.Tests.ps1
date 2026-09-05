@@ -7,7 +7,7 @@ Describe "Install-Harness" {
     AfterEach { Remove-Item -Recurse -Force $script:target }
 
     It "copies agents, hooks, and templates into .claude" {
-        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500
         Test-Path "$script:target/.claude/agents/task-reviewer.md" | Should -BeTrue
         Test-Path "$script:target/.claude/hooks/agent-worktree-gate.ts" | Should -BeTrue
         Test-Path "$script:target/.claude/guardrails.md" | Should -BeTrue
@@ -18,6 +18,9 @@ Describe "Install-Harness" {
         # checks it out as CRLF, so in -Raw text `$` sits behind a carriage return and a
         # bare `^\*$` never matches on Windows.
         Get-Content "$script:target/.claude/scratch/.gitignore" -Raw | Should -Match '(?m)^\*\r?$'
+        # Negative control for the bun-absent warning below: this workstation has bun on PATH,
+        # so a mutant that warned unconditionally would ship green without this line.
+        $out | Should -Not -Match 'bun is not on PATH'
     }
 
     It "merges hook registrations into existing settings.json without clobbering" {
