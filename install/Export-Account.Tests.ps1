@@ -910,6 +910,39 @@ exit 0
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
     }
 
+    It "folds the longest matching literal when one fold literal is a prefix of another" {
+        # Backlog item 30. Get-AccountFoldTable used to state, in a comment, that no literal is a
+        # substring of another, and the callers applied the rows in declaration order. Nothing
+        # checked the precondition, and the token the item was filed for ({{HOME}}) breaks it: the
+        # bare home is a prefix of both the .claude path and the vault path, so folding it first
+        # yields {{HOME}}/.claude where {{CLAUDE_HOME}} belongs.
+        #
+        # NPM_GLOBAL is declared second and CORE_REPO fourth, so a -NpmGlobal that is a prefix of
+        # -CoreRepo puts the shorter literal first in declaration order and the assertion below
+        # can only pass on the sort. mcpServers rather than a templated file: the model-read fold
+        # pass filters $folds down to the tokens each row names, so no single templated file ever
+        # sees two colliding literals, while an mcpServers string sees the whole table.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            $cj = Join-Path $stand '.claude.json'
+            @{ mcpServers = @{
+                    nested = @{ type = 'stdio'; command = 'node'
+                        args = @('E:\projects\agent-harness-core\tools\srv.js'); env = @{} }
+                } } | ConvertTo-Json -Depth 20 | Set-Content $cj
+
+            & $script:export -ClaudeHome $ch -ClaudeJson $cj -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'E:/projects' `
+                -VaultPath 'C:/vault' -SkipSettings | Out-Null
+
+            $m = Get-Content (Join-Path $out 'mcp-servers.json') -Raw | ConvertFrom-Json
+            @($m.mcpServers.nested.args)[0] | Should -Be '{{CORE_REPO}}/tools/srv.js' `
+                -Because "declaration order would fold {{NPM_GLOBAL}} first and swallow the tail"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
     It "throws when a table row names a file the payload does not carry" {
         # A silent skip here is how a fold quietly stops happening: the file gets renamed
         # upstream, the row goes stale, and the payload ships a machine path with nothing

@@ -271,13 +271,25 @@ foreach ($f in $script:AccountRootFiles) {
 # --- fold table --------------------------------------------------------------
 # Each fold has one named source. {{CLAUDE_HOME}} is the -ClaudeHome value, {{NPM_GLOBAL}} is
 # `npm root -g`, {{CORE_REPO}} is the main checkout, {{OBSIDIAN_VAULT}} and {{HOME_SLUG}} come
-# from $HOME, {{WSL_HOME}} is `wsl -e sh -c 'echo $HOME'`. Order is immaterial: no literal
-# contains another, since the npm path and the vault both sit under the bare home rather than
-# under .claude, and the slug shares no characters with any path spelling. {{WSL_HOME}} is the
-# sixth and needs its own reason: it is POSIX-rooted (`/home/<user>`), and the other four paths
-# are all Windows-rooted (`C:\...` or `E:\...`). No Windows-side literal can contain a
-# `/`-rooted string as a substring and no POSIX-side literal can contain a drive letter, so the
-# two families cannot collide regardless of the actual usernames or paths on either side.
+# from $HOME, {{WSL_HOME}} is `wsl -e sh -c 'echo $HOME'`.
+#
+# The rows are declared in the order a reader wants to meet them and RETURNED longest-literal
+# first, because the callers apply them in the order they arrive and a literal that is a prefix
+# of another must not go first. Today's six do not overlap -- the npm path and the vault both
+# sit under the bare home rather than under .claude, the slug shares no characters with any path
+# spelling, and {{WSL_HOME}} is POSIX-rooted while the other four are Windows-rooted, so no
+# Windows literal can contain a `/`-rooted string and no POSIX literal can contain a drive
+# letter. That held by luck of which paths were needed, not by construction: a {{HOME}} token
+# (backlog item 30) is a literal prefix of both the .claude path and the vault path, so folding
+# it first would yield `{{HOME}}/.claude` where `{{CLAUDE_HOME}}` belongs.
+#
+# Sorting here rather than restating the precondition in a comment: the precondition was already
+# written down, nothing checked it, and the sort is one line. The smaller alternative -- keep the
+# comment and hand-order the rows -- makes the next person to add a row rediscover the rule,
+# which is how item 30 came to be filed in the first place.
+#
+# No tie-break key is needed. Two literals of equal length cannot contain one another unless they
+# are the same string, so the relative order of equal-length rows cannot change any output.
 function Get-AccountFoldTable {
     param(
         [string]$ClaudeHome,
@@ -287,7 +299,7 @@ function Get-AccountFoldTable {
         [string]$VaultPath,
         [string]$HomeSlug
     )
-    return @(
+    $rows = @(
         [pscustomobject]@{ Token = '{{CLAUDE_HOME}}';    Literal = $ClaudeHome; IsPath = $true }
         [pscustomobject]@{ Token = '{{NPM_GLOBAL}}';     Literal = $NpmGlobal;  IsPath = $true }
         [pscustomobject]@{ Token = '{{WSL_HOME}}';       Literal = $WslHome;    IsPath = $true }
@@ -295,6 +307,7 @@ function Get-AccountFoldTable {
         [pscustomobject]@{ Token = '{{OBSIDIAN_VAULT}}'; Literal = $VaultPath;  IsPath = $true }
         [pscustomobject]@{ Token = '{{HOME_SLUG}}';      Literal = $HomeSlug;   IsPath = $false }
     )
+    return @($rows | Sort-Object -Property { if ($_.Literal) { $_.Literal.Length } else { 0 } } -Descending)
 }
 
 # Folds one literal into its token. A path fold matches both separator spellings and
