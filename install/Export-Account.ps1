@@ -170,12 +170,20 @@ if (-not $PSBoundParameters.ContainsKey('NpmGlobal')) {
 # on the machine running THIS export, not on whatever eventually installs the payload.
 if (-not $PSBoundParameters.ContainsKey('WslHome')) {
     $WslHome = if (Get-Command wsl -ErrorAction SilentlyContinue) {
-        $v = (& wsl -e sh -c 'echo $HOME' 2>$null | Select-Object -First 1)
-        if ($LASTEXITCODE -eq 0 -and $v) { $v.Trim() } else { $null }
+        # Collect the whole stream, THEN read $LASTEXITCODE. Piping straight into
+        # `Select-Object -First 1` lets Select stop the pipeline as soon as it has its one object,
+        # and a stopped pipeline can leave $LASTEXITCODE unset from this call -- so the exit-status
+        # check reads whatever the previous native command left behind, or nothing at all. The
+        # repo's own auto-resolution test fails in isolation for exactly this reason while passing
+        # in a full run, which is the signature of a check reading a stale global.
+        $lines = @(& wsl -e sh -c 'echo $HOME' 2>$null)
+        $rc = $LASTEXITCODE
+        $v = if ($lines.Count -gt 0) { $lines[0] } else { $null }
+        if ($rc -eq 0 -and $v) { $v.Trim() } else { $null }
     } else { $null }
 }
 
-# Validate a SUPPLIED -WslHome here, at the producer, rather than where the literal is consumed
+# Validate the RESOLVED -WslHome here, at the producer, rather than where the literal is consumed
 # ~770 lines below. Two consumers read this one value in contradictory ways: the fold table takes
 # it as a path literal with IsPath = $true, and the residual scan takes it as the thing to search
 # for. A degenerate value satisfies the first and defeats the second, so by the time the scan
@@ -193,12 +201,22 @@ if (-not $PSBoundParameters.ContainsKey('WslHome')) {
 # pattern '/home/wsluser\ (?!...)' and degraded the scan to a near-total no-op, completing the
 # export with the literal shipped.
 #
-# An UNRESOLVED -WslHome is a different case and stays legal: $null means this machine has no WSL
-# and there is nothing to fold or scan for. Only a value the caller actually supplied is judged.
-if ($PSBoundParameters.ContainsKey('WslHome') -and $WslHome) {
+# An UNRESOLVED WslHome is a different case and stays legal: $null means this machine has no WSL
+# and there is nothing to fold or scan for.
+#
+# Judged wherever the value came from, NOT only when the caller supplied it. A first version of
+# this guard read `$PSBoundParameters.ContainsKey('WslHome') -and $WslHome`, which left the
+# auto-resolution branch above unguarded while the consumer-side TrimEnd it replaced was deleted --
+# so it removed a defence that path already had. Measured with a stub `wsl` and -WslHome omitted:
+# a distro echoing '/home/stubwsl/' threw before that change and completed after it, marker written
+# and the literal shipped; a distro echoing '/' reproduced the original defect whole, mangled
+# mcp-servers.json included. `wsl -e sh -c 'echo $HOME'` returns whatever that distro's passwd
+# entry says, which is not a value this script gets to assume is well-formed.
+if ($WslHome) {
+    $wslHomeGiven = $WslHome
     $WslHome = $WslHome.Trim().TrimEnd('/')
     if ($WslHome -notmatch '^/[^/]') {
-        throw "-WslHome must name an absolute POSIX directory, and '$($PSBoundParameters['WslHome'])' does not. It is used both as a fold literal and as the string the residual scan searches for; a value that trims to nothing, or that is a bare '/', folds every separator in the payload and leaves the scan with nothing to match, so the export completes while shipping the WSL home it was meant to catch. Pass a path like '/home/<user>', or omit -WslHome to let this script resolve it."
+        throw "WslHome must name an absolute POSIX directory, and '$wslHomeGiven' does not. It is used both as a fold literal and as the string the residual scan searches for; a value that trims to nothing, or that is a bare '/', folds every separator in the payload and leaves the scan with nothing to match, so the export completes while shipping the WSL home it was meant to catch. Pass -WslHome a path like '/home/<user>', or fix what `wsl -e sh -c 'echo \$HOME'` returns on this machine."
     }
 }
 
