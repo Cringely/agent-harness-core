@@ -31,6 +31,14 @@
 .PARAMETER NpmGlobal
     The literal folded into {{NPM_GLOBAL}}. Defaults to `npm root -g`.
 
+.PARAMETER WslHome
+    The literal folded into {{WSL_HOME}} wherever it appears in mcpServers (today, only
+    code-context's launcher). Defaults to the default WSL distro's $HOME via
+    `wsl -e sh -c 'echo $HOME'`, or $null if wsl is not on PATH. Unlike the other five tokens
+    this one has no receiver-side answer: Install-Account.ps1's Get-AccountTokenMap leaves
+    {{WSL_HOME}} unexpanded on purpose, since a receiver may have no WSL at all and guessing a
+    username would make a dead entry look resolved.
+
 .PARAMETER VaultPath
     The literal folded into {{OBSIDIAN_VAULT}}. Defaults to $env:CLAUDE_OBSIDIAN_VAULT, else
     $HOME/Documents/Obsidian Vault/Claude Code.
@@ -77,6 +85,7 @@ param(
     [string]$OutputRoot,
     [string]$CoreRepo,
     [string]$NpmGlobal,
+    [string]$WslHome,
     [string]$VaultPath,
     [string]$HomeSlug,
     [switch]$SkipSettings,
@@ -113,6 +122,17 @@ if (-not $PSBoundParameters.ContainsKey('NpmGlobal')) {
     $NpmGlobal = if (Get-Command npm -ErrorAction SilentlyContinue) {
         $v = (& npm root -g 2>$null | Select-Object -First 1)
         if ($LASTEXITCODE -eq 0) { $v } else { $null }
+    } else { $null }
+}
+# Same shape as $NpmGlobal above: no environment variable exposes a WSL distro's $HOME to a
+# Windows process, so this shells out and tolerates absence the same way. Unlike NpmGlobal this
+# fold has no receiver-side answer at all (Install-Account.ps1 leaves {{WSL_HOME}} unexpanded on
+# purpose, see Get-AccountTokenMap's comment there), so a live value here only needs to be right
+# on the machine running THIS export, not on whatever eventually installs the payload.
+if (-not $PSBoundParameters.ContainsKey('WslHome')) {
+    $WslHome = if (Get-Command wsl -ErrorAction SilentlyContinue) {
+        $v = (& wsl -e sh -c 'echo $HOME' 2>$null | Select-Object -First 1)
+        if ($LASTEXITCODE -eq 0 -and $v) { $v.Trim() } else { $null }
     } else { $null }
 }
 
@@ -231,13 +251,18 @@ foreach ($f in $script:AccountRootFiles) {
 # --- fold table --------------------------------------------------------------
 # Each fold has one named source. {{CLAUDE_HOME}} is the -ClaudeHome value, {{NPM_GLOBAL}} is
 # `npm root -g`, {{CORE_REPO}} is the main checkout, {{OBSIDIAN_VAULT}} and {{HOME_SLUG}} come
-# from $HOME. Order is immaterial: no literal contains another, since the npm path and the
-# vault both sit under the bare home rather than under .claude, and the slug shares no
-# characters with any path spelling.
+# from $HOME, {{WSL_HOME}} is `wsl -e sh -c 'echo $HOME'`. Order is immaterial: no literal
+# contains another, since the npm path and the vault both sit under the bare home rather than
+# under .claude, and the slug shares no characters with any path spelling. {{WSL_HOME}} is the
+# sixth and needs its own reason: it is POSIX-rooted (`/home/<user>`), and the other four paths
+# are all Windows-rooted (`C:\...` or `E:\...`). No Windows-side literal can contain a
+# `/`-rooted string as a substring and no POSIX-side literal can contain a drive letter, so the
+# two families cannot collide regardless of the actual usernames or paths on either side.
 function Get-AccountFoldTable {
     param(
         [string]$ClaudeHome,
         [string]$NpmGlobal,
+        [string]$WslHome,
         [string]$CoreRepo,
         [string]$VaultPath,
         [string]$HomeSlug
@@ -245,6 +270,7 @@ function Get-AccountFoldTable {
     return @(
         [pscustomobject]@{ Token = '{{CLAUDE_HOME}}';    Literal = $ClaudeHome; IsPath = $true }
         [pscustomobject]@{ Token = '{{NPM_GLOBAL}}';     Literal = $NpmGlobal;  IsPath = $true }
+        [pscustomobject]@{ Token = '{{WSL_HOME}}';       Literal = $WslHome;    IsPath = $true }
         [pscustomobject]@{ Token = '{{CORE_REPO}}';      Literal = $CoreRepo;   IsPath = $true }
         [pscustomobject]@{ Token = '{{OBSIDIAN_VAULT}}'; Literal = $VaultPath;  IsPath = $true }
         [pscustomobject]@{ Token = '{{HOME_SLUG}}';      Literal = $HomeSlug;   IsPath = $false }
@@ -291,7 +317,7 @@ function ConvertTo-TemplatedCommand {
 }
 
 if (-not $HomeSlug) { $HomeSlug = Get-ProjectSlug $HOME }
-$folds = @(Get-AccountFoldTable -ClaudeHome $ClaudeHome -NpmGlobal $NpmGlobal `
+$folds = @(Get-AccountFoldTable -ClaudeHome $ClaudeHome -NpmGlobal $NpmGlobal -WslHome $WslHome `
         -CoreRepo $CoreRepo -VaultPath $VaultPath -HomeSlug $HomeSlug)
 
 # --- settings.account.json ---------------------------------------------------
@@ -526,6 +552,21 @@ if (-not $SkipMcp) {
                     $hits = @(Test-AccountSecret -Text $s -Patterns $patterns)
                     if ($hits.Count -gt 0) {
                         throw "Refusing to export mcpServers entry '$name': $($hits -join ', '). Server entries reach secrets through 1Password or an environment variable, never inline."
+                    }
+                    # review round 1, B3: $WslHome can be $null (wsl absent, the distro stopped,
+                    # or the shell-out timed out) or an explicit empty string, and either leaves
+                    # ConvertTo-TemplatedText's "if (-not $Fold.Literal ...) { return $Text }"
+                    # early return doing nothing -- the fold is then silently conditional on wsl
+                    # answering at export time, and a run where it does not ships the WSL
+                    # username verbatim with exit 0 and no warning naming {{WSL_HOME}}. Gating on
+                    # "$WslHome is falsy" directly would need this file to reason about every
+                    # falsy shape ($null, '', a value that resolves but happens not to match)
+                    # separately. Scanning the actual post-fold string for the one shape that must
+                    # never survive a successful fold -- a bare /home/<user> segment -- covers all
+                    # of those at once, and reuses the same scan-and-throw shape the secret gate
+                    # right above already established, rather than adding a second kind of gate.
+                    if ($s -match '/home/[^/"''\s]+') {
+                        throw "Refusing to export mcpServers entry '$name': carries an unfolded WSL home path ('$($Matches[0])'). -WslHome did not resolve (wsl absent, the distro stopped, or an empty override) so the fold could not apply; pass a real -WslHome, or fix the account layer's WSL entry, before exporting."
                     }
                 }
             }

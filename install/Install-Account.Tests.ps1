@@ -1559,7 +1559,7 @@ Describe "Install-Account" {
                         command = 'C:\Program Files\WindowsApps\Agilebits.1Password_8.12.26.40_x64__amwd9z03whsfe\onepassword-mcp.exe'
                         args = @(); env = @{} }
                     'code-context' = @{ type = 'stdio'; command = 'wsl'
-                        args = @('-e', '/home/prior/code-context-mcp.sh'); env = @{} }
+                        args = @('-e', '/home/wsluser/code-context-mcp.sh'); env = @{} }
                     # The real argument list, not a simplified "garmin-mcp": the URL is what
                     # makes Get-UnresolvedPath's drive-letter branch misfire (review F1), and a
                     # fixture that drops it cannot measure the defect it exists to catch.
@@ -1599,7 +1599,7 @@ Describe "Install-Account" {
             $report | Should -Match ([regex]::Escape(
                     'does not exist here: C:\Program Files\WindowsApps\Agilebits.1Password_8.12.26.40_x64__amwd9z03whsfe\onepassword-mcp.exe'))
             # code-context is the case Test-ResidualWindowsPath alone cannot see: `wsl -e
-            # /home/prior/code-context-mcp.sh` carries no drive letter and no USERPROFILE, so a
+            # /home/wsluser/code-context-mcp.sh` carries no drive letter and no USERPROFILE, so a
             # drive-letter rule would report one of the two entries this exists to name.
             $report | Should -Match 'code-context'
             # The line above alone does not discriminate: the trailer sentence below always
@@ -1608,7 +1608,7 @@ Describe "Install-Account" {
             # Get-UnresolvedPath was rigged to never flag code-context's own dead path. Matching
             # the actual dead path pins down that the POSIX-shaped entry was genuinely detected,
             # not merely named in that fixed sentence.
-            $report | Should -Match ([regex]::Escape('/home/prior/code-context-mcp.sh'))
+            $report | Should -Match ([regex]::Escape('/home/wsluser/code-context-mcp.sh'))
             $report | Should -Not -Match 'garmin'
             # The expanded hook command points at a file that is really there, so it must not
             # be reported. On a Windows receiver every correctly expanded command carries a
@@ -1616,6 +1616,58 @@ Describe "Install-Account" {
             $report | Should -Not -Match 'Scan-MemorySecrets'
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # {{WSL_HOME}} has no entry in Get-AccountTokenMap by design (see that function's comment),
+    # so a payload the exporter folded still carries the literal token after install. Task 11's
+    # acceptance criterion for the sibling test above must survive that: a fold that made the
+    # entry look resolved would be the exact failure the team lead's review called out.
+    Context "leaves {{WSL_HOME}} unexpanded and still reports code-context's dead path" {
+        BeforeAll {
+            $script:wlP = New-StandInPayload
+            $script:wlH = New-StandInClaudeHome
+            $script:wlCj = Join-Path $script:wlH 'claude.json'
+            @{ mcpServers = @{} } | ConvertTo-Json -Depth 20 | Set-Content $script:wlCj
+            @{ mcpServers = @{
+                    'code-context' = @{ type = 'stdio'; command = 'wsl'
+                        args = @('-e', '{{WSL_HOME}}/code-context-mcp.sh'); env = @{} }
+                } } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $script:wlP 'mcp-servers.json')
+
+            $script:wlOut = & $script:install -PayloadRoot $script:wlP -ClaudeHome $script:wlH `
+                -ClaudeJson $script:wlCj -CoreRepo 'E:/projects/agent-harness-core' `
+                -NpmGlobal 'C:/npm' -SkipPreflight *>&1 | Out-String
+
+            $script:wlServers = (Get-Content $script:wlCj -Raw | ConvertFrom-Json).mcpServers
+        }
+        AfterAll {
+            Remove-Item -Recurse -Force $script:wlP, $script:wlH -ErrorAction SilentlyContinue
+        }
+
+        It "leaves {{WSL_HOME}} unexpanded in the merged claude.json" {
+            $script:wlServers.'code-context'.args | Should -Contain '{{WSL_HOME}}/code-context-mcp.sh'
+        }
+        It "warns about the unexpanded token by name" {
+            $script:wlOut | Should -Match 'Unexpanded placeholder\(s\) in mcpServers: \{\{WSL_HOME\}\}'
+        }
+        It "still names mcpServers.code-context in the residual-path report" {
+            # Get-UnresolvedPath's regex is path-shaped, not token-aware: it does not match the
+            # opening {{WSL_HOME}} itself, but the / between the closing }} and the filename
+            # still satisfies the POSIX branch on its own, so the entry stays flagged -- on the
+            # truncated tail rather than the full original path. That is a pre-existing property
+            # of the regex (the same class of truncation review F6 already documents for a
+            # space inside a Whole command), not something this fold introduces.
+            #
+            # Review round 1, F4: a bare 'mcpServers\.code-context' match here is satisfied by the
+            # unconditional "Expected here: mcpServers.1password ... and mcpServers.code-context"
+            # trailer line, which prints whenever the block prints at all, regardless of which
+            # entries were actually flagged -- proven by ablation, redacting the per-entry line
+            # left this assertion green. Anchored on the classifier tag from the per-entry line
+            # instead ("[POSIX-shaped]"), which the trailer sentence never carries, so this can
+            # only pass when code-context's own line was printed.
+            $parts = @($script:wlOut -split 'Still carrying a source-machine path')
+            $parts.Count | Should -Be 2 -Because "the report must have printed at all"
+            $parts[1] | Should -Match 'mcpServers\.code-context \[POSIX-shaped\]'
+        }
     }
 
     It "completes the install even with residuals outstanding" {

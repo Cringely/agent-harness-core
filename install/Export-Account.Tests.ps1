@@ -938,6 +938,69 @@ exit 0
         }
     }
 
+    # WSL_HOME is the sixth fold and the only POSIX-rooted one. code-context's launcher is the
+    # one live entry it applies to (task-14-addendum's scrub: mcp-servers.json:14 names the
+    # operator's own WSL account as a literal that should not ship). /home/wsluser below is a
+    # synthetic fixture value, not the real one: review round 1, B1, the real account name was
+    # shipping in this test's own fixture and test name, which is exactly the kind of disclosure
+    # this fold exists to prevent.
+    Context 'folds a WSL user''s $HOME into {{WSL_HOME}} in mcpServers' {
+        BeforeAll {
+            $script:wStand = New-StandInHome
+            $script:wOut = New-OutputRoot
+            $wCh = (Join-Path $script:wStand '.claude')
+            $wCj = Join-Path $script:wStand '.claude.json'
+            @{
+                mcpServers = @{
+                    'code-context' = @{ type = 'stdio'; command = 'wsl'
+                        args = @('-e', '/home/wsluser/code-context-mcp.sh'); env = @{} }
+                }
+            } | ConvertTo-Json -Depth 20 | Set-Content $wCj
+
+            & $script:export -ClaudeHome $wCh -ClaudeJson $wCj -OutputRoot $script:wOut `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -WslHome '/home/wsluser' -SkipSettings | Out-Null
+
+            $script:wParsed = Get-Content (Join-Path $script:wOut 'mcp-servers.json') -Raw | ConvertFrom-Json
+        }
+        AfterAll {
+            Remove-Item -Recurse -Force $script:wStand, $script:wOut -ErrorAction SilentlyContinue
+        }
+
+        It "folds the WSL home segment in code-context's launcher arg" {
+            $script:wParsed.mcpServers.'code-context'.args | Should -Contain '{{WSL_HOME}}/code-context-mcp.sh'
+        }
+        It "leaves no residual /home/wsluser literal behind" {
+            $script:wParsed.mcpServers.'code-context'.args | Should -Not -Contain '/home/wsluser/code-context-mcp.sh'
+        }
+    }
+
+    It "fails closed instead of shipping the WSL home verbatim when -WslHome does not resolve" {
+        # Review round 1, B3, reproduced: an explicit empty -WslHome (standing in for wsl being
+        # absent, its distro stopped, or the shell-out timing out) used to leave the fold's own
+        # early return doing nothing, so the export exited 0 and wrote the real literal straight
+        # through with no warning naming {{WSL_HOME}} anywhere. Same fixture shape as the
+        # successful-fold Context above, -WslHome '' instead of a real value.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            $cj = Join-Path $stand '.claude.json'
+            @{ mcpServers = @{
+                    'code-context' = @{ type = 'stdio'; command = 'wsl'
+                        args = @('-e', '/home/wsluser/code-context-mcp.sh'); env = @{} }
+                } } | ConvertTo-Json -Depth 20 | Set-Content $cj
+
+            { & $script:export -ClaudeHome $ch -ClaudeJson $cj -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -WslHome '' -SkipSettings } |
+                Should -Throw -ExpectedMessage '*code-context*unfolded WSL home path*'
+            Test-Path -LiteralPath (Join-Path $out 'mcp-servers.json') |
+                Should -BeFalse -Because "a failed gate must leave nothing behind to commit"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
     It "fails closed when any mcpServers string trips the secret scanner's own patterns" {
         # Server entries reach secrets through 1Password or an environment variable, never
         # inline. Measured against today's live mcpServers: all 15 strings clean, 0 hits.
