@@ -427,15 +427,30 @@ const GIT_COMMIT_RE =
  * item-37 ReDoS fix spent its docstring proving safe. Rescanning group 1 is smaller and leaves
  * that proof untouched.
  *
- * Last `-C` wins when more than one appears, matching git's own left-to-right chaining for the
- * common case of absolute paths (no test exercises multiple real `-C` occurrences; this is the
- * documented tie-break if one is ever added).
+ * Repeated `-C` CHAINS, it does not tie-break. git resolves each `-C` relative to the one before
+ * it, so `git -C /a -C b commit` runs in `/a/b`. Taking the last one instead returned a bare `b`
+ * for that command, which the caller then resolved against the session cwd — a real directory,
+ * usually, and not the one git meant. Both ways of being wrong here are silent: a path that does
+ * not exist throws into the outer catch and exits 0, and one that exists with nothing staged
+ * reaches `decide()`'s bare ALLOW, which carries no `reason` and so never hits the announcement
+ * branch. Nothing tells the operator the gate looked at the wrong repository.
+ *
+ * Worth being precise about the provenance, because it changes who owns it. Before the group-1
+ * rescan above, `git -C /a -C b --no-pager commit` produced `undefined` and fell back to the
+ * session cwd; now it produces a resolved path. The rescan did not introduce chained `-C`, but it
+ * did turn one shape of this bug from "silently reviews the session cwd" into "silently reviews a
+ * path git never named", so the fix belongs with it rather than in the backlog.
+ *
+ * `resolve()` gives the chaining for free: it returns its last absolute argument unchanged and
+ * joins a relative one onto the accumulated path, which is exactly git's rule.
  */
 function repoPathFromOptionRun(optionRun: string): string | undefined {
   const re = /-C\s+(?!-{1,2}[A-Za-z][\w-]*(?:=\S+)?(?=\s|$))(\S+)/g;
   let repoPath: string | undefined;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(optionRun))) repoPath = m[1];
+  while ((m = re.exec(optionRun))) {
+    repoPath = repoPath === undefined ? m[1] : resolve(repoPath, m[1]);
+  }
   return repoPath;
 }
 

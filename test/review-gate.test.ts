@@ -14,7 +14,7 @@ import { describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   decide,
   findUnreviewedFiles,
@@ -329,6 +329,29 @@ describe("parseGitCommitInvocation() — item 37: a quoted option argument still
     expect(parseGitCommitInvocation("git -C /r -c user.name=CI commit -m x").repoPath).toBe("/r");
     expect(parseGitCommitInvocation("git --no-pager -C /r commit").repoPath).toBe("/r");
     expect(parseGitCommitInvocation("git -C /r --no-pager -c user.name=CI commit").repoPath).toBe("/r");
+  });
+
+  // Repeated -C chains rather than tie-breaking. `git -C /a -C b` runs in /a/b: git resolves each
+  // -C against the one before it. Taking the last returned a bare "b", which main() then resolved
+  // against the session cwd — a different, usually existing, directory, and the gate would review
+  // its staged files without saying so.
+  //
+  // The group-1 rescan above is what made this reachable in a new way. Before it, the second -C
+  // followed by an option produced undefined and the gate fell back to the session cwd; after it,
+  // the same command produced a path git never named. Two of these rows fail against the last-wins
+  // form, and the assertions are written against resolve() so they read the same on either OS.
+  test("repeated -C chains like git does, rather than the last one winning", () => {
+    expect(parseGitCommitInvocation("git -C /a -C b commit").repoPath).toBe(resolve("/a", "b"));
+    expect(parseGitCommitInvocation("git -C /a -C b --no-pager commit").repoPath).toBe(
+      resolve("/a", "b"),
+    );
+    // A later absolute -C discards what came before it, which is resolve()'s own rule and git's.
+    expect(parseGitCommitInvocation("git -C /a -C /b commit").repoPath).toBe(resolve("/b"));
+    expect(parseGitCommitInvocation("git -C a -C b -C c commit").repoPath).toBe(
+      resolve("a", "b", "c"),
+    );
+    // One -C is unchanged: still the raw argument, not resolved against the session cwd.
+    expect(parseGitCommitInvocation("git -C /r commit").repoPath).toBe("/r");
   });
 
   // Timing budget. Measured on this machine through parseGitCommitInvocation on bun: 92.7 ms at
