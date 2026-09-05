@@ -1,0 +1,111 @@
+---
+# Three post-2022 register tells that share one severity, so they share one rule:
+# Vale 3.15.1 has no per-token `level:`, and one .yml file is exactly one rule.
+# The fourth candidate in this batch ("boasts") is warning, not error, and is
+# therefore in TellWordsBoast.yml.
+#
+# DUPLICATE CHECK, run 2026-08-14 before a line of this file was written, over all
+# 63 rules in styles/ai-tells/ plus the sibling files in styles/Cringely/:
+#     rg -i 'commend|garn|poise' styles/    ->    one hit, and it is unrelated
+#                                                 (ai-tells.VagueAttributions:
+#                                                 "experts recommend").
+# None of the three tokens below is matched by any active rule. Two alerts on one
+# span is the measured noise pattern that gets a whole style switched off, so this
+# check is the load-bearing step, not the writing.
+#
+# --- commendable -------------------------------------------------------------
+# The best-evidenced token in the survey, and the one whose source genre matches
+# this harness most exactly. Liang et al. measured ICLR/NeurIPS PEER REVIEWS --
+# which is the genre this thing emits all day: task-reviewer verdicts,
+# adversarial-reviewer findings, PR review summaries -- at a 9.8-fold
+# per-sentence increase after ChatGPT. Kobak's released per-word abstract counts
+# give the same word in 80 abstracts in 2022 against 698 in 2024.
+# No carve-out. There is no homelab, config, or commit-message sense of
+# "commendable". If a change is good, name what is good about it.
+#
+# --- garner / garners / garnered / garnering ---------------------------------
+# No technical, homelab, or commit-message sense at all. The plain verbs are
+# "got", "won", "attracted", "collected", or just the number.
+# HONEST LIMIT, stated because the multiple flatters it: 813 abstracts rising to
+# 5,267 is a large ratio over a tiny base inside a multi-million-document corpus.
+# The word is rare in the SOURCE too, so expect near-zero hits here. This is
+# cheap insurance against a tell that would read badly if it ever appeared, not
+# a filter earning its keep on volume. Measured hits on the operator's corpus:
+# see the calibration line at the bottom.
+# All four surface forms are listed rather than written `garner(?:s|ed|ing)?`,
+# because whether Vale appends \b to a token is not documented and a wrong guess
+# here fails silently in the direction of a missed match.
+#
+# --- poised to ---------------------------------------------------------------
+# BIGRAM ONLY. Bare "poised" is ordinary English doing real work ("poised at the
+# boundary", "a poised response") and is deliberately not matched.
+# WEAKEST NUMBER IN THE FILE, and this comment has to say so rather than bury it:
+# 2.23x on 493 abstracts rising to 1,158 -- the lowest multiple of the four
+# candidates surveyed, and low enough that the corpus alone would not carry it.
+# The case is domain implausibility instead. Nothing in a homelab repo is
+# "poised to" do anything; a service starts on the next deploy or it does not,
+# and a plan either has a next step or it is stalled. Shipped as error on that
+# argument. If it ever fires on correct writing, drop it -- it has the least to
+# lose of anything here.
+#
+# REJECTED, negative lookahead for the carve-outs. Measured on this exact binary
+# (vale 3.15.1): a token of the form 'foo(?!bar)' behaves as 'foo\b' -- against
+# "foobar and foobaz and foo" it matched the bare foo and missed foobaz -- and
+# Vale exits 0 printing no diagnostic. A lookahead carve-out therefore looks
+# correct in review and is wrong in production. Where a carve-out is needed the
+# mechanism is `exceptions:` (see TellWordsBoast.yml). This rule needs none: the
+# bigram IS the carve-out for "poised", and the other two tokens have no
+# legitimate sense to protect.
+#
+# REJECTED, folding these into Cringely.Vocabulary. Two reasons, either fatal.
+# Vocabulary.yml is regenerated with a whole-file Set-Content by
+# Build-CringelyStyle.ps1 from the beautiful_prose word list, so a hand-added
+# token there is destroyed on the next run and nothing reports it. And
+# Cringely.Vocabulary is switched off entirely under [**/agent-harness-core/**]
+# in .vale.ini, which is where most of this harness's prose lives -- precisely
+# the corpus these tells target.
+#
+# CALIBRATION, 2026-08-14. Corpus: 142 .md files -- C:\Users\user\.claude\rules
+# (11), C:\Users\user\.claude\skills, and E:\projects\agent-harness-core minus
+# worktrees/node_modules/.git. Same corpus the .vale.ini ShipOveruse note used.
+#   total findings, all rules ....... 1025
+#   findings from this rule ......... 0
+# The zero was proved to be a real zero rather than a rule that failed to load:
+# the corpus and the fixture were linted in ONE invocation, which returned 16
+# findings from this file, all 16 inside the fixture. A raw `Select-String` for
+# commendable|garner|poised|boast over all 142 files returns nothing, so the
+# zero is genuine absence, not an exemption in .vale.ini hiding a hit. Honest
+# consequence: the corpus proves these rules are HARMLESS here; it does not
+# prove they are useful here, because the words simply never occur.
+#
+# FALSE-POSITIVE VECTORS, each measured against this config on 2026-08-14:
+#   bare URL, https://github.com/garner/thing ......... silent (exempt)
+#   fenced ```sh block containing all four tokens ..... silent (exempt)
+#   markdown link TEXT, [the garner repo](...) ....... FIRES on the link text,
+#       column 13, i.e. on the prose and not on the URL. Correct behaviour.
+#   table CELL content ............................... FIRES. Correct: only the
+#       delimiter row is exempt, cell prose is prose.
+#   inline code span, `to_failover` after "poised" ... silent. Vale masks a span
+#       with asterisks of equal length, so the bigram cannot complete. This
+#       fails in the safe direction (a missed match, never a wrong one).
+#   UNBACKTICKED path, C:\tools\garner\bin ........... FIRES. Accepted: house
+#       style backticks paths, and a backticked path is masked.
+#   PROPER NOUN, "Reviewed by Garner on Tuesday" ..... FIRES. This is the one
+#       live false-positive vector in the file. Not carved out, because
+#       `ignorecase: true` is required for sentence-initial "Commendable" and
+#       "Poised to", severity is per-rule so the tokens cannot be split without
+#       splitting the file, and no exception can tell the surname from the verb.
+#       Accepted on the measurement above: nobody named Garner appears in this
+#       corpus. If one ever does, drop the four garner tokens -- they are the
+#       lowest-value tokens here by the author's own admission.
+extends: existence
+message: "AI tell: '%s'. Peer-review and abstract register, measured as a post-2022 LLM marker. Say the concrete thing: what is good about it, what it got, what it will do."
+level: error
+ignorecase: true
+tokens:
+  - commendable
+  - garnering
+  - garnered
+  - garners
+  - garner
+  - poised to

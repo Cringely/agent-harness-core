@@ -1,0 +1,105 @@
+---
+# The stative "boasts": "the rig boasts 40 GB of VRAM", "the project boasts over
+# 200 contributors". Marketing copy wearing a spec sheet. The plain verb is
+# "has", or drop the verb and give the number.
+#
+# WHAT UPSTREAM ALREADY COVERS -- checked before this file existed, and it
+# changed the design. ai-tells.ServesAsDodge (extends: existence, level: error)
+# already carries seven collocations:
+#     boasts a vibrant / a rich / a diverse / a wide / a unique / a thriving /
+#     an impressive
+# Those seven are CARVED OUT below instead of re-matched. A bare `boasts` token
+# would raise two alerts on one span, which is the measured noise pattern that
+# gets an entire style disabled -- costing more than the tell is worth.
+# The gap this rule fills, and the only gap, is the QUANTITY form that upstream
+# does not touch: "boasts over 200 contributors", "boasts 40 GB of VRAM".
+#
+# THE SPLIT, and why it is mechanical rather than a judgment call. The pejorative
+# human-subject sense must not fire: "he boasts about his uptime" is correct
+# English doing real work, and a linter that rewrites it is simply wrong. That
+# sense takes a preposition or a complement clause -- boasts ABOUT, boasts THAT.
+# The stative sense takes a bare direct object and never a complementiser. So the
+# two senses are separable on the following token alone, which means the carve-out
+# is expressible as `exceptions:` and does not need lookahead.
+#
+# REJECTED, negative lookahead. Measured on vale 3.15.1: 'foo(?!bar)' behaves as
+# 'foo\b', matching the bare foo and missing foobaz in "foobar and foobaz and
+# foo", with exit code 0 and no diagnostic. A carve-out written as
+# `boasts?(?! about)` would pass review and fire on every "boasts about" in
+# production. `exceptions:` is the mechanism that works here.
+#
+# HONEST LIMIT ON THE NUMBER, stated up front because the figure is quotable and
+# shouldn't be: the 19.2x reported for "boasting" is computed off an 18-document
+# 2022 denominator. Eighteen documents. That is a small-base artefact, not
+# signal, and no threshold in this rule rests on it. What the rule rests on is
+# the register argument above, which is weaker evidence than Liang's peer-review
+# measurement -- hence warning, not error.
+#
+# SEPARATE FILE from TellWords.yml because `level:` is per-rule in Vale 3.15.1
+# and there is no per-token severity. The filename keeps the "TellWords" stem so
+# it cannot collide with a concurrently-authored file in this directory.
+#
+# TRAP, MEASURED HERE FOR THE FIRST TIME 2026-08-14 -- READ THIS BEFORE EDITING
+# THE EXCEPTION LIST BELOW. `exceptions:` is CASE-SENSITIVE even when the rule
+# sets `ignorecase: true`. The flag governs the tokens only. The first draft of
+# this file used plain lowercase exceptions and measured, against fixture
+# fix-words.md:
+#     "He boasts about his uptime."        -> silent      (exception matched)
+#     "Boasting about uptime is tiresome." -> FIRED       (exception missed)
+#     "Boast about the uptime if you must" -> FIRED       (exception missed)
+#     "Boasts a rich set of options."      -> FIRED TWICE, once from this rule
+#                                             and once from ai-tells.ServesAsDodge
+# That last line is the failure this rule exists to avoid, reintroduced by a
+# capital letter at the start of a sentence -- and Vale reports nothing about it.
+# FIX, verified: prefix every exception with the inline flag `(?i)`. Exceptions
+# are compiled as regexes, so the flag is honoured. After the change all four
+# lines above are silent from this rule, "Boasts a rich" raises exactly one
+# alert (ServesAsDodge's), and the lowercase carve-outs still work -- which is
+# the discriminator proving `(?i)` was interpreted, not taken literally.
+#
+# KNOWN LIMITS, measured 2026-08-14, both accepted:
+#   1. Code-span masking defeats an exception. Vale replaces an inline code span
+#      with asterisks of equal length and matches the masked text, so
+#      "he boasts `about` uptime" becomes "he boasts *******" and the carve-out
+#      cannot see the preposition. It fires. Judged acceptable: backticking the
+#      preposition of a sentence is not a construction that occurs.
+#      The same masking is HARMLESS in the true-positive direction, because the
+#      token here is a single word with no adjacency requirement:
+#      "boasts `40 GB` of VRAM" still fires correctly.
+#   2. The noun sense ("an idle boast") fires. Accepted rather than carved out:
+#      it needs an article-plus-adjective exception list that would have to
+#      guess every adjective, and the noun does not appear in this corpus.
+#
+# CALIBRATION, 2026-08-14. Corpus: 142 .md files -- C:\Users\user\.claude\rules
+# (11), C:\Users\user\.claude\skills, and E:\projects\agent-harness-core minus
+# worktrees/node_modules/.git. 1025 findings from all rules; 0 from this one.
+# The zero is a real zero and not a rule that failed to load: corpus and fixture
+# were linted in one invocation and this file's tokens fired 7 times, all inside
+# the fixture. A raw text sweep for "boast" over all 142 files returns nothing,
+# so the zero is genuine absence. Honest reading: the corpus proves this rule is
+# harmless here, not that it is useful here.
+extends: existence
+message: "AI tell: '%s' in the stative sense. Marketing register. Say it plainly: 'has 40 GB of VRAM', 'over 200 contributors'."
+level: warning
+ignorecase: true
+tokens:
+  - boasting
+  - boasts
+  - boast
+exceptions:
+  # Pejorative human-subject sense. Correct English; must not fire.
+  - (?i)boasting about
+  - (?i)boasts about
+  - (?i)boast about
+  - (?i)boasting that
+  - (?i)boasts that
+  - (?i)boast that
+  # Already owned by ai-tells.ServesAsDodge. Carved out so one span raises one
+  # alert instead of two.
+  - (?i)boasts a vibrant
+  - (?i)boasts a rich
+  - (?i)boasts a diverse
+  - (?i)boasts a wide
+  - (?i)boasts a unique
+  - (?i)boasts a thriving
+  - (?i)boasts an impressive
