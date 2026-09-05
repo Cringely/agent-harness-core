@@ -10,3 +10,12 @@ node_modules/
 # Anchored to the repo root: unanchored, this would also ignore a `.claude/`
 # tree inside a test fixture, and the Pester suite already builds such trees.
 /.claude/
+
+# Editor and script backups. change-management.md requires deleting a .bak once
+# the change it guards is stable, but nothing enforced that, and an untracked
+# install/Export-Account.ps1.bak survived a full pre-push audit sitting one
+# `git add .` away from publication -- holding, as it happened, the pre-fix copy
+# of a throw message that leaked the operator's profile path. Ignoring them means
+# a forgotten backup can no longer become a committed one.
+*.bak
+*.bak.*

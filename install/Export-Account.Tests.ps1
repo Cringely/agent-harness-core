@@ -1290,6 +1290,42 @@ exit 0
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
     }
 
+    # The refusal message must not leak the operator's own profile path.
+    #
+    # It ends by telling the reader to check what `wsl -e sh -c 'echo $HOME'` returns. That '$HOME'
+    # belongs to the POSIX shell the reader is told to run, not to PowerShell -- but the message is
+    # a double-quoted PowerShell string, so an unescaped $HOME interpolates at throw time and prints
+    # this machine's Windows profile path instead. Two defects from one character: the instruction
+    # stops being runnable, and an identifying string reaches console output, CI logs and session
+    # transcripts -- the channel the identity scan lower in this same file exists to keep clean.
+    #
+    # Backslash does not escape in PowerShell; the escape is a backtick. Both existing assertions on
+    # this message match its PREFIX, so neither one moves when the tail leaks. Hence a test of its
+    # own, asserting on the rendered text rather than on the source.
+    It "refuses without interpolating the operator's profile path into the message" {
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $msg = $null
+            try {
+                & $script:export -ClaudeHome (Join-Path $stand '.claude') -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -WslHome '/' -SkipSettings -SkipMcp
+            }
+            catch { $msg = $_.Exception.Message }
+
+            $msg | Should -Not -BeNullOrEmpty -Because 'the degenerate value must still be refused'
+            $msg | Should -BeLike '*must name an absolute POSIX directory*'
+
+            # -Not -Match would treat $HOME as a regex; the path is full of backslashes. Substring.
+            $msg.Contains($HOME) |
+                Should -BeFalse -Because 'the refusal must not print this machine''s profile path'
+            $msg.Contains('$HOME') |
+                Should -BeTrue -Because 'the reader is told to run a shell command that uses $HOME'
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
     # The same judgement on the value the script RESOLVES, not only on one the caller supplied.
     #
     # This pins a regression the first version of the producer guard introduced. That version read

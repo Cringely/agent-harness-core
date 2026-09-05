@@ -216,7 +216,7 @@ if ($WslHome) {
     $wslHomeGiven = $WslHome
     $WslHome = $WslHome.Trim().TrimEnd('/')
     if ($WslHome -notmatch '^/[^/]') {
-        throw "WslHome must name an absolute POSIX directory, and '$wslHomeGiven' does not. It is used both as a fold literal and as the string the residual scan searches for; a value that trims to nothing, or that is a bare '/', folds every separator in the payload and leaves the scan with nothing to match, so the export completes while shipping the WSL home it was meant to catch. Pass -WslHome a path like '/home/<user>', or fix what `wsl -e sh -c 'echo \$HOME'` returns on this machine."
+        throw "WslHome must name an absolute POSIX directory, and '$wslHomeGiven' does not. It is used both as a fold literal and as the string the residual scan searches for; a value that trims to nothing, or that is a bare '/', folds every separator in the payload and leaves the scan with nothing to match, so the export completes while shipping the WSL home it was meant to catch. Pass -WslHome a path like '/home/<user>', or fix what ``wsl -e sh -c 'echo `$HOME'`` returns on this machine."
     }
 }
 
