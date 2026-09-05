@@ -141,6 +141,30 @@ describe("requiresIsolation() — PROJECT_EXCEPTIONS", () => {
   test("without the exception the same def still requires isolation", () => {
     expect(requiresIsolation("writer", agentsDir)).toBe(true);
   });
+
+  // Claude Code dispatches a plugin's agent as `plugin:agent`, and `:` is deliberately outside the
+  // agent-name allowlist because it is the alternate-data-stream separator on Windows. Running the
+  // name check ahead of this list therefore made every plugin-namespaced exception silently inert:
+  // an operator's entry stopped exempting and the deny message blamed the role's tools frontmatter,
+  // which was not the reason. An exception entry is an operator-written literal that never becomes
+  // a path, so the check that keeps payload text out of a path does not apply to it.
+  test.each([
+    ["caveman:cavecrew-investigator", "a plugin-namespaced type"],
+    ["feature-dev:code-explorer", "another plugin-namespaced type"],
+    ["my.reader", "a dotted type"],
+  ])("an exception entry the allowlist rejects still exempts: %p (%s)", (type) => {
+    PROJECT_EXCEPTIONS.push(type);
+    expect(requiresIsolation(type, agentsDir)).toBe(false);
+  });
+
+  // The exception list is the only thing that lets such a name through. Without an entry it stays
+  // on the requires-isolation default, so moving the check has not opened a hole.
+  test.each(["caveman:cavecrew-investigator", "../outside/escaped", "my.reader"])(
+    "with no exception entry, a name the allowlist rejects still requires isolation: %p",
+    (type) => {
+      expect(requiresIsolation(type, agentsDir)).toBe(true);
+    },
+  );
 });
 
 describe("decide() — payload-level fail-open (unrecognizable input allows)", () => {
