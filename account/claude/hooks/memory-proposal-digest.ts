@@ -194,10 +194,14 @@ function note(fm: string, body = "\n## Decision\n\nbody\n", crlf = false): strin
 }
 
 function selftest(): void {
-  // mkdtempSync, not a hand-built tmpdir() path suffixed with the process id: a pid is
-  // guessable, and a shared /tmp lets another user pre-create that name (as a real
-  // directory or a symlink) ahead of us. mkdtempSync creates a directory atomically with
-  // an unpredictable suffix, so there is nothing to pre-place a path against.
+  // mkdtempSync, not join(tmpdir(), <predictable name>): it creates the directory atomically at
+  // 0700 with a random suffix, so the path cannot be guessed and cannot pre-exist. The old form
+  // composed a name from process.pid, which a local attacker on a shared /tmp can predict and
+  // plant as a symlink ahead of the run — every mkdirSync and writeFileSync below then follows it
+  // and overwrites whatever the operator can write. CodeQL reported that as eight alerts, one per
+  // write sink; all eight, plus mkdirSync(empty) and the spawnSync --root below that it did not
+  // report, come from these two lines. Fixing it here rather than at the sinks is what closes the
+  // three it missed.
   const root = mkdtempSync(join(tmpdir(), "memory-proposal-digest-selftest-"));
   const empty = mkdtempSync(join(tmpdir(), "memory-proposal-digest-empty-"));
   const projA = join(root, "P--alpha", "memory");
@@ -206,7 +210,7 @@ function selftest(): void {
     mkdirSync(projA, { recursive: true });
     mkdirSync(projB, { recursive: true });
     mkdirSync(join(root, "P--no-memory"), { recursive: true });
-    // empty already exists — mkdtempSync created it above.
+    mkdirSync(empty, { recursive: true });
 
     // CRLF throughout, quoted description: the shape that a bare "\n" split breaks.
     writeFileSync(
