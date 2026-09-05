@@ -1,0 +1,216 @@
+---
+# Borrowed imagery, narrowed until it stops hitting this operator's real writing.
+#
+# Five families live here. Each one is a genuine AI tell in its figurative form
+# and a genuine word in this repo's technical form, so the NARROWING is the whole
+# proposal: the unnarrowed version of any of these is net-negative on day one.
+# Families that could not be narrowed were dropped outright rather than shipped
+# loose; the drops are recorded below with their reasons, because a dropped
+# candidate with a measured reason is worth more than a marginal rule that
+# teaches the operator to switch the style off.
+#
+# CASE HANDLING, deliberate and load-bearing:
+#   `ignorecase: false` at the rule level, with `(?i:...)` wrapped around every
+#   token that wants case folding. Vale 3.15.1 has no per-token ignorecase, and
+#   the prestige-noun family (below) MUST stay case-sensitive while every other
+#   family must fold. Rejected: splitting the case-sensitive family into its own
+#   file, which the filename rules would allow only for a severity split and
+#   which would double the maintenance surface for one flag.
+#   Note the scoped form `(?i:...)`, never the bare `(?i)`. Vale joins tokens into
+#   one alternation, and in Go's regexp a bare flag-setting group applies to the
+#   remainder of its ENCLOSING group, so one bare `(?i)` anywhere in this list
+#   would case-fold every token after it, prestige nouns included. Evidence split,
+#   stated honestly: the scoped form is MEASURED not to leak - fixture line 147
+#   ("Mosaic and Symphony and Odyssey and Crucible and Constellation and Orchestra
+#   are product names") raises nothing even though eleven `(?i:...)` tokens sit
+#   above those nouns in the list. That the BARE form would leak is a documented
+#   property of Go's regexp, not something tested here; the scoped form is used
+#   because it is free, not because the failure was reproduced.
+#
+# NO NEGATIVE LOOKAHEAD ANYWHERE. Measured on Vale 3.15.1: `foo(?! )` behaves as
+# `foo\b` and `foo(?!bar)` matches the bare `foo` while missing `foobaz`, with
+# exit code 0 and no diagnostic. Every carve-out here is an `exceptions:` entry,
+# which is the mechanism that actually works. Exceptions match the surrounding
+# context and suppress a token match that falls inside them, so each exception
+# below is written to SPAN the token it suppresses, not merely to sit next to it.
+#
+# Exceptions are per-rule, not per-token, so the list at the bottom is shared by
+# all five families. Each entry is specific enough that it cannot swallow another
+# family's token; if that ever changes the symptom is a missing alert, not a
+# wrong one.
+#
+# MEASURED HOLE IN THE EXCEPTION MECHANISM - an inline code span defeats a
+# carve-out. Every exception here distinguishes literal from figurative by the
+# word AFTER the token. When that word sits in backticks, no exception can see
+# it, and the rule fires on writing that is correct. Two lines in the fixture
+# demonstrate it and both are false positives that survive in the shipped rule:
+#   line 33  Shine a light on the `sensor` before reflow.
+#   line 89  Let us double-click on that `icon` to launch it.
+# The un-backticked forms of both sentences (lines 25 and 83) are suppressed
+# correctly, so the carve-outs themselves are sound. Two repairs were tried on
+# 2026-08-14 and BOTH FAILED, leaving line 89 firing:
+#   `\*+` in the noun list, on the documented behaviour that Vale masks a code
+#         span with a run of asterisks of equal length. Did not suppress.
+#   `` `icon` `` as a literal alternative, on the theory that exceptions run
+#         against raw text instead. Did not suppress either.
+# So the exception window does not reach across an inline code span by either
+# spelling, and the mechanism behind that was not identified. What WOULD settle
+# it: reading Vale 3.15.1's existence-check source for the text it hands the
+# exception regex, or bisecting with a scope that has no code-span handling.
+# Until then this is a known, bounded false-positive class, not a fixed one.
+# It is bounded because both tokens need a demonstrative or an article
+# immediately before the backticked noun, and documentation normally writes
+# "double-click `setup.exe`" or "double-click the `Install` button" - neither of
+# which this rule matches at all.
+#
+# ---------------------------------------------------------------------------
+# FAMILY 1 - illumination, multiword forms only.
+#   Take: shed light on, shine a light on, cast light on, bring to light.
+#   Leave bare `illuminate` / `illuminating` completely alone. This operator
+#   builds ESP32 boards where an LED illuminates a sensor, and the bare verb is
+#   the literal, correct word for that.
+#   Dropped: `spotlight`. Regex cannot separate the verb ("spotlight the gap")
+#   from the noun ("put a spotlight on the queue" is already the noun form, and
+#   a stage/product spotlight is the same string). No narrowing exists.
+#   The two literal-capable forms ("shine a light on the solder joint", "casts
+#   light on the phototransistor") are carved out by object noun in exceptions.
+#   That carve-out's receipt is the same hardware corpus that justifies leaving
+#   `illuminate` alone; it is not speculative complexity.
+#
+# FAMILY 2 - marketing adjectives.
+#   Take: enterprise-grade, battle-tested, bulletproof.
+#   EXCLUDED, and these are exclusions by non-listing rather than exceptions,
+#   because there is no shared token to carve out of:
+#     production-ready  - a real release-engineering status transition, used as
+#                         a gate name in this repo.
+#     mission-critical  - a defined term in avionics, medical devices and
+#                         business-continuity planning, and it sits directly
+#                         adjacent to the production/experimental split that
+#                         ~/.claude/rules/security.md draws.
+#
+# FAMILY 3 - corporate idioms.
+#   Take: boil the ocean, low-hanging fruit, circle back, touch base,
+#   double-click on this/that.
+#   EXCLUDED by non-listing: greenfield (a real architectural distinction
+#   against brownfield), blue-sky, productize, visionary, enlightening, reach
+#   out. Joblint's stated purpose for that token list is detecting that a
+#   NON-TECHNICAL STAKEHOLDER wrote the text, which is evidence those words do
+#   not discriminate authorship - they discriminate job function. "reach out"
+#   is additionally already covered upstream in its tell-bearing form
+#   (ai-tells.ClosingPleasantries: "Feel free to reach out"), and a second rule
+#   on the same span is the measured noise pattern that gets a style disabled.
+#   `double-click on` is narrowed to the abstract-object form (this/that) and
+#   then further carved out for UI documentation, which this operator writes:
+#   "double-click on that icon" is an instruction, not a tell.
+#
+# FAMILY 4 - see NarrowedImageryDepth.yml. Split out for severity only (warning,
+#   because an honest scope statement in an introduction trips it). Vale has no
+#   per-token level.
+#
+# FAMILY 5 - prestige nouns, LOWERCASE ONLY.
+#   Take: mosaic, symphony, odyssey, crucible, constellation, orchestra.
+#   Case sensitivity is the entire narrowing: Amazon Bedrock, Atlassian
+#   Crucible, MosaicML and Cloudflare Constellation are product names this
+#   operator writes about, and all of them are capitalised. The cost is a
+#   sentence-initial figurative use ("Mosaic of half-finished gates.") going
+#   unreported. That is the right side of the trade - a missed tell is cheap, a
+#   linter that flags a product name is what gets the style switched off.
+#   `orchestra` deliberately does NOT cover `orchestration` / `orchestrates`,
+#   which are core vocabulary here ("main context orchestrates, subagents
+#   implement"); the trailing word boundary does that work and the fixture
+#   proves it.
+#   Dropped: `patchwork`. "patchwork of state laws" is live compliance
+#   vocabulary in this operator's governance writing, and the figurative and
+#   literal senses are the same string with the same shape.
+#   `bedrock` is scoped to "the bedrock of" rather than the bare noun, which
+#   keeps Amazon Bedrock clean even before the case rule applies.
+#
+# FAMILY 6 - true north, alone.
+#   Dropped: lodestar, guiding star, moral compass. Near-zero yield; none of
+#   them appears anywhere in the corpus below, and each carries the same
+#   product-name and literal-navigation risk without the frequency to pay for
+#   it. Note that ai-tells.StrategyBuzzwords already owns the north-star family
+#   ("north-star metric", "our north star"), so this rule takes only the string
+#   that upstream leaves uncovered.
+#   The skip condition is navigational: true-versus-magnetic north is a precise
+#   distinction in GIS, aviation and compass work, so the exceptions suppress
+#   the token when magnetic, declination, bearing, grid north or magnetometer
+#   appears in the same sentence. KNOWN LIMIT, measured, not guessed: the
+#   exception window is `[^.\n]{0,120}`, so a navigational cue in a NEIGHBOURING
+#   sentence does not suppress. Widening the window across sentence boundaries
+#   was rejected because `[\s\S]{0,120}` would let any unrelated paragraph
+#   containing the word "bearing" silence a real tell 120 characters away.
+#
+# CALIBRATION, 2026-08-14. Corpus: 142 .md files - ~/.claude/rules,
+# ~/.claude/skills, and E:\projects\agent-harness-core minus worktrees. That is
+# the same corpus the .vale.ini disable notes were measured against, chosen so
+# the numbers are comparable rather than freshly invented.
+#
+# ONE finding across all 142 files, from 20 tokens:
+#   skills/owasp-infrastructure/references/03-insecure-configurations.md:15:38
+#   "These vulnerabilities often serve as low-hanging fruit for attackers"
+# Judged a true positive and left to fire. It is vendored OWASP reference prose
+# from microsoft/hve-core, not this operator's writing, and the sentence is the
+# cliche in its pure form. It is also the ONLY alert on that span - checked
+# explicitly, because two findings on one span is the noise pattern that gets a
+# whole style switched off. (The same file does carry a pre-existing double
+# alert at 17:94, Cringely.Vocabulary and ai-tells.OverusedVocabulary both on
+# "robust". That one predates this rule.)
+#
+# The right way to read a near-zero corpus score: it shows these tokens do not
+# fire on good writing, which is what the corpus can prove. It does NOT show
+# they catch anything, because nothing in the corpus is bad writing. Yield is
+# unmeasured and stays unmeasured until a real draft trips one.
+#
+# Per-family fire and carve-out evidence is in <scratchpad>/fix-families-a.md,
+# which tests both directions for every token: 29 must-fire lines all fire, and
+# every must-not-fire line is silent except the two code-span cases recorded
+# above and the cross-sentence true-north case recorded below.
+extends: existence
+message: "Borrowed imagery: '%s'. Name the thing plainly."
+level: error
+ignorecase: false
+tokens:
+  # --- 1. illumination, multiword only ---
+  - '(?i:(?:shed|sheds|shedding) light on)'
+  - '(?i:(?:shine|shines|shined|shining|shone) a light on)'
+  - '(?i:(?:cast|casts|casting) light on)'
+  - '(?i:(?:bring|brings|bringing|brought) to light)'
+  # --- 2. marketing adjectives ---
+  - '(?i:enterprise[- ]grade)'
+  - '(?i:battle[- ]tested)'
+  - '(?i:bulletproof)'
+  # --- 3. corporate idioms ---
+  - '(?i:boil(?:s|ed|ing)? the ocean)'
+  - '(?i:low[- ]hanging fruit)'
+  - '(?i:circl(?:e|es|ed|ing) back)'
+  - '(?i:touch(?:es|ed|ing)? base)'
+  - '(?i:double[- ]click(?:ing)? on th(?:is|at))'
+  # --- 5. prestige nouns, lowercase only ---
+  - 'mosaics?'
+  - 'symphon(?:y|ies)'
+  - 'odyssey'
+  - 'crucibles?'
+  - 'constellations?'
+  - 'orchestras?'
+  # `bedrock` is the one prestige token that folds case, and it is safe to fold
+  # precisely because it is a phrase rather than a bare noun. MEASURED 2026-08-14:
+  # the case-sensitive form missed "The bedrock of the design is the store."
+  # (fixture line 135) - sentence-initial is the commonest position for this
+  # phrase, so case sensitivity cost the rule most of its yield. Amazon Bedrock
+  # stays clean anyway: it is written "Amazon Bedrock" / "on Bedrock", never
+  # "the Bedrock of", so the surrounding "the ... of" does the protecting here
+  # and the capital letter is not needed for it.
+  - '(?i:the bedrock of)'
+  # --- 6. true north ---
+  - '(?i:true north)'
+exceptions:
+  # 1. literal illumination of a physical part. Same receipt as leaving bare
+  #    `illuminate` alone. Written to span the token match, not to abut it.
+  - '(?i:(?:shine|shines|shined|shining|shone) a light on the (?:sensor|pad|board|joint|solder|die|window|panel|screen|target|phototransistor|photodiode|LED))'
+  - '(?i:(?:cast|casts|casting) light on the (?:sensor|pad|board|joint|solder|die|window|panel|screen|target|phototransistor|photodiode|LED))'
+  # 3. UI documentation, where double-clicking a named control is an instruction.
+  - '(?i:double[- ]click(?:ing)? on th(?:is|at) (?:icon|file|link|button|installer|shortcut|entry|row|item|folder|node|tab|cell))'
+  # 6. navigational true-versus-magnetic north, either word order.
+  - '(?i:(?:magnetic|declination|bearing|grid north|magnetometer)[^.\n]{0,120}true north)'
+  - '(?i:true north[^.\n]{0,120}(?:magnetic|declination|bearing|grid north|magnetometer))'

@@ -10,6 +10,13 @@ patterns to extract, or unresolved decisions surfaced during real sessions.
 
 **Status:** proposed. Promote on second recurrence, per `harness-core.md` findings flow.
 **Surfaced:** 2026-08-04, TrueNAS HAOS zvol forensics session.
+**Premises corrected 2026-09-05.** Two statements below went false with `7b1497e`. Core does now
+keep a canonical copy of the account rules: `account/claude/rules/` holds all eleven as tracked
+content, `agent-usage.md` among them. And `install/` does have an exporter,
+`install/Export-Account.ps1`, registered at `README.md:116-125`; the "assembled by hand" claim is
+now true only of the three-directory bundle `Restore-ClaudeProject.ps1` consumes, a different
+artifact. This opens a fourth option the item does not list: put the reconciliation in the payload,
+which `Install-Account.ps1` already distributes. The item's own recurrence bar is unaffected.
 
 ### What happened
 
@@ -123,7 +130,12 @@ the more specific statement. Scope this item to the other two templates.
 
 ## 4. Audit actuation: map each class to repair-or-report
 
-**Status:** proposed.
+**Status:** closed 2026-09-05. The class-to-action mapping this item asks for is at
+`Install-Harness.ps1:602-609`, added by `8577ae4`, printed in the audit output and commented
+against `CONTRIBUTING.md`'s drift gate. Two premises below are false as written. `-Audit` is
+invoked, by `core/claude/hooks/session-start-drift-check.sh:114`, which is wired on `SessionStart`
+in `core/claude/templates/settings.hooks.json`. And it is named outside the script, at
+`CONTRIBUTING.md:45`.
 **Surfaced:** 2026-08-04, SRS tenets pass (T3), from *Building Secure and Reliable Systems* ch 9.
 
 `.harness-manifest.json` plus `Install-Harness.ps1 -Audit` is a working drift detector with a
@@ -167,7 +179,13 @@ would satisfy it sit in files this pass did not own.
 
 ## 6. Remediation in the worktree gate's deny payload
 
-**Status:** proposed.
+**Status:** half closed 2026-09-05. The deny payload already carries the corrected dispatch, at
+`core/claude/hooks/agent-worktree-gate.ts:224`, including the auto-clean note and the `remote`
+alternative, and has since before the account-layer work. So the first sentence below is false as
+written. What stays open is deleting the compensating line from the rules file, now at
+`~/.claude/rules/harness-core.md:19` and also committed into the payload at
+`account/claude/rules/harness-core.md:19`. That second copy is new, so closing this item now means
+editing the live tree and re-exporting rather than a one-line deletion.
 **Surfaced:** 2026-08-04, SRS tenets pass (T5).
 
 The gate denies an unisolated write-agent dispatch without telling the caller how to comply. The
@@ -306,9 +324,14 @@ first and it is the same hand-verification that let the word go missing in the f
 
 ## 12. Failures that do not propagate: pipefail, and the installer's unchecked git write
 
-**Status:** partially fixed. Both PowerShell sites are closed; the two shell hooks remain open. The
+**Status:** partially fixed. Both PowerShell sites are closed; the shell hooks remain open. The
 diagnosis below is a record of what the audit found, written in past tense; the current state is at
 the end of the item.
+**File list corrected 2026-09-05.** The item names two shell hooks. There is a third:
+`core/claude/hooks/session-start-drift-check.sh:29` sets the same `set -eu` without `-o pipefail`,
+and it carries the repo's only real shell pipeline, at `:124`. The item's "no live instance"
+verdict survives, because that pipeline is terminal and nothing chains off it, but the file list
+does not.
 **Surfaced:** 2026-08-04, wave-2 review. Audit of `install/` and the shell hooks run while writing
 `patterns/ablation-verification.md`'s empty-check section.
 
@@ -486,3 +509,702 @@ by adding prose:
 - Does the spec-and-plan requirement belong in `guardrails.template.md`, which every installed
   project receives, or does it stay an account-layer convention that this table has now shown to
   be the same shape as the gaps it was filed alongside?
+
+---
+
+## 14. NotebookLM as a corpus-bounded knowledge agent
+
+**Status:** assessed 2026-09-05. **Recommendation: none of the four candidates gets wired to the
+operator's Google account.** The assessment ran the six questions below against all four unpacked
+tarballs, statically, nothing executed. It ran in an SDD workspace under `.superpowers/sdd/`, whose
+`.gitignore` is `*` and which the process deletes on completion, so the findings are inlined here
+rather than cited to it. Citations that point into a published tarball name the exact version,
+because that is re-fetchable and a scratch path is not.
+
+Every candidate authenticates by driving a browser through a human Google login and keeping the
+resulting account-level session cookies (`SID`, `HSID`, `SSID`, `APISID`, `SAPISID`,
+`__Secure-1PSID`). None uses OAuth. None produces a grant scoped to the product or revocable
+without signing the operator's Google account out everywhere. That is the condition this item named
+in advance as disqualifying, and it is met by all four. `@roomi-fields/notebooklm-mcp` also stores
+the account password and TOTP seed for unattended re-login.
+
+Three of the four also carry a local-file read path into the same home directory that holds
+`~/.claude`. `notebooklm-mcp-server` resolves any caller-supplied path and uploads `.md` content to
+Google, which reaches every rules file, agent definition and memory note in one tool call.
+`@pan-sec/notebooklm-mcp` defaults its allowlist to `os.homedir()` and omits `.claude` from its
+denied segments. So a prompt injection in an ingested source would have both a credential worth
+stealing and material worth stealing, on one machine.
+
+`notebooklm-mcp-server@4.0.2` ships one bundled `dist/index.js`, 1,510,631 bytes over 44,971 lines,
+with 350 dependency modules inlined at build time behind esbuild's per-module banners. It is not
+minified and it was read: identifiers and 2,878 comment lines survive, the eight first-party blocks
+are labelled by source path, and `src/auth.ts` was spot-checked against the public repository and
+matches. Reviewability is not the problem. Two other things are. Nothing mechanically links the
+tarball back to the repository: no `sourceMappingURL`, no `.map`, no `.d.ts`, no `src/`, `build.js`
+excluded by the `files` array so the build cannot be reproduced from what npm serves, and no
+provenance attestation. And inlining the dependency tree blinds every consumer-side scanner.
+`npm audit` and Dependabot see the 8 declared dependencies and audit none of the code that actually
+runs, so axios frozen in at 1.13.4 will never surface an advisory to anyone who installs this.
+That second one is true regardless of what the server does at runtime.
+`@pan-sec/notebooklm-mcp` has a milder form of it, 105 `.js` and 105 `.d.ts` with zero `.map`; the
+incumbent, charlie and roomi publish ordinary `tsc` output 1:1 with their sources.
+
+This sharpens rather than changes the recommendation, and it moves charlie for a reason worth
+recording: it is the only candidate whose shipped artifact can be tied to reviewed source by
+something other than hand-checking, so a future version bump there is a diff to read rather than an
+audit to redo.
+
+One correction to the assessment's own working note, which never reached this item but would have
+been wrong if it had: `notebooklm-mcp-server` does not harvest the whole browser cookie jar. The
+primary harvest is URL-filtered to `notebooklm.google.com`, and the code then reaches into the
+unfiltered jar for three named cookies scoped to other Google hosts, with a comment at
+`src/auth.ts:128-132` saying exactly why. A documented cross-host reach is a worse finding than an
+unfiltered API call, not a better one, because it is deliberate.
+
+**Correction to this item's own preliminary result.** The paragraph below stating that none of the
+five declares a `preinstall` or `postinstall` script is false, and it was relayed to the reviewer as
+settled rather than re-measured. Verified against each `package.json`: four declare `prepare`, which
+does not run for a published registry tarball and is inert; `notebooklm-mcp-server@4.0.2` declares
+`"postinstall": "npx playwright install chromium"`, which runs on every install and is both
+install-time code execution and install-time egress. Nothing executed during the assessment, because
+the fetch used `npm pack` and never `npm install`. The safety came from the procedure, not from
+the premise.
+
+**If the capability is still wanted,** one shape is defensible: a Google account used for nothing
+else with the notebook shared to it, `@charlie.act7/gemini-notebook-mcp` pinned to `2.3.11` and
+never `@latest`, stdio transport only, a data directory outside `%APPDATA%`, project-scoped rather
+than user-scoped, and every answer treated as untrusted input. Charlie is the pick on containment
+and provenance (the only candidate with SLSA provenance and OIDC publishing, no local-file read
+path, and an HTTP transport that refuses an unauthenticated off-localhost bind), not on
+authentication, where it is no better than the rest. Rehearse the revocation first, because there is
+no per-app revoke and there will not be one. Three of the four, charlie included, depend on
+`patchright`, an anti-bot-detection Playwright fork from a pseudonymous maintainer, which is a terms
+question on top of a security one.
+
+**Surfaced:** 2026-09-03, operator request during the account-layer portability session.
+
+### The idea
+
+Use a NotebookLM notebook as a narrow, high-trust oracle for one knowledge domain at a time: load
+a curated corpus, then interrogate it from a session instead of searching the open web or building
+a retrieval layer. The property worth having is that answers stay inside the corpus and cite the
+passage they came from, which places them at the vendored-reference tier of `no-overclaim.md`'s
+evidence hierarchy rather than the assumption tier where an unsourced model answer sits.
+
+### What already exists here
+
+A `notebooklm` MCP server is configured at the `C:/Users/user` project scope in `~/.claude.json`:
+`npx notebooklm-mcp@latest` over stdio, empty `env`. It is not active in this repository's
+sessions, and nothing in this repo references it.
+
+It is also broken. Google renamed the product to Gemini Notebook, and the configured package has
+not been republished since. Measured against the npm registry on 2026-09-03: `notebooklm-mcp` is
+at 2.0.0, last modified 2026-05-01, repository `PleasePrompto/notebooklm-mcp`. Because the entry
+resolves `@latest` rather than a pin, the breakage arrived without a config change, which is the
+failure mode `security.md`'s pinning rule exists to prevent.
+
+### Replacement candidates, measured not endorsed
+
+Four packages published after the rename. None has been run, and the table records provenance
+only.
+
+| Package | Version | Published | Repository |
+|---|---|---|---|
+| `@charlie.act7/gemini-notebook-mcp` | 2.3.11 | 2026-08-20 | `CharlieCardenasToledo/gemini-notebook-mcp` |
+| `@pan-sec/notebooklm-mcp` | 2026.5.0 | 2026-08-29 | `Pantheon-Security/notebooklm-mcp-secure` |
+| `notebooklm-mcp-server` | 4.0.2 | 2026-08-22 | `moodRobotics/notebooklm-mcp-server` |
+| `@roomi-fields/notebooklm-mcp` | 3.1.2 | 2026-08-21 | `roomi-fields/notebooklm-mcp` |
+
+The first is the closest match by description, which reads almost word for word like the
+configured package's and names the rename directly, so it is probably a fork. Its repository owner
+differs from `PleasePrompto`, so it is a fork or a reimplementation rather than a maintainer
+handover, and that distinction matters when the package holds a Google session.
+
+Every one of them is MIT, single-maintainer, published under a personal email address, and
+unofficial. Swapping one for another fixes the breakage and leaves the shape unchanged: an
+unreviewed dependency brokering an authenticated Google account. `security.md`'s supply-chain
+section rules against exactly this, so the replacement gets a security review and a version pin
+before it is wired anywhere, and the review decides the choice rather than the version number
+deciding it. `appsec-sme` is the right reviewer.
+
+### What the assessment has to cover
+
+An assessment with no stated criteria gets rubber-stamped, so these are the questions, and the
+first one governs the rest.
+
+- **Authentication.** OAuth with a scoped grant, or a full Google session cookie lifted from a
+  browser profile, or a headless browser driving the product interface. This decides whether the
+  access can be scoped and revoked independently of the operator's whole Google account.
+- **Credential storage.** Where on disk, under what permissions, in plaintext or not, and whether
+  a second account is kept beside the first. `@roomi-fields/notebooklm-mcp` is the one to read
+  first here: it ships `setup-auth`, `de-auth` and `accounts` CLI entry points, so it clearly
+  stores credentials and manages more than one.
+- **Network egress.** Any endpoint that is not Google's, reached at any point including start-up
+  telemetry.
+- **Dependency provenance.** Direct counts are small, 4 to 9 across the four candidates, so the
+  transitive tree is worth walking rather than sampling.
+- **Publisher signals.** npm two-factor, provenance attestation, repository activity, whether
+  anyone answers an issue.
+- **Containment.** Whether it runs without broad host filesystem access, and what the revocation
+  path is once it holds a credential.
+
+One preliminary result, measured 2026-09-03: none of the five packages, the configured one
+included, declares a `preinstall` or `postinstall` script. That clears the usual supply-chain
+vector and says nothing about the six questions above.
+
+The assessment has to be able to come out against all four. If the only authentication any of
+them offers is a harvested full-account session cookie, then the finding is that none gets wired,
+and a curated notebook stays something the operator queries by hand. An assessment that can only
+return a ranking is not measuring anything.
+
+### What the investigation has to answer
+
+Adoption turns on three questions, in this order, and the first two can kill it on their own.
+
+The access question comes first. NotebookLM has no official public API, so an MCP server for it is
+presumably driving the product's own interface with a user's credentials. That needs to be
+established rather than assumed, because it decides whether this is a supported integration or a
+dependency that breaks whenever Google changes the product. `@latest` on an unofficial package holding
+a Google session is the least pinned, highest privilege component that would exist in this stack,
+and `security.md` requires a pinned version and a scoped grant before any real use.
+
+The value question comes second. The stack already answers domain questions three ways:
+`code-context` for this repository's code, Context7 for library documentation, and web search for
+everything else. A notebook is worth adding only where a curated corpus beats all three, which
+means a bounded body of source material that changes slowly and that the open web indexes badly.
+Name one such domain and test against it rather than reasoning about the category.
+
+The routing question comes last, and only if the first two clear. Adoption would mean a new row in
+`agent-usage.md` saying when a domain question goes to a notebook instead of to search, alongside
+the cost of maintaining a corpus that goes stale silently.
+
+### Promotion
+
+This is an account-layer tool question, not a core process one, so it does not sit behind
+`CONTRIBUTING.md`'s two-occurrences bar. It enters core only if it produces a routing rule, and a
+routing rule is exactly the kind of finding that bar governs.
+
+---
+
+## 15. The model-tier gate's sonnet branch is unsatisfiable on the Agent tool
+
+**Status:** proposed. Found in use, 2026-09-03, on the first two real dispatches after the gate
+was wired at account scope.
+**Surfaced:** 2026-09-03, account-layer portability session.
+
+### What happened
+
+`model-tier-gate.ts` was registered in `~/.claude/settings.json` as a `PreToolUse` hook on
+`Agent|Task|Workflow`. It worked immediately: the first dispatch omitted `model` and was denied,
+correctly, because a dispatch that names no tier inherits the session model.
+
+The second dispatch passed `model: "sonnet"` and was denied again, this time for omitting
+`effort: "xhigh"`. That denial cannot be satisfied. The Agent tool on this surface accepts
+`description`, `isolation`, `mode`, `model`, `name`, `prompt`, `subagent_type` and `team_name`.
+There is no `effort` parameter, so no sonnet dispatch through this tool can ever carry the field
+the gate demands.
+
+The agent in question was `senior-developer`, whose definition already carries `effort: xhigh`
+beside `model: sonnet`. It would have run at the mandated effort. The gate denied it because the
+gate reads the dispatch and cannot see the definition.
+
+### Why this matters more than it looks
+
+The gate ships a documented escape hatch, `MODEL-OVERRIDE: <reason>`, and its header argues that
+the safeguard is the override being written down and visible rather than a regex grading it. That
+reasoning holds for an override used occasionally. It does not hold when one branch of the gate
+can only ever be passed by overriding it. Every sonnet dispatch on this surface now requires the
+operator to write an override, which trains the reflex the gate exists to prevent, and an override
+written reflexively is a muted gate that still looks armed.
+
+### What to decide
+
+Three candidate responses, and the first two are the real ones.
+
+- Resolve `subagent_type` to its definition and read `effort` and `model` from the frontmatter
+  before denying. This is the accurate fix: the gate's premise is that an unstated tier is an
+  inherited tier, and that premise is false when a definition states it.
+- Deny only on a stated tier that is wrong, rather than on an absent field that the caller has no
+  way to supply. Narrower, and it gives up catching a definition that omits `effort`.
+- Leave it and document the override as the expected path for sonnet. Cheapest, and it accepts the
+  reflex problem above.
+
+Worth checking whether the same shape affects the `Workflow` branch, where `agent()` calls do take
+an `opts.effort`, so the field is suppliable there and the branch is probably sound.
+
+### Evidence
+
+Both denials were live, on real dispatches, with the gate's own stderr. The first is the gate
+working as designed. The second is this item.
+
+---
+
+## 16. Export-Account and Install-Account ship unwired until Task 13
+
+**Status:** closed 2026-09-04. Both scripts are registered in `README.md` and `~/.claude/rules/harness-core.md`, and both header notices are gone.
+**Surfaced:** 2026-09-03, account layer portability work.
+
+Both scripts carry the Gate 1 header notice. Neither is named by `README.md` or by
+`~/.claude/rules/harness-core.md`, so nothing tells an operator they exist. Task 13 adds both
+registrations and removes both notices; this item is the tracker Gate 1 asks for in the meantime.
+
+Owner: whoever executes Task 13 of that plan. If the plan is abandoned before Task 13, the two
+scripts and their test files come out rather than staying as unwired files that read as installed.
+
+## 17. Prose-lint skip list misses `.superpowers/sdd/`
+
+`writing-style.md` row 5 exempts internal agent traffic from the prose contract, and the mechanism
+is the skip list matching `/memory/`, `/handoffs/`, `/scratchpad/`, `/.scratch/`,
+`/council-transcripts/` and `/.claude/` against the written path. The superpowers
+subagent-driven-development skill writes every brief, report and review under
+`<repo>/.superpowers/sdd/<plan>/`, which no segment matches, so the hook lints subagent reports that
+the rule already exempts.
+
+Observed 2026-09-04 during account-layer execution: a reviewer's report file drew ai-tells findings
+on quoted Pester output and code identifiers. The reviewer correctly overruled them and said why.
+
+Both mechanisms need the same segment added, per the "naming all three mechanisms keeps them from
+drifting" note in `writing-style.md`: `core/claude/hooks/lint-doc-prose.ts` on write, and
+`~/.claude/hooks/Lint-DocumentProse.ps1`. Check `core/claude/hooks/pre-commit` too, though
+`.superpowers/` is git-ignored scratch so a commit hook may never see it.
+
+## 18. The mcpServers gate and the mcpServers fold cover different property sets
+
+`install/Export-Account.ps1` scans every string reachable under an MCP server entry before writing
+`account/claude/mcp-servers.json`, but the placeholder fold still walks only `command`, `args` and
+`env`. The two came from different rounds of the same task and the asymmetry was left in
+deliberately.
+
+Nothing leaks today. All three live servers are `type: stdio` with exactly `[type, command, args,
+env]`, so every property the writer serialises is also a property the fold visits. Add an `http` or
+`sse` server, though, and a machine path sitting in its `url` or in a `headers` value gets committed
+unfolded, because the fold never looks there.
+
+The reason this is a backlog item rather than a fix in the task that found it: extending the fold
+means a mutating walk that rewrites values in place, which is a good deal more code than the
+read-only collector the gate uses, and Task 14's payload-wide residual machine-path scan is a hard
+gate that catches an unfolded machine path wherever it sits. So there is a net under this already.
+The work here is closing the gap at its own level rather than relying on the net.
+
+Take it when someone adds a non-stdio MCP server, or sooner if the Task 14 scan turns out to be
+narrower than it reads. The fix is to derive both the gate's input and the fold's targets from one
+traversal of the entry, so the two cannot drift again.
+
+## 19. The account-layer containment guards do not resolve reparse points
+
+`Install-Account.ps1` refuses a `-PayloadRoot` equal to or nested inside `-ClaudeHome`, and
+`Export-Account.ps1` refuses an `-OutputRoot` equal to or nested inside `-ClaudeHome`. Both compare
+canonical absolute paths, and both can be walked past the same three ways.
+
+A review of the installer's guard measured all three. NTFS junctions are the one that matters: a
+junction pointing from the payload root into the target reproduces exactly the containment the
+guard exists to refuse, and it grows without bound. Four consecutive runs produced 10, then 21,
+then 32, then 43, then 54 files, gaining one more `rules\nested\` level each time. 8.3 short names
+and a `\?\` path prefix also get past it, though neither compounds the way the junction does.
+
+Fifteen other spellings held: equality, nesting in both directions, case differences, forward and
+backward slashes, `..` segments, trailing separators, and relative versus absolute pairs. The
+prefix case that has bitten this repo before is handled correctly, since `.claude` against
+`.claude-backup` is accepted in both orderings.
+
+The fix belongs in `AccountShared.ps1` as one containment helper both scripts call, resolving
+reparse points before comparing. Doing it in either script alone leaves the other wrong, and the
+two guards already exist for the same reason against the same failure. Whoever takes this should
+also decide whether a junction inside the tree being copied is worth refusing outright rather than
+resolving, which is simpler and probably right for a tool with one operator.
+
+Not urgent. It takes a deliberately constructed junction to reach, both scripts print what they
+are about to do, and the destructive one now reports a mixed state on partial failure.
+
+## 20. `-ClaudeJson` sits outside the containment guard, and the mixed-state warning has gone stale
+
+Two small gaps left open by the `mcpServers` merge, both raised in review and both deliberately
+deferred.
+
+`Install-Account.ps1` compares only `-ClaudeHome` and `-PayloadRoot` when it checks containment. A
+`-ClaudeJson` pointing inside `-PayloadRoot` would have the merge write into the payload tree. No
+realistic caller does this, and the copy has already finished by the time the merge runs, so
+nothing is corrupted today.
+
+The mixed-state warning names only `$ClaudeHome`, but the mcp block now also writes `-ClaudeJson`.
+A code comment at the write says so; the warning text does not. In practice the `Set-Content` is
+the last fallible statement in the `try`, so a failure after it is not reachable.
+
+Take both together with item 19, since the containment half wants the same helper.
+
+## 21. `Convert-HookCommand` and `Expand-AccountToken` both expand `{{CLAUDE_HOME}}`
+
+The account installer reuses `Convert-HookCommand`, a function written for project restore, inside
+the account-layer install path. Both it and `Expand-AccountToken` handle `{{CLAUDE_HOME}}`, so
+either one alone is enough to produce a correct hook command.
+
+The review that found it reads the overlap as accidental, a side effect of the reuse rather than
+defence in depth, and nothing documents it as intentional. The cost is a test blind spot rather
+than a bug: an assertion on the expanded hook command cannot be reddened by disabling either
+function alone, only both at once, so a regression confined to one of them passes unnoticed.
+
+Closing it means deciding which function owns the token on the account path and removing the other
+handler, not adding a test that pins which one did the work. That would assert an implementation
+detail rather than the outcome.
+
+## 22. The prose-lint skip lists do not match `.superpowers/`
+
+**Status:** closed 2026-09-05 as a duplicate of item 17. Same defect, same two files, same fix.
+Item 17 survives because it carries the observation date, the symptom someone actually saw, and the
+instruction to check `pre-commit` as well. This item was written during the account-layer review
+without checking whether the finding already existed, which is the same failure as the stale
+citations in items 26 through 31: acting on a list without first reading it. Left in place rather
+than deleted, because items are referenced by number.
+
+`Lint-DocumentProse.ps1` and `core/claude/hooks/lint-doc-prose.ts` both skip `/memory/`,
+`/handoffs/`, `/scratchpad/`, `/.scratch/`, `/council-transcripts/` and `/.claude/`, which is
+`writing-style.md`'s row 5 exemption for internal agent traffic.
+
+Neither matches `/.superpowers/`. That directory holds the subagent-driven-development workspace:
+ledgers, task briefs, implementer reports, review reports. It is the same kind of traffic by every
+test the row applies, written for the next agent rather than for a reader, and it lints today.
+
+Add the segment to both lists in one change, the way the row's other three mechanisms are already
+kept in step.
+
+## 23. The WSL-home gate is narrower than its name in two directions
+
+`Export-Account.ps1` folds a WSL home path to `{{WSL_HOME}}` and then refuses to write
+`mcp-servers.json` if any post-fold string still carries a bare `/home/<user>` segment. The gate
+did its job on the export it was written for, but its guarantee is smaller than it reads, in two
+ways a future export could walk into.
+
+The check keys on a `/home/` prefix. A WSL root account lives at `/root`, a Linux distribution
+image can put a user under `/Users/<name>`, and a WSL path reaching back into Windows is
+`/mnt/c/Users/<name>`. The last one is the awkward case: it carries the Windows username, and it
+escapes both the WSL gate, which does not recognise the prefix, and the Windows folds, which match
+on backslashes. A two-valued test over a path shape that is not enumerated cannot decide the
+question it is being asked, which is the same failure the scope-filter invariant in
+`change-management.md` already records.
+
+Separately, the gate runs over `mcpServers` strings only. The same literal can reach the payload
+through a settings hook command, through a copied rules file, or through any templated file that
+reports folding one of one and is counted as clean. Today's payload was verified free of it by
+direct scan across all 218 files, so neither half blocked the branch. Closing this means
+deciding the set of home-path shapes the fold owns and applying the gate at the point every file
+passes through, rather than at the one file that happened to carry the literal first.
+
+## 24. The `-WslHome` default-resolution block cannot be reddened
+
+Ablating the block that resolves `-WslHome` when the caller supplies no value leaves the
+Export-Account suite fully green. No assertion names the behaviour, so a regression in it would
+ship green too. Verifiable without an ablation: the block is `Export-Account.ps1:132-137`, and
+every test touching the parameter passes it explicitly, a populated path at
+`Export-Account.Tests.ps1:1074` and an empty string at `:1108`. No case omits it.
+
+The baseline this item first quoted, 56 passing, was already a commit out of date when it was
+written, and the correction sweep across items 26 through 31 missed this one because it swept the
+items it was thinking about rather than every item carrying a count. Suite figures are deliberately
+left out above for that reason; the citation is what stays true.
+
+This is the fifth instance on this branch of a test that could not fail, and the fourth found by
+ablation rather than by reading. The pattern is consistent enough to be worth stating as a habit
+rather than a series of incidents: an assertion is not evidence until the code it names has been
+broken underneath it.
+
+The fix is a case that exercises the default path with the parameter omitted, not an assertion on
+the resolved value from a call that passes one.
+
+## 25. Licence marking inside the vendored security skills is uneven
+
+Seven skill trees under `account/claude/skills/` come from `microsoft/hve-core`: the six OWASP
+knowledge bases and `secure-by-design`. Each tree's `SKILL.md` carries an SPDX `license:` field,
+and 52 of the 85 files carry a licence marker in the file itself. The 33 reference files under
+`owasp-cicd/`, `owasp-infrastructure/` and `owasp-mcp/` carry none, while the matching files under
+the other three OWASP trees all do.
+
+The repository `NOTICE` covers all 85 and says so explicitly, so attribution accompanies the
+distribution. This item is about closing the gap at its source rather than about the notice.
+
+The repair does not belong in the payload. These files are copied verbatim from `~/.claude/` by
+the exporter, so a hand edit under `account/claude/` is reverted by the next export. Fix the live
+tree, or take the gap upstream to `microsoft/hve-core`, then re-export.
+
+## 26. Three unpinned guards and one assertion that passes on an empty output
+
+The whole-branch review ablated twelve production lines and found four more gaps that no test
+notices: three correct production lines with nothing behind them, and one assertion satisfied by an
+empty string.
+
+Line numbers below are at `0911ab0`. Suite baselines are Export-Account 58 pass, 0 fail and
+Install-Account 96 pass, 0 fail.
+
+`Export-Account.ps1:164` anchors the containment comparison with
+`$sep = [System.IO.Path]::DirectorySeparatorChar`, so a sibling that shares a name prefix is not
+mistaken for a nested path. Setting `$sep = ""` leaves the suite at 58 pass, 0 fail, and exporting
+to `.claude-payload` beside `.claude` is then refused with a message that is false.
+`Install-Account.Tests.ps1:284` and `:298` already pin this on the installer's identical guard, in
+both directions. Port the pair across.
+
+`Export-Account.ps1:549` filters the server list with `| Where-Object { $_ }`. Dropping it leaves
+58 pass, 0 fail, and `"mcpServers": {}` then reports one server and proceeds on a phantom entry,
+because `.PSObject.Properties.Name` on an empty object is `$null` and `@($null)` holds one element.
+`change-management.md` records that trap as having bitten four times.
+
+`Install-Account.ps1:373` de-duplicates residual tokens with `| Select-Object -Unique`. Dropping it
+leaves 96 pass, 0 fail, and a file carrying one token twice reports it twice. Cosmetic, but stated
+behaviour with nothing behind it.
+
+`Install-Account.Tests.ps1:494` asserts only that the output does not match `\bjq\b`. Its sibling
+at `:531` asserts the same negative but guards it with a positive control first. Making
+`Test-Prerequisite` return an empty list reddens eight tests including that sibling, while `:494`
+stays green: an empty string satisfies it, so it cannot tell whether the npm probe found anything,
+which is the only thing it claims to prove. Add the same `Should -Match '\bvale\b'` control.
+
+## 27. Two ablations that cannot discriminate
+
+Distinct from item 26. These two tests do redden, and neither reddening means what it appears to.
+
+`AccountShared.ps1:21` throws when the AST lift finds no function, converting a rename in
+`Restore-ClaudeProject.ps1` into a loud failure. Replacing the throw with `if ($false)` leaves 58
+pass, 0 fail. That is the correct outcome rather than a defect, because the failure the guard
+exists for needs the rename and not the guard's removal. `FIXTURE-ONLY-MARKER` proves the lift happens;
+nothing proves it fails loudly. An honest test renames a function in a fixture copy and asserts the
+throw.
+
+`Export-Account.Tests.ps1:1083` asserts that `args` contains `{{WSL_HOME}}/code-context-mcp.sh`
+and `:1086` that it does not contain the raw `/home/wsluser/` form. The fixture's `args` has two
+elements, so the second assertion cannot fail unless the first already has. Deleting the
+`{{WSL_HOME}}` fold row does redden the Context, but through its `BeforeAll`: the fail-closed gate
+throws before the file is written, so neither `It` body runs. Neither assertion has been observed to
+discriminate anything.
+
+That matters because item 23 proposes changing that gate. Any change that stops it throwing on this
+fixture turns both assertions live for the first time, with no evidence they work.
+
+## 28. Add a `.gitattributes` rule normalising the payload to LF
+
+`account/claude/` is written LF by the exporter and checked out CRLF under `core.autocrlf=true`, so
+a fresh clone can show 212 of the 218 payload files as modified with no content difference.
+`git ls-files --eol account/claude` measures the split directly: 212 files are `i/lf w/crlf`, 4 are
+`i/lf w/lf` (the `.sh` files the current rules already cover) and 2 are binary.
+The current `.gitattributes` covers `*.sh` and `core/claude/hooks/pre-commit` only.
+
+`7b1497e`'s commit message describes the symptom at length, which means the knowledge exists but
+lives in a commit body rather than anywhere a future reader would look.
+
+One caution carried from `change-management.md`: adding `text eol=lf` renormalises every existing
+clone, so this is worth doing for the payload's real ergonomics and never as a way to repair a
+failing test. A matcher that breaks on line endings gets fixed in the matcher.
+
+## 29. Make the exporter's zero-fold report fatal where a fold is required
+
+`Export-Account.ps1:439` prints `folded $substituted of N token(s)` as a plain `Write-Host`, and
+`:435` warns per token. A file that folds zero of its tokens is reported in the same register as one
+that folds all of them.
+
+For the two files where a fold is required rather than incidental, a zero count means the fold table
+and the source text have drifted apart, which is the failure the report exists to catch. Make that
+case throw. Ruled during execution and recorded in the ledger; it did not reach this file at the
+time.
+
+## 30. A `{{HOME}}` fold token needs longest-literal-first ordering
+
+`Get-AccountFoldTable` states a precondition that no fold literal is a substring of another.
+`$HOME` breaks it: it is a literal prefix of both the `.claude` path and the vault path, so folding
+it first swallows their tails and produces `{{HOME}}/.claude` where `{{CLAUDE_HOME}}` belongs.
+
+Adding the token means ordering the table longest-literal-first in `ConvertTo-TemplatedText`, not
+just appending a row. Worth doing only alongside a reason to add `{{HOME}}`; recorded here so the
+ordering constraint is not rediscovered by whoever does.
+
+## 31. The residual-path report reads pre-install state under `-WhatIf`
+
+Item F4 of the branch review covered the status lines that claim work `-WhatIf` did not do, and
+those are fixed. The installer's residual-path report is a different shape and was deliberately left
+alone rather than folded into that fix.
+
+It reads on-disk state. Under `-WhatIf` nothing has been written, so on a first-time install the
+state it reads is the state before the install, and the report under-counts the residual paths a
+real run would produce. The two known non-portable entries, `1password` and `code-context`, would
+not appear.
+
+The report is otherwise the best-designed diagnostic in either script, and it ends with the line
+that makes it falsifiable: "Anything else on this list is an exporter bug." A dry run that quietly
+returns a shorter list weakens exactly that claim. Fixing it means reporting against what the
+install would write rather than against what is on disk, which is a larger change than the status
+lines needed and is why it is here rather than in that commit.
+
+## 32. Two leftovers from the fix round that closed items F1 through F6
+
+Neither blocks anything. Both were found by the re-review of the fix itself and left deliberately,
+rather than widening a commit whose message promised a narrow change.
+
+The residual-token exemption list is global. `$script:AccountResidualExemptLiterals` filters all
+three `Get-ResidualToken` call sites: the templated-file loop, the `settings.json` check and the
+`mcpServers` check. Only the first needs it. A real `{{PROJECT}}` appearing in a hook command or
+a server argument would now be dropped without a warning, which is the same class of silence the
+exemption was added to prevent, just moved. No such token exists in the payload today. The narrower
+fix passes the list as a parameter and supplies it at the one call site.
+
+The new Export containment test closes with two `Test-Path` assertions on installed files. Under
+the ablation the test targets, the marker guard fails closed and the fixture never changes, so both
+assertions pass while the test fails on its message. They are entailed by the `-ExpectedMessage`
+assertion and have never discriminated anything. They were copied from the pre-existing sibling
+test rather than written for this one, so the sibling carries the same pair. Worth knowing before
+anyone cites either as coverage; item 27 is the same shape.
+
+## 33. `NOTICE` hard-codes eleven measurements of a generated directory
+
+`NOTICE` states 218, 153, 85, 72, 13, 52, 33, 63, 2, 3 and 65 as file counts. Every one measures
+`account/claude/`, which `Export-Account.ps1` regenerates from `~/.claude/`. All eleven are correct
+as of `3b698b7`, and `360e2e3` is the record of four of them having been wrong once already.
+
+`CONTRIBUTING.md:41` forbids this directly: file counts "belong with the file that carries them or
+in a doc whose author controls that file." Nobody controls `account/claude/`; the exporter writes
+it. The rule's escape hatch is to round the figure and label it as rounded, which the first draft of
+this notice did and the correction removed in favour of exact counts.
+
+Nothing re-checks them. Not `test/`, not the Pester suites, not the export procedure at
+`README.md:116-125`, and there is no CI. The next export that adds or drops one skill falsifies a
+licence attribution silently, which is worse than the same drift in prose.
+
+The repo-idiomatic close is a test rather than a rounding: assert each count against `git ls-files`
+so an export that moves a number fails a gate instead of shipping. That also closes the drift
+exposure permanently, where rounding only widens the tolerance. Sequence it with item 36, which is
+about nothing running any test at all.
+
+## 34. Two vendored trees ship without stated permission, recorded as prose and not as a decision
+
+`NOTICE` discloses that `account/claude/skills/beautiful_prose/` (2 files, upstream states no
+licence) and `account/claude/skills/filesystem-context/` (3 files, an author line and nothing else)
+are redistributed with attribution but without stated permission, and offers removal on request.
+That disclosure is honest and it is not a decision.
+
+The operator ruled to ship both, applying one precedent across two identical cases. Nothing tracks
+the alternative, which is one `$script:AccountSkipDirs` entry each: that table exists at
+`AccountShared.ps1:45` and already carries a policy exclusion of exactly this kind for
+`skills/appsec-kpi-deck`. `filesystem-context` is the closer call of the two, since
+`settings.account.json` shows it disabled locally, so the payload carries a skill the operator has
+switched off.
+
+This belongs as a decision note under `change-management.md`'s security-tradeoff category, where the
+reasoning survives independently of the notice text. A ruling recorded only inside the artifact it
+authorises cannot be found by anyone asking whether it was ever made.
+
+**Status:** closed 2026-09-05. Note written as `ship-unlicensed-vendored-trees` under the
+`E--projects-agent-harness-core` memory scope, indexed in that scope's `MEMORY.md` Decisions group,
+`status: proposed` pending the operator's ratification. It records both directories, the rejected
+`$script:AccountSkipDirs` alternative, and an explicit non-extension clause: a third unlicensed tree
+triggers a standing policy rather than an amendment to this note.
+
+## 35. Nothing verifies that the committed payload matches a fresh export
+
+`README.md:112-114` and `account/claude/rules/harness-core.md` both state the one-direction rule and
+"never hand-edited" as prose. README's "Export, on this workstation" section names the procedure:
+re-export, then read the result. Every one of those is prose; the enforcement is a person
+remembering.
+
+**Measured 2026-09-05.** The check was run by hand for the first time, and the payload passes: a
+fresh export produces 218 files against the committed 218, nothing added or removed, and
+`git diff --exit-code` on the re-exported tree returns 0. What failed was the documented procedure
+itself. `git status --short` reported 203 modified paths on that same zero-content-diff tree,
+because the export writes LF where a Windows checkout writes CRLF, so a no-change re-export flips
+working-tree endings without touching the index. `Export-Account.ps1` told a reader to trust that
+output twice, in its `.DESCRIPTION` and in its closing `Write-Host`; README told them the same, and
+so did `~/.claude/rules/harness-core.md`, which went furthest with "anything the status shows is a
+real change." Every one of those now says `git diff`. The item stays open because the check remains
+manual; what changed is that the instrument it names is no longer the wrong one.
+
+One unrelated defect surfaced in the same run.
+`account/claude/tools/prose-lint/styles/Cringely/Vocabulary.yml` carries one CRLF among 38 LF, and
+the source under `~/.claude/` is byte-identical, so `Build-CringelyStyle.ps1` emits the stray ending
+rather than the export introducing it. Cosmetic, unfixed, noted here so the next reader of
+`git ls-files --eol` does not chase it as export drift.
+
+Item 25 already leans on the invariant as though it were enforced, saying a hand edit under
+`account/claude/` is reverted by the next export. That is true only if someone re-exports.
+
+This is the shape the repo's own findings flow calls a forcing function authored but not registered:
+a rule with no mechanism. Note the check is not free, because `core.autocrlf=true` makes
+`git status` the wrong instrument, per item 28. A real check compares blob hashes through git's
+filters, which is what the branch's final review did by hand and nothing does automatically.
+
+## 36. The repository has no automated test run
+
+`.github/` holds `ISSUE_TEMPLATE/promotion.md` and nothing else. Five Pester suites and `bun test`
+exist, 647 tests between them, and all six run only when a person remembers to run them.
+
+Four items in this file (24, 26, 27, 32) are about individual tests that cannot fail. The gap above
+all four is that nothing runs any of them unless invoked by hand, on a repository whose stated
+subject is gates that cannot silently pass.
+
+Whether that is deliberate for a process-layer repo is worth asking rather than assuming: the suites
+need `pwsh`, `bun` and a populated `~/.claude` to exercise anything, and a CI runner has none of the
+third. Worth a decision note recording the answer either way, since the current state reads
+as an oversight and may not be one.
+
+## 37. `GIT_COMMIT_RE` backtracks exponentially on flag-shaped input
+
+`core/claude/hooks/review-gate.ts:312-313` defines the pattern that recognises a `git commit`
+invocation, applied at `:337`. Its starred group holds three alternatives that overlap on the same
+input token and consume different numbers of tokens: `\s+-C\s+(\S+)` and `\s+-c\s+\S+` each swallow
+the following token as an argument, while `\s+-{1,2}[A-Za-z][\w-]*(?:=\S+)?` matches the flag alone.
+Nothing requires `-C`'s argument to be non-flag-shaped, so a run of n flag-shaped tokens can be
+tiled in Fibonacci(n+1) ways, and the engine explores all of them when the trailing `\s+commit`
+fails to match.
+
+The measurements below come from running it, not from reading the pattern. The input is
+`"git" + " -C".repeat(n) + " x"`; at n=40 that is a
+125-character Bash command. Bare pattern on node: 68 ms at n=32 rising to 3169 ms at n=40, roughly
+×2.6 per two added tokens, unbounded. Through the hook's own exported `parseGitCommitInvocation`
+and `decide` on bun, which is the runtime the hooks actually run on: 1435.9 ms at n=125, then flat
+from n=40 through n=200, so JSC appears to cap backtracking. The honest impact statement is a fixed
+stall of about 1.4 seconds on every matching Bash tool call under bun, and an unbounded hang under
+node. CodeQL's analysis is an NFA-ambiguity search over the pattern and is runtime-independent, so
+the alert fires either way.
+
+Reachability is not in question: this is a PreToolUse hook on matcher `Bash`, and
+`parseGitCommitInvocation(command)` runs before any short-circuit on every Bash tool call. Quoting
+the flags defeats the attack, because `scrubQuotesAndHeredocs()` blanks quoted spans first.
+
+Two constraints on whoever fixes it. The deferred global-regex rewrite sketched in the doc comment
+at `review-gate.ts:326-330` makes this strictly worse, since `while ((m = re.exec(scrubbed)))` pays
+the backtracking cost per match; that rewrite and this fix have to land together. And the fix is to
+remove the ambiguity, not to add an input-length cap, which would guard the consumer while leaving
+the pattern wrong.
+
+This is almost certainly one of the three open CodeQL alerts. `js/redos` is error severity,
+security-severity 7.5, precision high, and sits in `javascript-code-scanning.qls`, so it fires under
+default setup with no configuration. It is on `master`, so it predates PR #53 and that PR's green
+check never contradicted it: a code-scanning PR check fails on alerts the pull request introduces,
+not on ones already present. Suite membership here is documented spec read
+through a fetch summarizer rather than quoted verbatim, so confirm it against the query source if a
+decision turns on it.
+
+The other two alerts could not be named with a triggering input, and the review bounded the search
+rather than leaving it open. All 23 regex literals in the hooks were swept empirically against
+exponential and superlinear screens; 22 came back clean, so this is the only ReDoS to find. Three
+ranked candidates remain for the gap, and one bit of configuration discriminates between them:
+whether default setup runs the Default or the Extended suite. Extended would add
+`js/indirect-command-line-injection` at `account/claude/hooks/memory-proposal-digest.ts:287`;
+code-quality analysis being on would add two dead stores in the same file at `:111` and
+`:117`; a threat model set to `local` would surface the seven flows in item 38. That bit is visible
+on the repository's code-scanning configuration page and needs no `security_events` scope, which
+makes it the cheapest next step while the alert list itself stays unreadable.
+
+## 38. Two hooks interpolate an unvalidated payload field into a filesystem path
+
+`core/claude/hooks/agent-write-scope.ts:80` builds `join(projectDir, ".claude", "agents",
+`${agentType}.md`)` and `core/claude/hooks/agent-worktree-gate.ts:164` builds
+`join(agentsDir, `${subagentType}.md`)`. Both values arrive in the hook payload. `agent_type` is
+lowercased and trimmed and never validated, so `agent_type: "../../../../etc/passwd"` reaches
+`readFileSync` with no traversal or charset guard between.
+
+Impact today is low and the reason is worth writing down rather than trusting: the read result only
+feeds a `writeScope` or `tools` lookup, and both call sites fail closed when the read throws. So
+this is a missing guard rather than a live vulnerability. It is also the only place in the
+repository's 19 TypeScript files where untrusted text becomes a path with nothing filtering it.
+
+It produces no CodeQL alert as configured, and the reason generalises past this item. CodeQL's
+default threat model is `remote` only; command-line arguments, environment variables, stdin and
+file contents are the `local` model and are opt-in through `threat-models: local`. These hooks have
+no HTTP or DOM surface, so every taint-based query runs with zero sources. Six `js/path-injection`
+sinks and one `js/prototype-polluting-assignment` sink exist across the hooks and all of them are
+dark. Enabling `local` would light them up at once, which makes that a change to sequence
+deliberately rather than to flip while chasing something else.

@@ -1,0 +1,190 @@
+---
+# The release-verb "ship", and only that.
+#
+# WHY THIS RULE EXISTS AT ALL
+# ai-tells.ShipOveruse matches a bare \bship(s|ped|ping)?\b and its own header
+# refuses carve-outs, on the grounds that the logistics verb ("ship the order")
+# and the vessel noun ("a cargo ship") are indistinguishable from the release
+# verb to a regex. That reasoning is sound, and the measurement agrees with it:
+# across 142 markdown files (~/.claude/rules, ~/.claude/skills,
+# E:\projects\agent-harness-core minus worktrees) the upstream rule raised 27
+# findings, and 20 of them were senses it never meant to police —
+#
+#   log transport to a SIEM      "logs are not shipped to a centralized location"
+#   comes-bundled-with           "an application server ships with sample apps"
+#   physical dispatch            "printers are shipped with default usernames"
+#   vendor default               "vendor-shipped configurations"
+#   a quoted enum literal        a board status field literally named "Shipped"
+#
+# So the upstream author's advice is taken literally: the whole rule is turned
+# off in .vale.ini, and this rule replaces it by matching the register the
+# operator actually writes rather than the word.
+#
+# WHAT IT KEEPS
+# The 7 true positives in that corpus are all operator-authored, in
+# rules/fix-quality.md and rules/no-overclaim.md, and every one of them is the
+# release verb taking a release object:
+#
+#   "Never ship entangled fixes as a bundle"      -> token 1 (ship + object)
+#   "Tag every shipped fix load-bearing"          -> token 1
+#   "turned into shipped code"                    -> token 1
+#   "Shipping code, passing offline tests"        -> token 1
+#   "Run 1 shipped a conclusion"                  -> token 1
+#   "the code being shipped"                      -> token 2 (object + copula)
+#   "Before shipping any memoization/..."         -> token 3
+#
+# TWO DISCRIMINATORS, NOT ONE
+# Token 1 gates on a closed list of release objects. Logistics prose ships logs,
+# orders and printers; release prose ships code, fixes, patches, features,
+# builds and conclusions. It allows up to two words between the verb and its
+# object ("ship entangled fixes") and no more, which is what keeps "Ship all
+# CI/CD logs to a centralized location" silent.
+#
+# That list alone is too narrow, and the first version of this rule carried only
+# it. Measured 2026-08-14 against 18 release-register shapes the upstream
+# rule used to catch, it flagged 1 of 18: this operator ships rules, skills,
+# docs, agent definitions, configs and artifacts, and none of those nouns are on
+# any closed list worth maintaining. Two of the unflagged shapes are in prose
+# already inside this kit (NarrowedConstructions.yml:6 "What ships here is the
+# discriminated form", TellWords.yml:47 "Shipped as error on that").
+#
+# Group 4 is the second discriminator: a determiner, or a release adverb. It
+# recovers 12 of the 18 and moves the 142-file corpus by nothing (8 findings,
+# same file and line, before and after). Its cost is NOT the "one misfire" an
+# earlier version of this header reported. That figure measured the fixture.
+#
+# WHAT GROUP 4 DISCRIMINATES, AND WHAT IT DOES NOT
+# A determiner separates a transitive "ship" from an intransitive one. It does
+# not separate a release object from a freight object, and it never did. Left to
+# itself, group 4 flags every transitive ship + determiner + noun, which takes in
+# active-voice logistics ("We ship the logs to a centralized location") and the
+# vessel noun sitting in front of a relative clause or a measure phrase ("Those
+# ships the navy retired", "A ship the size of a city docked at the pier").
+#
+# The claim that it excluded the logistics sense rested on a 14-sense misfire
+# fixture that raised exactly one alert. That fixture was written almost entirely
+# in the passive voice or with no determiner at all — "Logs are not shipped to",
+# "Printers are shipped with", "A cargo ship left the port" — so the determiner
+# gate was never asked to discriminate anything. Rewrite the same 14 senses in
+# the ACTIVE, determiner-carrying voice, which is the shape the gate has to
+# reject, and 12 of them fire. Measured 2026-08-14 on <scratchpad>/r3-shipfix.md
+# with group 4 unguarded: 54 alerts, 24 of them false positives.
+#
+# The two `exceptions:` entries at the bottom narrow that. Vale suppresses a
+# token match when an exception's own match OVERLAPS it, and the scope is the
+# overlap rather than the line — measured, "We ship the rule after the logs
+# rotate" still fires with `logs` carved out. Same fixture with the exceptions
+# in place: 34 alerts, 4 false positives, all 30 true positives kept. The
+# 142-file corpus does not move (1022 findings, ShipRelease 8, same file and
+# line). So the exceptions are prospective cover, not a corpus fix: this
+# operator's writing contains none of these senses today.
+#
+# KNOWN FALSE POSITIVES, five classes
+#   1. comes-bundled-with, active and determiner-carrying: "The server ships the
+#      sample applications", "Git Bash ships the three binaries".
+#   2. vendor defaults: "The vendor ships the configurations with defaults".
+#      Deliberately NOT carved out — "We shipped the config last night" is a true
+#      positive this rule exists to catch, and the two differ by a suffix.
+#   3. a freight noun that is also a software artifact: "ships the package by
+#      courier" is freight, "ship the package to npm" is release. The same holds
+#      for crates and containers, so none of the three is on the exception list.
+#   4. the vessel noun with nothing in front of it: "Ships the navy retired are
+#      now museums", "Ships that carry passengers need lifeboats". The carve-out
+#      keys on a preceding determiner and a sentence-initial plural has none.
+#      Note the near miss, because it is misleading: "Ships that carry cargo
+#      across the Pacific" IS silent, but only because `cargo` sits on the
+#      freight list below. The vessel carve-out did not catch it.
+#   5. any freight or hardware object absent from the carve-out list. The list is
+#      closed, so it covers what someone thought of and nothing else. Measured
+#      2026-08-14: "We ship the order." and "They shipped the printers." both
+#      fire, while "We ship the logs to the SIEM." is silent, and the only
+#      difference is that `logs` is on the list. Adding nouns narrows the gap and
+#      never closes it, because the release sense and the freight sense differ by
+#      the object's referent rather than by anything a token list can hold.
+# The upstream header reaches the same place on the same ambiguity and tells a
+# writer in these domains to switch the rule off. That is the remedy here too.
+#
+# IF YOU WRITE LOGISTICS OR MARITIME PROSE
+# Put `<!-- vale Cringely.ShipRelease = NO -->` at the top of the document.
+# Measured 2026-08-14 on r3-shipfix.md: 34 alerts without that line, 0 with it.
+# To narrow rather than disable, delete in this order: the determiner token in
+# group 4, which is the one that fires on any object at all ("ship the rule",
+# and equally "ships the package"); then "before shipping" in group 3, the only
+# other token that does not name its object. What remains after both deletions is
+# mostly object-gated, not entirely: the group-3 tokens that do name an object
+# still match any noun on their own lists.
+# An earlier version of this header claimed "ship the order" no longer fires
+# because the freight carve-out covers it. That is false and was corrected on
+# 2026-08-14: "We ship the order." fires, with or without a trailing adverb.
+# `order` is simply not on the freight list. See class 5 above.
+#
+# NOTE ON LOOKAHEAD: Vale 3.15.1 accepts (?!...) and silently does not apply it
+# — measured, no diagnostic, exit 0. Nothing here uses it. Both carve-outs are
+# `exceptions:` entries, which is the mechanism that works.
+extends: existence
+message: "Release-register 'ship': '%s'. Say what actually happened — released, merged, deployed, landed — or name the change."
+level: error
+nonword: true
+ignorecase: true
+tokens:
+  # 1. ship + (<=2 words) + a release object.
+  - '\bship(?:s|ped|ping)?\s+(?:\w+\s+){0,2}(?:code|fix|fixes|patch|patches|feature|features|release|releases|build|builds|version|versions|changes?|conclusions?|answers?|commits?|refactors?)\b'
+  # 2. a release object + copula + shipped ("the code being shipped").
+  - '\b(?:code|fix|fixes|patch|patches|feature|features|release|releases|build|builds|version|versions|changes?)\s+(?:being|is|was|were|are|gets|get|got)\s+shipped\b'
+  # 3. the objectless release idioms.
+  - '\bbefore\s+shipping\b'
+  - '\bship(?:s|ping|ped)?\s+it\b'
+  - '\bship\s+(?:fast|early|often|now|daily|weekly|small)\b'
+  - '\bready\s+to\s+ship\b'
+  # 4. ship + determiner + ANY noun, and the release adverbs. The object
+  #    allowlist in token 1 is a closed set and this operator ships rules,
+  #    skills, docs, agent definitions, configs and artifacts, none of which are
+  #    on it. This token recovers those. It gates on the determiner ALONE, so
+  #    every sense it lets through is carved out in `exceptions:` below and
+  #    nowhere here. The four strings an earlier version of this header cited as
+  #    excluded — "logs are shipped to a SIEM", "ships with sample applications",
+  #    "printers are shipped with default usernames", "a cargo ship" — are
+  #    excluded only in those exact passive or determiner-less spellings.
+  #    Written actively with a determiner, three of the four fire.
+  - '\bship(?:s|ped|ping)?\s+(?:the|a|an|this|that|these|those|our|your|my)\s+\w+'
+  - '\bship(?:s|ped|ping)?\s+(?:quickly|faster|often|regularly|continuously)\b'
+  # 5. the maritime clichés upstream also caught. Zero occurrences in the
+  #    corpus; carried so disabling the upstream rule loses nothing.
+  - '\bruns?\s+a\s+tight\s+ship\b'
+  - '\brunning\s+a\s+tight\s+ship\b'
+  - '\b(?:that|the)\s+ship\s+has\s+sailed\b'
+# Exceptions are per-RULE, not per-token, so either entry below can suppress a
+# group-1, group-2 or group-3 match it happens to overlap. Measured 2026-08-14:
+# no such suppression happens on the 142-file corpus — all 8 findings survive at
+# the same file and line, and 6 of them are object-gated shapes that only group 1
+# or group 2 can raise. Nor on any of the five fixtures. Vale merges the tokens
+# into one alternation, so which group produced a given alert is not observable;
+# the guarantee here is that the alert set did not change. The failure mode if
+# an exception ever does swallow one is a missing alert, which is silent.
+exceptions:
+  # A. The vessel noun. "ship" is the noun whenever a determiner sits directly in
+  #    front of it, optionally with one maritime adjective between. What follows
+  #    is then a relative clause or a measure phrase rather than an object:
+  #    "A ship the size of a city", "Those ships the navy retired".
+  #    The adjective slot is a closed maritime list on purpose. An open `\w+`
+  #    slot was measured on 2026-08-14 and rejected: it cost 6 of the 15
+  #    release-register shapes in <scratchpad>/r3-shipcollateral.md, among them
+  #    "The team ships the fix", "The pipeline ships the build" and "A reviewer
+  #    ships the patch" — subject nouns are the commonest thing sitting between
+  #    a determiner and the verb, so the open slot eats the whole register.
+  - '(?i:\b(?:the|a|an|this|these|those|every|each|another|no)\s+(?:(?:cargo|container|cruise|naval|pirate|supply|passenger|merchant|ghost|sister|fishing|freight|battle|war)\s+)?ships?\s+(?:the|a|an|this|that|these|those|our|your|my)\s+\w+)'
+  # B. Freight and log transport. Two gates, and both are load-bearing.
+  #    The object list holds only nouns that are freight or telemetry in this
+  #    operator's writing and never a release artifact. package, crate and
+  #    container are deliberately off it, because npm, Cargo and OCI own those
+  #    words; "ship the package to npm" has to keep firing.
+  #    The trailing preposition, cadence adverb or punctuation is what stops the
+  #    carve-out reaching a compound noun whose head is the artifact. Measured
+  #    2026-08-14 on <scratchpad>/r3-shipcollateral.md with this exact object
+  #    list: dropping the tail gate silences "We ship the metrics dashboard",
+  #    "We ship the log parser" and "We ship the telemetry agent", 3 of 15
+  #    release-register shapes. With the tail gate, 0 of 15. (Against a longer
+  #    object list carrying container, device, hardware, data and events, the
+  #    same ablation cost 8 of 15 — which is why that list was cut back to
+  #    nouns with no software sense rather than kept and gated.)
+  - '(?i:\bship(?:s|ped|ping)?\s+(?:the|a|an|this|that|these|those|our|your|my)\s+(?:[\w/-]+\s+){0,2}(?:logs?|telemetry|metrics?|traces?|printers?|orders?|parcels?|pallets?|freight|cargo|shipments?|inventory|goods|supplies|replacements?|units?)\s*(?:[,.;:]|\b(?:to|from|into|onto|upstream|downstream|overnight|nightly|daily|weekly|monthly|by|via|with|within|before|after|out|off|back|over|across|through|around|straight|directly|on|at)\b))'
