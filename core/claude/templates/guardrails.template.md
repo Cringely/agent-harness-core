@@ -105,9 +105,11 @@ The assumed stack:
 
 Caveman, ponytail, and `~/.claude/rules/writing-style.md` each specify how output should read, and
 they cover overlapping ground: register, length, banned words, structure. Where they collide on
-output register, `writing-style.md`'s surface-routing table (file-based prose vs. code comments
-and briefs vs. user-facing chat) is the existing arbiter. It names which register applies on which
-surface, and `beautiful_prose` is canonical for the banned-vocabulary list that table mirrors.
+output register, `writing-style.md`'s surface-routing table (five surfaces: file-based prose
+deliverables, code comments and briefs, user-facing chat, structured status artifacts read against
+a diff, and internal agent traffic, which it exempts) is the existing arbiter. It names which
+register applies on which surface, and `beautiful_prose` is canonical for the banned-vocabulary
+list that table mirrors.
 
 For every other kind of overlap between these layers, there is no agreed precedence yet. Don't
 invent one in the moment; note the conflict and ask, or use judgment and flag the call you made so
