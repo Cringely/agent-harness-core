@@ -315,6 +315,22 @@ describe("parseGitCommitInvocation() — item 37: a quoted option argument still
     expect(optionShaped.repoPath).toBeUndefined();
   });
 
+  // Pre-fix, the `-C` pair alternative's own capture group sat inside the star's alternation, so
+  // it was nested inside a quantified group. ECMAScript resets a nested capture on every iteration
+  // that takes a DIFFERENT alternative — so a real, well-formed `-C <path>` lost its capture the
+  // moment any other option followed it before `commit`, regardless of how the path itself was
+  // written. Not the master-equivalence case above (an option-shaped -C argument): this is a plain
+  // path, reset by an unrelated flag two tokens later. Confirmed live pre-fix:
+  // `GIT_COMMIT_RE.exec("git -C /r --no-pager commit")` returned undefined for that nested group
+  // even though group 1 (the whole option run) held `" -C /r --no-pager"` intact — the text
+  // survived, only the nested capture did not. See `repoPathFromOptionRun()` for the fix.
+  test("repoPath survives when -C is not the last option before commit", () => {
+    expect(parseGitCommitInvocation("git -C /r --no-pager commit").repoPath).toBe("/r");
+    expect(parseGitCommitInvocation("git -C /r -c user.name=CI commit -m x").repoPath).toBe("/r");
+    expect(parseGitCommitInvocation("git --no-pager -C /r commit").repoPath).toBe("/r");
+    expect(parseGitCommitInvocation("git -C /r --no-pager -c user.name=CI commit").repoPath).toBe("/r");
+  });
+
   // Timing budget. Measured on this machine through parseGitCommitInvocation on bun: 92.7 ms at
   // n=32, 640.3 ms at n=36, 1878.3 ms at n=40 before the fix; under 1 ms after. The budget sits
   // ~19x under the pre-fix number and ~100x over the post-fix one, so it discriminates without
@@ -716,7 +732,11 @@ describe("getStagedAbsPaths() — real git, real temp repo", () => {
     }
   });
 
-  test("cheap fix: a non-ASCII filename round-trips as the real name, not a C-quoted octal escape", () => {
+  // Was misattributed to `-c core.quotePath=false`, dropped from getStagedAbsPaths as dead code:
+  // `-z` alone suppresses git's C-style quoting regardless of that config's value (verified live,
+  // git 2.53.0 — see the doc comment above getStagedAbsPaths). The behavior this pins is real; only
+  // the mechanism credited for it was wrong.
+  test("a non-ASCII filename round-trips as the real name, not a C-quoted octal escape", () => {
     const dir = initRepo();
     try {
       const filename = "café.ts";
