@@ -514,7 +514,45 @@ by adding prose:
 
 ## 14. NotebookLM as a corpus-bounded knowledge agent
 
-**Status:** proposed, investigation only. No commitment to adopt.
+**Status:** assessed 2026-09-05. **Recommendation: none of the four candidates gets wired to the
+operator's Google account.** The assessment ran the six questions below against all four unpacked
+tarballs, statically, nothing executed. Report at
+`.superpowers/sdd/2026-09-03-account-layer-portability/nb-mcp-assessment.md`.
+
+Every candidate authenticates by driving a browser through a human Google login and keeping the
+resulting account-level session cookies (`SID`, `HSID`, `SSID`, `APISID`, `SAPISID`,
+`__Secure-1PSID`). None uses OAuth. None produces a grant scoped to the product or revocable
+without signing the operator's Google account out everywhere. That is the condition this item named
+in advance as disqualifying, and it is met by all four. `@roomi-fields/notebooklm-mcp` also stores
+the account password and TOTP seed for unattended re-login.
+
+Three of the four also carry a local-file read path into the same home directory that holds
+`~/.claude`. `notebooklm-mcp-server` resolves any caller-supplied path and uploads `.md` content to
+Google, which reaches every rules file, agent definition and memory note in one tool call.
+`@pan-sec/notebooklm-mcp` defaults its allowlist to `os.homedir()` and omits `.claude` from its
+denied segments. So a prompt injection in an ingested source would have both a credential worth
+stealing and material worth stealing, on one machine.
+
+**Correction to this item's own preliminary result.** The paragraph below stating that none of the
+five declares a `preinstall` or `postinstall` script is false, and it was relayed to the reviewer as
+settled rather than re-measured. Verified against each `package.json`: four declare `prepare`, which
+does not run for a published registry tarball and is inert; `notebooklm-mcp-server@4.0.2` declares
+`"postinstall": "npx playwright install chromium"`, which runs on every install and is both
+install-time code execution and install-time egress. Nothing executed during the assessment, because
+the fetch used `npm pack` and never `npm install`. The safety came from the procedure, not from
+the premise.
+
+**If the capability is still wanted,** one shape is defensible: a Google account used for nothing
+else with the notebook shared to it, `@charlie.act7/gemini-notebook-mcp` pinned to `2.3.11` and
+never `@latest`, stdio transport only, a data directory outside `%APPDATA%`, project-scoped rather
+than user-scoped, and every answer treated as untrusted input. Charlie is the pick on containment
+and provenance (the only candidate with SLSA provenance and OIDC publishing, no local-file read
+path, and an HTTP transport that refuses an unauthenticated off-localhost bind), not on
+authentication, where it is no better than the rest. Rehearse the revocation first, because there is
+no per-app revoke and there will not be one. Three of the four, charlie included, depend on
+`patchright`, an anti-bot-detection Playwright fork from a pseudonymous maintainer, which is a terms
+question on top of a security one.
+
 **Surfaced:** 2026-09-03, operator request during the account-layer portability session.
 
 ### The idea
