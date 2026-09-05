@@ -1,0 +1,168 @@
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "ENABLE_TOOL_SEARCH": "auto:5",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "400000",
+    "CLAUDE_CODE_USE_POWERSHELL_TOOL": "1"
+  },
+  "permissions": {
+    "allow": [
+      "mcp__code-context"
+    ],
+    "defaultMode": "auto"
+  },
+  "skillOverrides": {
+    "filesystem-context": "off"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Agent|Task|Workflow",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun \"{{CLAUDE_HOME}}/hooks/model-tier-gate.ts\"",
+            "timeout": 10,
+            "statusMessage": "Checking model tier..."
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "& '{{CLAUDE_HOME}}/hooks/Scan-MemorySecrets.ps1'",
+            "shell": "powershell",
+            "timeout": 5,
+            "statusMessage": "Scanning for secrets..."
+          }
+        ]
+      },
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "& '{{CLAUDE_HOME}}/hooks/Guard-SkillSize.ps1'",
+            "shell": "powershell",
+            "timeout": 5,
+            "statusMessage": "Checking skill payload size..."
+          },
+          {
+            "type": "command",
+            "command": "node {{NPM_GLOBAL}}/ccstatusline/dist/ccstatusline.js --hook"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "& '{{CLAUDE_HOME}}/hooks/Sync-MemoryToObsidian.ps1'",
+            "shell": "powershell",
+            "timeout": 10,
+            "statusMessage": "Syncing memory to Obsidian..."
+          },
+          {
+            "type": "command",
+            "command": "& '{{CLAUDE_HOME}}/hooks/Lint-DocumentProse.ps1'",
+            "shell": "powershell",
+            "timeout": 15,
+            "statusMessage": "Prose-linting document..."
+          },
+          {
+            "type": "command",
+            "command": "bun \"{{CLAUDE_HOME}}/hooks/memory-transition-log.ts\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"{{CLAUDE_HOME}}/hooks/harness-core-reminder.sh\"",
+            "timeout": 10,
+            "statusMessage": "Checking for harness layer..."
+          },
+          {
+            "type": "command",
+            "command": "bun \"{{CLAUDE_HOME}}/hooks/memory-proposal-digest.ts\"",
+            "timeout": 10,
+            "statusMessage": "Checking for open decision proposals..."
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node {{NPM_GLOBAL}}/ccstatusline/dist/ccstatusline.js --hook",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "node {{NPM_GLOBAL}}/ccstatusline/dist/ccstatusline.js",
+    "padding": 0,
+    "refreshInterval": 20
+  },
+  "enabledPlugins": {
+    "feature-dev@claude-plugins-official": true,
+    "code-simplifier@claude-plugins-official": false,
+    "greptile@claude-plugins-official": false,
+    "security-guidance@claude-plugins-official": true,
+    "commit-commands@claude-plugins-official": false,
+    "claude-md-management@claude-plugins-official": false,
+    "ask-questions-if-underspecified@trailofbits": true,
+    "audit-context-building@trailofbits": false,
+    "differential-review@trailofbits": false,
+    "git-master@claude-plugin-marketplace": false,
+    "powershell-master@claude-plugin-marketplace": false,
+    "docker-master@claude-plugin-marketplace": false,
+    "bash-master@claude-plugin-marketplace": false,
+    "microsoft-docs@claude-plugins-official": true,
+    "github@claude-plugins-official": true,
+    "claude-code-setup@claude-plugins-official": false,
+    "ralph-loop@claude-plugins-official": true,
+    "context7@claude-plugins-official": false,
+    "frontend-design@claude-plugins-official": false,
+    "code-review@claude-plugins-official": true,
+    "superpowers@claude-plugins-official": true,
+    "ponytail@ponytail": true,
+    "caveman@caveman": true
+  },
+  "extraKnownMarketplaces": {
+    "ponytail": {
+      "source": {
+        "source": "github",
+        "repo": "DietrichGebert/ponytail"
+      }
+    },
+    "caveman": {
+      "source": {
+        "source": "github",
+        "repo": "JuliusBrussee/caveman"
+      }
+    }
+  },
+  "alwaysThinkingEnabled": true,
+  "effortLevel": "xhigh",
+  "awaySummaryEnabled": false,
+  "skipDangerousModePermissionPrompt": true,
+  "preferredNotifChannel": "auto",
+  "teammateMode": "auto",
+  "inputNeededNotifEnabled": true,
+  "agentPushNotifEnabled": true
+}

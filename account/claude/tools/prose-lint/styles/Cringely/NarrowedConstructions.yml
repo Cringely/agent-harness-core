@@ -1,0 +1,269 @@
+---
+# Six narrowed constructions. The narrowing IS the proposal.
+#
+# Every family below arrived as a broad candidate ("ban quietly", "ban fabric",
+# "ban ensuring", "ban appropriate") and every one of those broad forms fires on
+# correct writing this operator does daily. What ships here is the discriminated
+# core of each: the object list, the sentence position, or the exact phrase that
+# separates the rhetorical use from the technical one. Where no such
+# discriminator could be expressed in Vale, the candidate was dropped rather
+# than shipped loose — see DROPPED, at the bottom.
+#
+# ONE FILE, ONE MESSAGE. Vale 3.15.1 has no per-token message and no per-token
+# level, so six families sharing one `level:` must share one `message:`. That
+# costs specificity in the alert text and is the reason the message names a
+# repair strategy ("name the specific thing") rather than a family. Splitting
+# into six files was rejected: it would multiply six near-identical headers and
+# six maintenance surfaces for a severity that no consumer of this kit ever
+# prints (the PostToolUse hook, the pre-commit gate and the /prose-lint skill
+# all run `vale --output=line`, which emits no severity at all).
+#
+# NOTE ON LOOKAHEAD AND EXCEPTIONS: Vale 3.15.1 accepts (?!...) and silently
+# does not apply it — exit 0, no diagnostic, 'foo(?!bar)' behaving as 'foo\b'.
+# Nothing here uses it. `exceptions:` is the mechanism that works, but it has
+# limits of its own that were measured here and are written up at the bottom of
+# this file. The short version: an exception can only reach text to the RIGHT of
+# the token match. This file ships with no `exceptions:` block at all, because
+# every carve-out it needed turned out to be expressible in the token instead —
+# which is the more durable form.
+#
+# NOTE ON CODE SPANS: Vale masks an inline code span with a run of '*' of equal
+# length and matches against the mask, which makes any rule of the form
+# "<word> + <adjacent token>" a false-positive generator in prose built out of
+# backticked paths. Every token below is <word> + <literal word from a closed
+# list>, so an asterisk run can never satisfy the second half. Verified: the
+# fixture carries a backticked-identifier line for each multi-word token and
+# none of them fire.
+#
+# CALIBRATION CORPUS, 2026-08-14, three sweeps, 142 markdown files, all run
+# against the full active rule set via .vale.ini rather than a reduced config:
+#
+#   C:\Users\user\.claude\rules            11 files    86 alerts total    0 here
+#   E:\projects\agent-harness-core          32 files     9 alerts total    0 here
+#   C:\Users\user\.claude\skills           99 files   930 alerts total    0 here
+#
+# (repo count excludes .claude\worktrees\, which holds 387 more .md files that
+# are transient copies of the same documents.)
+#
+# Zero findings on 142 documents the operator considers well written is the
+# result this file was tuned for, and it took three token deletions to get
+# there: 'relevant' and 'appropriate' before the first run, 'validation' after
+# it. Each is written up at its token below.
+extends: existence
+message: "Rhetorical filler: '%s'. Name the specific thing — the mechanism, the measured effect, or the plain word."
+level: warning
+nonword: true
+ignorecase: true
+tokens:
+  # ---- 1. "quiet" + a closed abstract-noun list. ------------------------------
+  # "quiet confidence", "a quiet revolution", "quiet dignity". The noun list is
+  # the whole rule: it is these nine nouns or nothing.
+  #
+  # "quietly" was DROPPED from this token. It cannot precede an abstract noun in
+  # English ("quietly confidence" is not a sentence), so it would have bought
+  # nothing, and it would have put the operator's most-used register in range:
+  # "fails quietly", "silently grants Read, Write, and Edit", "drifting apart
+  # quietly" (rules/writing-style.md:37). That sense is precise engineering
+  # prose about a failure mode and must never fire.
+  #
+  # Measured on the corpus: one near-miss, "a quiet disagreement between the
+  # table and the hook" (rules/writing-style.md:45). It stays silent because
+  # "disagreement" is not on the list, which is the closed list doing its job.
+  - '\bquiet\s+(?:confidence|rebellion|revolution|truth|dignity|power|determination|strength|resolve)\b'
+
+  # ---- 2. "woven into the fabric of", that form only. -------------------------
+  # Bare "fabric" is a live technical noun (switch fabric, service fabric,
+  # Microsoft Fabric) and is not matched. Neither are "threads of" (threads of
+  # execution), "weaves", or "interwoven". Only the full five-word cliché.
+  - '\bwoven\s+into\s+the\s+fabric\s+of\b'
+
+  # ---- 3. Abstract-benefit TRAILING CLAUSE, sentence-final only. --------------
+  # The tell is a sentence that ends by asserting an unmeasurable virtue:
+  # "The retry budget is bounded, ensuring reliability." The abstract-quality
+  # object is the discriminator. "ensures the config is validated before reload"
+  # names a mechanism and must not fire, and does not, because its object is a
+  # clause rather than a word from the list.
+  #
+  # TWO NARROWINGS, both forced by measurement rather than chosen.
+  #
+  # The leading '[,;]' means only a genuine trailing clause matches. A main
+  # clause — "The advisory lock ensures consistency." — is deliberately NOT
+  # matched, and dropping it is what removes this rule's only collision with
+  # ai-tells.Metacommentary, which already fires at error on "This ensures
+  # [^.]+\." and "This \w+ ensures [^.]+\." (Metacommentary.yml:73-74). The
+  # first draft matched bare 'ensures' and needed an `exceptions:` carve-out to
+  # avoid double-alerting on "This ensures consistency."; that carve-out cannot
+  # be written (see the note at the bottom of this file), so the token was
+  # narrowed until the overlap did not exist. A construction that needs no
+  # exception beats one that needs an exception that works.
+  #
+  # The trailing '\.' is the only reliable spelling of "sentence-final" here.
+  # Vale's default scope hands the rule a whole paragraph, so a '$' anchor would
+  # match the paragraph end, not the sentence end, and would silently cover just
+  # one sentence per paragraph. Consequence, accepted: ", ensuring consistency
+  # across restarts." stays silent because the abstract noun is not the last
+  # word. This rule under-fires by design.
+  - '[,;]\s*ensur(?:es|ing)\s+(?:correctness|consistency|reliability|robustness|maintainability|quality)\s*\.'
+  - '[,;]\s*improving\s+readability\s*\.'
+  - '\bfor\s+better\s+maintainability\s*\.'
+
+  # ---- 4. Empty modifiers, two adjectives only. -------------------------------
+  # "proper handling", "necessary components" — the adjective adds nothing a
+  # reader can check. Neither adjective is matched bare; both need one of the
+  # six nouns after them.
+  #
+  # 'relevant' was DROPPED on measurement, not on taste: the only corpus hit for
+  # this whole family is core/claude/agents/task-reviewer.md:124,
+  # "Security-relevant changes (auth, secrets handling, ...)". A hyphen is a
+  # non-word character, so '\brelevant\b' matches inside "security-relevant" and
+  # the rule would have fired on the operator's own well-formed compound. One
+  # hit, one false positive, 100% — dropped rather than exception-listed,
+  # because "policy-relevant changes" and "review-relevant changes" are the same
+  # construction and an exception list cannot enumerate them.
+  #
+  # 'appropriate' was DROPPED for a different reason: the spec requires exempting
+  # policy and control-language files, where it is a term of art in CIS- and
+  # NIST-shaped prose, and this operator writes compliance material
+  # (rules/security.md). File exemption in Vale lives only in a .vale.ini path
+  # section, which this rule is not permitted to touch. A carve-out that cannot
+  # be expressed is a rule that should not ship.
+  #
+  # 'validation' was DROPPED from the noun list, also on measurement. It is the
+  # single hit this whole file produced anywhere outside its own fixture:
+  #   skills/owasp-mcp/references/05-command-injection-execution.md:14
+  #   "...using untrusted input without proper validation or sanitization."
+  # That is the security-checklist register, not filler, and it recurs — the
+  # same phrase appears in the Substrate and Solana vulnerability-scanner
+  # skills, and "Appropriate validation level?" in a third. This operator writes
+  # security and compliance material constantly, so the noun was removed rather
+  # than defended. The other six nouns produce zero hits across all three
+  # corpora swept (rules, agent-harness-core, and 99 files of ~/.claude/skills).
+  - '\b(?:proper|necessary)\s+(?:changes|updates|components|handling|refactoring|improvements)\b'
+
+  # ---- 5. "invaluable", alone. ------------------------------------------------
+  # Puffery with no measurable content, and not covered upstream (checked
+  # against all 63 ai-tells rules; ai-tells.PromotionalPuffery and
+  # ai-tells.OverusedVocabulary both lack it).
+  #
+  # 'exacerbate' / 'exacerbating' arrived with it in the source list and was
+  # DROPPED. It means specifically "worsen an already-bad condition", it is
+  # standard in incident and performance writing, and the replacements a writer
+  # reaches for when it is banned (affect, impact, influence) are all vaguer
+  # than the word itself. Banning a precise verb to catch a vague one is a net
+  # loss.
+  - '\binvaluable\b'
+
+  # ---- 6. "it can be argued that" and its modal siblings. ---------------------
+  # Half this family is already upstream: ai-tells.FillerPhrases carries
+  # "it can be seen that" and "it can be observed that" (FillerPhrases.yml:40-41)
+  # at error. Those two verbs are deliberately absent here so the two rules can
+  # never double-alert on one span — two findings on one span is the measured
+  # noise pattern that gets a whole style switched off. Appending to the
+  # upstream file was not an option: styles/ai-tells/ is a pinned package and
+  # `vale sync` rewrites it wholesale.
+  #
+  # DELIBERATELY UNMATCHED: "it is possible that" and "there is a possibility
+  # that". Both are correct in a postmortem where the cause is genuinely
+  # unknown, and rules/no-overclaim.md REQUIRES naming what is unproven. A rule
+  # that punishes honest uncertainty would fight a rule the operator wrote.
+  - '\bit\s+(?:can|could|may|might)\s+be\s+(?:argued|said|assumed)\s+that\b'
+
+# NO `exceptions:` BLOCK, AND THAT IS THE FINDING.
+#
+# This file shipped with one carve-out for most of its life: ai-tells.Metacommentary
+# already fires at error on "This ensures [^.]+\." and "This \w+ ensures [^.]+\."
+# (Metacommentary.yml:73-74), so a bare 'ensures consistency.' token double-alerts
+# on the same span, which is the noise pattern that gets a whole style switched off.
+# Four drafts of that carve-out were written and measured. None of them work, for a
+# reason that is a property of Vale and not of the draft: an exception can only
+# reach text to the RIGHT of the token match, and the discriminator here ("This")
+# sits to the LEFT. The token was narrowed instead, and the collision no longer
+# exists. Everything below is why, kept so the next author does not spend the
+# afternoon this cost.
+#
+# THREE MEASURED FACTS ABOUT `exceptions:`, all learned the hard way here, all
+# silent when you get them wrong. Vale 3.15.1, exit 0, no diagnostic in any of
+# the three failure cases.
+#
+# 1. AN EXCEPTION MUST NOT END (OR BEGIN) ON A NON-WORD CHARACTER. Vale wraps
+#    the joined exception list in word boundaries, so a trailing '\.' puts a
+#    '\b' after a period and the exception can never match anything. This is
+#    the trap that cost the most time here, because it looks like the carve-out
+#    is simply being ignored. Two drafts died on it:
+#      exceptions: ['(?i:this ensures [^.]*\.)']  -> suppressed nothing
+#      exceptions: ['(?i:ensures consistency\.)'] -> suppressed nothing
+#        FIXTURE:46:28:Cringely.NarrowedConstructions:... 'ensures consistency.'
+#        FIXTURE:58:17:Cringely.NarrowedConstructions:... 'ensures consistency.'
+#    Deleting one character, the escaped period, made the same exception work:
+#      exceptions: ['(?i:ensures consistency)']   -> suppressed BOTH lines 46
+#      and 58, leaving only the two 'reliability' alerts.
+#    Every exception below therefore ends on a word character. The tokens may
+#    end in a period; the exceptions may not.
+#
+# 2. AN EXCEPTION DOES SEE CONTEXT, BUT ONLY TO THE RIGHT: IT MUST BEGIN AT THE
+#    TOKEN MATCH'S OWN START OFFSET. Proved with an exception strictly longer
+#    than its token. Token '\binvaluable\b' against "An invaluable check, and an
+#    invaluable one at that." raises two alerts, columns 13 and 38. Adding
+#    exceptions: ['(?i:invaluable check)'] drops the count to one, so the
+#    exception is plainly reading past the end of the token — it is not being
+#    tested against the matched substring alone.
+#    But the mirror case fails. exceptions: ['(?i:this ensures consistency)']
+#    did NOT suppress "This ensures consistency.", because the token match
+#    starts at "ensures" and the exception starts four characters earlier:
+#      FIXTURE:58:17:Cringely.NarrowedConstructions:... 'ensures consistency.'
+#    while the same exception shortened to '(?i:ensures consistency)' — now
+#    sharing the token's start offset — suppressed it and every other occurrence
+#    of the phrase.
+#    CONSEQUENCE, and it is the important one: `exceptions:` can express "this
+#    token, except when followed by X". It CANNOT express "except when preceded
+#    by X". A left-hand discriminator has to go into the token itself, or the
+#    rule has to be narrowed until it does not need one. There is no third
+#    option: lookbehind is unsupported by RE2 and lookahead silently degrades.
+#
+# 3. THE SURVIVING ALERT IS REPORTED AT THE SUPPRESSED MATCH'S COLUMN. In the
+#    invaluable experiment, the alert that survives is the "invaluable one"
+#    occurrence at column 38, but Vale prints it at column 13 — the position of
+#    the occurrence it just suppressed:
+#      FIXTURE:86:13:Cringely.NarrowedConstructions:Rhetorical filler: 'invaluable'.
+#    Right count, wrong column. Anyone validating a carve-out by eyeballing the
+#    column will conclude it did not work. Validate by COUNT, and only ever
+#    against the full active rule set: two rules sharing a token with different
+#    exception lists produce the same signature.
+#
+# One more, inherited rather than measured here: `ignorecase: true` applies to
+# `tokens` but NOT to `exceptions` (see the header of
+# Cringely/HumanCommonConstructions.yml), so any exception added later must be
+# written as a case-insensitive group.
+
+# ---------------------------------------------------------------------------
+# DROPPED, with the reason, so nobody re-proposes them cold.
+#
+# Keep-a-Changelog headings in a commit body (## Added, ### Fixed,
+# ### Breaking Changes). DROPPED as unimplementable, twice over. First, Vale
+# never sees a commit message: .vale.ini binds only [*.md], and there is no
+# commit-msg hook anywhere in this kit, so the rule could not reach the artifact
+# it was written for. Second, pointed at .md files instead it would fire on
+# every real changelog, and the hard exemption the spec requires (CHANGELOG*,
+# RELEASE*, HISTORY*, NEWS*) is a filename exemption, which lives only in a
+# .vale.ini path section. Net-negative on day one. If commit-message linting is
+# ever wanted, the fix is a commit-msg hook plus a dedicated config, not a rule
+# in this file.
+#
+# Emoji occupying a formatting slot (first character of a heading, or straight
+# after a list marker). DROPPED on measurement plus the same exemption problem.
+# Measured 2026-08-14 across the calibration corpus: zero emoji in any heading
+# or list-marker position in C:\Users\user\.claude\rules, and exactly one
+# non-ASCII symbol in all 32 markdown files of E:\projects\agent-harness-core
+# ("Yes → charter-pointer", patterns/agent-def-shape.md:34), which is mid-prose
+# and would not be matched anyway. So the rule has no true positive to catch
+# here. Against that, it needs four file-level exemptions the spec names
+# outright — README badge and legend rows, CHANGELOG legends, checklist status
+# glyphs, and the Artifact tool's `favicon` parameter, which requires emoji by
+# contract — and all four are filename-scoped, so none of them can be written
+# without editing .vale.ini. The source's own hedge is that the tell is now
+# "more rare". Zero measured benefit against four unexpressible carve-outs is
+# not a close call.
+#
+# "which allows for". DROPPED: ordinary technical English with no rhetorical
+# loading, and the neighbouring senses ("which allows for a 2-hour window") are
+# indistinguishable to a regex.

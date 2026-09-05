@@ -1,0 +1,67 @@
+---
+# Depth-and-water imagery. Family 4 of NarrowedImagery.yml, split into its own
+# file for ONE reason: severity. Vale 3.15.1 has no per-token `level`, and this
+# family earns `warning` where the other five earn `error`, because an honest
+# scope statement in an introduction trips it. "This note scratches the surface
+# of the retry path" is a true and useful sentence; it is also the exact shape of
+# the tell. Warning says "look at this", error says "this is wrong", and only the
+# first is defensible here.
+#
+# THE NARROWING IS THE MULTIWORD FORM. Every token requires a verb, so none of
+# them can touch the technical sense of `surface` that this operator writes
+# constantly - "attack surface", "the surface of the board", "six maintenance
+# surfaces". The fixture proves that direction explicitly rather than assuming
+# it; a rule whose safety argument rests on an untested claim about word
+# adjacency is a rule that has not been tested.
+#
+# Taken: scratches the surface, uncharted waters, plumb the depths.
+#
+# "barely scratches the surface" is deliberately NOT a separate token. Vale joins
+# tokens into one alternation and reports one match per span, so listing both the
+# bare and the intensified form would not double-fire - but it would report the
+# longer or shorter match depending on alternation order, for no gain. The single
+# inflected token `scratch(?:es|ed|ing)? the surface` covers "scratch",
+# "scratches", "scratched", "scratching" and every intensifier in front of them.
+#
+# DROPPED, each for a measured reason rather than taste:
+#   a sea of        - "a sea of config files" is unremarkable descriptive prose,
+#                     and the phrase is short enough to collide with quoted text.
+#   awash in        - low yield; single-digit frequency in any corpus checked.
+#   wade into       - "wade into the planner" reads as ordinary informal English
+#                     here, not as borrowed imagery.
+#   the abyss       - near-zero yield.
+#   the depths of   - collides head-on with the kept token `plumb the depths`,
+#                     which would put two alerts on one span. Two findings on one
+#                     span is the measured noise pattern that gets an entire
+#                     style disabled, and it is the single most expensive
+#                     mistake available in this directory. Keeping the verb form
+#                     and dropping the bare noun phrase avoids it by construction.
+#
+# No `exceptions:` entry is needed or present. Every carve-out this family wants
+# is achieved by requiring the verb, which is a property of the token itself.
+# Negative lookahead was never a candidate: measured on Vale 3.15.1, `foo(?!bar)`
+# silently degrades to a word boundary and exits 0 with no diagnostic.
+#
+# CALIBRATION, 2026-08-14. Corpus: 142 .md files - ~/.claude/rules,
+# ~/.claude/skills, and E:\projects\agent-harness-core minus worktrees, the same
+# corpus the .vale.ini disable notes were measured against.
+#
+# ZERO findings from this rule across all 142 files, including every file that
+# uses "surface" in its technical sense. Read that as evidence the multiword
+# narrowing holds, not as evidence the rule catches anything - nothing in the
+# corpus is bad writing, so yield is unmeasured.
+#
+# Both directions are tested per token in <scratchpad>/fix-families-a.md. The
+# four must-fire lines all fire; "The attack surface grew when the port opened"
+# and "The surface of the board is unpopulated" are both silent, which is the
+# check that matters here. This rule has no exceptions and therefore no exposure
+# to the inline-code-span hole documented in NarrowedImagery.yml - its carve-out
+# is a property of the token, so a following code span cannot defeat it.
+extends: existence
+message: "Depth imagery: '%s'. Say how much is actually covered, or what is unknown."
+level: warning
+ignorecase: true
+tokens:
+  - 'scratch(?:es|ed|ing)? the surface'
+  - 'uncharted waters'
+  - 'plumb(?:s|ed|ing)? the depths'

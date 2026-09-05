@@ -1,0 +1,1 @@
+Written by Export-Account.ps1. Marks this directory as a known export destination so a repeat export does not need -Force. Delete this file (or the whole directory) to require -Force again.

@@ -1,0 +1,211 @@
+---
+# Literal machine residue: generator output that was never prose.
+#
+# Every other rule in this kit is a frequency argument — "delve" is a real word
+# used too often, "ablate" is a real term used three times in a breath. Those
+# arguments decay when a model is retuned. This one does not. Nothing below is
+# English. `oaicite`, `citeturn0search3`, a U+200B between two letters, and
+# `INSERT_COMPANY_NAME` are artifacts of a pipeline, and their presence in a
+# committed document is direct evidence that raw generator output was pasted in
+# and never read. There is no register in which they are correct, so there is no
+# calibration to argue about and no false-positive rate to trade against.
+#
+# ONE RULE, FOUR CLASSES, and why they are not four files:
+#   `level:` is per-rule, not per-token, and every class here is error, so a
+#   split would buy nothing but four identifiers. The costs of merging are real
+#   and worth naming: one `message:` for all four classes (hence the class list
+#   inside it, because %s prints EMPTY for a zero-width match and the reader
+#   needs to know what they are looking at), one `ignorecase:` for all four
+#   (hence the explicit `[Aa]` classes below), and one in-file disable comment
+#   granularity. If a document ever needs to discuss citation artifacts while
+#   still being checked for unfilled placeholders, split then.
+#
+# ignorecase IS OFF, deliberately. `INSERT_[A-Z_]+` and `PASTE_[A-Z_]+` are
+# screaming-snake placeholder conventions; case-insensitive they would match
+# `insert_row`, `paste_buffer` and every ordinary snake_case identifier that
+# survived into prose. Sentence-initial capitals are handled per token with an
+# `[Aa]` class instead. This is the whole reason the file is not `ignorecase: true`.
+#
+# NO NEGATIVE LOOKAHEAD ANYWHERE IN THIS FILE. Measured on Vale 3.15.1 by this
+# session's scouting pass: `foo(?! )` behaves exactly as `foo\b`, and `foo(?!bar)` against
+# "foobar and foobaz and foo" matched only the bare foo — Vale exits 0 and
+# prints no diagnostic, so a lookahead carve-out passes review and is wrong in
+# production. Word boundaries below are plain `\b`, which does work. There are
+# no `exceptions:` in this rule because no surviving token needed a carve-out;
+# every candidate that did need one was dropped instead (see DROPPED, below).
+#
+# ---------------------------------------------------------------------------
+# DROPPED CANDIDATES, each with its reason. Kept in the file because the next
+# person to read a list of AI-residue tokens will propose these again.
+# ---------------------------------------------------------------------------
+#   attached_file          — an ordinary snake_case identifier. Fires on any
+#                            prose naming a variable or form field.
+#   lenticular brackets    — U+3010/U+3011 are standard CJK punctuation. The
+#     【 and 】              bare `oaicite` token below already catches the
+#                            ChatGPT artifact that wraps itself in them.
+#   dagger / double dagger — † and ‡ are ordinary footnote markers.
+#   the generic `:::` form — Pandoc and Docusaurus fenced divs. Only the exact
+#                            `:::writing` literal is anchored.
+#   ↩ (U+21A9)             — GitHub's own footnote rendering emits it. The spec
+#                            allowed it at suggestion only; dropped outright
+#                            because severity is decorative in this kit — every
+#                            consumer runs `vale --output=line`, which prints no
+#                            severity at all (the PostToolUse hooks, the
+#                            pre-commit gate, the /prose-lint skill; see the
+#                            same argument in .vale.ini's
+#                            AnthropomorphicJustification note). A suggestion
+#                            here would be indistinguishable from an error, so
+#                            it is a full-price rule at a discount label.
+#   `[span_1](start_span)` — the Gemini span marker, DROPPED ON MEASUREMENT, not
+#     (and `end_span`)       on taste. It is valid Markdown inline-link syntax,
+#                            and Vale lints only the link TEXT: a probe token
+#                            `\b(?:start|end)_span\b` produced ZERO findings on a
+#                            fixture line containing `[span_1](start_span)`,
+#                            while a probe `\[?\bspan_\d+\b\]?` reported
+#                            `span_1` at column 6 — inside the brackets, with
+#                            both brackets and the whole `(start_span)`
+#                            destination stripped before matching. So the only
+#                            matchable fragment is the bare identifier
+#                            `span_1`, which is an ordinary snake_case token and
+#                            fails the same test that dropped `attached_file`.
+#                            Contrast `[Your Name]`, which DOES match brackets
+#                            and all (fixture 69:5): a shortcut reference link
+#                            with no definition stays literal text, while a full
+#                            inline link is parsed. The Gemini marker's home is
+#                            the byte scan too, or a pre-markdown raw filter.
+#   `[cite: 1]`            — could not be cleared against bibliography tooling
+#                            in this session, and the spec required clearing it
+#                            first. Left out rather than shipped unverified.
+#   `[link to .*]`         — matches the ordinary Markdown link
+#                            `[link to the design doc](url)`.
+#   `(If available)`       — normal checklist English.
+#   FIXME / TODO / ERASE THIS (proselint's set) — this operator runs a skill
+#                            whose job is harvesting those markers. The rule
+#                            would be disabled the day it landed, and a disabled
+#                            rule takes the rest of the style down with it.
+#   U+00A0, U+202F         — correct typography in "10 kg" and "Fig. 3", and
+#                            inserted by any paste from a browser or Word.
+#                            Not residue. Not here at any level.
+#
+# ---------------------------------------------------------------------------
+# WHAT THIS RULE CANNOT SEE. `.vale.ini` binds exactly one format section,
+# `[*.md]`. Vale is never handed a .ps1, .yml, .json, .ts or .sh file, and there
+# is no commit-msg hook anywhere, so commit messages are unlinted too. A zero-
+# width space in a YAML key or a BOM in the middle of a PowerShell script breaks
+# a PARSER, not a sentence, and this rule will never fire on either. The real
+# home for the invisible-character class is a byte scan in the pre-commit hook
+# covering every staged file regardless of extension; the tokens below are the
+# markdown-shaped fraction of that job, not the job.
+#
+# U+FEFF is listed WITHOUT a "not at byte 0" carve-out, because a token regex
+# cannot express file offset and Vale has no anchor for it. Measured on this
+# corpus (see calibration) it produced zero findings, so the BOM-at-byte-0 case
+# either does not arise or is consumed by Vale's own reader. If a legitimately
+# BOM'd file ever fires at 1:1, drop U+FEFF here and let the byte scan own it.
+#
+# ---------------------------------------------------------------------------
+# SELF-EXEMPTION. This rule fires on any document that discusses it — including
+# the report that shipped it and this kit's own documentation. Two mechanisms,
+# both verified this session against the full config:
+#   1. Inline code spans. Vale masks a span's CONTENT with asterisks of equal
+#      length before matching, so `oaicite` in backticks cannot match. This is
+#      the cheap fix and it is also correct typography: an artifact being
+#      discussed is a literal, and literals belong in code spans.
+#   2. An in-file comment, for prose that must name the token bare:
+#           <!-- vale Cringely.MachineResidue = NO -->
+#           ... the passage that quotes artifacts ...
+#           <!-- vale Cringely.MachineResidue = YES -->
+#      `<!-- vale off -->` / `<!-- vale on -->` does the same for every rule at
+#      once. Both verified firing-then-silent on the fixture below.
+#
+# Calibration (2026-08-14). Three runs, all under the full .vale.ini with all 63
+# upstream rules and every sibling Cringely rule active — never a reduced config,
+# because two rules sharing a token report the right COUNT at the wrong column:
+#   C:\Users\user\.claude\rules  (11 files)        86 findings total,  0 mine
+#   E:\projects\agent-harness-core\*.md (2 files)    1 finding  total,  0 mine
+#   wide: repo recursive minus .git/worktrees + ~/.claude/skills + ~/.claude/rules
+#         (142 files, the same corpus the .vale.ini notes above were measured on)
+#                                                 1026 findings total,  0 mine
+# ZERO is the expected result, not a weak one. None of these tokens is English,
+# so a well-written corpus must be silent; a nonzero count would have meant a
+# token was too loose, not that the corpus was bad. There is no threshold in this
+# rule to calibrate — it is presence/absence, which is also why it will not decay
+# when a model is retuned.
+#
+# Fixture: fix-residue.md, 45 findings, every one expected, and zero of them
+# sharing a line:col with any other active rule (checked explicitly — a second
+# alert on one span is the noise pattern that gets a whole style switched off).
+extends: existence
+message: "Machine residue: '%s'. Generator output, not prose — a vendor citation artifact, an invisible character, an unfilled placeholder, or model self-description. Delete it, or fill it in."
+level: error
+nonword: true
+ignorecase: false
+tokens:
+  # --- Vendor citation artifacts -------------------------------------------
+  # ChatGPT. `citeturn` has no trailing \b: it is always glued to a digit
+  # (citeturn0search3), so a boundary there would never hold.
+  - '\boaicite\b'
+  - '\boai_citation\b'
+  - '\bcontentReference\b'
+  - '\bciteturn'
+  - '\bturn\d+search\d+\b'
+  # Generalized from the spec's literal `turn0image0`: the marker increments on
+  # both axes (turn0image1, turn1image0) and a literal would miss every one but
+  # the first. \d+ on both, no other loosening.
+  - '\bturn\d+image\d+\b'
+  - '\battributableIndex\b'
+  # Grok. No trailing \b on grok_card — it appears glued to further _segments.
+  - '\bgrok_card'
+  - '\bgrok_render_citation_card_json\b'
+  # Perplexity file-upload path fragment.
+  - '\bppl-ai-file-upload\b'
+  # NOTE: the Gemini `[span_1](start_span)` marker is NOT here. It cannot be
+  # matched in markdown and the measurement is in the DROPPED list above.
+  # Anchored to the exact literal only. Bare ::: is a Pandoc/Docusaurus fenced
+  # div and matching it would fire on legitimate documentation syntax.
+  - ':::writing'
+
+  # --- Zero-width and invisible characters ----------------------------------
+  # ZWSP, ZWNJ, ZWJ, word joiner, BOM. Two known collateral cases, neither
+  # present in this corpus and both worth knowing before this ships elsewhere:
+  # U+200D is load-bearing inside emoji ZWJ sequences (a profession or family
+  # emoji contains one), and U+200C is required orthography in Persian, Hindi
+  # and Malay. In an English engineering corpus that emits no emoji, both are
+  # residue. In a document that does either, disable this rule in-file.
+  - '\x{200B}'
+  - '\x{200C}'
+  - '\x{200D}'
+  - '\x{2060}'
+  - '\x{FEFF}'
+
+  # --- Unfilled placeholders -------------------------------------------------
+  # Leading \b on INSERT_/PASTE_ is doing real work: without it, INSERT_ matches
+  # inside BULK_INSERT_MODE. With it, the preceding underscore is a word
+  # character so no boundary exists there and the identifier is left alone.
+  - '\[Your Name\]'
+  - '\bINSERT_[A-Z_]+'
+  - '\bPASTE_[A-Z_]+'
+  - '\b20\d\d-[Xx]{2}-[Xx]{2}\b'
+  - '[Tt]his section would discuss'
+
+  # --- First-person model self-description ----------------------------------
+  # ANCHORED ON THE FIRST-PERSON POSSESSIVE, without exception. "As of March
+  # 2026, the API returns 404" is ordinary and correct engineering prose and
+  # must never match; only "as of MY last update" is the tell. Every token in
+  # this block therefore contains `my`, `I`, or the literal "as a(n) ... model".
+  # Named MachineResidue and not SelfReference: ai-tells.SelfReference is
+  # already taken and covers a different thing (cross-references — "as mentioned
+  # above"), with no token overlap with this block. Grepped 2026-08-14.
+  - '\b[Aa]s of my (?:last|latest|most recent) (?:update|training|knowledge update)\b'
+  - '\bmy training data\b'
+  - '\bmy (?:knowledge|training) cutoff\b'
+  - '\b[Aa]s an AI (?:language model|model|assistant)\b'
+  - '\b[Aa]s an? (?:large )?language model\b'
+  # The can't-reach-the-network family, deliberately narrow. "I cannot access
+  # the web" is NOT here: `the web\b` also matches "the web interface", which a
+  # human writes in an ordinary bug report. Only `browse` (unambiguous) is
+  # allowed to take "web". Also dropped: "I can't open external links", which is
+  # something a person legitimately writes.
+  - '\bI (?:cannot|can[''’]t|am unable to) access the internet\b'
+  - '\bI (?:cannot|can[''’]t|am unable to) browse the (?:internet|web)\b'
+  - '\bI (?:do not|don[''’]t) have (?:access to the internet|internet access|real-?time access)\b'
