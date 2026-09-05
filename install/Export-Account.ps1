@@ -456,6 +456,27 @@ if ($PSCmdlet.ShouldProcess($OutputRoot, 'fold model-read machine paths')) {
                 Write-Warning "${rel}: token $($f.Token) did not match the file's text; it still carries whatever machine path it had."
             }
         }
+        # A row that folds NONE of its tokens is a different failure from a row that folds some
+        # of them, and printing both through the same Write-Host below put them in the same
+        # register. Every row in the table exists because that file carries a machine path; a
+        # zero count says the file no longer carries any of the literals the row names, which
+        # means the table and the source text have drifted apart. That is the failure the report
+        # was added to catch, so it throws rather than warns.
+        #
+        # Zero, not "fewer than all". A partial match (the two-token row where one token lands)
+        # is a real signal too, and the per-token Write-Warning above already names exactly which
+        # token stopped matching; promoting that to a throw would make a file legitimately losing
+        # one of its two literals block every export until the table was edited.
+        #
+        # Scope note: backlog item 29 asked for this on "the two files where a fold is required
+        # rather than incidental" and named neither. Nothing in the repo records which two. All
+        # six rows have the same character -- each is model-read text that a placeholder cannot
+        # be written into at source -- so this applies to all six. Measured against the live
+        # account layer before shipping it: every row folds at least one token today (five at
+        # 1 of 1, subagent-prompting at 2 of 2), so no real export changes behaviour.
+        if ($substituted -eq 0) {
+            throw "Templated file '$rel' folded none of its $(@($rowFolds).Count) token(s) ($($wanted -join ', ')). The fold table in AccountShared.ps1 and the file's text have drifted apart; the payload would ship whatever machine path this file carries. Fix the row or the source text."
+        }
         Set-Content -LiteralPath $target -Value $text -NoNewline
         Write-Host "  ${rel}: folded $substituted of $(@($rowFolds).Count) token(s)$dryRun"
     }
