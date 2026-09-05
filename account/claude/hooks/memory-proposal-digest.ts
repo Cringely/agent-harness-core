@@ -15,7 +15,7 @@
 //   bun ~/.claude/hooks/memory-proposal-digest.ts --selftest   # parse + expiry math check
 
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -194,15 +194,19 @@ function note(fm: string, body = "\n## Decision\n\nbody\n", crlf = false): strin
 }
 
 function selftest(): void {
-  const root = join(tmpdir(), `memory-proposal-digest-selftest-${process.pid}`);
-  const empty = join(root, "..", `memory-proposal-digest-empty-${process.pid}`);
+  // mkdtempSync, not a hand-built tmpdir() path suffixed with the process id: a pid is
+  // guessable, and a shared /tmp lets another user pre-create that name (as a real
+  // directory or a symlink) ahead of us. mkdtempSync creates a directory atomically with
+  // an unpredictable suffix, so there is nothing to pre-place a path against.
+  const root = mkdtempSync(join(tmpdir(), "memory-proposal-digest-selftest-"));
+  const empty = mkdtempSync(join(tmpdir(), "memory-proposal-digest-empty-"));
   const projA = join(root, "P--alpha", "memory");
   const projB = join(root, "P--beta", "memory");
   try {
     mkdirSync(projA, { recursive: true });
     mkdirSync(projB, { recursive: true });
     mkdirSync(join(root, "P--no-memory"), { recursive: true });
-    mkdirSync(empty, { recursive: true });
+    // empty already exists — mkdtempSync created it above.
 
     // CRLF throughout, quoted description: the shape that a bare "\n" split breaks.
     writeFileSync(
