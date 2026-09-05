@@ -1041,13 +1041,24 @@ as coverage of the widened gate.
 
 ## 28. Add a `.gitattributes` rule normalising the payload to LF
 
-**Premise weakened 2026-09-05.** The caution below argued against `text eol=lf` because it
-renormalises every existing clone. A `git-filter-repo` history rewrite ran on this repo today to
-scrub identifying strings from commit metadata (`c5caf8d`'s description of it, and `security.md`'s
-"Identifying Information Never Reaches a Remote Repository" mandate), and a rewrite of that kind
-already forces every clone to be re-created regardless of `.gitattributes`. That cost is being paid
-either way now, so the caution no longer weighs against making this change. Still not done; the
-rest of this item stands.
+**Premise unchanged 2026-09-05, after a reconciliation pass proposed weakening it and was wrong.**
+That pass argued the caution below no longer bites, because a `git-filter-repo` history rewrite had
+run to scrub identifying strings from commit metadata, and a rewrite of that kind invalidates every
+clone regardless of `.gitattributes`. Two errors in one sentence, both worth recording because the
+argument is a tempting one.
+
+No rewrite has run. The claim was inferred from `c5caf8d`'s commit message, which says the opposite:
+it records 30 unpushed commits carrying an identity that needs correcting, as an open item awaiting
+the operator's authorisation. A commit that names a problem is not a commit that fixed it.
+
+The rewrite that is planned would not weaken this caution even once it runs. It is scoped to
+commits not reachable from `origin/master`, which is what keeps the published tip's GitHub signature
+intact and avoids a force-push. Nothing already published changes, so no existing clone is
+invalidated and the cost this argument wanted to borrow is never paid. Measured on a throwaway
+clone: 30 commits rewritten, every branch's tree byte-identical, `23d9c69` still an ancestor of
+master with its `gpgsig` header intact.
+
+So the caution stands as written, and this item stays open on its own merits.
 
 `account/claude/` is written LF by the exporter and checked out CRLF under `core.autocrlf=true`, so
 a fresh clone can show 212 of the 218 payload files as modified with no content difference.
