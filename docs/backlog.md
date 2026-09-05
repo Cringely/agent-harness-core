@@ -1138,3 +1138,61 @@ Whether that is deliberate for a process-layer repo is worth asking rather than 
 need `pwsh`, `bun` and a populated `~/.claude` to exercise anything, and a CI runner has none of the
 third. Worth a decision note recording the answer either way, since the current state reads
 as an oversight and may not be one.
+
+## 37. `GIT_COMMIT_RE` backtracks exponentially on flag-shaped input
+
+`core/claude/hooks/review-gate.ts:312-313` defines the pattern that recognises a `git commit`
+invocation, applied at `:337`. Its starred group holds three alternatives that overlap on the same
+input token and consume different numbers of tokens: `\s+-C\s+(\S+)` and `\s+-c\s+\S+` each swallow
+the following token as an argument, while `\s+-{1,2}[A-Za-z][\w-]*(?:=\S+)?` matches the flag alone.
+Nothing requires `-C`'s argument to be non-flag-shaped, so a run of n flag-shaped tokens can be
+tiled in Fibonacci(n+1) ways, and the engine explores all of them when the trailing `\s+commit`
+fails to match.
+
+Reproduced, not inferred. The input is `"git" + " -C".repeat(n) + " x"`; at n=40 that is a
+125-character Bash command. Bare pattern on node: 68 ms at n=32 rising to 3169 ms at n=40, roughly
+×2.6 per two added tokens, unbounded. Through the hook's own exported `parseGitCommitInvocation`
+and `decide` on bun, which is the runtime the hooks actually run on: 1435.9 ms at n=125, then flat
+from n=40 through n=200, so JSC appears to cap backtracking. The honest impact statement is a fixed
+stall of about 1.4 seconds on every matching Bash tool call under bun, and an unbounded hang under
+node. CodeQL's analysis is an NFA-ambiguity search over the pattern and is runtime-independent, so
+the alert fires either way.
+
+Reachability is not in question: this is a PreToolUse hook on matcher `Bash`, and
+`parseGitCommitInvocation(command)` runs before any short-circuit on every Bash tool call. Quoting
+the flags defeats the attack, because `scrubQuotesAndHeredocs()` blanks quoted spans first.
+
+Two constraints on whoever fixes it. The deferred global-regex rewrite sketched in the doc comment
+at `review-gate.ts:326-330` makes this strictly worse, since `while ((m = re.exec(scrubbed)))` pays
+the backtracking cost per match; that rewrite and this fix have to land together. And the fix is to
+remove the ambiguity, not to add an input-length cap, which would guard the consumer while leaving
+the pattern wrong.
+
+This is almost certainly one of the three open CodeQL alerts. `js/redos` is error severity,
+security-severity 7.5, precision high, and sits in `javascript-code-scanning.qls`, so it fires under
+default setup with no configuration. It is on `master` and therefore predates PR #53, which is why
+that PR's green check never contradicted it: a code-scanning PR check fails on alerts the pull
+request introduces, not on ones already present. Suite membership here is documented spec read
+through a fetch summarizer rather than quoted verbatim, so confirm it against the query source if a
+decision turns on it.
+
+## 38. Two hooks interpolate an unvalidated payload field into a filesystem path
+
+`core/claude/hooks/agent-write-scope.ts:80` builds `join(projectDir, ".claude", "agents",
+`${agentType}.md`)` and `core/claude/hooks/agent-worktree-gate.ts:164` builds
+`join(agentsDir, `${subagentType}.md`)`. Both values arrive in the hook payload. `agent_type` is
+lowercased and trimmed and never validated, so `agent_type: "../../../../etc/passwd"` reaches
+`readFileSync` with no traversal or charset guard between.
+
+Impact today is low and the reason is worth writing down rather than trusting: the read result only
+feeds a `writeScope` or `tools` lookup, and both call sites fail closed when the read throws. So
+this is a missing guard rather than a live vulnerability. It is also the only place in the
+repository's 19 TypeScript files where untrusted text becomes a path with nothing filtering it.
+
+It produces no CodeQL alert as configured, and the reason generalises past this item. CodeQL's
+default threat model is `remote` only; command-line arguments, environment variables, stdin and
+file contents are the `local` model and are opt-in through `threat-models: local`. These hooks have
+no HTTP or DOM surface, so every taint-based query runs with zero sources. Six `js/path-injection`
+sinks and one `js/prototype-polluting-assignment` sink exist across the hooks and all of them are
+dark. Enabling `local` would light them up at once, which makes that a change to sequence
+deliberately rather than to flip while chasing something else.
