@@ -84,6 +84,34 @@ exit 0
         function New-OutputRoot {
             Join-Path ([System.IO.Path]::GetTempPath()) ("acct-out-" + [guid]::NewGuid())
         }
+
+        # Every identity test writes its own file and passes -IdentityFile. The DEFAULT is the
+        # operator's real declaration, and a test that fell back to it would assert against the
+        # exact strings this repo exists to keep out -- printing them on the first failure, which
+        # is the reasoning the -WslHome stub below already follows.
+        #
+        # The JSON is built by hand rather than through ConvertTo-Json because the empty case is
+        # load-bearing: "declares nothing" must still leave the username arm running, and that
+        # branch is worth writing as literal [] rather than trusting a serialiser to emit it.
+        function New-IdentityFile {
+            param([string[]]$Names = @(), [string[]]$Emails = @(), [string]$Raw)
+            $p = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-ident-" + [guid]::NewGuid() + ".json")
+            $body = if ($PSBoundParameters.ContainsKey('Raw')) { $Raw }
+            else {
+                $n = (@($Names) | ForEach-Object { '"' + $_ + '"' }) -join ','
+                $e = (@($Emails) | ForEach-Object { '"' + $_ + '"' }) -join ','
+                "{`"names`":[$n],`"emails`":[$e]}"
+            }
+            Set-Content -LiteralPath $p -Value $body
+            return $p
+        }
+
+        # A username that cannot occur in a real path on the machine running the suite.
+        # [System.IO.Path]::GetTempPath() on Windows is under the profile directory, so every
+        # stand-in home built above already carries the RUNNER's username in a `Users\<name>`
+        # position. Without an explicit -AccountUser the exporter would redact that out of the
+        # fixtures, and the suite's behaviour would then depend on whose machine ran it.
+        $script:fixtureUser = 'zzfixtureuser'
     }
 
     It "lifts all three path functions out of Restore-ClaudeProject.ps1" {
@@ -828,8 +856,14 @@ exit 0
             "Core repo: $core. Account home is $ch, which this row does not list." |
                 Set-Content (Join-Path $ch 'rules/harness-core.md')
 
+            # -AccountUser, because this is the one It that asserts a STAND-IN PATH survives into
+            # the payload verbatim, and a stand-in path sits under [System.IO.Path]::GetTempPath(),
+            # which on Windows is inside the runner's own profile directory. Without the override
+            # the identity redaction rewrites `Users\<runner>` inside $ch and this assertion fails
+            # on the operator's machine while passing on one whose temp directory is elsewhere.
             & $script:export -ClaudeHome $ch -OutputRoot $out -CoreRepo $core `
-                -NpmGlobal 'C:/npm' -VaultPath 'C:/vault' -SkipSettings -SkipMcp | Out-Null
+                -NpmGlobal 'C:/npm' -VaultPath 'C:/vault' -SkipSettings -SkipMcp `
+                -AccountUser $script:fixtureUser | Out-Null
 
             $t = Get-Content (Join-Path $out 'rules/harness-core.md') -Raw
             $t | Should -Match '\{\{CORE_REPO\}\}'
@@ -1385,6 +1419,256 @@ exit 0
                 Should -BeTrue -Because "the gate must not abort on bytes it had no business decoding"
         }
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    # --- identity redaction and gate -----------------------------------------
+    # security.md's mandate: identifying information must never reach a remote repository, and
+    # only a human can override it. account/claude/ is generated into a PUBLIC repo, so the
+    # generator carries the mandate rather than trusting an upstream scrub. It had not: six
+    # payload files held a neutral placeholder where their live sources hold the username, and
+    # nothing in this script put it there -- a one-time git-filter-repo run outside the generator
+    # did, leaving the next export free to write the username straight back in.
+    #
+    # The two mechanisms are tested apart because their widths differ on purpose. Redaction is
+    # narrow (username in a profile-path position only); the gate is wide (any identifying string
+    # anywhere) and is the only mechanism for a declared name or email.
+
+    It "redacts the workstation username where it sits in a profile path, and names the file it changed" {
+        # rules/ssh.md, because it is one of the six real files this applies to and it is
+        # deliberately NOT in $AccountTemplatedFiles -- no fold pass reaches it, so redaction is
+        # the only thing that can take the username out.
+        #
+        # Ablating the redaction does not merely change the output here, it turns the export into
+        # a throw: the gate is wider than the redaction and fires on what redaction would have
+        # removed. Both halves are asserted, so a mutation that keeps the file readable while
+        # dropping the placeholder is red on the -Match, and one that drops the whole block is red
+        # on the marker.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        $ident = New-IdentityFile
+        try {
+            $ch = (Join-Path $stand '.claude')
+            "SSH config is at C:\Users\$($script:fixtureUser)\.ssh\config on this workstation." |
+                Set-Content (Join-Path $ch 'rules/ssh.md')
+
+            & $script:export -ClaudeHome $ch -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipSettings -SkipMcp `
+                -AccountUser $script:fixtureUser -IdentityFile $ident `
+                -InformationVariable info -InformationAction SilentlyContinue | Out-Null
+
+            $ssh = Get-Content (Join-Path $out 'rules/ssh.md') -Raw
+            $ssh | Should -Match ([regex]::Escape('C:\Users\user\.ssh\config')) `
+                -Because "the sentence keeps naming this machine's path shape, minus the person"
+            $ssh | Should -Not -Match ([regex]::Escape($script:fixtureUser))
+            Test-Path -LiteralPath (Join-Path $out '.export-account-marker') |
+                Should -BeTrue -Because "a redacted payload is a clean payload, not a failed export"
+            # The audit trail. A redaction landing anywhere unexpected -- settings.account.json or
+            # mcp-servers.json, where a rewritten path is wrong on the receiver rather than merely
+            # neutral -- is only visible because every changed file is named on the way past.
+            (@($info) -join "`n") |
+                Should -Match 'rules/ssh\.md: redacted 1 workstation-username occurrence'
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out, $ident -ErrorAction SilentlyContinue }
+    }
+
+    It "refuses when the workstation username survives outside a profile path, where redaction cannot reach" {
+        # The negative space the narrow redaction leaves, and the reason the gate is wider than
+        # it. A bare mention in prose is a defect in the SOURCE for a human to fix; rewriting
+        # arbitrary prose is how a redactor mangles a document, and a username short or common
+        # enough to read as an ordinary word (root, admin, user) makes a blind replace the same
+        # false-positive failure the WSL gate's /root boundary exists to stop.
+        #
+        # This It also pins the redaction's narrowness from the other side: widening it to a bare
+        # replace turns this green on the export and red on the -Throw.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        $ident = New-IdentityFile
+        try {
+            $ch = (Join-Path $stand '.claude')
+            "The account on this box is called $($script:fixtureUser), for what it is worth." |
+                Set-Content (Join-Path $ch 'rules/security.md')
+
+            { & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp `
+                    -AccountUser $script:fixtureUser -IdentityFile $ident } |
+                Should -Throw -ExpectedMessage '*rules/security.md*workstation username*'
+            Test-Path -LiteralPath (Join-Path $out '.export-account-marker') |
+                Should -BeFalse -Because "a gate that threw must not have written the marker"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out, $ident -ErrorAction SilentlyContinue }
+    }
+
+    It "refuses on a declared name, naming the file and the class but never the value" {
+        # A legal name has no automatic rewrite and must not get one: substituting a name means
+        # substituting somebody else's. The gate is the whole mechanism for this class.
+        #
+        # The "never the value" half is not decoration. The mandate covers every channel a run
+        # touches, and a message quoting its match copies the string into console output, CI logs
+        # and any transcript. Reverting to a message built with the matched value leaves the first
+        # two assertions green and only this third one red, which is why it is separate.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        $name = 'Zylric Quandsworth'
+        $ident = New-IdentityFile -Names @($name)
+        try {
+            $ch = (Join-Path $stand '.claude')
+            "Reviewed by $name on the second pass." |
+                Set-Content (Join-Path $ch 'rules/security.md')
+
+            $err = $null
+            try {
+                & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp `
+                    -AccountUser $script:fixtureUser -IdentityFile $ident | Out-Null
+            }
+            catch { $err = $_ }
+
+            $err | Should -Not -BeNullOrEmpty -Because "a declared name in the payload must abort the export"
+            $err.Exception.Message | Should -Match ([regex]::Escape('rules/security.md'))
+            $err.Exception.Message | Should -Match 'declared name'
+            $err.Exception.Message | Should -Not -Match ([regex]::Escape($name)) `
+                -Because "the refusal must not copy the string it exists to contain"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out, $ident -ErrorAction SilentlyContinue }
+    }
+
+    It "refuses on a declared email carried by a file the exporter generated rather than copied" {
+        # Coverage claim this It exists to make measurable: the gate reads the WRITTEN PAYLOAD, not
+        # the source tree, so it also covers the two files no Copy-AccountTree pass ever touches.
+        # settings.account.json is built from parsed JSON above and lands in -OutputRoot before the
+        # traversal runs. A scrub wired into the copy instead would leave both generated files
+        # unchecked and every assertion here green except this one.
+        #
+        # A non-command key, because ConvertTo-TemplatedCommand only rewrites hook and statusLine
+        # commands; "keeps every non-command key" above pins that such a key survives untouched,
+        # which is exactly what makes it a live route into the payload.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        $email = 'zq@example.invalid'
+        $ident = New-IdentityFile -Emails @($email)
+        try {
+            $ch = (Join-Path $stand '.claude')
+            @{
+                env   = @{ REPORT_CONTACT = $email }
+                hooks = @{}
+            } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $ch 'settings.json')
+
+            { & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipMcp `
+                    -AccountUser $script:fixtureUser -IdentityFile $ident } |
+                Should -Throw -ExpectedMessage '*settings.account.json*declared email*'
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out, $ident -ErrorAction SilentlyContinue }
+    }
+
+    It "still checks the workstation username when the identity file declares nothing" {
+        # An empty list means "nothing extra to check", never "check nothing". The username arm is
+        # derived from the environment and does not depend on the file at all, so a mutation that
+        # skips the gate whenever the declared lists are empty -- the plausible one, since that is
+        # the common case -- has to be red here.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        $ident = New-IdentityFile -Names @() -Emails @()
+        try {
+            $ch = (Join-Path $stand '.claude')
+            "The account on this box is called $($script:fixtureUser)." |
+                Set-Content (Join-Path $ch 'rules/security.md')
+
+            { & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp `
+                    -AccountUser $script:fixtureUser -IdentityFile $ident } |
+                Should -Throw -ExpectedMessage '*workstation username*'
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out, $ident -ErrorAction SilentlyContinue }
+    }
+
+    It "does not read a declared name out of an ordinary word that contains it" {
+        # Measured on the live account layer, and the reason the gate uses lookarounds rather than
+        # a substring test: skills/owasp-llm/references/08-vector-and-embedding-weaknesses.md:117
+        # reads "adjusting the augmentation process", which contains the operator's declared first
+        # name as a substring. A bare containment check aborts every export against a vendored
+        # third-party document nobody here may edit -- the same failure the WSL gate's /root
+        # boundary already fixed, one class up.
+        #
+        # The fixture uses a synthetic four-letter declaration rather than the real first name for
+        # the obvious reason: writing that name into a test in this repo is the thing being
+        # prevented. 'Just' sits inside 'adjusting' exactly as the real one does.
+        #
+        # Ablation is the over-permissive mutation, not the revert: dropping the lookarounds for a
+        # plain -match or .Contains turns this red while every other It in this group stays green.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        $ident = New-IdentityFile -Names @('Just')
+        try {
+            $ch = (Join-Path $stand '.claude')
+            'Adversarial suffixes work by adjusting the augmentation process.' |
+                Set-Content (Join-Path $ch 'rules/security.md')
+
+            & $script:export -ClaudeHome $ch -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipSettings -SkipMcp `
+                -AccountUser $script:fixtureUser -IdentityFile $ident | Out-Null
+
+            Test-Path -LiteralPath (Join-Path $out '.export-account-marker') |
+                Should -BeTrue -Because "a declared name inside an unrelated word is not a leak"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out, $ident -ErrorAction SilentlyContinue }
+    }
+
+    It "throws on a malformed identity file before writing any payload" {
+        # A gate reading its own config must not degrade to "checked less than you think" because
+        # a comma went missing, and it must say so before 218 files are on disk rather than after.
+        # -OutputRoot is never created at all, which is the assertion that separates a fail-fast
+        # from a warn-and-continue.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        $ident = New-IdentityFile -Raw '{ "names": [ '
+        try {
+            { & $script:export -ClaudeHome (Join-Path $stand '.claude') -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp `
+                    -AccountUser $script:fixtureUser -IdentityFile $ident } |
+                Should -Throw -ExpectedMessage '*not valid JSON*'
+            Test-Path -LiteralPath $out |
+                Should -BeFalse -Because "the identity file is read before the first copy"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out, $ident -ErrorAction SilentlyContinue }
+    }
+
+    It "derives the workstation username from `$HOME when the caller omits -AccountUser" {
+        # The same gap backlog item 24 found on -WslHome: every other It in this group passes
+        # -AccountUser explicitly, so deleting the default-resolution line leaves all of them green
+        # while a real export ships the username. This is the only It that exercises the default.
+        #
+        # Asserted as BOOLEANS, deliberately. Pester prints the expected and actual value of a
+        # failed Should, so `Should -Match $realLeaf` would put the operator's username in the
+        # suite's output the first time this broke -- the exact disclosure the whole change exists
+        # to prevent, and the reasoning the -WslHome stub below follows for the same reason.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        $ident = New-IdentityFile
+        try {
+            $ch = (Join-Path $stand '.claude')
+            $leaf = Split-Path ($HOME.TrimEnd('\', '/')) -Leaf
+            "profile lives at C:\Users\$leaf\Documents" |
+                Set-Content (Join-Path $ch 'rules/ssh.md')
+
+            & $script:export -ClaudeHome $ch -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipSettings -SkipMcp -IdentityFile $ident | Out-Null
+
+            $ssh = Get-Content (Join-Path $out 'rules/ssh.md') -Raw
+            $ssh.Contains('C:\Users\user\Documents') |
+                Should -BeTrue -Because "the default -AccountUser must resolve to this machine's profile leaf"
+            $ssh.Contains($leaf) |
+                Should -BeFalse -Because "no spelling of the username may survive into the payload"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out, $ident -ErrorAction SilentlyContinue }
     }
 
     It "resolves -WslHome from wsl when the caller omits the parameter" {
