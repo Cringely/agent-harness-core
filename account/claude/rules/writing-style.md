@@ -37,16 +37,19 @@ normal prose regardless of surface.
 
 Row 5 is an exemption, not a register. Internal agent traffic is written for the next agent or the
 next session, never for a reader, so no prose contract binds it. The mechanism is the skip list in
-`~/.claude/hooks/Lint-DocumentProse.ps1`, which matches `/memory/`, `/handoffs/`, `/scratchpad/`,
-`/.scratch/`, `/council-transcripts/`, `/.claude/` and `/obsidian vault/claude code/` against the
-path of the file just written, then exits before Vale ever starts. That vault token is the sync
-target, not the vault: the hand-authored notes sitting elsewhere under `Obsidian Vault` are the
-operator's own prose and keep linting. The same list drops `/node_modules/`, `/.git/` and
+`~/.claude/hooks/Lint-DocumentProse.ps1`, which matches `/memory/`, `/handoffs/`,
+`/scratchpad/`, `/.scratch/`, `/.superpowers/`, `/council-transcripts/`, `/.claude/` and
+`/obsidian vault/claude code/` against the path of the file just written, then exits before Vale
+ever starts. That vault token is the sync target, not the vault: the hand-authored notes sitting
+elsewhere under `Obsidian Vault` are the operator's own prose and keep linting. The `.superpowers`
+token keeps its dot: the subagent-driven-development skill writes its briefs and reports to
+`<repo>/.superpowers/sdd/`, while a repository's committed `docs/superpowers/plans/` holds
+deliverables that must keep linting. The same list drops `/node_modules/`, `/.git/` and
 `/.obsidian/`, which is housekeeping rather than contract.
 
 Two more mechanisms carry the exemption into any project that installs the core hooks,
 `core/claude/hooks/lint-doc-prose.ts` on write and `core/claude/hooks/pre-commit` on commit. Their
-list differs on purpose: the same six agent-traffic segments, no vault token at all because the
+list differs on purpose: the same seven agent-traffic segments, no vault token at all because the
 vault is this machine's rather than a project's, and `docs/assets/` on top in the write hook.
 Naming all three mechanisms here keeps the contract and the tools from drifting apart quietly: a
 change to one is a change to the others.
