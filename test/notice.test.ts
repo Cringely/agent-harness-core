@@ -13,20 +13,53 @@
 // counts. A prose reminder inside NOTICE would have lost that argument the same
 // way, so the reminder is here, where it fails a run.
 //
-// Deliberately narrow: it catches "218 files" and "2 files", the form the
-// document actually used, and not every conceivable phrasing of a count. A
-// guard that tried to recognise "eighty-five markdown documents" would be
-// guessing at English, and the rule it enforces is a review-time judgment that
-// this check only backstops at its most common shape.
+// The first version of this guard read only digits followed by "files", which
+// is the form the eleven counts happened to use, and it therefore matched none
+// of the three that survived them: "All seven trees", "The six OWASP trees",
+// "all seven trees". CONTRIBUTING.md's clause covers "any number read off a
+// file", not only file counts, and one of those three scoped a LICENCE claim by
+// a count of a generated directory — an eighth OWASP skill arriving through
+// Export-Account.ps1 would have falsified it silently. So the guard now reads a
+// spelled-out number as readily as a digit, and reads trees, directories and
+// skills as readily as files.
+//
+// Still deliberately bounded, in two ways. The number words stop at twelve,
+// because a notice counting past that is counting something it has no business
+// enumerating either way. And a count is only a finding when a payload noun
+// follows it within a word, which is what keeps "OGL-UK-3.0 AND CC-BY-4.0" and
+// "v1.21.2" out. Nothing here tries to recognise "eighty-five markdown
+// documents": the rule is a review-time judgment this check backstops at its
+// common shapes, not a parser for English.
 
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
+const COUNT = String.raw`\d[\d,]*|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve`;
+// What this notice could be counting: the trees and files of a generated tree.
+const PAYLOAD = String.raw`files?|trees?|director(?:y|ies)|skills?|documents?`;
+// One optional word between the two, so "six OWASP trees" is caught alongside
+// "seven trees". Two would start matching ordinary prose that happens to open
+// with a number word.
+const COUNTED = new RegExp(String.raw`\b(?:${COUNT})\s+(?:\w+\s+)?(?:${PAYLOAD})\b`, "gi");
+
 describe("NOTICE — no hard-coded measurement of the generated payload", () => {
-  test("states no file count", () => {
+  test("counts nothing in the payload, in digits or in words", () => {
     const notice = readFileSync(join(import.meta.dir, "..", "NOTICE"), "utf8");
-    const counts = [...notice.matchAll(/\b\d[\d,]*\s+files?\b/gi)].map((m) => m[0]);
+    const counts = [...notice.matchAll(COUNTED)].map((m) => m[0]);
     expect(counts).toEqual([]);
+  });
+
+  // Without this the case above passes on a guard that matches nothing at all,
+  // which is exactly how the digits-only version read clean over three counts
+  // it could not see.
+  test("the guard recognises both spellings it was widened for", () => {
+    const found = (s: string) => [...s.matchAll(COUNTED)].map((m) => m[0]);
+    expect(found("All seven trees come from microsoft/hve-core.")).toEqual(["seven trees"]);
+    expect(found("The six OWASP trees carry license: CC-BY-SA-4.0.")).toEqual(["six OWASP trees"]);
+    expect(found("218 files under account/claude/.")).toEqual(["218 files"]);
+    // The two version strings the notice legitimately carries stay clean.
+    expect(found("`license: OGL-UK-3.0 AND CC-BY-4.0`")).toEqual([]);
+    expect(found("vale-ai-tells at v1.21.2, pinned by release URL")).toEqual([]);
   });
 });
