@@ -305,6 +305,72 @@ function accountSkipTokens(): string[] {
   return [...body.matchAll(/'([^']*)'/g)].map((m) => m[1]);
 }
 
+// Each mechanism carries entries beyond the shared seven, and writing-style.md
+// row 5 says why: docs/assets/ is generated and belongs only to the hook that
+// fires on every write, and the account hook's four are this machine's vault
+// mirror plus housekeeping trees a project has no equivalent of. Deliberate, so
+// they are declared here rather than filtered out — an extra that disappears
+// from its mechanism reddens too.
+const TS_EXTRAS = ["docs/assets"];
+const PRE_COMMIT_EXTRAS: string[] = [];
+const ACCOUNT_EXTRAS = ["obsidian vault/claude code", "node_modules", ".git", ".obsidian"];
+
+/** A SKIP_PATHS regex source reduced to the segment it matches:
+ * "(^|\\/)\\.claude\\/(?!worktrees\\/)" ⇒ ".claude". The worktree lookahead is
+ * dropped on purpose — it is behaviour, and the four worktree cases above pin
+ * it directly. Throws on an entry that is not separator-anchored rather than
+ * inventing a segment name for it. */
+function tsSegment(src: string): string {
+  const anchor = "(^|\\/)";
+  if (!src.startsWith(anchor)) {
+    throw new Error(`SKIP_PATHS entry is not separator-anchored: /${src}/`);
+  }
+  return src
+    .slice(anchor.length)
+    .split("(?")[0]
+    .replace(/\\([./])/g, "$1")
+    .replace(/\/+$/, "")
+    .toLowerCase();
+}
+
+/** pre-commit's arms reduced to segments, kept as two sets because the root
+ * arm (".claude/*") and the nested arm ("*​/.claude/*") are separate globs and
+ * a segment carried by only one of them is half a matcher. */
+function preCommitSegments(): { root: string[]; nested: string[] } {
+  const root: string[] = [];
+  const nested: string[] = [];
+  for (const arm of preCommitArms()) {
+    const asNested = /^\*\/(.+)\/\*$/.exec(arm);
+    if (asNested) {
+      nested.push(asNested[1].toLowerCase());
+      continue;
+    }
+    const asRoot = /^([^*]+)\/\*$/.exec(arm);
+    if (asRoot) {
+      root.push(asRoot[1].toLowerCase());
+      continue;
+    }
+    throw new Error(`pre-commit arm is neither a root nor a nested segment glob: ${arm}`);
+  }
+  return { root, nested };
+}
+
+/** A $skip token reduced to its segment: "/memory/" ⇒ "memory". Throws on a
+ * token that is not separator-wrapped, which would be a substring match. */
+function accountSegment(token: string): string {
+  if (!token.startsWith("/") || !token.endsWith("/") || token.length < 3) {
+    throw new Error(`$skip entry is not separator-wrapped: ${JSON.stringify(token)}`);
+  }
+  return token.slice(1, -1).toLowerCase();
+}
+
+const sorted = (xs: string[]): string[] => [...xs].sort();
+
+/** The whole set one mechanism is allowed to carry: the shared seven plus its
+ * own declared extras, and nothing else. */
+const expectedSegments = (extras: string[]): string[] =>
+  sorted([...AGENT_TRAFFIC_SEGMENTS, ...extras]);
+
 // A parser that silently returned [] would make every case below pass
 // vacuously, so none of them is written to tolerate one: region() throws when
 // its anchor is gone, .some() over an empty array is false, and toContain on an
@@ -325,5 +391,45 @@ describe("prose-lint exemption — the three mechanisms carry one segment set", 
 
   test.each(AGENT_TRAFFIC_SEGMENTS)("Lint-DocumentProse.ps1 skips /%s/", (segment) => {
     expect(accountSkipTokens()).toContain(`/${segment}/`);
+  });
+});
+
+// The 21 cases above are a one-directional subset check: they prove each of the
+// seven segments is present in all three mechanisms and say nothing about what
+// else is. Inserting /(^|\/)\.newtraffic\//i, into SKIP_PATHS alone, touching
+// neither pre-commit nor the account hook, left the suite green — which is the
+// same shape as items 17 and 22, a segment in some mechanisms and absent from
+// another. So the subset check cannot fail on the drift it exists to stop.
+//
+// The three cases below compare each mechanism's WHOLE parsed list against one
+// expected set, so an addition to one mechanism reddens as loudly as a removal
+// from it. That is what makes "a change to one is a change to the others"
+// enforceable in both directions.
+//
+// Rejected as the simpler alternative: filtering each list down to the seven
+// before comparing. That is the subset check, and it is what failed. Also
+// rejected: one flat union set shared by all three, which would demand
+// docs/assets/ in pre-commit and the vault token in a project hook — the
+// opposite of what writing-style.md says about each.
+//
+// Non-vacuity comes from comparing against the hard-coded segment list rather
+// than against another mechanism: a normaliser that collapsed every entry to ""
+// yields a one-element set, never the seven named above, so a broken parser or
+// normaliser fails here instead of making all three agree on nothing.
+describe("prose-lint exemption — no mechanism carries an undeclared segment", () => {
+  test("lint-doc-prose.ts carries the seven and docs/assets, nothing else", () => {
+    expect(sorted(tsSkipSources().map(tsSegment))).toEqual(expectedSegments(TS_EXTRAS));
+  });
+
+  test("pre-commit carries the seven at root and nested, nothing else", () => {
+    const { root, nested } = preCommitSegments();
+    expect(sorted(root)).toEqual(expectedSegments(PRE_COMMIT_EXTRAS));
+    expect(sorted(nested)).toEqual(expectedSegments(PRE_COMMIT_EXTRAS));
+  });
+
+  test("Lint-DocumentProse.ps1 carries the seven and its four extras, nothing else", () => {
+    expect(sorted(accountSkipTokens().map(accountSegment))).toEqual(
+      expectedSegments(ACCOUNT_EXTRAS),
+    );
   });
 });
