@@ -12,6 +12,8 @@
 # unmodified in any project it's installed into — no repo name hardcoded here.
 
 set -eu
+# Guarded pipefail, no pipeline here yet — see session-start-drift-check.sh:30-34 for why guarded.
+if (set -o pipefail) 2>/dev/null; then set -o pipefail; fi
 
 root="${CLAUDE_PROJECT_DIR:-.}"
 catalog="$root/.claude/guardrails.md"
