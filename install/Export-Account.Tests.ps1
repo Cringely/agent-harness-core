@@ -12,7 +12,7 @@ Describe "Export-Account" {
             $claude = Join-Path $standHome '.claude'
             foreach ($d in 'rules', 'agents', 'hooks', 'tools/prose-lint/styles/Cringely',
                 'skills/prose-lint', 'skills/handoff', 'skills/council', 'skills/subagent-prompting',
-                'skills/cloned-skill/.git/refs/heads') {
+                'skills/cloned-skill/.git/refs/heads', 'skills/appsec-kpi-deck/references') {
                 New-Item -ItemType Directory -Path (Join-Path $claude $d) -Force | Out-Null
             }
             'rule body'                | Set-Content (Join-Path $claude 'rules/security.md')
@@ -29,6 +29,10 @@ Describe "Export-Account" {
             'ps statusline'            | Set-Content (Join-Path $claude 'statusline-command.ps1')
             'sh statusline'            | Set-Content (Join-Path $claude 'statusline-command.sh')
             'local override'           | Set-Content (Join-Path $claude 'settings.local.json')
+            # Operator ruling, review N1: a corporate deliverable spec that stays in ~/.claude
+            # for local use but must never travel in the payload.
+            'kpi deck spec'            | Set-Content (Join-Path $claude 'skills/appsec-kpi-deck/SKILL.md')
+            'kpi deck detail'          | Set-Content (Join-Path $claude 'skills/appsec-kpi-deck/references/deck-spec.md')
 
             # All six rows of $AccountTemplatedFiles, each carrying a foldable literal. The fold
             # pass throws on a row it cannot find, by design, so a fixture missing any of them
@@ -184,6 +188,36 @@ exit 0
         }
         finally {
             Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "excludes skills/appsec-kpi-deck from the payload, and keeps excluding it on a repeat export" {
+        # Operator ruling, review N1: a corporate deliverable spec that must not be published,
+        # kept in ~/.claude for local use. AccountSkipDirs is a prefix match, so both files under
+        # it (SKILL.md and references/deck-spec.md) are covered by one entry, and the check runs
+        # twice against the same source to prove a second export does not resurrect it -- the
+        # exporter always removes and recopies the destination (Copy-AccountTree's own doc
+        # comment), so nothing here is incremental state that could carry the exclusion forward
+        # only once, but the review asked for this proven rather than reasoned about.
+        $stand = New-StandInHome
+        $out1 = New-OutputRoot
+        $out2 = New-OutputRoot
+        try {
+            $args = @{
+                ClaudeHome = (Join-Path $stand '.claude')
+                CoreRepo = 'E:/projects/agent-harness-core'; NpmGlobal = 'C:/npm'
+                VaultPath = 'C:/vault'; SkipSettings = $true; SkipMcp = $true
+            }
+            & $script:export @args -OutputRoot $out1 | Out-Null
+            & $script:export @args -OutputRoot $out2 | Out-Null
+
+            foreach ($out in @($out1, $out2)) {
+                Test-Path -LiteralPath (Join-Path $out 'skills/appsec-kpi-deck') | Should -BeFalse `
+                    -Because "a corporate deliverable spec must not travel in the payload"
+            }
+        }
+        finally {
+            Remove-Item -Recurse -Force $stand, $out1, $out2 -ErrorAction SilentlyContinue
         }
     }
 
@@ -565,7 +599,10 @@ exit 0
             @{
                 env = @{ CLAUDE_CODE_USE_POWERSHELL_TOOL = '1' }
                 permissions = @{ allow = @('mcp__code-context'); defaultMode = 'auto' }
-                skillOverrides = @{ 'appsec-kpi-deck' = 'off' }
+                # Not appsec-kpi-deck: that key is now stripped by the export-side leak fix below,
+                # and this test's job is the opposite one, that an override for a skill NOT on
+                # AccountSkipDirs survives untouched. Synthetic name, matches nothing real.
+                skillOverrides = @{ 'unrelated-skill' = 'off' }
                 enabledPlugins = @{ 'superpowers@claude-plugins-official' = $true }
                 skipDangerousModePermissionPrompt = $true
                 effortLevel = 'xhigh'
@@ -583,8 +620,33 @@ exit 0
             # shipping, in either direction.
             $s.skipDangerousModePermissionPrompt | Should -BeTrue
             $s.effortLevel | Should -Be 'xhigh'
-            $s.skillOverrides.'appsec-kpi-deck' | Should -Be 'off'
+            $s.skillOverrides.'unrelated-skill' | Should -Be 'off'
             $s.env.CLAUDE_CODE_USE_POWERSHELL_TOOL | Should -Be '1'
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "strips a skillOverrides entry for a skill excluded by AccountSkipDirs" {
+        # Review N1's second check-rather-than-assume: settings.json names a skill by its bare
+        # key regardless of whether Copy-AccountTree shipped its files, so excluding the
+        # directory alone leaves the name sitting in settings.account.json's skillOverrides map.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            @{
+                skillOverrides = @{ 'appsec-kpi-deck' = 'off'; 'unrelated-skill' = 'off' }
+                hooks = @{}
+            } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $ch 'settings.json')
+
+            & $script:export -ClaudeHome $ch -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipMcp | Out-Null
+
+            $s = Get-Content (Join-Path $out 'settings.account.json') -Raw | ConvertFrom-Json
+            $s.skillOverrides.PSObject.Properties.Name | Should -Not -Contain 'appsec-kpi-deck' `
+                -Because "the payload must not reference an excluded skill by name, not just by omitting its files"
+            $s.skillOverrides.'unrelated-skill' | Should -Be 'off'
         }
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
     }

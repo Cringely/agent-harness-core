@@ -196,7 +196,8 @@ function Copy-AccountTree {
         [string]$SourceRoot,
         [string]$DestRoot,
         [string]$Relative,
-        [string[]]$SkipRelative
+        [string[]]$SkipRelative,
+        [string[]]$SkipDirs
     )
     $from = Join-Path $SourceRoot $Relative
     $to = Join-Path $DestRoot $Relative
@@ -222,7 +223,11 @@ function Copy-AccountTree {
         # older, untimestamped backups (e.g. hooks/Scan-MemorySecrets.ps1.bak) that predate it
         # and would otherwise ship a machine path in the payload.
         if ($f.Name -like '*.bak.*' -or $f.Name -like '*.bak') { continue }
-        if ($SkipRelative -contains "$Relative/$rel") { continue }
+        $full = "$Relative/$rel"
+        if ($SkipRelative -contains $full) { continue }
+        # Prefix, not an exact match: a whole excluded skill can hold any number of files, and
+        # this must catch all of them without a second entry in AccountShared.ps1 per file.
+        if (@($SkipDirs | Where-Object { $full -eq $_ -or $full.StartsWith("$_/") })) { continue }
         $dest = Join-Path $to $rel
         $null = New-Item -ItemType Directory -Path (Split-Path $dest -Parent) -Force
         Copy-Item -LiteralPath $f.FullName -Destination $dest -Force
@@ -235,7 +240,7 @@ $null = New-Item -ItemType Directory -Path $OutputRoot -Force
 
 foreach ($d in $script:AccountTreeDirs) {
     $n = Copy-AccountTree -SourceRoot $ClaudeHome -DestRoot $OutputRoot `
-        -Relative $d -SkipRelative $script:AccountSkipFiles
+        -Relative $d -SkipRelative $script:AccountSkipFiles -SkipDirs $script:AccountSkipDirs
     Write-Host "  ${d}: $n files"
 }
 
@@ -331,6 +336,22 @@ if (-not $SkipSettings) {
         # JSON encoding doubles every backslash, so a text pass would have to match two
         # spellings of two spellings and would also reach strings that are not paths.
         $settings = Get-Content -LiteralPath $settingsSrc -Raw | ConvertFrom-Json
+
+        # AccountSkipDirs keeps an excluded skill's files out of the payload, but settings.json's
+        # per-skill enable/disable map names skills by their bare key regardless of whether the
+        # skill ships, so a straight copy-through re-discloses the name Copy-AccountTree just
+        # removed the files for. Caught by Task 14's own review (N1): the operator's ruling on
+        # skills/appsec-kpi-deck was that the payload must not reference it by name OR path, and
+        # this map is a path-shaped exclusion's remaining name-shaped leak.
+        if ($settings.skillOverrides) {
+            $excludedSkillNames = @($script:AccountSkipDirs | Where-Object { $_ -like 'skills/*' } |
+                    ForEach-Object { ($_ -split '/', 2)[1] })
+            foreach ($name in @($settings.skillOverrides.PSObject.Properties.Name)) {
+                if ($excludedSkillNames -contains $name) {
+                    $settings.skillOverrides.PSObject.Properties.Remove($name)
+                }
+            }
+        }
 
         foreach ($event in $settings.hooks.PSObject.Properties.Name) {
             # Defensive, not load-bearing today: this loop is straight-line property access, and
