@@ -21,15 +21,15 @@ take the count from `git ls-files` when a count is what you need.
 `account/claude/skills/owasp-agentic/`, `owasp-cicd/`, `owasp-infrastructure/`,
 `owasp-llm/`, `owasp-mcp/`, `owasp-top-10/` and `secure-by-design/`.
 
-All seven trees come from `microsoft/hve-core`, which each `SKILL.md` names in its
-description. They were installed from there rather than derived from the primary
+Every tree named above comes from `microsoft/hve-core`, which each `SKILL.md` names in
+its description. They were installed from there rather than derived from the primary
 sources directly, and each tree records its own upstream in a `content_based_on`
 frontmatter field.
 
-The six OWASP trees carry `license: CC-BY-SA-4.0` and name the OWASP Foundation as
-author. Content derived from works by the OWASP Foundation, licensed under CC BY-SA
-4.0 (https://creativecommons.org/licenses/by-sa/4.0/). ShareAlike applies:
-adaptations of this material distributed onward must carry the same licence.
+The `owasp-*` trees named above carry `license: CC-BY-SA-4.0` and name the OWASP
+Foundation as author. Content derived from works by the OWASP Foundation, licensed
+under CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/). ShareAlike
+applies: adaptations of this material distributed onward must carry the same licence.
 
 `secure-by-design/` carries `license: OGL-UK-3.0 AND CC-BY-4.0`. Content derived from
 works by the UK Government Security Group (Crown Copyright) licensed under the Open
@@ -41,7 +41,7 @@ CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
 Licence marking inside these trees is uneven, which this notice exists to cover. Each
 tree's `SKILL.md` carries the SPDX `license:` field. The reference files under
 `owasp-cicd/`, `owasp-infrastructure/` and `owasp-mcp/` carry no marker of their own.
-Read the attribution here as applying to every file in all seven trees.
+Read the attribution here as applying to every file in the trees named above.
 
 ## vale-ai-tells
 
