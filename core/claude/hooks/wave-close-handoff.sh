@@ -51,15 +51,20 @@ cd "${CLAUDE_PROJECT_DIR:-.}" || exit 0
 OUT=".claude/wave-state.md"
 STATE_DOC="docs/STATE.md"
 
-# Everything below is best-effort: a failed query degrades to a blank section
-# rather than a failed hook. `|| true` on each, and never `set -e` past here.
+# Everything below is best-effort: a failed query must never fail the hook, so `2>/dev/null`
+# on each and never `set -e` past here. It must not read as an empty one either. A blank
+# section is indistinguishable from nothing to report, so a broken gh token renders a busy
+# wave as a quiet one and the handoff is trusted anyway. Each gh call's exit status is kept
+# and the section below says which of the two it was.
 set +e
 
 recent=$(git log --oneline -8 2>/dev/null)
 openprs=$(gh pr list --state open --json number,title,reviewDecision,mergeable \
   --jq '.[] | "- #\(.number) \(.title) [review: \(.reviewDecision // "none")] [\(.mergeable)]"' 2>/dev/null)
+openprs_rc=$?
 p1s=$(gh issue list --state open --label "priority:P1" --limit 8 --json number,title \
   --jq '.[] | "- #\(.number) \(.title)"' 2>/dev/null)
+p1s_rc=$?
 head_sha=$(git rev-parse --short HEAD 2>/dev/null)
 
 # Is the status doc's current-state block older than the code it describes?
@@ -82,11 +87,15 @@ fi
   echo
   echo "## Open PRs (where the review loop stands)"
   echo
-  if [ -n "$openprs" ]; then echo "$openprs"; else echo "_none — the wave is closed._"; fi
+  if [ -n "$openprs" ]; then echo "$openprs"
+  elif [ "$openprs_rc" -ne 0 ]; then echo "_(query failed)_"
+  else echo "_none — the wave is closed._"; fi
   echo
   echo "## Open P1"
   echo
-  if [ -n "$p1s" ]; then echo "$p1s"; else echo "_none._"; fi
+  if [ -n "$p1s" ]; then echo "$p1s"
+  elif [ "$p1s_rc" -ne 0 ]; then echo "_(query failed)_"
+  else echo "_none._"; fi
   echo
   echo "## Recent commits"
   echo
