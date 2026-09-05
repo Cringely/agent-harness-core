@@ -925,11 +925,33 @@ exit 0
         #
         # -VaultPath is left at C:/vault so New-StandInHome's handoff fixture still folds; a row
         # that folded nothing would now take the export down before this assertion ran.
+        #
+        # Review round 3: this It used to omit -WslHome entirely, so every run shelled out to the
+        # real `wsl -e sh -c 'echo $HOME'` on the operator's box for a value that has nothing to do
+        # with fold ordering. The item-24 It below keeps -CoreRepo and -NpmGlobal explicit for that
+        # exact reason and stubs `wsl`; this one now passes -WslHome '' instead.
+        #
+        # The poisoned stub is what makes the omission observable rather than merely tidy. `wsl` on
+        # PATH answers /home/poison, and a copied file carries /home/poison/launcher.sh, so if the
+        # explicit -WslHome '' is ever dropped again the resolution block picks the stub up, the
+        # whole-payload gate fires on rules/security.md, and this It goes red instead of quietly
+        # depending on whatever the host's WSL happens to hold.
         $stand = New-StandInHome
         $out = New-OutputRoot
+        $stubDir = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-wslstub-" + [guid]::NewGuid())
+        $oldPath = $env:PATH
         try {
+            New-Item -ItemType Directory -Path $stubDir -Force | Out-Null
+            # .cmd for the same reason the item-24 It gives: a .ps1 that never calls exit leaves
+            # $LASTEXITCODE at whatever the previous native command set.
+            "@echo off`r`necho /home/poison`r`n" |
+                Set-Content -LiteralPath (Join-Path $stubDir 'wsl.cmd') -NoNewline
+            $env:PATH = $stubDir + [System.IO.Path]::PathSeparator + $oldPath
+
             $ch = (Join-Path $stand '.claude')
             $cj = Join-Path $stand '.claude.json'
+            'the launcher lives at /home/poison/launcher.sh' |
+                Set-Content (Join-Path $ch 'rules/security.md')
             @{ mcpServers = @{
                     nested = @{ type = 'stdio'; command = 'node'
                         args = @('E:\projects\agent-harness-core\tools\srv.js'); env = @{} }
@@ -937,13 +959,18 @@ exit 0
 
             & $script:export -ClaudeHome $ch -ClaudeJson $cj -OutputRoot $out `
                 -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'E:/projects' `
-                -VaultPath 'C:/vault' -SkipSettings | Out-Null
+                -VaultPath 'C:/vault' -WslHome '' -SkipSettings | Out-Null
 
             $m = Get-Content (Join-Path $out 'mcp-servers.json') -Raw | ConvertFrom-Json
             @($m.mcpServers.nested.args)[0] | Should -Be '{{CORE_REPO}}/tools/srv.js' `
                 -Because "declaration order would fold {{NPM_GLOBAL}} first and swallow the tail"
+            Test-Path -LiteralPath (Join-Path $out '.export-account-marker') |
+                Should -BeTrue -Because "an explicit -WslHome '' keeps the stub out of the run"
         }
-        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+        finally {
+            $env:PATH = $oldPath
+            Remove-Item -Recurse -Force $stand, $out, $stubDir -ErrorAction SilentlyContinue
+        }
     }
 
     It "throws when a table row names a file the payload does not carry" {
@@ -976,18 +1003,36 @@ exit 0
         # Backlog item 29: this used to assert a Write-Warning. A row that folds zero of its
         # tokens and a row that folds all of them were reported in the same register, one as a
         # warning beside a "folded 0 of 1" status line that reads like completed work. A zero
-        # count is the fold table and the source text having drifted apart, so it is fatal now.
-        # The partial case (one token of two) stays a warning and is covered by the It below.
+        # count is the $AccountTemplatedFiles row and the source text having drifted apart, so it
+        # is fatal now. The partial case (one token of two) stays a warning and is covered by the
+        # It below.
+        #
+        # Review round 3: the message used to say "The fold table in AccountShared.ps1", which
+        # names nothing that is there. Get-AccountFoldTable is defined in Export-Account.ps1; what
+        # lives in AccountShared.ps1 is the $AccountTemplatedFiles row this throw is about. The
+        # captured-message form below rather than one -ExpectedMessage wildcard, because half the
+        # claim is negative -- the message must NOT send the reader after a fold table -- and
+        # Should -Throw has no way to say that.
         $stand = New-StandInHome
         $out = New-OutputRoot
         try {
             $ch = (Join-Path $stand '.claude')
             'no machine paths of any kind live in this file' |
                 Set-Content (Join-Path $ch 'rules/harness-core.md')
-            { & $script:export -ClaudeHome $ch -OutputRoot $out `
+            $msg = $null
+            try {
+                & $script:export -ClaudeHome $ch -OutputRoot $out `
                     -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
-                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp } |
-                Should -Throw -ExpectedMessage "*rules/harness-core.md*folded none*CORE_REPO*"
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp | Out-Null
+            }
+            catch { $msg = $_.Exception.Message }
+            # First, so the two -Not assertions below cannot pass vacuously on a $null message.
+            $msg | Should -Not -BeNullOrEmpty -Because "a zero-token fold is fatal, not a warning"
+            $msg | Should -BeLike "*rules/harness-core.md*folded none*CORE_REPO*"
+            $msg | Should -BeLike '*AccountTemplatedFiles row in AccountShared.ps1*' `
+                -Because "that is the row the reader has to fix"
+            $msg | Should -Not -BeLike '*fold table*' `
+                -Because "Get-AccountFoldTable is in Export-Account.ps1, not the file the message names"
         }
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
     }
@@ -1213,9 +1258,14 @@ exit 0
 
     It "fails closed on a WSL home literal carried by a copied file, not only by mcpServers" {
         # Backlog item 23, second direction. The gate inside the mcpServers loop reads mcpServers
-        # strings only, and the same literal reaches the payload through a rules file, a settings
-        # hook command, or any templated file. -SkipMcp here so mcpServers is never read at all:
-        # this can only pass on the whole-payload scan, not on the loop gate.
+        # strings only, and Copy-AccountTree copies rules, agents, skills, hooks and the two
+        # statusline scripts verbatim with no fold pass over any of them. -SkipMcp here so
+        # mcpServers is never read at all: this can only pass on the whole-payload scan, not on
+        # the loop gate.
+        #
+        # Review round 3: this used to say the literal also reaches here "through a settings hook
+        # command". It cannot -- ConvertTo-TemplatedCommand folds hook commands and statusLine
+        # with the whole table, {{WSL_HOME}} included, before this scan runs.
         $stand = New-StandInHome
         $out = New-OutputRoot
         try {
@@ -1227,6 +1277,20 @@ exit 0
                     -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
                     -VaultPath 'C:/vault' -WslHome '/home/wsluser' -SkipSettings -SkipMcp } |
                 Should -Throw -ExpectedMessage '*rules/security.md*WSL home literal*'
+
+            # Review round 3: this gate throws AFTER the payload is on disk, while every It in this
+            # file covering an mcpServers gate asserts the opposite ("a failed gate must leave
+            # nothing behind to commit"). Pinned rather than changed, so the file stops stating two
+            # opposite things about its own gates without saying which is intended. The behaviour
+            # is argued in 2f3b196: staging the payload in a temp tree and moving it on success is
+            # the alternative, and it copies 218 files twice on every run. It is bounded for the
+            # default -OutputRoot, where account/claude/.export-account-marker is tracked and a
+            # re-run therefore still passes the marker check. A FRESH -OutputRoot like this one is
+            # left non-empty and marker-less, so every retry against it needs -Force.
+            Test-Path -LiteralPath (Join-Path $out 'rules/security.md') |
+                Should -BeTrue -Because "the whole-payload gate throws after the copy, by design"
+            Test-Path -LiteralPath (Join-Path $out '.export-account-marker') |
+                Should -BeFalse -Because "no marker is what makes a fresh -OutputRoot need -Force to retry"
         }
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
     }

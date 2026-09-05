@@ -47,11 +47,14 @@
     {{WSL_HOME}} unexpanded on purpose, since a receiver may have no WSL at all and guessing a
     username would make a dead entry look resolved.
 
-    The FOLD applies to mcpServers strings. The GATE that catches an unfolded WSL home applies to
-    every file the export writes: the same literal reaches the payload through a rules file, a
-    settings hook command or a templated file just as easily. Where -WslHome resolved, the gate
-    scans for that literal exactly; where it did not, the mcpServers gate falls back to the
-    POSIX-home shapes enumerated at $script:PosixHomeShape.
+    The FOLD applies to mcpServers strings and to settings.json's hook and statusLine commands,
+    both of which ConvertTo-TemplatedCommand rewrites with the whole fold table. The GATE that
+    catches an unfolded WSL home applies to every file the export writes, because those are the
+    ones no WSL_HOME fold reaches: a copied rules, agents, skills, hooks or statusline file gets
+    no fold pass at all, and a templated file is folded only for the tokens its own
+    AccountTemplatedFiles row names, none of which is WSL_HOME. Where -WslHome resolved, the gate
+    scans for that literal on a path boundary; where it did not, the mcpServers gate falls back to
+    the POSIX-home shapes enumerated at $script:PosixHomeShape.
 
 .PARAMETER VaultPath
     The literal folded into {{OBSIDIAN_VAULT}}. Defaults to $env:CLAUDE_OBSIDIAN_VAULT, else
@@ -480,8 +483,14 @@ if ($PSCmdlet.ShouldProcess($OutputRoot, 'fold model-read machine paths')) {
         # be written into at source -- so this applies to all six. Measured against the live
         # account layer before shipping it: every row folds at least one token today (five at
         # 1 of 1, subagent-prompting at 2 of 2), so no real export changes behaviour.
+        #
+        # Names $AccountTemplatedFiles, not "the fold table". Review round 3: the message used to
+        # say "the fold table in AccountShared.ps1", which points at a table that is not there --
+        # Get-AccountFoldTable is defined above in this file, and what lives in AccountShared.ps1
+        # is the $AccountTemplatedFiles row this loop is iterating. "Fix the row" was already
+        # right; the table it named was not.
         if ($substituted -eq 0) {
-            throw "Templated file '$rel' folded none of its $(@($rowFolds).Count) token(s) ($($wanted -join ', ')). The fold table in AccountShared.ps1 and the file's text have drifted apart; the payload would ship whatever machine path this file carries. Fix the row or the source text."
+            throw "Templated file '$rel' folded none of its $(@($rowFolds).Count) token(s) ($($wanted -join ', ')). The AccountTemplatedFiles row in AccountShared.ps1 and the file's text have drifted apart; the payload would ship whatever machine path this file carries. Fix the row or the source text."
         }
         Set-Content -LiteralPath $target -Value $text -NoNewline
         Write-Host "  ${rel}: folded $substituted of $(@($rowFolds).Count) token(s)$dryRun"
@@ -680,10 +689,20 @@ if (-not $SkipMcp) {
 }
 
 # --- residual WSL home, whole payload ----------------------------------------
-# The gate inside the mcpServers loop sees mcpServers strings and nothing else. The same WSL home
-# literal can reach the payload through a settings hook command, through a copied rules file, or
-# through any templated file, and every one of those is on disk by the time this runs. That was
-# the second half of backlog item 23: the gate's guarantee read wider than its scope.
+# The gate inside the mcpServers loop sees mcpServers strings and nothing else. Copy-AccountTree
+# copies every rules, agents, skills, hooks and tools/prose-lint file verbatim, and the two
+# $AccountRootFiles statusline scripts with them; no fold pass runs over any of those, so a WSL
+# home literal written into one ships as written. The six $AccountTemplatedFiles rows are folded,
+# but only for the tokens their own row names, and no row names WSL_HOME today, which leaves them
+# in the same position. Every one of those files is on disk by the time this runs. That was the
+# second half of backlog item 23: the gate's guarantee read wider than its scope.
+#
+# Review round 3: this comment and 2f3b196's message both named "a settings hook command" as one
+# of the paths reaching here. It is not one, and cannot be. ConvertTo-TemplatedCommand rewrites
+# every hook command and statusLine.command above with the WHOLE fold table, {{WSL_HOME}}
+# included, and this block only runs when $WslHome is truthy -- which is exactly the condition
+# under which that fold lands. A hook command is folded before the scan starts. The path that can
+# fire is a copied file, which is what the copied-file It in Export-Account.Tests.ps1 exercises.
 #
 # Scans for the resolved LITERAL, not for $script:PosixHomeShape. The shape cannot be used over
 # the whole tree: the payload legitimately names POSIX home paths in prose, and
@@ -702,6 +721,9 @@ if (-not $SkipMcp) {
 # what a repeat export trusts, it is written only once every gate has passed, and a destination
 # left without one already demands -Force. The cost of the small fix is a partially written
 # -OutputRoot on a failed run; the cost of the large one is copying 218 files twice on every run.
+# The copied-file It in Export-Account.Tests.ps1 pins that disclosed behaviour, because the
+# mcpServers gate's Its in the same file assert the opposite ("a failed gate must leave nothing
+# behind to commit") and the file should not state both without saying which is intended.
 if ($WslHome -and -not $WhatIfPreference) {
     # Boundary, not a bare substring test. Review round 3, reproduced on the live payload:
     # $body.Contains($WslHome) reads ANY occurrence of the literal as a machine path, and /root --
@@ -750,7 +772,7 @@ if ($WslHome -and -not $WhatIfPreference) {
         $body = Get-Content -LiteralPath $f.FullName -Raw
         if ($body -and $body -cmatch $wslHomePattern) {
             $rel = ($f.FullName.Substring($outputRootFull.Length).TrimStart('\', '/')) -replace '\\', '/'
-            throw "Refusing to complete the export: '$rel' still carries the WSL home literal after folding. {{WSL_HOME}} is folded in mcpServers only, so a copy of that path in a rules file, a hook command or a templated file ships verbatim. Remove it at source, or add the file to AccountTemplatedFiles with a WSL_HOME row."
+            throw "Refusing to complete the export: '$rel' still carries the WSL home literal after folding. No fold pass covers {{WSL_HOME}} there -- Copy-AccountTree copies verbatim, and a templated file is folded only for the tokens its own AccountTemplatedFiles row names, none of which is WSL_HOME. Remove it at source, or add the file to AccountTemplatedFiles with a WSL_HOME row."
         }
     }
 }
