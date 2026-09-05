@@ -97,6 +97,28 @@ export function readWriteScope(agentType: string, projectDir: string): string | 
 }
 
 /**
+ * The session working directory from the hook payload, or this process's own when the payload
+ * does not carry a usable one.
+ *
+ * Why this is a TYPE check and not the charset check `agent_type` gets. Both fields arrive on the
+ * same stdin, and the difference is what they are, not where they come from. `agent_type` names a
+ * definition file, so a filename-safe segment is the whole of what it may be, and anything else is
+ * malformed. `cwd` IS a directory path — it is the base `inScratch()` resolves a relative write
+ * against, and it stands in for projectDir when CLAUDE_PROJECT_DIR is unset — so there is no
+ * narrower shape to demand. Treating it as untrusted text would mean rejecting the legitimate
+ * value.
+ *
+ * What it does need is to be a string. `join(42, …)` and `resolve({}, …)` throw, the throw is
+ * caught by the outermost handler below, and the hook then exits 0 with no stdout — so a
+ * malformed cwd used to convert a deny this gate would have made into silence. Falling back keeps
+ * the gate deciding. Mirrors review-gate.ts:680, which narrows the same field the same way.
+ */
+export function readSessionCwd(payload: unknown): string {
+  const value = (payload as Record<string, unknown> | null | undefined)?.cwd;
+  return typeof value === "string" && value !== "" ? value : process.cwd();
+}
+
+/**
  * Deny a write that a scratch-scoped agent aims outside its scratch directory.
  * Every other combination allows: unscoped agents, the main session (no
  * agent_type), and in-scope writes.
@@ -122,7 +144,7 @@ export function decide(
 if (import.meta.main) {
   try {
     const payload = JSON.parse(await Bun.stdin.text());
-    const cwd = payload.cwd ?? process.cwd();
+    const cwd = readSessionCwd(payload);
     const scope = readWriteScope(
       payload.agent_type ?? "",
       process.env.CLAUDE_PROJECT_DIR ?? cwd,

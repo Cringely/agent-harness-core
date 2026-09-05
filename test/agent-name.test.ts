@@ -9,17 +9,22 @@ import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { isValidAgentName } from "../core/claude/hooks/agent-name";
 
-describe("isValidAgentName() — accepted", () => {
+// Every name here is one the gates actually see: a built-in subagent_type, or a type on the
+// dispatch roster with no definition file. The first version of this table also carried
+// "agent_1", "0-leading-digit" and "a", which nothing ships or dispatches — those rows restated
+// AGENT_NAME_RE's character class in a second syntax and would have had to be edited in lockstep
+// with it, so they could not fail independently. Uppercase moved to a behaviour test in
+// test/agent-write-scope.test.ts, which plants a mixed-case definition file and reads it back:
+// that hook takes agent_type without lowercasing, so the case is observable rather than asserted.
+describe("isValidAgentName() — the types the gates are dispatched with", () => {
   test.each([
-    "task-reviewer",
-    "adversarial-reviewer",
-    "general-purpose",
     "explore",
+    "plan",
     "fork",
-    "a",
-    "agent_1",
-    "Reader", // agent-write-scope reads agent_type without lowercasing it
-    "0-leading-digit",
+    "general-purpose",
+    "claude",
+    "claude-code-guide",
+    "statusline-setup",
   ])("%p", (name) => {
     expect(isValidAgentName(name)).toBe(true);
   });
