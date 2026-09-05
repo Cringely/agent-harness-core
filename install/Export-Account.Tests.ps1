@@ -1290,6 +1290,39 @@ exit 0
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
     }
 
+    It "does not text-decode a binary payload file looking for the WSL home" {
+        # Review round 3: the scan read every payload file with Get-Content -Raw, including the two
+        # PNGs under skills/wiring-diagram/examples/ (600 KB between them). Decoding megabytes of
+        # image on every export is waste, and a decoded byte run that happened to match would abort
+        # the export pointing at an image the operator cannot edit.
+        #
+        # The fixture forces that second failure rather than measuring the first: PNG magic, then a
+        # NUL, then the WSL home as ASCII bytes. Get-Content -Raw decodes those trailing bytes back
+        # into the literal, on a path boundary ('/' follows it), so the gate fires on the image
+        # unless the file is skipped as binary. Timing is not asserted -- a wall-clock threshold in
+        # a test is a flake, and the false abort is the half that has a correctness answer.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            $magic = [byte[]](0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D)
+            $png = [byte[]]($magic +
+                [System.Text.Encoding]::ASCII.GetBytes('/home/wsluser/code-context-mcp.sh'))
+            [System.IO.File]::WriteAllBytes(
+                (Join-Path $ch 'skills/cloned-skill/diagram.png'), $png)
+
+            & $script:export -ClaudeHome $ch -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -WslHome '/home/wsluser' -SkipSettings -SkipMcp | Out-Null
+
+            Test-Path -LiteralPath (Join-Path $out 'skills/cloned-skill/diagram.png') |
+                Should -BeTrue -Because "a binary file is skipped by the gate, not by the copy"
+            Test-Path -LiteralPath (Join-Path $out '.export-account-marker') |
+                Should -BeTrue -Because "the gate must not abort on bytes it had no business decoding"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
     It "resolves -WslHome from wsl when the caller omits the parameter" {
         # Backlog item 24: ablating the default-resolution block left the whole suite green,
         # because every test touching the parameter passed it explicitly -- a populated path in

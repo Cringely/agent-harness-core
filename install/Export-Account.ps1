@@ -727,9 +727,26 @@ if ($WslHome -and -not $WhatIfPreference) {
     # -cmatch and not -match: POSIX paths are case-sensitive and .Contains was ordinal, so the
     # case-insensitive default would widen the gate past the boundary this is here to add.
     $wslHomePattern = [regex]::Escape($WslHome) + '(?![^/"''\s])'
+    # One buffer for the whole scan, not one per file. IndexOf below is bounded by $read, so bytes
+    # left over from a longer previous file are never looked at.
+    $head = [byte[]]::new(8000)
     # $outputRootFull, not $OutputRoot: FullName below is absolute, and -OutputRoot may be
     # relative, so the Substring that builds $rel has to be taken against the resolved root.
     foreach ($f in @(Get-ChildItem -LiteralPath $outputRootFull -Recurse -File -Force)) {
+        # Skip binary files instead of text-decoding them. Get-Content -Raw decodes every byte of
+        # skills/wiring-diagram/examples/'s two PNGs on every export, 600 KB between them, and a
+        # decoded byte run that happened to match would abort the export pointing at an image the
+        # operator cannot edit. A NUL byte in the head is git's own binary test.
+        #
+        # Rejected an extension ALLOWLIST of text types: a new text extension would silently drop
+        # OUT of the gate, which is the one failure a gate must not have. Rejected a denylist of
+        # binary extensions: it needs a new entry per format shipped, and this needs none. Head
+        # only, not ReadAllBytes, so the megabyte is never read at all. Measured on the live
+        # 218-file payload: exactly the two PNGs carry a NUL byte, the other 216 files carry none.
+        $stream = [System.IO.File]::OpenRead($f.FullName)
+        try { $read = $stream.Read($head, 0, $head.Length) } finally { $stream.Dispose() }
+        if ($read -gt 0 -and [System.Array]::IndexOf($head, [byte]0, 0, $read) -ge 0) { continue }
+
         $body = Get-Content -LiteralPath $f.FullName -Raw
         if ($body -and $body -cmatch $wslHomePattern) {
             $rel = ($f.FullName.Substring($outputRootFull.Length).TrimStart('\', '/')) -replace '\\', '/'
