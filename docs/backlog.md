@@ -1149,7 +1149,8 @@ Nothing requires `-C`'s argument to be non-flag-shaped, so a run of n flag-shape
 tiled in Fibonacci(n+1) ways, and the engine explores all of them when the trailing `\s+commit`
 fails to match.
 
-Reproduced, not inferred. The input is `"git" + " -C".repeat(n) + " x"`; at n=40 that is a
+The measurements below come from running it, not from reading the pattern. The input is
+`"git" + " -C".repeat(n) + " x"`; at n=40 that is a
 125-character Bash command. Bare pattern on node: 68 ms at n=32 rising to 3169 ms at n=40, roughly
 ×2.6 per two added tokens, unbounded. Through the hook's own exported `parseGitCommitInvocation`
 and `decide` on bun, which is the runtime the hooks actually run on: 1435.9 ms at n=125, then flat
@@ -1170,11 +1171,22 @@ the pattern wrong.
 
 This is almost certainly one of the three open CodeQL alerts. `js/redos` is error severity,
 security-severity 7.5, precision high, and sits in `javascript-code-scanning.qls`, so it fires under
-default setup with no configuration. It is on `master` and therefore predates PR #53, which is why
-that PR's green check never contradicted it: a code-scanning PR check fails on alerts the pull
-request introduces, not on ones already present. Suite membership here is documented spec read
+default setup with no configuration. It is on `master`, so it predates PR #53 and that PR's green
+check never contradicted it: a code-scanning PR check fails on alerts the pull request introduces,
+not on ones already present. Suite membership here is documented spec read
 through a fetch summarizer rather than quoted verbatim, so confirm it against the query source if a
 decision turns on it.
+
+The other two alerts could not be named with a triggering input, and the review bounded the search
+rather than leaving it open. All 23 regex literals in the hooks were swept empirically against
+exponential and superlinear screens; 22 came back clean, so this is the only ReDoS to find. Three
+ranked candidates remain for the gap, and one bit of configuration discriminates between them:
+whether default setup runs the Default or the Extended suite. Extended would add
+`js/indirect-command-line-injection` at `account/claude/hooks/memory-proposal-digest.ts:287`;
+code-quality analysis being on would add two dead stores in the same file at `:111` and
+`:117`; a threat model set to `local` would surface the seven flows in item 38. That bit is visible
+on the repository's code-scanning configuration page and needs no `security_events` scope, which
+makes it the cheapest next step while the alert list itself stays unreadable.
 
 ## 38. Two hooks interpolate an unvalidated payload field into a filesystem path
 
