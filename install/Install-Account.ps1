@@ -486,10 +486,16 @@ foreach ($rel in $script:AccountTemplatedFiles.Keys) {
 }
 
 # --- settings ----------------------------------------------------------------
-# Convert-HookCommand does the {{CLAUDE_HOME}} expansion and, on Linux only, the
-# "& '...ps1'" to "pwsh -NoProfile -File" rewrite in one pass. It never touches the shell key,
-# so that removal is new code below. {{NPM_GLOBAL}} is not under {{CLAUDE_HOME}} and is left
-# alone by that function, so it takes the plain token replace.
+# Expand-AccountToken owns every token, including {{CLAUDE_HOME}}, on every path in this file.
+# Convert-HookCommand owns the Linux-only "& '...ps1'" to "pwsh -NoProfile -File" rewrite and
+# nothing else. It never touches the shell key, so that removal is new code below.
+#
+# Backlog item 21: both functions used to expand {{CLAUDE_HOME}} here, because Convert-HookCommand
+# was called first with '{{CLAUDE_HOME}}' as its $OldHome and Expand-AccountToken ran over the
+# result. Either alone produced a correct command, so no assertion on an expanded hook command
+# could be reddened by breaking one of them -- a regression confined to either would have shipped
+# with the suite green. Split rather than pinned: a test naming which function did the work would
+# assert an implementation detail. See the call site below for how the split is enforced.
 function Convert-SettingsForTarget {
     param(
         [pscustomobject]$Settings,
@@ -531,8 +537,23 @@ function Convert-SettingsForTarget {
                 # throws rather than creating one, so leave the entry alone instead of
                 # crashing on it.
                 if (-not $hook.PSObject.Properties['command']) { continue }
-                $hook.command = Convert-HookCommand $hook.command '{{CLAUDE_HOME}}' $homeSlashed $TargetIsWindows
+                # Item 21, the enforced half of the split described at the top of this section.
+                # Expansion runs FIRST, so {{CLAUDE_HOME}} is already gone by the time
+                # Convert-HookCommand sees the string, and $homeSlashed is passed as both its
+                # $OldHome and its $NewHome so its own home substitution has nothing left to
+                # rewrite. Handing the token back as $OldHome would have restored the overlap by
+                # a different route: breaking Expand-AccountToken would then still leave a
+                # correct command, which is the blind spot this change exists to close.
+                #
+                # Not called at all when preparing a Windows target: with the token gone its
+                # Windows branch is a self-to-self replace, and the pwsh rewrite is Linux-only.
+                # Not inlined either -- the three lines that do the rewrite live in
+                # Restore-ClaudeProject.ps1:245-247, and AccountShared.ps1's header says why a
+                # second copy of a lifted function is the thing being avoided.
                 $hook.command = Expand-AccountToken -Text $hook.command -Tokens $Tokens
+                if (-not $TargetIsWindows) {
+                    $hook.command = Convert-HookCommand $hook.command $homeSlashed $homeSlashed $false
+                }
                 if (-not $TargetIsWindows -and $hook.PSObject.Properties['shell']) {
                     # On Linux the command string goes to /bin/sh. Leaving the key would send
                     # the rewritten pwsh command back to a PowerShell host that is not there.
