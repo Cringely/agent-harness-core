@@ -56,6 +56,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { isValidAgentName } from "./agent-name";
 
 /**
  * Project-specific escape hatch: subagent_type values this project has
@@ -149,11 +150,20 @@ function frontmatterRequiresIsolation(text: string): boolean {
  * Derived classification: does `subagentType` (already trimmed + lowercased)
  * need worktree isolation? Ground truth is the agent-definition frontmatter;
  * built-ins are the only hardcoded cases; unknown fails toward isolation.
+ *
+ * The "already trimmed + lowercased" precondition above is a claim about the caller, and
+ * `decide()` is not the only caller of an exported function. So the name is checked against the
+ * agent-name allowlist here, at the line that turns it into a path, rather than at the payload
+ * read (backlog item 38): a name that is not filename-safe proves nothing about the role, which
+ * is what "requires isolation" already means for every unknown type, so it takes that answer.
+ * Ahead of PROJECT_EXCEPTIONS deliberately — an exception entry names a role, and a traversal is
+ * not a role.
  */
 export function requiresIsolation(
   subagentType: string,
   agentsDir: string = DEFAULT_AGENTS_DIR,
 ): boolean {
+  if (!isValidAgentName(subagentType)) return true;
   if (PROJECT_EXCEPTIONS.includes(subagentType)) return false;
 
   const key = `${agentsDir} ${subagentType}`;

@@ -258,3 +258,57 @@ describe("decide() — subagent_type is normalized before classification", () =>
     ).toEqual({ action: "allow" });
   });
 });
+
+// --- item 38: subagent_type is payload text, not a path fragment -------------------------------
+//
+// requiresIsolation() interpolates subagent_type straight into `<agentsDir>/<type>.md`. Its own
+// fixture tree, separate from the shared one above, because these definitions have to sit in
+// places a well-formed name cannot reach. Every planted definition declares a read-only tools
+// grant, so an unguarded read RESOLVES it and returns false — the gate stands down for a
+// definition the dispatcher chose the path to. A guarded read returns true, the same answer a
+// missing definition gives.
+
+const traversalRoot = mkdtempSync(join(tmpdir(), "worktree-gate-agent-type-"));
+const traversalAgentsDir = join(traversalRoot, "agents");
+mkdirSync(join(traversalAgentsDir, "sub"), { recursive: true });
+mkdirSync(join(traversalRoot, "outside"), { recursive: true });
+
+function writeReadOnlyDef(absPath: string) {
+  writeFileSync(absPath, ["---", "name: planted", "tools: Read, Grep, Glob", "---", "", "Body."].join("\n"));
+}
+
+writeReadOnlyDef(join(traversalAgentsDir, "valid-reader.md"));
+// The file an empty subagent_type resolves to once `<type>.md` is interpolated.
+writeReadOnlyDef(join(traversalAgentsDir, ".md"));
+// Reached by a separator-bearing name, and by an absolute one: node's join() folds a leading
+// separator instead of restarting from the filesystem root, so `/sub/nested` lands here too.
+writeReadOnlyDef(join(traversalAgentsDir, "sub", "nested.md"));
+// Outside the agents directory entirely — only a traversal reaches this one.
+writeReadOnlyDef(join(traversalRoot, "outside", "escaped.md"));
+
+afterAll(() => {
+  rmSync(traversalRoot, { recursive: true, force: true });
+});
+
+describe("requiresIsolation() — item 38: only a filename-safe type name resolves a definition", () => {
+  test("a normal type name still resolves its definition and is exempted", () => {
+    expect(requiresIsolation("valid-reader", traversalAgentsDir)).toBe(false);
+  });
+
+  test.each([
+    ["traversal", "../outside/escaped"],
+    ["absolute path", "/sub/nested"],
+    ["path separator", "sub/nested"],
+    ["empty string", ""],
+  ])("%s in subagent_type proves nothing, so isolation is required: %p", (_label, type) => {
+    expect(requiresIsolation(type, traversalAgentsDir)).toBe(true);
+  });
+
+  test("a traversing subagent_type is denied end to end, not silently exempted", () => {
+    const verdict = decide(
+      { tool_name: "Agent", tool_input: { subagent_type: "../outside/escaped", prompt: "go" } },
+      traversalAgentsDir,
+    );
+    expect(verdict.action).toBe("deny");
+  });
+});
