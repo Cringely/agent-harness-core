@@ -223,7 +223,8 @@ Describe "Install-Account" {
     It "refuses when -PayloadRoot and -ClaudeHome are the same directory" {
         $h = New-StandInClaudeHome
         try {
-            { & $script:install -PayloadRoot $h -ClaudeHome $h -SkipPreflight } |
+            { & $script:install -PayloadRoot $h -ClaudeHome $h `
+                    -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight } |
                 Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
         }
         finally { Remove-Item -Recurse -Force $h -ErrorAction SilentlyContinue }
@@ -233,7 +234,8 @@ Describe "Install-Account" {
         $h = New-StandInClaudeHome
         $nestedPayload = Join-Path $h 'payload'
         try {
-            { & $script:install -PayloadRoot $nestedPayload -ClaudeHome $h -SkipPreflight } |
+            { & $script:install -PayloadRoot $nestedPayload -ClaudeHome $h `
+                    -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight } |
                 Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
         }
         finally { Remove-Item -Recurse -Force $h -ErrorAction SilentlyContinue }
@@ -243,7 +245,8 @@ Describe "Install-Account" {
         $p = New-StandInPayload
         $nestedHome = Join-Path $p 'nested-home'
         try {
-            { & $script:install -PayloadRoot $p -ClaudeHome $nestedHome -SkipPreflight } |
+            { & $script:install -PayloadRoot $p -ClaudeHome $nestedHome `
+                    -ClaudeJson (Join-Path $nestedHome 'claude.json') -SkipPreflight } |
                 Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
         }
         finally { Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue }
@@ -266,7 +269,8 @@ Describe "Install-Account" {
         $nestedPayload = Join-Path $h 'payload'
         New-Item -ItemType Directory -Path $nestedPayload -Force | Out-Null
         try {
-            { & $script:install -PayloadRoot $nestedPayload -ClaudeHome "$h\" -SkipPreflight } |
+            { & $script:install -PayloadRoot $nestedPayload -ClaudeHome "$h\" `
+                    -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight } |
                 Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
         }
         finally { Remove-Item -Recurse -Force $h -ErrorAction SilentlyContinue }
@@ -315,7 +319,8 @@ Describe "Install-Account" {
         $savedLoc = Get-Location
         try {
             Set-Location $shared
-            { & $script:install -PayloadRoot $shared -ClaudeHome '.' -SkipPreflight } |
+            { & $script:install -PayloadRoot $shared -ClaudeHome '.' `
+                    -ClaudeJson (Join-Path $shared 'claude.json') -SkipPreflight } |
                 Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
         }
         finally {
