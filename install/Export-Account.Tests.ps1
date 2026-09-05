@@ -922,6 +922,9 @@ exit 0
         # can only pass on the sort. mcpServers rather than a templated file: the model-read fold
         # pass filters $folds down to the tokens each row names, so no single templated file ever
         # sees two colliding literals, while an mcpServers string sees the whole table.
+        #
+        # -VaultPath is left at C:/vault so New-StandInHome's handoff fixture still folds; a row
+        # that folded nothing would now take the export down before this assertion ran.
         $stand = New-StandInHome
         $out = New-OutputRoot
         try {
@@ -964,24 +967,27 @@ exit 0
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
     }
 
-    It "warns when a table row's tokens do not match the file's text" {
+    It "throws when a table row folds none of its tokens" {
         # The missing-file throw above catches a row whose FILE went missing. It says nothing
         # about a row whose LITERAL stopped matching: an upstream edit that respells the path, or
         # a -CoreRepo/-VaultPath value the file's text no longer contains. Without this, the
         # payload ships the machine path while the console still reports the row as handled.
+        #
+        # Backlog item 29: this used to assert a Write-Warning. A row that folds zero of its
+        # tokens and a row that folds all of them were reported in the same register, one as a
+        # warning beside a "folded 0 of 1" status line that reads like completed work. A zero
+        # count is the fold table and the source text having drifted apart, so it is fatal now.
+        # The partial case (one token of two) stays a warning and is covered by the It below.
         $stand = New-StandInHome
         $out = New-OutputRoot
         try {
             $ch = (Join-Path $stand '.claude')
             'no machine paths of any kind live in this file' |
                 Set-Content (Join-Path $ch 'rules/harness-core.md')
-            & $script:export -ClaudeHome $ch -OutputRoot $out `
-                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
-                -VaultPath 'C:/vault' -SkipSettings -SkipMcp `
-                -WarningVariable warnings -WarningAction SilentlyContinue | Out-Null
-            $warned = @($warnings) -join "`n"
-            $warned | Should -Match 'rules/harness-core\.md'
-            $warned | Should -Match '\{\{CORE_REPO\}\}'
+            { & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp } |
+                Should -Throw -ExpectedMessage "*rules/harness-core.md*folded none*CORE_REPO*"
         }
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
     }
