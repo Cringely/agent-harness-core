@@ -438,6 +438,51 @@ Describe "Install-Harness" {
         }
     }
 
+    It "installs pre-push and identity-patterns.sh alongside pre-commit (issue #64)" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        # A gate that ships in core/claude/hooks/ but is never copied into a project
+        # enforces nothing while looking like a control -- issue #64's whole complaint
+        # about core/claude/hooks/pre-commit before this installer wired it. Asserting
+        # both files land is what would have caught that for pre-push and its shared
+        # library too.
+        Test-Path "$script:target/.claude/hooks/pre-push" | Should -BeTrue
+        Test-Path "$script:target/.claude/hooks/identity-patterns.sh" | Should -BeTrue
+    }
+
+    It "installs the pre-push hook with the owner execute bit actually set" -Skip:$IsWindows {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        # git skips a hook without the execute bit and says nothing, same trap
+        # pre-commit's own version of this test guards against. pre-push is issue #64's
+        # authoritative whole-range identity sweep; a silently-non-executable copy is a
+        # gate that looks wired and is not.
+        $hook = Get-Item -LiteralPath "$script:target/.claude/hooks/pre-push"
+        $hook.UnixMode | Should -Match '^.{3}x'
+    }
+
+    It "reports a failed chmod for pre-push too, not only pre-commit" -Skip:$IsWindows {
+        # Same shim as pre-commit's version of this test: a `chmod` that always fails,
+        # placed first on PATH. Both git-invoked hooks go through the same chmod loop,
+        # so both rows must report the failure -- a mutant that only wired the loop for
+        # pre-commit would leave pre-push silently non-executable with a clean report.
+        $shimDir = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-shim-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $shimDir | Out-Null
+        $shim = Join-Path $shimDir 'chmod'
+        Set-Content -LiteralPath $shim -Value "#!/bin/sh`nexit 1`n"
+        & /bin/chmod +x $shim
+        $prevPath = $env:PATH
+        $env:PATH = $shimDir + [System.IO.Path]::PathSeparator + $prevPath
+        try {
+            $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String
+            $out | Should -Match 'chmod:hooks/pre-commit'
+            $out | Should -Match 'chmod:hooks/pre-push'
+            $out | Should -Match 'hooks/pre-push\s+installed'
+        }
+        finally {
+            $env:PATH = $prevPath
+            Remove-Item -Recurse -Force $shimDir
+        }
+    }
+
     It "migrates a v1 flat manifest to v2, preserving the recorded hashes under files" {
         & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
         $manifestPath = "$script:target/.claude/.harness-manifest.json"
