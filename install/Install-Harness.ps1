@@ -767,28 +767,37 @@ Get-ChildItem -LiteralPath $hooksSrc -File | Where-Object { $_.Name -ne '.gitkee
     Install-ManagedFile -SourcePath $_.FullName -DestPath (Join-Path $hooksDst $_.Name) -ManifestKey "hooks/$($_.Name)"
 }
 
-# Copy-Item doesn't carry the source executable bit, and a git pre-commit hook
-# git won't invoke without one on a platform that has the concept at all.
+# Copy-Item doesn't carry the source executable bit, and a git hook git
+# won't invoke without one on a platform that has the concept at all.
 # Windows has none, so this is a no-op there — Git for Windows runs the hook
 # by its shebang regardless of the (meaningless) NTFS permission bits.
+#
+# Both git-invoked entry points, not only pre-commit: core/claude/hooks/
+# pre-push (issue #64's whole-range identity sweep) is a real git hook too,
+# and git skips it the same silent way it skips an unmarked pre-commit.
+# identity-patterns.sh is deliberately absent from this list — it is a
+# sourced function library, never executed directly by git or anything
+# else, so it needs no executable bit at all.
 if (-not $IsWindows) {
-    $preCommitDst = Join-Path $hooksDst 'pre-commit'
-    if (Test-Path -LiteralPath $preCommitDst) {
-        & chmod +x $preCommitDst
-        # Same trap as the core.hooksPath write below: a native command's non-zero exit
-        # does not trip $ErrorActionPreference = 'Stop'. Failure reports, success stays
-        # silent. The rule behind that, and behind why core.hooksPath reports its success
-        # while this does not: a row reports success only where nothing else reports it.
-        # core.hooksPath has no other row, so it prints one; the chmod is covered by the
-        # hooks/pre-commit row already saying 'installed', so only a failure adds anything,
-        # and it has to, because git skips a hook lacking the executable bit without saying
-        # so. Silence here conflates three states (chmod succeeded, Windows skip above,
-        # no hook file found), which is tolerable only because the one state an operator
-        # can act on is the one that prints.
-        # Real triggers are filesystems with no POSIX permission bits (CIFS/SMB, exFAT,
-        # WSL DrvFs mounted without `metadata`) and a checkout owned by another uid.
-        if ($LASTEXITCODE -ne 0) {
-            $results.Add([pscustomobject]@{ File = 'chmod:hooks/pre-commit'; Action = "FAILED (chmod exit $LASTEXITCODE) - hook not executable" })
+    foreach ($gitHookName in @('pre-commit', 'pre-push')) {
+        $gitHookDst = Join-Path $hooksDst $gitHookName
+        if (Test-Path -LiteralPath $gitHookDst) {
+            & chmod +x $gitHookDst
+            # Same trap as the core.hooksPath write below: a native command's non-zero exit
+            # does not trip $ErrorActionPreference = 'Stop'. Failure reports, success stays
+            # silent. The rule behind that, and behind why core.hooksPath reports its success
+            # while this does not: a row reports success only where nothing else reports it.
+            # core.hooksPath has no other row, so it prints one; the chmod is covered by the
+            # hooks/<name> row already saying 'installed', so only a failure adds anything,
+            # and it has to, because git skips a hook lacking the executable bit without saying
+            # so. Silence here conflates three states (chmod succeeded, Windows skip above,
+            # no hook file found), which is tolerable only because the one state an operator
+            # can act on is the one that prints.
+            # Real triggers are filesystems with no POSIX permission bits (CIFS/SMB, exFAT,
+            # WSL DrvFs mounted without `metadata`) and a checkout owned by another uid.
+            if ($LASTEXITCODE -ne 0) {
+                $results.Add([pscustomobject]@{ File = "chmod:hooks/$gitHookName"; Action = "FAILED (chmod exit $LASTEXITCODE) - hook not executable" })
+            }
         }
     }
 }

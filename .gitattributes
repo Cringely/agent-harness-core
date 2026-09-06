@@ -5,3 +5,4 @@
 # extension, so they need listing individually.
 *.sh text eol=lf
 core/claude/hooks/pre-commit text eol=lf
+core/claude/hooks/pre-push text eol=lf
