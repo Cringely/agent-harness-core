@@ -411,6 +411,27 @@ Describe "Install-Harness" {
         $hook.UnixMode | Should -Match '^.{3}x'
     }
 
+    # commit-msg and pre-push get the same assertion for the same reason. Both were added to
+    # the chmod loop after pre-commit and neither had a test, which is how one of them would
+    # have been dropped from that list without anything noticing: git skips an unmarked hook
+    # silently, so a missing execute bit looks exactly like a gate that examined the commit
+    # and approved it.
+    It "installs the <Name> hook with the owner execute bit actually set" -Skip:$IsWindows -ForEach @(
+        @{ Name = 'pre-push' }
+        @{ Name = 'commit-msg' }
+    ) {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        (Get-Item -LiteralPath "$script:target/.claude/hooks/$Name").UnixMode | Should -Match '^.{3}x'
+    }
+
+    It "installs commit-msg, the AI-attribution guard, into the payload at all" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $hook = "$script:target/.claude/hooks/commit-msg"
+        Test-Path -LiteralPath $hook | Should -BeTrue -Because 'a guard that ships nowhere protects one machine'
+        # Not merely present: present and still refusing what it exists to refuse.
+        (Get-Content -LiteralPath $hook -Raw) | Should -Match 'Co-authored-by'
+    }
+
     It "reports a failed chmod instead of leaving the pre-commit hook silently non-executable" -Skip:$IsWindows {
         # The real triggers are filesystems with no POSIX permission bits (CIFS/SMB, exFAT,
         # WSL DrvFs without `metadata`) and a checkout owned by another uid. None of those
