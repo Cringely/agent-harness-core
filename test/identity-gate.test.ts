@@ -25,7 +25,18 @@
 // and sets USERNAME/COMPUTERNAME directly — both already read by the real
 // code, so no knob is needed to control them either.
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+
+// 30s, not bun's 5s default, for every test in this file. These spawn real git
+// against real temp repositories -- a single pre-push case builds a base commit,
+// two branches, a conflicted merge and a push, around thirteen git spawns plus a
+// hook run. Five of them sat between 5,020ms and 7,763ms on the author's
+// workstation while passing on GitHub's runner, so the suite was green in CI and
+// red locally at the same commit. A test whose result depends on how fast the
+// machine is does not test what its name says. Set once for the file rather than
+// annotated per test, because the next slow case would otherwise inherit the
+// 5s default and reintroduce this.
+setDefaultTimeout(30_000);
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
@@ -212,13 +223,34 @@ describe("identity gate — pre-commit (cheap stage: content, path, pending auth
     expect(result.stderr.toString()).toContain("branch name");
   });
 
-  test("gate exits non-zero when the identity file is missing — fail closed, never scans for nothing and reports clean", () => {
+  // No identity file is "not configured", not "broken", and this asserted the
+  // opposite until 2026-09-06. Under that behaviour a project installing this
+  // harness had every commit refused from its first one, because the installer
+  // wires pre-commit and nothing tells a new user the file must exist. A gate
+  // cannot protect an identity nobody declared: refusing there protected
+  // nothing and only blocked. The notice is the load-bearing half of this test,
+  // since #64's "never scan for nothing and report clean" is still honoured --
+  // saying so on stderr on every commit is not reporting clean.
+  test("a missing identity file skips the checks and says so, rather than refusing every commit", () => {
     const dir = initPreCommitRepo();
     stageClean(dir);
     const missingHome = makeIdentityHome(null);
     const result = runPreCommit(dir, envWith({ USERPROFILE: missingHome, HOME: missingHome }));
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr.toString()).toContain("not configured");
+    expect(result.stderr.toString()).toContain("identity checks are SKIPPED");
+  });
+
+  // The other half of that distinction. A file that EXISTS and cannot be read
+  // means something was declared and the gate cannot see it, which is the
+  // dangerous state and still refuses.
+  test("an identity file that exists but is unreadable still refuses", () => {
+    const dir = initPreCommitRepo();
+    const badHome = makeIdentityHome("not even json");
+    stageClean(dir);
+    const result = runPreCommit(dir, envWith({ USERPROFILE: badHome, HOME: badHome }));
     expect(result.exitCode).not.toBe(0);
-    expect(result.stderr.toString()).toContain("no identity file at");
+    expect(result.stderr.toString()).toContain("does not look like a JSON object");
   });
 
   // Found by running the gate rather than by reading it. The count check that
@@ -485,14 +517,17 @@ describe("identity gate — pre-push (authoritative whole-range sweep)", () => {
     expect(result.stderr.toString()).toContain("content of one or more commits");
   });
 
-  test("gate exits non-zero when the identity file is missing", () => {
+  // Same three-state distinction as the pre-commit stage: a missing file is
+  // "not configured" and lets the push through with a notice, so a project
+  // installing this harness is not blocked from pushing on day one.
+  test("a missing identity file skips the sweep and says so, rather than refusing every push", () => {
     const remote = initBareRemote();
     const dir = initPrePushRepo(remote);
     commitClean(dir);
     const missingHome = makeIdentityHome(null);
     const result = push(dir, "HEAD:refs/heads/main", { USERPROFILE: missingHome, HOME: missingHome });
-    expect(result.exitCode).not.toBe(0);
-    expect(result.stderr.toString()).toContain("no identity file at");
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr.toString()).toContain("identity checks are SKIPPED");
   });
 
   // Bypass 1 (attack report 2026-09-05): every range check reads history

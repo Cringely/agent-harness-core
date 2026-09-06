@@ -104,16 +104,34 @@ identity_json_array() {
 # every declared name, every declared email, the username, and the
 # hostname) plus IDENTITY_CANARIES (one line per entry in that alternation,
 # consumed by identity_control below so every arm gets proved, not just
-# one). Every failure mode is fail-closed with a message on stderr and a
-# non-zero return: a missing or unreadable file, a file that is not
-# JSON-shaped, an environment where the username or hostname cannot be
+# one).
+#
+# THREE RETURN STATES, NOT TWO. 0 configured and loaded. 1 configured and
+# BROKEN, which is fail-closed with a message on stderr: a file that exists
+# and cannot be read, one that is not JSON-shaped, one declaring no names and
+# no emails, an environment where the username or hostname cannot be
 # discovered, or a declared entry that could never match anything once
-# wrapped in \b (see identity_edge_ok below). This is deliberately stricter
-# than Export-Account.ps1's own loader, which warns and continues on a
-# missing identity file because its derived-username arm still runs either
-# way -- issue #64's mandate for this gate is explicit: "the gate exits
-# non-zero when its pattern file is missing or unreadable. It must never
-# scan for nothing and report clean."
+# wrapped in \b (see identity_edge_ok below). 2 not configured at all, which
+# prints a notice and lets the caller continue.
+#
+# That third state is a correction made 2026-09-06, and the reasoning matters
+# more than the change. Issue #64's mandate reads "the gate exits non-zero
+# when its pattern file is missing or unreadable. It must never scan for
+# nothing and report clean", and this file implemented it literally, which
+# meant a project that installed the harness had every commit refused from
+# its first one. The mandate conflated two states. A file that EXISTS and
+# cannot be read means something was declared and the gate cannot see it,
+# which is dangerous and still refuses. A file that does not exist means no
+# identity was declared, and a gate cannot protect an identity nobody named:
+# refusing there protects nothing and only blocks.
+#
+# "Never scan for nothing and report clean" is still honoured, because state 2
+# does not report clean. It says on stderr, on every single commit, that
+# identity checks are skipped and how to enable them. Silence would be the
+# violation; a notice is not.
+#
+# Export-Account.ps1's own loader warns and continues on a missing identity
+# file, and has since before this hook existed. This now agrees with it.
 #
 # NO ENV-VAR OVERRIDE FOR THE FILE PATH OR THE DERIVED USERNAME/HOSTNAME.
 # An earlier revision read CLAUDE_IDENTITY_FILE, IDENTITY_USERNAME_OVERRIDE
@@ -146,9 +164,27 @@ identity_load() {
 
     identity_file=${USERPROFILE:-$HOME}/.claude-account-identity.json
 
+    # NO FILE AT ALL IS "NOT CONFIGURED", NOT "BROKEN", AND THE TWO ARE NOT THE
+    # SAME STATE. This returned 1 until 2026-09-06, which meant a project that
+    # installed this harness had every commit refused from the first one, with
+    # nothing in the Quick Start saying an identity file had to exist. The
+    # repository's whole purpose is installing into other projects, so that made
+    # the shipped product unusable for its stated job on day one.
+    #
+    # The conflation was mine to make and worth naming: a missing file means the
+    # operator has declared no identity, and a gate cannot protect an identity
+    # nobody declared. Refusing there protects nothing; it only blocks. A file
+    # that EXISTS and cannot be read is the genuinely dangerous state, because
+    # something was declared and the gate cannot see it, and that still refuses
+    # below.
+    #
+    # Return 2 rather than 0 or 1 so callers can tell the three states apart:
+    # 0 configured, 1 broken and must refuse, 2 not configured. The notice goes
+    # to stderr on every commit rather than staying silent, because a security
+    # gate that is off should say so every time and not once.
     if [ ! -f "$identity_file" ]; then
-        echo "identity gate: no identity file at '$identity_file'. Refusing to scan for nothing and report clean -- see install/Export-Account.ps1's -IdentityFile doc for the shape ({\"names\": [...], \"emails\": [...]})." >&2
-        return 1
+        echo "identity gate: not configured, so identity checks are SKIPPED. To enable them, create '$identity_file' with the shape {\"names\": [...], \"emails\": [...]} naming the strings that must never reach a remote. Until then this hook checks nothing for identifying content." >&2
+        return 2
     fi
     if [ ! -r "$identity_file" ]; then
         echo "identity gate: '$identity_file' exists but is not readable." >&2
@@ -317,5 +353,13 @@ EOF
 # so the exact invocation identity_control just proved works is the one
 # that runs against real content.
 identity_match() {
+    # Not configured (identity_load returned 2, IDENTITY_PATTERN never set):
+    # match nothing. Guarding here rather than at each of the six call sites
+    # across the two hooks, because a call site added later would not know to
+    # guard itself, and an unset pattern handed to `grep -iE` matches every
+    # line rather than none -- the failure would be a gate that refuses
+    # everything, not one that lets things past, but it is still wrong and it
+    # would look like the gate working.
+    [ -n "${IDENTITY_PATTERN:-}" ] || return 1
     printf '%s\n' "$1" | grep -qiE "$IDENTITY_PATTERN"
 }
