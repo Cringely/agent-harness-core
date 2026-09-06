@@ -17,6 +17,7 @@ Describe "Export-Account" {
             }
             'rule body'                | Set-Content (Join-Path $claude 'rules/security.md')
             'stale backup'             | Set-Content (Join-Path $claude 'rules/security.md.bak.20260101-000000')
+            'homelab specifics'        | Set-Content (Join-Path $claude 'rules/homelab.local.md')
             # F-10: predates change-management.md's *.bak.<timestamp> convention, no timestamp
             # suffix. hooks/Scan-MemorySecrets.ps1.bak is the real file the review found shipping
             # C:\Users\user in the payload.
@@ -167,6 +168,8 @@ exit 0
             Test-Path -LiteralPath (Join-Path $out '.credentials.json') | Should -BeFalse
             Test-Path -LiteralPath (Join-Path $out 'settings.local.json') |
                 Should -BeFalse -Because "settings.local.json is the per-machine escape hatch"
+            Test-Path -LiteralPath (Join-Path $out 'rules/homelab.local.md') |
+                Should -BeFalse -Because "a .local.md is the per-environment overlay and never travels"
         }
         finally {
             Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue

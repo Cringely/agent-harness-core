@@ -37,9 +37,9 @@ file contents:
   `--message-callback`.
 - **Branch names, tags, PR and issue text.**
 
-The identity for public work is `Cringely <Cringely@users.noreply.github.com>`. Set it per repo
-(`git config --local`) rather than relying on the global value: the global on this workstation is a
-real name, so a repo without a local override silently inherits it on every commit.
+The identity for public work is a GitHub noreply address under a pseudonymous handle. Set it per
+repo (`git config --local`) rather than relying on the global value: a global that carries a real
+name is silently inherited by every repo without a local override, on every commit.
 
 **Before any push to a remote, verify both channels.** Content:
 `git grep -I -l -i -e <name> -e <username> -e <email>`. Metadata:
@@ -80,7 +80,7 @@ Any code accepting external input (CLI args, files, env vars, network) must vali
 
 ## Supply Chain
 
-- Docker images: pin to specific version (`grafana:11.5.2`), prefer digest (`@sha256:...`). Never `:latest` in production
+- Docker images: pin to specific version (`image:1.2.3`), prefer digest (`@sha256:...`). Never `:latest` in production
 - Never pipe curl to bash. Verify checksums before executing downloaded scripts
 - Keep build/deploy scripts in version control. Production state must be reproducible from git
 
@@ -101,6 +101,6 @@ Before any new script, service config, or infrastructure change:
 ## Homelab Proportionality
 
 - **Always apply**: least privilege, secrets hygiene, no default credentials, network segmentation, secure config defaults
-- **Production services** (Authentik, Traefik, PostgreSQL, monitoring): defense in depth, auth on all paths
+- **Production services** (SSO, reverse proxy, databases, monitoring): defense in depth, auth on all paths
 - **Accepted tradeoffs**: `insecureSkipVerify` for self-signed LAN backends (documented), `privileged` only where required (documented)
 - **Skip**: formal risk register, audit trails for every read, automated compliance scanning
