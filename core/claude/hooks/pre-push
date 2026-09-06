@@ -1,0 +1,163 @@
+#!/bin/sh
+# Git pre-push hook — refuses to push identifying strings across any of the
+# four channels this repository's identity mandate covers, over the WHOLE
+# range of commits about to leave this clone.
+#
+# WHY THIS STAGE EXISTS ALONGSIDE pre-commit
+# core/claude/hooks/pre-commit catches the cheap case: an edit or an amend,
+# before a bad commit exists at all. It cannot catch a commit that already
+# exists locally by the time this hook runs — one made by another tool, one
+# reintroduced by a rebase, or one made with --no-verify. Only the range
+# actually being pushed is authoritative for what is about to leave the
+# machine, and only this hook sees that range.
+#
+# WHY THE METADATA SWEEP LIVES HERE
+# 2026-09-05's incident: thirty commits already carried a real name in both
+# the author and the committer field, sitting in local history for a while
+# before anyone scanned for it. pre-commit's own `git var` check (added
+# alongside this hook) only ever sees the identity a NEW commit is about to
+# use; it cannot retroactively catch one that already landed. This hook's
+# whole-range `git log --format` sweep is the one that would have caught
+# those thirty before `git push` ever ran.
+#
+# PROTOCOL
+# git invokes this hook as `pre-push <remote-name> <remote-url>` and feeds
+# one line per ref being updated on stdin: "<local ref> <local oid>
+# <remote ref> <remote oid>". A local oid of all zeroes is a delete (nothing
+# is leaving the machine; skip it). A remote oid of all zeroes means the
+# remote ref does not exist yet (a new branch or tag): there is no upstream
+# commit to diff FROM, so the range becomes "every commit reachable from the
+# local oid that is not already on some remote-tracking ref" instead of
+# ref1..ref2.
+#
+# KNOWN GAP: MERGE COMMITS
+# `git log -p` shows no diff at all for a merge commit unless told to with
+# -m or -c, and this hook does not pass either — a merge's own combined
+# diff would otherwise multiply the content scanned for every merge in the
+# range with no real gain, since content a merge brings in was introduced
+# by the non-merge commits already in the same range and already gets
+# scanned on its own. The gap this leaves is narrow but real: a merge
+# commit whose conflict resolution hand-types NEW content that exists in no
+# parent commit is invisible to the content channel. Metadata and message
+# channels are unaffected — `git log --format` walks every commit
+# regardless of shape.
+#
+# See core/claude/hooks/identity-patterns.sh for the matcher itself (why
+# grep -E and \b instead of -F or a PCRE lookaround) and for why the
+# pattern set is loaded from ~/.claude-account-identity.json and the
+# environment rather than declared in this repository.
+
+set -u
+
+hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+identity_lib="$hook_dir/identity-patterns.sh"
+if [ ! -f "$identity_lib" ]; then
+  echo "pre-push: identity gate library missing at '$identity_lib'. Refusing rather than silently skipping a security gate." >&2
+  exit 1
+fi
+. "$identity_lib"
+
+identity_load || exit 1
+identity_control || exit 1
+
+# True (0) when $1 is an all-zero object id, whatever length the
+# repository's hash algorithm gives it (SHA-1: 40, SHA-256: 64). Checked by
+# content rather than length, so this needs no opinion on which algorithm a
+# given repository uses.
+identity_is_zero_oid() {
+  case $(printf '%s' "$1" | tr -d '0') in
+    '') return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+identity_refuse_range() {
+  echo "pre-push: refused. $1" >&2
+  echo "  security.md: identifying information must never reach a remote repository," >&2
+  echo "  and only a human can waive that. The matched value is deliberately not" >&2
+  echo "  printed. Fix it at the source (git-filter-repo, or an interactive rebase" >&2
+  echo "  for a small range), then re-push." >&2
+  exit 1
+}
+
+# Read the whole of stdin into a variable and loop over it with a here-doc,
+# not a pipe into `while` — same reasoning as pre-commit's own loop: a pipe
+# puts the loop in a subshell in some /bin/sh implementations, and this
+# loop's `exit 1` on refusal has to end the real process, not a subshell
+# copy of it that the parent never sees.
+identity_stdin=$(cat)
+[ -n "$identity_stdin" ] || exit 0
+
+while read -r identity_local_ref identity_local_oid identity_remote_ref identity_remote_oid; do
+  [ -n "${identity_local_ref:-}" ] || continue
+  identity_is_zero_oid "$identity_local_oid" && continue
+
+  # Both sides of the refspec, not only the local one: `git push origin
+  # HEAD:refs/heads/x` sends the literal symbolic name "HEAD" as the local
+  # ref, and the destination name actually about to exist on the remote
+  # sits in $identity_remote_ref instead. Measured: checking only
+  # $identity_local_ref let a `HEAD:refs/heads/feature/<username>-work`
+  # push through clean, because "HEAD" itself carries nothing to match.
+  if identity_match "$identity_local_ref"; then
+    identity_refuse_range "ref name '$identity_local_ref' carries an identifying string."
+  fi
+  if identity_match "$identity_remote_ref"; then
+    identity_refuse_range "destination ref name '$identity_remote_ref' carries an identifying string."
+  fi
+
+  if identity_is_zero_oid "$identity_remote_oid"; then
+    identity_range_args="$identity_local_oid --not --remotes"
+  else
+    identity_range_args="${identity_remote_oid}..${identity_local_oid}"
+  fi
+
+  # Channel 1: content, over every commit's diff in the range being pushed.
+  # --format='' suppresses git log -p's default commit header (author,
+  # date, subject line) and leaves only the diff hunks -- without it, a
+  # match found here could actually be sitting in the header the default
+  # format prints ahead of every diff, misreporting a metadata or message
+  # hit as a content one. Measured: without --format='', this check fires
+  # (and reports "content") on both the channel-2 and channel-3 fixtures
+  # below, because the plain `git log -p` this used to call embeds the
+  # author line and the full commit message ahead of each diff.
+  identity_content=$(git log -p --format='' --diff-filter=ACMR $identity_range_args 2>/dev/null)
+  if [ -n "$identity_content" ] && identity_match "$identity_content"; then
+    identity_refuse_range "the content of one or more commits being pushed on '$identity_local_ref' carries an identifying string."
+  fi
+
+  # Channel 2: author and committer, independently, over every commit in
+  # the range — name and email both, since either field alone identifies.
+  identity_idents=$(git log --format='%an%n%ae%n%cn%n%ce' $identity_range_args 2>/dev/null)
+  if [ -n "$identity_idents" ] && identity_match "$identity_idents"; then
+    identity_refuse_range "the author or committer identity of one or more commits being pushed on '$identity_local_ref' carries an identifying string."
+  fi
+
+  # Channel 3: commit message bodies. git-filter-repo --replace-text does
+  # not rewrite these, so a scrub that fixes content leaves this channel
+  # dirty — this whole-range check is what catches that.
+  identity_messages=$(git log --format='%B' $identity_range_args 2>/dev/null)
+  if [ -n "$identity_messages" ] && identity_match "$identity_messages"; then
+    identity_refuse_range "the commit message of one or more commits being pushed on '$identity_local_ref' carries an identifying string."
+  fi
+
+  # Channel 4, the annotated-tag half: a lightweight tag's oid IS the
+  # commit, already covered by the metadata and message sweeps above. An
+  # annotated tag is its own object with its own tagger identity and its
+  # own message, neither of which `git log` over a commit range ever reads.
+  case $identity_local_ref in
+    refs/tags/*)
+      identity_tag_type=$(git cat-file -t "$identity_local_oid" 2>/dev/null)
+      if [ "$identity_tag_type" = "tag" ]; then
+        identity_tag_body=$(git cat-file -p "$identity_local_oid" 2>/dev/null)
+        if [ -n "$identity_tag_body" ] && identity_match "$identity_tag_body"; then
+          identity_refuse_range "the annotated tag object for '$identity_local_ref' carries an identifying string in its tagger identity or message."
+        fi
+      fi
+      ;;
+  esac
+done <<EOF
+$identity_stdin
+EOF
+
+exit 0
