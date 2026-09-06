@@ -23,6 +23,20 @@
     ceremony-ledger.json and their hook registrations) assume wave/standup ceremony
     infrastructure most projects lack, and are only installed with -IncludeCeremonies.
 
+    A file dropped from core since a project's last install stays in that project's manifest
+    forever, flagged 'orphaned' by -Audit with no repair path, unless the operator prunes it
+    with -Prune. That is deliberately a standalone command rather than an automatic step on
+    every install. Two earlier designs pruned by deleting a file, and adversarial review
+    executed a real deletion against both: an automatic loop keyed off whatever manifest entry
+    core no longer recognized, where an untrusted key like '../../victim.txt' carrying that
+    file's real hash drove Remove-Item with no containment check at all; and a standalone
+    -Prune whose containment check turned out to be textual (GetUnresolvedProviderPathFromPSPath
+    plus GetRelativePath on unresolved strings), so a directory symlink placed inside .claude
+    walked Remove-Item straight to a target the check never resolved and deleted the identity
+    gate a second time. -Prune now carries no delete primitive at all: it drops the manifest
+    record and tells the operator the file, if one still exists, is theirs to keep or remove by
+    hand.
+
 .PARAMETER Target
     Project root to install into. Must already exist.
 
@@ -46,6 +60,31 @@
     reasons to drop one. Throws when the key is not pinned. Writes the manifest and nothing
     else, and never restores or deletes a file.
 
+.PARAMETER Prune
+    Retire a manifest key for a file core no longer ships. A standalone action, matching -Accept
+    and -Unaccept — never composed with an install. Takes a path relative to the project's
+    .claude directory, or the literal manifest key itself when that key does not round-trip
+    through path resolution — the same literal-key-first lookup -Unaccept already does — falling
+    back to the same resolve-and-contain check -Accept and -Unaccept use for everything else.
+
+    Refuses when core still ships the key (this is not an orphan — re-run the installer, or with
+    -IncludeCeremonies, instead) and when the key is pinned in the manifest's `accepted` map (a
+    pin means the project owns the file; drop the pin first with -Unaccept). ceremony-ledger.json
+    is refused too: it is live state core never shipped a source for, not an orphan of one it
+    dropped. These are coherence checks now, not a safety boundary — nothing below them can
+    destroy anything.
+
+    Otherwise, drops the manifest record and nothing else. -Prune never deletes a file. Two
+    earlier designs did, and adversarial review executed a real file deletion against each one:
+    an automatic loop with an untrusted manifest key driving Remove-Item with no containment
+    check, then a standalone -Prune whose containment check was textual and never saw a
+    directory symlink placed inside .claude. A manifest key is untrusted, PR-modifiable input —
+    core/claude/hooks/session-start-drift-check.sh's own SECURITY block says so — and this
+    command no longer trusts it with anything sharper than a hashtable key removal. If the file
+    still exists on disk it is left exactly where it is, now untracked, which is what then lets
+    -Accept pin it as an overlay without a hand-edited manifest. Delete it yourself if it is
+    unwanted.
+
 .PARAMETER Audit
     Report-only drift check; writes nothing. Three-way compare (core source vs
     manifest hash vs installed file) classifies every managed file:
@@ -56,7 +95,16 @@
       missing            in manifest but deleted from the project
       not-installed      new in core since last install
       untracked          present in .claude but never installed via manifest
-      orphaned           in manifest but no longer shipped by core
+      orphaned (already removed)
+                         in manifest, no longer shipped by core, already gone from disk —
+                         -Prune drops the stale record
+      orphaned (unmodified)
+                         in manifest, no longer shipped by core, on-disk copy still matches
+                         the recorded hash — -Prune drops the record; the file is left on disk
+      orphaned (modified)
+                         in manifest, no longer shipped by core, on-disk copy has diverged —
+                         -Prune drops the record; the file is left on disk, then -Accept
+                         pins it as an overlay
       overlay (accepted) pinned fork, still at the hash it was pinned at
       overlay (changed)  pinned fork has moved since pinning — re-review, re-pin
       not-installed (ceremony-gated)
@@ -85,6 +133,8 @@ param(
 
     [string]$Unaccept,
 
+    [string]$Prune,
+
     [switch]$Audit,
 
     [switch]$Quiet
@@ -98,6 +148,17 @@ $ErrorActionPreference = 'Stop'
 # as a misused one, and go looking in the wrong place.
 if ($Quiet -and -not $Audit) {
     throw "-Quiet applies to -Audit only. Re-run with -Audit -Quiet for the machine-readable drift report, or drop -Quiet."
+}
+
+# All three take [string], so `-Accept ""` binds an empty string rather than leaving the
+# parameter unset. `if ($Accept)` (and the -Unaccept/-Prune checks below it) then read that
+# empty string as falsy and fall straight through to a full install -- silently doing the one
+# thing none of these three commands are supposed to compose with. PSBoundParameters is what
+# tells "typed empty" apart from "not typed at all"; the plain variable cannot.
+foreach ($flagName in @('Accept', 'Unaccept', 'Prune')) {
+    if ($PSBoundParameters.ContainsKey($flagName) -and -not $PSBoundParameters[$flagName]) {
+        throw "-$flagName requires a non-empty path or manifest key; an empty string would otherwise fall through to an install instead of running -$flagName's own guard."
+    }
 }
 
 if (-not (Test-Path -LiteralPath $Target -PathType Container)) {
@@ -119,7 +180,7 @@ $scratchDst = Join-Path $claudeDir 'scratch'
 # conjure a .claude tree. A missing directory there is the "file does not exist" / "nothing is
 # pinned" case each one's own guard reports, and reporting that beats silently creating an empty
 # layout.
-if (-not $Audit -and -not $Accept -and -not $Unaccept) {
+if (-not $Audit -and -not $Accept -and -not $Unaccept -and -not $Prune) {
     foreach ($dir in @($claudeDir, $agentsDst, $hooksDst, $scratchDst)) {
         if (-not (Test-Path -LiteralPath $dir)) {
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
@@ -196,6 +257,38 @@ function Resolve-LayerPath {
         Key      = ($relative -replace '\\', '/')
         FullPath = $fullPath
     }
+}
+
+# Map of every file core ships (ceremony files included — if a project installed them, they
+# should be audited/pruned regardless of which switches this run got). Shared by -Audit and
+# -Prune: both need the identical answer to "does core still ship this key", and two copies of
+# that scan are two chances for one to drift from the other and call a still-shipped ceremony
+# file orphaned.
+function Get-CoreFilesMap {
+    # Get-ChildItem on a MISSING directory throws under this script's Stop preference, which is
+    # already fail-closed. A directory that EXISTS but lists zero files does not throw, and this
+    # map answering "core ships no agents" or "core ships no hooks" from that state is the same
+    # defect security.md's scope-filter rule names: a filter that resolves empty must refuse,
+    # never widen (here, to "everything installed is an orphan"). Measured: an empty
+    # core/claude/agents made a normally-installed project audit as 18 'orphaned (unmodified)'
+    # rows, and -Prune following -Audit's own printed command through those rows deleted the
+    # identity gate and every other agent/hook with it, no manifest tampering required. Refuse
+    # instead of answering "core ships nothing".
+    $agentFiles = @(Get-ChildItem -LiteralPath $agentsSrc -Filter '*.md' -File)
+    if ($agentFiles.Count -eq 0) {
+        throw "Get-CoreFilesMap: $agentsSrc exists but contains no agent files. Refusing rather than reporting every installed agent as orphaned."
+    }
+    $hookFiles = @(Get-ChildItem -LiteralPath $hooksSrc -File | Where-Object { $_.Name -ne '.gitkeep' })
+    if ($hookFiles.Count -eq 0) {
+        throw "Get-CoreFilesMap: $hooksSrc exists but contains no hook files. Refusing rather than reporting every installed hook as orphaned."
+    }
+
+    $map = [ordered]@{}
+    foreach ($f in $agentFiles) { $map["agents/$($f.Name)"] = $f.FullName }
+    foreach ($f in $hookFiles) { $map["hooks/$($f.Name)"] = $f.FullName }
+    $map['guardrails.md'] = Join-Path $templatesSrc 'guardrails.template.md'
+    $map['scratch/.gitignore'] = Join-Path $templatesSrc 'scratch.gitignore'
+    return $map
 }
 
 # Claude Code plugins install to ~/.claude/plugins/cache/<marketplace>/<plugin>/ at
@@ -466,6 +559,75 @@ if ($Unaccept) {
     return
 }
 
+# -Prune: standalone for the same reason as -Accept and -Unaccept, and deliberately one key per
+# invocation rather than a loop over every orphan. Two earlier designs pruned by deleting, and
+# adversarial review executed a real file deletion against each one: an automatic loop keyed off
+# whatever manifest entry core no longer recognized, where an untrusted key like
+# '../../victim.txt' carrying that file's real hash drove Remove-Item with no containment check
+# at all; and a standalone -Prune resolving its argument through Resolve-LayerPath's containment
+# check before deleting, where the check turned out to be textual
+# (GetUnresolvedProviderPathFromPSPath plus GetRelativePath on unresolved strings, so it never
+# resolves a reparse point) and a directory symlink placed inside .claude walked Remove-Item
+# straight past it to a target the check never saw. -Prune now contains no delete primitive: it
+# only ever removes a key from $manifest['files'], which cannot destroy anything no matter what
+# the key resolves to. That closes the whole class rather than the instances -- a traversal or
+# symlink key can still slip the checks below, but the worst it now does is drop a manifest
+# record that was already sitting in the manifest, which harms nothing.
+if ($Prune) {
+    # Literal key first, canonicalized second -- exactly -Unaccept's lookup at the branch above.
+    # A manifest key can outlive the path resolving that way at all (hand-edited, carried in from
+    # another machine, an older installer's canonicalization), and resolving first would leave
+    # such a key undroppable by any command: the 'orphaned' row with no repair path this whole
+    # command exists to close. The literal branch skips Resolve-LayerPath's containment check
+    # entirely, same as -Unaccept's does -- coherent now that neither branch can reach a
+    # Remove-Item, so there is nothing left for that check to protect here.
+    $pruneKey = $null
+    $prunePath = $null
+    if ($manifest['files'].Contains($Prune)) {
+        $pruneKey = $Prune
+        $prunePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath((Join-Path $claudeDir $pruneKey))
+    }
+    else {
+        $resolvedPrune = Resolve-LayerPath -RelativePath $Prune -LayerDir $claudeDir -Flag '-Prune'
+        $pruneKey = $resolvedPrune.Key
+        $prunePath = $resolvedPrune.FullPath
+    }
+
+    # Live ceremony state, not a file core ships or ever shipped a source for — -Audit already
+    # carves this key out of every hash-based classification for the same reason ('stateful (not
+    # audited)'). Refusing here is coherence, not safety: -Prune cannot delete the ledger any
+    # more than it can delete anything else. It still refuses, because dropping the tracking
+    # record for live state that -Audit already treats as untracked is not what this command is
+    # for, and the message points at the right one instead of a silent no-op.
+    if ($pruneKey -eq 'ceremony-ledger.json') {
+        throw "-Prune 'ceremony-ledger.json': this is live ceremony state, not a file core ships or ever shipped, so pruning it is not what this command is for. Delete it by hand if it is genuinely unwanted."
+    }
+
+    $coreFiles = Get-CoreFilesMap
+    if ($coreFiles.Contains($pruneKey)) {
+        throw "-Prune '$pruneKey': core still ships this file, so it is not an orphan. Re-run the installer to bring it back in sync, or with -IncludeCeremonies if it is gated on that switch."
+    }
+
+    if ($manifest['accepted'].Contains($pruneKey)) {
+        throw "-Prune '$pruneKey': pinned as an accepted overlay. A pin means the project owns this file, so -Prune must not silently override it. Run -Unaccept '$pruneKey' first if the pin should go too."
+    }
+
+    if (-not $manifest['files'].Contains($pruneKey)) {
+        throw "-Prune '$pruneKey': not tracked in the manifest's files map, so there is nothing to prune. Run -Audit to see which keys are orphaned."
+    }
+
+    $manifest['files'].Remove($pruneKey)
+    $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
+
+    if (-not (Test-Path -LiteralPath $prunePath -PathType Leaf)) {
+        Write-Host "Pruned manifest record '$pruneKey': already gone from disk."
+    }
+    else {
+        Write-Host "Dropped the manifest record for '$pruneKey'. The file is still on disk at $prunePath, now untracked by the harness -- delete it yourself if it is unwanted, or run -Accept '$pruneKey' to pin it as an overlay."
+    }
+    return
+}
+
 $results = New-Object System.Collections.Generic.List[pscustomobject]
 # Wrap the call, not just the function's internal `return @()`: a function's empty-array
 # return crosses the pipeline like any other output, and zero pipeline objects captured
@@ -476,17 +638,7 @@ $detectedOutputStyles = @(Get-DetectedOutputStyles)
 $detectedMcpServers = @(Get-DetectedMcpServers -TargetPath $Target)
 
 if ($Audit) {
-    # Map of every file core ships (ceremony files included — if a project installed
-    # them, they should be audited regardless of which switches this run got).
-    $coreFiles = [ordered]@{}
-    Get-ChildItem -LiteralPath $agentsSrc -Filter '*.md' -File | ForEach-Object {
-        $coreFiles["agents/$($_.Name)"] = $_.FullName
-    }
-    Get-ChildItem -LiteralPath $hooksSrc -File | Where-Object { $_.Name -ne '.gitkeep' } | ForEach-Object {
-        $coreFiles["hooks/$($_.Name)"] = $_.FullName
-    }
-    $coreFiles['guardrails.md'] = Join-Path $templatesSrc 'guardrails.template.md'
-    $coreFiles['scratch/.gitignore'] = Join-Path $templatesSrc 'scratch.gitignore'
+    $coreFiles = Get-CoreFilesMap
 
     if (-not $Quiet -and -not (Test-Path -LiteralPath $manifestPath)) {
         Write-Host "No .harness-manifest.json in $claudeDir — harness was never installed here via the installer."
@@ -533,7 +685,20 @@ if ($Audit) {
         }
 
         if (-not $srcPath) {
-            $results.Add([pscustomobject]@{ File = $key; Status = 'orphaned' })
+            # Every key reaching here came from manifest['files'].Keys (an accepted key already
+            # returned above, and a coreFiles key always carries a non-null srcPath), so
+            # $manifest['files'][$key] is always a real recorded hash. Still split three ways for
+            # the operator's own information -- -Prune's action is identical across all three
+            # now, but whether the on-disk copy matches what was last installed is worth knowing
+            # before deciding whether to delete it by hand afterward.
+            if (-not $dstExists) {
+                $results.Add([pscustomobject]@{ File = $key; Status = 'orphaned (already removed)' })
+                continue
+            }
+            $dstHash = Get-FileHashHex -Path $dstPath
+            $recHash = $manifest['files'][$key]
+            $status = if ($dstHash -eq $recHash) { 'orphaned (unmodified)' } else { 'orphaned (modified)' }
+            $results.Add([pscustomobject]@{ File = $key; Status = $status })
             continue
         }
 
@@ -606,7 +771,7 @@ if ($Audit) {
         # recovery for one and the pin-drop for the other rather than sending both to the
         # installer. (CONTRIBUTING.md's drift-detection gate: every class the audit reports needs
         # a standing response, and the classes that must never be auto-repaired are named as such.)
-        Write-Host "$($attention.Count) file(s) need attention. project-modified/untracked-differs = candidates to promote into core; core-updated/not-installed = re-run installer to pull down; overlay-changed = re-review the fork, then re-pin with -Accept; missing = re-run the installer if the row is a tracked file, but a missing pinned overlay exists only in the project's own history, so restore it from there or drop the pin with -Unaccept."
+        Write-Host "$($attention.Count) file(s) need attention. project-modified/untracked-differs = candidates to promote into core; core-updated/not-installed = re-run installer to pull down; overlay-changed = re-review the fork, then re-pin with -Accept; missing = re-run the installer if the row is a tracked file, but a missing pinned overlay exists only in the project's own history, so restore it from there or drop the pin with -Unaccept; orphaned (already removed/unmodified/modified) = -Prune the key to drop the stale manifest record -- the file, if any is still there, is left on disk for you to delete by hand or -Accept to pin as an overlay."
     }
 
     # Stack drift: report-only, same as the file audit above — never writes the manifest.
