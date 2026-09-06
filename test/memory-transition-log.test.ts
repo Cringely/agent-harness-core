@@ -84,7 +84,16 @@ describe("spawned process — the fail-open path stays open and says why", () =>
     expect(result.stderr).toContain("memory-transition-log: hook error, skipping:");
   });
 
-  test("a Write/Edit outside memory/ counts nothing: exit 0, no stdout, no stderr", () => {
+  test("a Write/Edit outside memory/ counts nothing: exit 0, no stdout, no stderr, no new line", () => {
+    // This hook has no stdout contract at all (file header above), so exit/stdout/stderr alone
+    // cannot tell a correct no-op from one that wrongly counted: appendFileSync touches neither.
+    // The one channel that discriminates is the state file itself. The test above this one has
+    // already run and appended a line, so the baseline is captured fresh here rather than
+    // asserted absent — this is "same content as immediately before this test's own run", not
+    // "empty file". The payload below is a real status: proposed -> accepted transition, same
+    // shape the positive test counts; only the out-of-memory/ path should stop it, so a broken
+    // or removed inMemoryDir() gate is exactly what turns `before` and `after` unequal.
+    const before = readFileSync(statePath, "utf8");
     const result = runHook(
       JSON.stringify({
         tool_name: "Edit",
@@ -96,5 +105,6 @@ describe("spawned process — the fail-open path stays open and says why", () =>
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe("");
     expect(result.stderr).toBe("");
+    expect(readFileSync(statePath, "utf8")).toBe(before);
   });
 });

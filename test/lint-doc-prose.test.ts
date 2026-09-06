@@ -5,7 +5,7 @@
 // non-doc files do not.
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { planLint, resolveValeConfig, shouldLint } from "../core/claude/hooks/lint-doc-prose";
@@ -505,10 +505,15 @@ afterAll(() => {
 });
 
 describe("spawned process — a real finding reaches stdout", () => {
-  // Requires a real `vale` on PATH and a resolvable config, the same prerequisite the hook itself
-  // documents as advisory-degrade-if-absent. Skipped rather than faked when either is missing: an
-  // offline stub asserting nothing about the real Bun.spawnSync(["vale", ...]) call would pass for
-  // the wrong reason, which is exactly the defect #78 exists to close.
+  // Requires a real `vale` on PATH and a resolvable config: this specifically exercises Vale's
+  // OWN rule engine end to end (real binary, real Cringely styles, a real AI-tell match), which
+  // is what the fake `vale` in the next describe block below cannot cover. Skipped rather than
+  // faked when either is missing: a monkeypatched Bun.spawnSync (or a hook refactored to inject
+  // one) would prove nothing about the real call, which is exactly the defect #78 exists to
+  // close. That is a different thing from a PATH-injected real executable named `vale` — the
+  // hook still resolves it via its own real Bun.which(), still calls its own real Bun.spawnSync,
+  // still parses real stdout — and the next describe block uses exactly that to cover the
+  // stdout-emission path host-independently, with no dependency on Vale's rule engine at all.
   const valeReady = Bun.which("vale") !== null && resolveValeConfig() !== null;
 
   test.skipIf(!valeReady)(
@@ -530,6 +535,73 @@ describe("spawned process — a real finding reaches stdout", () => {
     const result = runHook(JSON.stringify({ tool_input: { file_path: join(spawnFixtureRoot, "x.ts") } }));
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe("");
+  });
+});
+
+/** One canned --output=line-shaped finding, printed verbatim by the fake `vale` regardless of
+ * its argv. The marker proves the finding text this test asserts on actually came out of the
+ * spawned process rather than out of `buildContext`'s own boilerplate (which already contains
+ * `file` on every run, finding or not). */
+const FAKE_VALE_FINDING = "fixture.md:1:1:Fake.Finding:fake-vale-finding-marker";
+
+/**
+ * Installs a fake `vale` in a fresh temp dir and returns the dir, to prefix onto PATH. Platform-
+ * specific because the hook's own Bun.which()/Bun.spawnSync() go straight to the OS process
+ * launcher, not through a shell: on Windows, Bun.which() resolves a bare "vale" via PATHEXT and
+ * needs a .cmd/.exe/.bat, never an extensionless shebang script (confirmed empirically — an
+ * extensionless "vale" file in an otherwise-matching dir resolves to null); on POSIX it needs an
+ * extensionless file with the exec bit and a real shebang, which Windows can't run directly. The
+ * fake ignores every argument and always emits FAKE_VALE_FINDING, so this exercises the hook's
+ * OWN spawn call and stdout parsing without depending on Vale's rule engine.
+ */
+function installFakeVale(): string {
+  const dir = mkdtempSync(join(tmpdir(), "lint-doc-prose-fakevale-"));
+  if (process.platform === "win32") {
+    writeFileSync(join(dir, "vale.cmd"), ["@echo off", `echo ${FAKE_VALE_FINDING}`, ""].join("\r\n"));
+  } else {
+    const stubPath = join(dir, "vale");
+    writeFileSync(stubPath, ["#!/bin/sh", `echo "${FAKE_VALE_FINDING}"`, ""].join("\n"));
+    chmodSync(stubPath, 0o755);
+  }
+  return dir;
+}
+
+describe("spawned process — stdout emission path via a PATH-injected fake vale", () => {
+  // Host-independent counterpart to the vale-gated describe block above: runs the same on this
+  // workstation and on a vale-less CI runner, where that block's test.skipIf leaves the stdout-
+  // emission path dark. Reproduces #97/#78's residual gap directly: mutating the entrypoint's
+  // `if (findings === "") process.exit(0)` to an unconditional `process.exit(0)` (dropping every
+  // finding) leaves the CI-only suite green with no other guard catching it — this test is that
+  // guard, verified failing against the mutation before being written.
+  const fakeValeDir = installFakeVale();
+  const dummyConfig = join(fakeValeDir, "fake.vale.ini");
+  writeFileSync(dummyConfig, ""); // resolveValeConfig() only checks existsSync, never reads it
+
+  afterAll(() => {
+    rmSync(fakeValeDir, { recursive: true, force: true });
+  });
+
+  test("a finding from the fake binary reaches stdout, independent of a real vale being installed", () => {
+    const sep = process.platform === "win32" ? ";" : ":";
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      PATH: [fakeValeDir, process.env.PATH ?? ""].join(sep),
+      PROSE_LINT_VALE_CONFIG: dummyConfig,
+    };
+    // Must satisfy shouldLint()'s own allowlist (README.md at any depth, or under docs/) —
+    // this is exercising the spawn/parse/emit path, not shouldLint(), so the fixture goes under
+    // docs/ rather than relying on a bare filename to happen to match.
+    const docsDir = join(spawnFixtureRoot, "docs");
+    mkdirSync(docsDir, { recursive: true });
+    const file = join(docsDir, "fake-vale-target.md");
+    writeFileSync(file, "# Fixture\n\nContent doesn't matter — the fake vale ignores it.\n");
+    const result = runHook(JSON.stringify({ tool_input: { file_path: file } }), env);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.length).toBeGreaterThan(0);
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed.hookSpecificOutput.hookEventName).toBe("PostToolUse");
+    expect(parsed.hookSpecificOutput.additionalContext).toContain(file);
+    expect(parsed.hookSpecificOutput.additionalContext).toContain("fake-vale-finding-marker");
   });
 });
 
