@@ -538,10 +538,10 @@ describe("spawned process — a real finding reaches stdout", () => {
   });
 });
 
-/** One canned --output=line-shaped finding, printed verbatim by the fake `vale` regardless of
- * its argv. The marker proves the finding text this test asserts on actually came out of the
- * spawned process rather than out of `buildContext`'s own boilerplate (which already contains
- * `file` on every run, finding or not). */
+/** One canned --output=line-shaped finding, printed verbatim by the fake `vale`. The marker
+ * proves the finding text this test asserts on actually came out of the spawned process rather
+ * than out of `buildContext`'s own boilerplate (which already contains `file` on every run,
+ * finding or not). */
 const FAKE_VALE_FINDING = "fixture.md:1:1:Fake.Finding:fake-vale-finding-marker";
 
 /**
@@ -550,17 +550,28 @@ const FAKE_VALE_FINDING = "fixture.md:1:1:Fake.Finding:fake-vale-finding-marker"
  * launcher, not through a shell: on Windows, Bun.which() resolves a bare "vale" via PATHEXT and
  * needs a .cmd/.exe/.bat, never an extensionless shebang script (confirmed empirically — an
  * extensionless "vale" file in an otherwise-matching dir resolves to null); on POSIX it needs an
- * extensionless file with the exec bit and a real shebang, which Windows can't run directly. The
- * fake ignores every argument and always emits FAKE_VALE_FINDING, so this exercises the hook's
- * OWN spawn call and stdout parsing without depending on Vale's rule engine.
+ * extensionless file with the exec bit and a real shebang, which Windows can't run directly.
+ *
+ * The fake echoes its own argv (prefixed "ARGV:") ahead of FAKE_VALE_FINDING. Earlier this ignored
+ * argv entirely, which closed the mutation this test was written for (dropping every finding) but
+ * left a different one dark: nothing asserted what the hook actually PASSES to the spawn. Dropping
+ * `"--config", plan.config` from the real spawn call still produces exit 0 plus a finding line —
+ * Vale itself would print a stderr error and no stdout, but this fake can't reproduce that
+ * distinction, so the ARGV echo is what catches a dropped/reordered arg instead.
  */
 function installFakeVale(): string {
   const dir = mkdtempSync(join(tmpdir(), "lint-doc-prose-fakevale-"));
   if (process.platform === "win32") {
-    writeFileSync(join(dir, "vale.cmd"), ["@echo off", `echo ${FAKE_VALE_FINDING}`, ""].join("\r\n"));
+    writeFileSync(
+      join(dir, "vale.cmd"),
+      ["@echo off", "echo ARGV:%*", `echo ${FAKE_VALE_FINDING}`, ""].join("\r\n"),
+    );
   } else {
     const stubPath = join(dir, "vale");
-    writeFileSync(stubPath, ["#!/bin/sh", `echo "${FAKE_VALE_FINDING}"`, ""].join("\n"));
+    writeFileSync(
+      stubPath,
+      ["#!/bin/sh", 'echo "ARGV:$@"', `echo "${FAKE_VALE_FINDING}"`, ""].join("\n"),
+    );
     chmodSync(stubPath, 0o755);
   }
   return dir;
@@ -602,6 +613,14 @@ describe("spawned process — stdout emission path via a PATH-injected fake vale
     expect(parsed.hookSpecificOutput.hookEventName).toBe("PostToolUse");
     expect(parsed.hookSpecificOutput.additionalContext).toContain(file);
     expect(parsed.hookSpecificOutput.additionalContext).toContain("fake-vale-finding-marker");
+    // The ARGV echo, not the two lines above: `file` and the finding marker both reach
+    // additionalContext regardless of what the hook actually spawned (buildContext's own
+    // boilerplate names `file` unconditionally, and the fake prints its finding line no matter
+    // its argv). What only the ARGV echo can prove is that the hook's OWN spawn call carried the
+    // flags and config path plan.config resolved to, not just any file/finding text.
+    expect(parsed.hookSpecificOutput.additionalContext).toContain("--output=line");
+    expect(parsed.hookSpecificOutput.additionalContext).toContain("--config");
+    expect(parsed.hookSpecificOutput.additionalContext).toContain(dummyConfig);
   });
 });
 

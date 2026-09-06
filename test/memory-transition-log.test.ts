@@ -11,7 +11,7 @@
 // lands on disk for a transition that should be counted, which is what the test below checks.
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -87,13 +87,16 @@ describe("spawned process — the fail-open path stays open and says why", () =>
   test("a Write/Edit outside memory/ counts nothing: exit 0, no stdout, no stderr, no new line", () => {
     // This hook has no stdout contract at all (file header above), so exit/stdout/stderr alone
     // cannot tell a correct no-op from one that wrongly counted: appendFileSync touches neither.
-    // The one channel that discriminates is the state file itself. The test above this one has
-    // already run and appended a line, so the baseline is captured fresh here rather than
-    // asserted absent — this is "same content as immediately before this test's own run", not
-    // "empty file". The payload below is a real status: proposed -> accepted transition, same
-    // shape the positive test counts; only the out-of-memory/ path should stop it, so a broken
-    // or removed inMemoryDir() gate is exactly what turns `before` and `after` unequal.
-    const before = readFileSync(statePath, "utf8");
+    // The one channel that discriminates is the state file itself. Under the full suite the test
+    // above this one has already run and appended a line, so the baseline is captured fresh here
+    // rather than asserted absent — this is "same content as immediately before this test's own
+    // run", not "empty file". Run in isolation (e.g. `bun test -t "counts nothing"`) the file
+    // never gets created, so existsSync() falls back to "" rather than ENOENT-ing on a read of a
+    // file the positive test didn't get a chance to write. The payload below is a real status:
+    // proposed -> accepted transition, same shape the positive test counts; only the
+    // out-of-memory/ path should stop it, so a broken or removed inMemoryDir() gate is exactly
+    // what turns `before` and `after` unequal either way.
+    const before = existsSync(statePath) ? readFileSync(statePath, "utf8") : "";
     const result = runHook(
       JSON.stringify({
         tool_name: "Edit",
@@ -105,6 +108,7 @@ describe("spawned process — the fail-open path stays open and says why", () =>
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe("");
     expect(result.stderr).toBe("");
-    expect(readFileSync(statePath, "utf8")).toBe(before);
+    const after = existsSync(statePath) ? readFileSync(statePath, "utf8") : "";
+    expect(after).toBe(before);
   });
 });
