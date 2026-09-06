@@ -164,5 +164,6 @@
   "preferredNotifChannel": "auto",
   "teammateMode": "auto",
   "inputNeededNotifEnabled": true,
-  "agentPushNotifEnabled": true
+  "agentPushNotifEnabled": true,
+  "outputStyle": "Explanatory"
 }

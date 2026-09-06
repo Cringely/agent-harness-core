@@ -149,6 +149,31 @@ One direction. Config is authored in `~/.claude/` on the canonical workstation, 
 `account/claude/` here, and consumed elsewhere. A divergence on a receiving machine is a bug
 rather than a fork to keep.
 
+### Keeping one machine's specifics out of the payload
+
+The published payload is meant to be usable by someone who is not its author, so it should not name
+one person's infrastructure: which reverse proxy runs where, a pinned version of a monitoring stack,
+an SSH key filename, the incidents that produced a rule.
+
+Any file whose name ends `.local.md` is the per-environment overlay. The exporter skips it on the
+leaf name at any depth, and `.gitignore` covers the other half so a project installing the harness
+cannot commit one either. So a rule that needs local particulars splits in two:
+
+```
+~/.claude/rules/change-management.md         generic, published
+~/.claude/rules/change-management.local.md   this machine's specifics, never published
+```
+
+A suffix rather than a subdirectory, deliberately. Claude Code loads `~/.claude/rules/*.md` from that
+directory, so moving content into a subdirectory would change whether it loads at all, which is a
+behaviour change wearing a publishing decision's clothes. A sibling file loads exactly as before and
+simply never travels.
+
+The line to draw is not "does this name a product". A general invariant stays even when it names
+one: Alpine images resolving `localhost` to IPv6 first, so a healthcheck wants `127.0.0.1`, helps
+anyone who meets it. One operator's service inventory moves. The test is whether the sentence would
+help a reader running entirely different infrastructure.
+
 Export, on the canonical workstation only:
 
 ```

@@ -19,3 +19,11 @@ node_modules/
 # a forgotten backup can no longer become a committed one.
 *.bak
 *.bak.*
+
+# Per-environment overlay for the account layer. A `.local.md` beside any rule,
+# skill or agent file holds one machine's specifics -- named hosts, a service
+# inventory, incidents from one person's infrastructure -- so the published
+# payload stays usable by someone who is not its author. install/Export-Account.ps1
+# skips these on the leaf name at any depth; this entry is the second half, so a
+# project that installs the harness cannot commit one either.
+*.local.md
