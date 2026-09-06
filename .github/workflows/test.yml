@@ -1,0 +1,97 @@
+name: test
+
+# Two tiers, one workflow. Both gate the same events and share one concurrency
+# group, so splitting them into separate files would only duplicate that config.
+# The CI decision note (memory: ci-for-a-process-layer-repo) carries why the
+# suites are split rather than all run at once.
+#
+# push is filtered to master on purpose. Unfiltered, a branch pushed for a pull
+# request fires this workflow twice, once per event, running every suite two
+# times for one change. Filtered, a branch is covered by its pull request and
+# master is covered directly, with no overlap.
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bun-test:
+    name: bun test (TypeScript hook suite)
+    # Pinned rather than ubuntu-latest so the image cannot move under the suite
+    # between runs. ubuntu-latest already points at 24.04 and GitHub is
+    # previewing 26.04; a pinned image fails loudly on a deliberate bump instead
+    # of quietly on someone else's schedule.
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.3.14"
+
+      - name: bun test
+        run: bun test
+
+  pester-test:
+    name: Pester (fixture-built installer suites)
+    # Windows, not Linux, and the first run of this workflow is why. It put this
+    # tier on ubuntu-24.04 and Install-Account.Tests.ps1 failed nine ways, every
+    # one a platform assumption rather than a defect: a Windows drive letter in a
+    # path, assertions expecting `chmod` to be absent from PATH where Linux has
+    # it, and a 1Password Store path that exists only on Windows.
+    #
+    # The CI decision note measured these suites for coupling to a real
+    # ~/.claude and found them clean. That was true and it was the wrong axis.
+    # They are coupled to the platform they were written on, which no
+    # home-directory measurement would have shown.
+    #
+    # These scripts target a Windows workstation, so running them where they are
+    # valid is correct rather than a workaround. What it does not do is prove the
+    # installer behaves on Linux. Nothing currently proves that, and the gap is
+    # filed as its own issue rather than hidden behind a green check here.
+    #
+    # windows-latest is deliberately unpinned, unlike the bun job. The suites
+    # depend on Windows path and drive semantics rather than on a particular
+    # image's tool versions, and those semantics do not move between images.
+    runs-on: windows-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # One suite runs here, not two, and the two runs that established that are
+      # worth recording because the CI decision note predicts otherwise.
+      #
+      # Install-Account.Tests.ps1 is excluded. On ubuntu-24.04 it failed nine
+      # ways on platform assumptions. Moved to Windows, where it passes on the
+      # author's workstation, it failed fifteen or more ways on machine state:
+      # it asserts a 1Password Store path with an embedded version, which exists
+      # on that workstation and on no runner. It is not coupled to the platform,
+      # it is coupled to one machine, and no amount of choosing a different
+      # runner image fixes that.
+      #
+      # Install-Harness.Tests.ps1 is excluded for the older and simpler reason:
+      # it reads a real ~/.claude-shaped tree.
+      #
+      # Both are worth running and neither can run unattended yet. Run them by
+      # hand until the coupling is removed:
+      #   pwsh -NoProfile -File install/Install-Account.Tests.ps1
+      #   pwsh -NoProfile -File install/Install-Harness.Tests.ps1
+      #
+      # Invocation form matters. `pwsh -NoProfile -File <script>` exits non-zero
+      # on a failing test; `pwsh -Command 'Invoke-Pester ...'` prints the failure
+      # and still exits 0 (CONTRIBUTING.md, "Change process").
+      - name: Restore-ClaudeProject.Tests.ps1
+        run: pwsh -NoProfile -File install/Restore-ClaudeProject.Tests.ps1
