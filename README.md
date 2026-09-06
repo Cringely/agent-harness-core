@@ -99,18 +99,18 @@ one of the reasons a pin outlives its usefulness. It refuses a key that is not p
 touches the file itself.
 
 `-Prune <relpath>` retires a manifest key for a file core no longer ships. It refuses a key core
-still ships (that is not an orphan) and a key pinned in `accepted` (drop the pin with `-Unaccept`
-first, since a pin means the project owns the file). Otherwise: a file whose on-disk copy still
-matches the hash recorded at install is deleted along with the record; one that has since diverged
-is left on disk and only the record is dropped, which is what then lets `-Accept` pin it, since the
-file is no longer tracked in `files`; and a record whose file is already gone is dropped by itself.
-It resolves its argument through the same containment check as `-Accept` and `-Unaccept`, so it can
-only ever touch a path inside the project's own `.claude`. It warns, without refusing, when
-`settings.json` still registers a hook command naming the file being pruned. An earlier version
-pruned every orphaned key automatically on every install; adversarial review found it would delete
-an arbitrary file outside the project from a manifest key like `../../victim.txt` carrying that
-file's real hash, among other defects, so this shipped as a standalone, one-key-at-a-time command
-instead.
+still ships (that is not an orphan), a key pinned in `accepted` (drop the pin with `-Unaccept`
+first, since a pin means the project owns the file), and `ceremony-ledger.json` (live state core
+never shipped a source for). Otherwise it drops the manifest record and nothing else: the file, if
+one is still there, is left exactly where it is, now untracked, which is what then lets `-Accept`
+pin it as an overlay. `-Prune` carries no delete primitive at all. Two earlier designs deleted a
+file, and adversarial review executed a real deletion against both: an automatic loop that pruned
+every orphaned key on every install, where an untrusted manifest key like `../../victim.txt`
+carrying that file's real hash drove `Remove-Item` with no containment check; and a standalone
+`-Prune` that resolved its argument through a containment check before deleting, where the check
+turned out to be textual and never resolved a reparse point, so a directory symlink placed inside
+`.claude` walked `Remove-Item` straight past it. A manifest key is untrusted, PR-modifiable input,
+and this command no longer trusts it with anything sharper than a hashtable key removal.
 
 `-Audit` writes nothing and reports drift in both directions, using a three-way compare of core
 source, the manifest hash, and the installed file: `project-modified` and `untracked (differs from
