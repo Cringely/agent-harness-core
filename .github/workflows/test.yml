@@ -71,11 +71,23 @@ jobs:
         with:
           persist-credentials: false
 
-      # Only the two suites that build every fixture under the OS temp directory
-      # run here. install/Install-Harness.Tests.ps1 is left out: it is the one
-      # suite genuinely coupled to a real ~/.claude-shaped tree, and provisioning
-      # a synthetic one on a runner is an open question this workflow does not
-      # settle. Run it by hand:
+      # One suite runs here, not two, and the two runs that established that are
+      # worth recording because the CI decision note predicts otherwise.
+      #
+      # Install-Account.Tests.ps1 is excluded. On ubuntu-24.04 it failed nine
+      # ways on platform assumptions. Moved to Windows, where it passes on the
+      # author's workstation, it failed fifteen or more ways on machine state:
+      # it asserts a 1Password Store path with an embedded version, which exists
+      # on that workstation and on no runner. It is not coupled to the platform,
+      # it is coupled to one machine, and no amount of choosing a different
+      # runner image fixes that.
+      #
+      # Install-Harness.Tests.ps1 is excluded for the older and simpler reason:
+      # it reads a real ~/.claude-shaped tree.
+      #
+      # Both are worth running and neither can run unattended yet. Run them by
+      # hand until the coupling is removed:
+      #   pwsh -NoProfile -File install/Install-Account.Tests.ps1
       #   pwsh -NoProfile -File install/Install-Harness.Tests.ps1
       #
       # Invocation form matters. `pwsh -NoProfile -File <script>` exits non-zero
@@ -83,6 +95,3 @@ jobs:
       # and still exits 0 (CONTRIBUTING.md, "Change process").
       - name: Restore-ClaudeProject.Tests.ps1
         run: pwsh -NoProfile -File install/Restore-ClaudeProject.Tests.ps1
-
-      - name: Install-Account.Tests.ps1
-        run: pwsh -NoProfile -File install/Install-Account.Tests.ps1
