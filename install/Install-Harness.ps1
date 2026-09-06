@@ -772,14 +772,16 @@ Get-ChildItem -LiteralPath $hooksSrc -File | Where-Object { $_.Name -ne '.gitkee
 # Windows has none, so this is a no-op there — Git for Windows runs the hook
 # by its shebang regardless of the (meaningless) NTFS permission bits.
 #
-# Both git-invoked entry points, not only pre-commit: core/claude/hooks/
-# pre-push (issue #64's whole-range identity sweep) is a real git hook too,
-# and git skips it the same silent way it skips an unmarked pre-commit.
+# All three git-invoked entry points, not only pre-commit: core/claude/hooks/
+# pre-push (issue #64's whole-range identity sweep) and commit-msg (the
+# AI-attribution refusal, promoted from a hand-placed .git/hooks copy that
+# existed on one machine and in no repository) are real git hooks too, and
+# git skips either the same silent way it skips an unmarked pre-commit.
 # identity-patterns.sh is deliberately absent from this list — it is a
 # sourced function library, never executed directly by git or anything
 # else, so it needs no executable bit at all.
 if (-not $IsWindows) {
-    foreach ($gitHookName in @('pre-commit', 'pre-push')) {
+    foreach ($gitHookName in @('pre-commit', 'pre-push', 'commit-msg')) {
         $gitHookDst = Join-Path $hooksDst $gitHookName
         if (Test-Path -LiteralPath $gitHookDst) {
             & chmod +x $gitHookDst
