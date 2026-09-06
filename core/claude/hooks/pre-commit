@@ -36,7 +36,7 @@
 #
 # CONFIG RESOLUTION
 # Mirrors lint-doc-prose.ts's project-then-global order (see that file's
-# resolveValeConfig, lines ~85-87): a repo-vendored kit at
+# resolveValeConfig, line 125): a repo-vendored kit at
 # .claude/tools/prose-lint/.vale.ini first, then the machine-global kit under
 # the user's home. No env-var override here — that candidate in
 # lint-doc-prose.ts exists for its own CI callers, not this hook.
@@ -70,9 +70,9 @@ hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # message wherever the real one would read. pre-commit does not walk
 # history the way pre-push does, but every git invocation in this hook
 # still inherits this, and setting it costs nothing when unused. See
-# identity-patterns.sh's pre-push counterpart for the reproduction this
-# closes (a replace ref that made all four push-stage channels read a
-# clean stand-in while the real object shipped to the remote).
+# the pre-push hook, lines 68-79, for the reproduction this closes: a
+# replace ref that made all four push-stage channels read a clean
+# stand-in while the real object shipped to the remote.
 export GIT_NO_REPLACE_OBJECTS=1
 
 # --- identity gate: refuse before Vale ever runs ------------------------
@@ -137,7 +137,7 @@ if [ -n "$identity_staged" ]; then
       exit 1
     fi
     # Content channel: `git show ":$f"` reads the blob straight from the
-    # index, the same way identity-patterns.sh's pre-push counterpart reads
+    # index, the same way the pre-push hook reads
     # it via `git cat-file` -- never through a `git diff`/`git log -p` call,
     # which inherits every diff-shaping knob measured against this gate: a
     # leading NUL byte git's own binary heuristic reacts to, a `-diff`

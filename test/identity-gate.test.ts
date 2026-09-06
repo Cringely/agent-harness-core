@@ -457,6 +457,14 @@ describe("identity gate — pre-push (authoritative whole-range sweep)", () => {
   // just another object newly reachable in the range. Pinned here because
   // the header comment above now claims this closed; a claim like that
   // needs a test, not just a comment.
+  // 30s, not bun's 5s default. This case builds a base commit, two branches, a
+  // conflicted merge and a push, which is around thirteen git spawns plus a
+  // hook run, and it landed at 5,020ms on the author's workstation while
+  // passing on GitHub's runner. A test whose result depends on how fast the
+  // machine is does not test what its name says: it was green in CI and red
+  // locally at the same commit. The budget is deliberately far above the
+  // observed time rather than just above it, because the point is to stop
+  // measuring the hardware, not to re-tune the threshold on the next machine.
   test("a merge commit's hand-typed conflict resolution (absent from every parent) is still caught", () => {
     const remote = initBareRemote();
     const dir = initPrePushRepo(remote);
@@ -483,7 +491,7 @@ describe("identity gate — pre-push (authoritative whole-range sweep)", () => {
     const result = push(dir, "branchA:refs/heads/branchA");
     expect(result.exitCode).not.toBe(0);
     expect(result.stderr.toString()).toContain("content of one or more commits");
-  });
+  }, 30_000);
 
   test("gate exits non-zero when the identity file is missing", () => {
     const remote = initBareRemote();
