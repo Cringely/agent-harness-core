@@ -75,7 +75,8 @@ reminder to ask rather than authorization to act.
 
 Report every issue you find, including ones you are uncertain about or consider low-severity. Do
 not filter for importance or confidence at this stage. For each finding, include your confidence
-level and an estimated severity so a downstream filter can rank them.
+level and an estimated severity so a downstream filter can rank them. The guardrails table's
+"Work has to be able to end" row is that filter.
 
 ## Method
 
