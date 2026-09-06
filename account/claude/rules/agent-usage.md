@@ -113,7 +113,7 @@ Docker, PowerShell, and Bash each have a **skill** (knowledge injection, cheap) 
 - First query on a repo auto-indexes (keyword results in seconds; semantic backfills ~2 min). A "partial index" flag in results means absence is not proof.
 - Dispatching search-heavy subagents whose tool access includes MCP (`tools: *` agents): mention code-context in the brief. Restricted-tool agents (Explore, cavecrew) don't have it — brief them normally.
 
-Backend runs in WSL (setup note: memory `code-context-mcp-wsl`). If its tools are absent from a session, fall back to Grep/Glob without comment.
+If its tools are absent from a session, fall back to Grep/Glob without comment.
 
 ## When to Use Agents
 
@@ -124,7 +124,7 @@ Use agents when the task **individually** clears these thresholds:
 | **Explore** | Understanding something would take 2+ search/read rounds, or the territory is unfamiliar |
 | **cheap mechanical agent** (`model: haiku`) | Anything that runs a command and reports what it said: builds, test runs, log tails, service checks, recursive listings, collecting a diff |
 | **prose agent** (`model: fable`) | Any deliverable that is prose a person will read: docs, policy and runbook sections, memos, reports, README and wiki text, PR and commit bodies. Decide by the deliverable, not the task label — a doc-drift survey stays cheap, a doc-drift rewrite runs Fable |
-| **code-reviewer** | Any change with logic in it, any security-relevant config (Traefik, Authentik, firewall, secrets), anything altering service-to-service communication. Review runs on a premium model by design, so this is the one widened trigger that costs premium quota rather than saving it; that is a deliberate trade, not an oversight |
+| **code-reviewer** | Any change with logic in it, any security-relevant config (reverse proxy, SSO, firewall, secrets), anything altering service-to-service communication. Review runs on a premium model by design, so this is the one widened trigger that costs premium quota rather than saving it; that is a deliberate trade, not an oversight |
 | **code-architect** | A feature spans multiple services or compose files and needs design before implementation |
 | **code-explorer** | Need to trace an execution path or understand how an existing feature works across multiple layers |
 | **Plan** | Task has multiple valid approaches and needs architectural comparison before committing |
@@ -153,4 +153,4 @@ When a single call is still right, chain related commands with `&&` rather than 
 
 ## SSH / Remote Work Note
 
-Most homelab work happens over SSH to remote hosts. Agents can use Bash (and therefore SSH) but don't inherit session context, so direct tool use in the main context is often more practical for remote exploration. Agents for local codebase analysis; direct commands for remote host work.
+Agents can use Bash (and therefore SSH) but don't inherit session context, so direct tool use in the main context is often more practical for remote exploration. Agents for local codebase analysis; direct commands for remote host work.

@@ -439,6 +439,21 @@ function Copy-AccountTree {
         # older, untimestamped backups (e.g. hooks/Scan-MemorySecrets.ps1.bak) that predate it
         # and would otherwise ship a machine path in the payload.
         if ($f.Name -like '*.bak.*' -or $f.Name -like '*.bak') { continue }
+        # Per-environment overlay, never published. A `.local.md` beside any account file is
+        # the operator's own environment talking: named hosts, service inventories, the
+        # specifics of one homelab. The published payload is meant to be usable by someone
+        # who is not this operator, so that content has to live somewhere the exporter cannot
+        # reach, while still loading normally on the machine that wrote it.
+        #
+        # A suffix on the leaf rather than a directory, deliberately. Claude Code loads
+        # ~/.claude/rules/*.md from that directory; moving environment content into a
+        # subdirectory would change whether it loads at all, which is a behaviour change
+        # dressed up as a publishing decision. A sibling file with a reserved suffix keeps
+        # loading exactly as before and simply never travels.
+        #
+        # Checked on the leaf, like *.bak above, so the convention works at any depth: a
+        # skills/<name>/notes.local.md is excluded on the same rule as rules/homelab.local.md.
+        if ($f.Name -like '*.local.md') { continue }
         $full = "$Relative/$rel"
         if ($SkipRelative -contains $full) { continue }
         # Prefix, not an exact match: a whole excluded skill can hold any number of files, and

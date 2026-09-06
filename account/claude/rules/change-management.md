@@ -1,7 +1,7 @@
 # Change Management Protocol
 
 ## Homelab Context
-This is a homelab environment. Balance between move-fast experimentation and avoiding outages. Production services (Authentik SSO, monitoring, media stack) deserve more care than experimental containers.
+This is a homelab environment. Balance between move-fast experimentation and avoiding outages. Production services deserve more care than experimental containers.
 
 ## Non-Destructive Changes First
 
@@ -33,7 +33,7 @@ This is a homelab environment. Balance between move-fast experimentation and avo
 
 ## Git Commit Identity
 
-All commits must use the user's GitHub identity only. Never add Claude as a co-author or include any `Co-Authored-By` trailer. The commit author is always the user (Cringely). Do not add bot signatures, co-author lines, or any attribution to Claude in commit messages.
+All commits must use the user's GitHub identity only. Never add Claude as a co-author or include any `Co-Authored-By` trailer. The commit author is always the user. Do not add bot signatures, co-author lines, or any attribution to Claude in commit messages.
 
 ## Decision Documentation
 
@@ -62,7 +62,7 @@ Ask user before:
 - Dropping database tables or schemas
 - Force-pushing to git repos
 - Pruning Docker images/containers/networks/volumes (might remove unrelated items)
-- Modifying production service configs (Authentik, Traefik, monitoring)
+- Modifying production service configs (SSO, reverse proxy, monitoring)
 - Changing firewall rules or network configuration
 - Removing services from docker-compose.yml
 
@@ -73,14 +73,14 @@ Ask user before:
 - Removing services from stack → export volumes if they contain data
 - Major version upgrades of databases (Postgres, Redis) → backup + test restore
 - SSL certificate changes → backup existing certs
-- Authentik configuration changes → export blueprints
+- Identity provider (SSO) configuration changes → export its configuration
 
 ## Incremental Changes
 
 **Prefer small steps:**
 - Add one service at a time, verify, then add next
 - Change one config parameter, test, then change next
-- Deploy to staging (docker-staging VM) before production
+- Deploy to staging before production
 
 ## Rollback Strategy
 
@@ -92,7 +92,7 @@ Ask user before:
 
 ## Change Log for Multi-Step Operations
 
-For complex multi-step changes (like Phase 4-11 in Docker stack):
+For complex multi-step changes:
 - Use plan files to track progress
 - Update auto memory after completing each phase
 - Note which configs changed and where backups are
@@ -119,16 +119,16 @@ When the same class of failure appears more than once across sessions, promote i
 - Docker Compose bind-mount secrets need `0644` not `0600` — non-root container users can't read `0600` files
 - Services that add PUID/PGID support may still need explicit `user:` directives — check the image docs
 - CRLF line endings break shell scripts sent via SSH from Windows — use Python3 or base64 encoding for remote file edits
-- Git Bash `$HOME` on this workstation is `/c/Users/user/Documents`, not the real profile at `C:\Users\user`. Any Bash check written as `~/.claude/...` or `$HOME/...` silently reads a directory that does not exist and reports the file missing. Use the absolute `/c/Users/user/.claude/...` (or `$USERPROFILE`) when verifying anything under the profile from the Bash tool. Node's `os.homedir()` and PowerShell's `~` resolve correctly, so a hook can work fine while a Bash probe claims its config is gone. Bitten twice on 2026-07-28, in two sessions within the hour, both concluding the prose-lint kit had vanished when it was present and working.
+- Git Bash `$HOME` on Windows can differ from the real profile directory (on the workstation that produced this rule it was the profile's `Documents` folder). Any Bash check written as `~/.claude/...` or `$HOME/...` then silently reads a directory that does not exist and reports the file missing. Use `$USERPROFILE` (or the absolute profile path) when verifying anything under the profile from the Bash tool. Node's `os.homedir()` and PowerShell's `~` resolve correctly, so a hook can work fine while a Bash probe claims its config is gone. Bitten twice on 2026-07-28, in two sessions within the hour, both concluding the prose-lint kit had vanished when it was present and working.
 - Never `--accept-routes` on a Tailscale node running `network_mode: host` within the advertised subnet — it routes the host's own LAN traffic into the tunnel, breaking all connectivity. The setting persists to the state file and survives container restarts.
 - Docker networks with static IPs must define `ip_range` to restrict the IPAM dynamic pool — otherwise a container starting before the static-IP container can grab its address. Use a separate /24 for dynamic allocation.
 - DHCP gateway must be inside the client subnet mask. IoT devices with minimal TCP stacks cannot route to an off-subnet gateway, even if the gateway is on the same L2 broadcast domain. If the subnet mask is narrower than the network, add a secondary IP to the router within the client's subnet range.
-- Authentik server container needs `shm_size: 256m` — default 64MB fills from gunicorn worker IPC, causing SIGBUS crash loops
+- Docker's default 64MB `/dev/shm` fills under gunicorn worker IPC and the container crash-loops with SIGBUS; set `shm_size` explicitly on any container whose workers share memory that way
 - PowerShell's collection handling breaks in both directions, and both failures read as a plausible wrong answer rather than an error. It collapses a single-element collection to a bare scalar, so wrap any pipeline or cmdlet output you will index, count, or iterate in `@()`. And it splits multi-line native-command output into a string ARRAY, where `.Contains("substring")` silently becomes an exact ELEMENT test and returns False for text that is plainly present — join with `-join "\`n"` (or `Out-String`) before any substring check. Bitten three times: `Where-Object` returning one hook serialized `"hooks": {...}` instead of `[...]`; `Get-Content -Tail` on a one-line transcript made `$lines[0]` return one character, which read as "context unknown" and disabled a guard hook; and `gh pr view --json body --jq .body | .Contains(...)` reported a PR body edit had not landed when it had, nearly triggering a duplicate write. The tell is the same each time: a boolean or a count that disagrees with what you can see in the raw output.
 - The `@()` wrapping rule above has two failure modes of its own, and both produce a wrong value rather than an error. `@($null)` is a ONE-element array, not an empty one, so wrapping a source that can be null manufactures a phantom element: `$obj.PSObject.Properties.Name` on an empty `PSCustomObject` is `$null`, and `foreach ($k in @(...))` over it then runs one iteration with a null key. Filter with `| Where-Object { $_ }` wherever the source can be null. Separately, `@()` as a branch's only statement emits nothing for the branch to capture, so `$x = if ($c) { $a } else { @() }` assigns `$null` rather than an empty array; use a plain statement assignment, or `,@()`. Bitten four times on one branch in a single session, every time from code a plan supplied and every time with a green suite: an empty `env` object and an empty `mcpServers` in the exporter, an empty `hooks` object that broke 37 of 44 pre-existing tests and read as a regression in the task rather than a defect in the brief, and the `if/else` form, which crashed on ANY hook event installed for the first time. The tell is a loop body that runs once against an object you know is empty, or a variable that is null where you wrote a literal empty array.
 - Any matcher that reads a repo file on Windows must be line-ending agnostic. With `core.autocrlf=true` and no `.gitattributes` rule for the extension, the index holds LF and the working tree holds CRLF, so `split("\n")` leaves a `\r` on every line and a regex anchored on `$` sits behind it. Use `/\r?\n/` and `\r?$`. Bitten three times in one repo: a whole-line `===` against a heading reported six drifted files that had not drifted (and the comparisons below it then passed vacuously, six empty strings being equal), a Pester `Should -Match '(?m)^\*$'` failed against a two-line fixture, and a case-handling divergence traced to the same cause. Fix the matcher, not the checkout: adding `text eol=lf` to `.gitattributes` renormalizes every existing clone to repair a test bug and leaves test correctness coupled to a git config value. MSYS `grep`/`sed`/`od` strip CR silently, so diagnose with `git ls-files --eol` or a node/bun read with `JSON.stringify`.
-- Scrutiny-web does NOT support `file://` prefix in env vars — Viper passes the literal string as the token value. Use a standard env var from `.env` or a `scrutiny.yaml` config file instead.
-- A scope filter that resolves empty must fail closed, never widen to the full population, and scope identity must come from an explicit caller-supplied value rather than being inferred from whether a filter is non-empty. Bitten four times in one reporting pipeline: the generator script deliberately keeps an empty subset non-null so its output comes back empty instead of silently widening to the full population (the one place that got it right); a downstream merge step consumed the newest metrics artifact with no scope check, feeding subset figures into a full-population report while provenance still read `present`; a list-building step under `bash -e` without `pipefail` goes green with an empty list, turning a narrow scoped run into a full-population one an order of magnitude larger, with live promotion un-gated; and a destination branch took its identity from whether the filter was non-empty, so every distinct ad-hoc filter shared one force-pushed branch. The boolean is the tell: a two-valued expression over an unbounded input domain cannot name a scope.
+- Not every app honours a `file://` prefix on a secret env var; Viper-based Go apps pass the literal string through as the value. Verify support before relying on it, and fall back to a plain env var from `.env` or the app's own config file.
+- A scope filter that resolves empty must fail closed, never widen to the full population, and scope identity must come from an explicit caller-supplied value rather than being inferred from whether a filter is non-empty. Bitten four times in one reporting pipeline: the generator script deliberately keeps an empty subset non-null so its output comes back empty instead of silently widening to the full population (the one place that got it right); a downstream merge step consumed the newest metrics artifact with no scope check, feeding subset figures into a full-population report while provenance still read `present`; a list-building step under `bash -e` without `pipefail` goes green with an empty list, turning a narrow scoped run into a full-population one an order of magnitude larger, with live promotion un-gated; and a destination branch took its identity from whether the filter was non-empty, so every distinct ad-hoc filter shared one force-pushed branch. The boolean is the tell: a two-valued expression over an unbounded input domain cannot name a scope. A fifth instance, 2026-09-06, outside any reporting pipeline: an installer's "which files does the upstream layer still ship" lookup threw on a missing source directory but answered "ships nothing" on a present-but-empty one, so every installed file classified as orphaned and the tool printed a delete command for each. Present-but-empty is the gap a missing-directory check leaves open, and it is what a sparse checkout, an interrupted sync, or a vendored partial copy actually produces. Enumeration-of-the-upstream-side counts as a scope filter even when nothing in it looks like a filter.
 - Every timestamp is UTC at the point of formatting, not at the point of comparison. Bitten three times: `Get-Date` without `-AsUTC` in a failure-Issue title beside an `-AsUTC` body (different calendar day near midnight on a non-UTC runner), the same omission in a scheduled metrics workflow, and `[DateTimeOffset]::Parse` applied to a `ConvertFrom-Json` value that is already `[datetime] Kind=Utc`, which silently reinterprets it as local. Put `-AsUTC` on every `Get-Date`; parse type-aware (`[datetime]` → `ToUniversalTime()`, string → InvariantCulture + `AssumeUniversal`). Tests that compare formatted dates only discriminate on a non-UTC host, so a green suite is not evidence here.
 
 **What is not an invariant:**
@@ -141,7 +141,7 @@ When the same class of failure appears more than once across sessions, promote i
 Before ending any session with code or config changes:
 1. **Commit last known good state** — all working changes must be in a commit before the session closes. Never leave uncommitted working changes.
 2. **Push to remote** — ensure the commit is on GitHub, not just local.
-3. **Sync production** — pull on TrueNAS if production was the work target.
+3. **Sync production** — pull on the production host if production was the work target.
 
 ## Temporary and Diagnostic Script Hygiene
 
