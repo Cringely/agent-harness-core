@@ -1,15 +1,14 @@
 name: test
 
-# Two tiers, one workflow: both gate the same push/pull_request events and share
-# one concurrency group, so splitting them into separate files would just
-# duplicate that config. See the CI decision note (memory:
-# ci-for-a-process-layer-repo) for why the suites are split this way instead
-# of run all at once.
+# Two tiers, one workflow. Both gate the same events and share one concurrency
+# group, so splitting them into separate files would only duplicate that config.
+# The CI decision note (memory: ci-for-a-process-layer-repo) carries why the
+# suites are split rather than all run at once.
+#
 # push is filtered to master on purpose. Unfiltered, a branch pushed for a pull
-# request fires this workflow twice, once for the push and once for the pull
-# request, running every suite two times for one change. Filtering means a
-# branch is covered by its pull request and master is covered directly, with no
-# overlap.
+# request fires this workflow twice, once per event, running every suite two
+# times for one change. Filtered, a branch is covered by its pull request and
+# master is covered directly, with no overlap.
 on:
   push:
     branches: [master]
@@ -25,9 +24,10 @@ concurrency:
 jobs:
   bun-test:
     name: bun test (TypeScript hook suite)
-    # Pinned rather than ubuntu-latest: see the pester-test job below, which
-    # needs the pin for real reasons. Kept identical here so both jobs run on
-    # the same image instead of two silently different ones.
+    # Pinned rather than ubuntu-latest so the image cannot move under the suite
+    # between runs. ubuntu-latest already points at 24.04 and GitHub is
+    # previewing 26.04; a pinned image fails loudly on a deliberate bump instead
+    # of quietly on someone else's schedule.
     runs-on: ubuntu-24.04
     steps:
       - name: Check out repo
@@ -45,41 +45,42 @@ jobs:
 
   pester-test:
     name: Pester (fixture-built installer suites)
-    # ubuntu-latest is a moving target: it already points at 24.04 today but
-    # GitHub is previewing 26.04, and ubuntu-latest silently moved once before
-    # in a way that mattered here — pwsh briefly vanished from every hosted
-    # image in April 2024 (actions/runner-images#9752). Pinning the image
-    # pins the pwsh/Pester pairing it ships instead of inheriting whatever
-    # GitHub swaps in next.
-    runs-on: ubuntu-24.04
+    # Windows, not Linux, and the first run of this workflow is why. It put this
+    # tier on ubuntu-24.04 and Install-Account.Tests.ps1 failed nine ways, every
+    # one a platform assumption rather than a defect: a Windows drive letter in a
+    # path, assertions expecting `chmod` to be absent from PATH where Linux has
+    # it, and a 1Password Store path that exists only on Windows.
+    #
+    # The CI decision note measured these suites for coupling to a real
+    # ~/.claude and found them clean. That was true and it was the wrong axis.
+    # They are coupled to the platform they were written on, which no
+    # home-directory measurement would have shown.
+    #
+    # These scripts target a Windows workstation, so running them where they are
+    # valid is correct rather than a workaround. What it does not do is prove the
+    # installer behaves on Linux. Nothing currently proves that, and the gap is
+    # filed as its own issue rather than hidden behind a green check here.
+    #
+    # windows-latest is deliberately unpinned, unlike the bun job. The suites
+    # depend on Windows path and drive semantics rather than on a particular
+    # image's tool versions, and those semantics do not move between images.
+    runs-on: windows-latest
     steps:
       - name: Check out repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      # ubuntu-24.04 ships PowerShell 7.6.5 with Pester 5.9.0 preinstalled
-      # (actions/runner-images images/ubuntu/Ubuntu2404-Readme.md). Neither
-      # suite below uses anything version-sensitive (Should -Be/-BeTrue/
-      # -BeFalse/-BeLessThan/-Contain/-Match/-Not/-Throw, all stable across
-      # Pester 5.x), so that bundled pairing is not repinned separately here.
-      #
-      # Only the two suites that build their own fixtures under the OS temp
-      # directory run here: Restore-ClaudeProject.Tests.ps1 and
-      # Install-Account.Tests.ps1. Both scripts under test document Windows
-      # *and* Linux support directly in their own comment-based help, and
-      # neither suite reads or writes a real ~/.claude — every fixture is
-      # built under [System.IO.Path]::GetTempPath().
-      #
-      # install/Install-Harness.Tests.ps1 is deliberately left out: it is the
-      # one suite that is actually coupled to a real ~/.claude-shaped tree,
-      # and provisioning a synthetic one on a runner is an open question this
-      # workflow does not settle. Run it by hand:
+      # Only the two suites that build every fixture under the OS temp directory
+      # run here. install/Install-Harness.Tests.ps1 is left out: it is the one
+      # suite genuinely coupled to a real ~/.claude-shaped tree, and provisioning
+      # a synthetic one on a runner is an open question this workflow does not
+      # settle. Run it by hand:
       #   pwsh -NoProfile -File install/Install-Harness.Tests.ps1
       #
-      # Invocation form matters: `pwsh -NoProfile -File <script>` exits
-      # non-zero on a failing test; `pwsh -Command 'Invoke-Pester ...'` prints
-      # the failure and still exits 0 (see CONTRIBUTING.md, "Change process").
+      # Invocation form matters. `pwsh -NoProfile -File <script>` exits non-zero
+      # on a failing test; `pwsh -Command 'Invoke-Pester ...'` prints the failure
+      # and still exits 0 (CONTRIBUTING.md, "Change process").
       - name: Restore-ClaudeProject.Tests.ps1
         run: pwsh -NoProfile -File install/Restore-ClaudeProject.Tests.ps1
 
