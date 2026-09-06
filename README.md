@@ -98,13 +98,33 @@ droppable. It does not require the file to still be there, which is the point: a
 one of the reasons a pin outlives its usefulness. It refuses a key that is not pinned, and it never
 touches the file itself.
 
+`-Prune <relpath>` retires a manifest key for a file core no longer ships. It refuses a key core
+still ships (that is not an orphan) and a key pinned in `accepted` (drop the pin with `-Unaccept`
+first, since a pin means the project owns the file). Otherwise: a file whose on-disk copy still
+matches the hash recorded at install is deleted along with the record; one that has since diverged
+is left on disk and only the record is dropped, which is what then lets `-Accept` pin it, since the
+file is no longer tracked in `files`; and a record whose file is already gone is dropped by itself.
+It resolves its argument through the same containment check as `-Accept` and `-Unaccept`, so it can
+only ever touch a path inside the project's own `.claude`. It warns, without refusing, when
+`settings.json` still registers a hook command naming the file being pruned. An earlier version
+pruned every orphaned key automatically on every install; adversarial review found it would delete
+an arbitrary file outside the project from a manifest key like `../../victim.txt` carrying that
+file's real hash, among other defects, so this shipped as a standalone, one-key-at-a-time command
+instead.
+
 `-Audit` writes nothing and reports drift in both directions, using a three-way compare of core
 source, the manifest hash, and the installed file: `project-modified` and `untracked (differs from
 core)` files are candidates to promote upstream, `core-updated` and `not-installed` mean the project
 should re-run the installer, and `overlay (changed)` means a pinned fork has moved since it was
 pinned and wants re-reviewing. `missing` splits: a tracked file that was deleted comes back with a
 re-run, while a deleted overlay exists only in the project's own history, so it is restored from
-there or the pin goes with `-Unaccept`. Nothing automatic ever recreates the second kind. This is the mechanical half of the findings flow in CONTRIBUTING.md;
+there or the pin goes with `-Unaccept`. Nothing automatic ever recreates the second kind. `orphaned`
+splits three ways instead: a key core no longer ships whose file already left the project reads
+`orphaned (already removed)`, one where the on-disk copy still matches the hash recorded at install
+reads `orphaned (unmodified)`, and one the project edited since reads `orphaned (modified)`. All
+three are `-Prune`'s job, the last of them followed by `-Accept` to pin the fork.
+
+This is the mechanical half of the findings flow in CONTRIBUTING.md;
 run it periodically per project (SpaceMolt wires it into a `core_harvest` ceremony, see that
 project's `docs/wiki/team-ceremonies.md`).
 
