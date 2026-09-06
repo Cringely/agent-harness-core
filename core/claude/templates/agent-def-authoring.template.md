@@ -23,18 +23,21 @@ This is the actual shape this repo's agent defs use. Read one before deviating f
 name: {{kebab-case-name, matches the filename without .md}}
 description: {{one sentence, third person, states what the agent is for and when to reach for it}}
 model: {{haiku | sonnet | opus | fable}}
-effort: {{low | medium | high | xhigh; sonnet forces xhigh}}
+effort: {{low | medium | high | xhigh}}
 tools: {{comma-separated tool list; omit the field entirely only if the agent needs every tool}}
 ---
 ```
 
-The `model` and `effort` keys are not independent picks. Sonnet gets chosen for work that needs
-real reasoning below Opus prices, so `model: sonnet` takes `effort: xhigh` and nothing else; on
-the normal dispatch path, the model-tier gate denies a sonnet dispatch at any other effort. This
-repo's haiku defs carry `effort: low` by convention, though whether haiku honors the key at all
-is an open question on issue #11. The authority on the coupling is the "Every dispatch names its
-model tier" row in `core/claude/templates/guardrails.template.md`, backed by
-`core/claude/hooks/model-tier-gate.ts`; defer to it instead of copying its rules here, because a
+Pick `effort` for the role rather than from the tier. Prefer `xhigh` where this agent's work needs
+real reasoning and something cheaper where it does not; nothing gates the choice and no tier forces
+a value. A mandate coupling `model: sonnet` to `effort: xhigh` was withdrawn on 2026-09-05, partly
+on cost and partly because the Agent tool's input schema has no `effort` parameter, so a plain
+dispatch could not satisfy it. This repo's haiku defs carry `effort: low` by convention, though
+whether haiku honors the key at all is an open question on issue #11.
+
+The `model` key is the one with a rule behind it: the "Every dispatch names its model tier" row in
+`core/claude/templates/guardrails.template.md`, backed by
+`core/claude/hooks/model-tier-gate.ts`. Defer to it instead of copying its rules here, because a
 rule written down twice drifts.
 
 Every def in this repo names a real tier: `test/agent-frontmatter-keys.test.ts` asserts the

@@ -210,6 +210,145 @@ describe("parseGitCommitInvocation() — F-R3-1: --dry-run exemption reverted", 
   });
 });
 
+// Item 37, and the regression the first attempt at it shipped.
+//
+// GIT_COMMIT_RE used to hold three starred alternatives that overlap on the same input token
+// while consuming different token counts: `\s+-C\s+(\S+)` and `\s+-c\s+\S+` each swallow the
+// next token as an argument, while the generic flag alternative matched `-C`/`-c` alone. A run
+// of n flag-shaped tokens tiled Fibonacci(n+1) ways and the engine walked every tiling once the
+// trailing `\s+commit` failed: 1878.3 ms on bun for 125 characters of `git -C -C … x`.
+//
+// The first fix blocked the generic alternative from ever matching a bare `-C`/`-c`. That
+// removed the ambiguity and also removed the gate, because the ambiguity was load-bearing:
+// scrubQuotesAndHeredocs() blanks a quoted span to spaces, so in `git -C "$PWD" commit` the
+// argument is not a token by the time the regex runs. Under the first fix the pair alternative
+// swallowed `commit` as the repo path and the match failed, and both decide() and main() in
+// review-gate.ts read isCommit false as allow — so a quoted `-C` argument walked past the gate.
+// The suite went
+// 456/0 through that, because no test on any branch covered a quoted option argument.
+//
+// The shipped fix keeps the ambiguity where it is harmless and removes it where it is not: `-C`
+// and `-c` refuse an argument the generic flag alternative can consume WHOLE, and only that. The
+// narrower version of the same idea — refuse anything that merely LOOKS option-shaped — also
+// shipped once and lost its own class of commands; see the second block below. Every case here
+// was checked against master's pattern as well; the whole block is a master-equivalence contract,
+// not a new opinion about what a commit invocation is.
+describe("parseGitCommitInvocation() — item 37: a quoted option argument still reaches the gate", () => {
+  // Each of these is a form `master` recognised, the shipped pattern recognises, and the first
+  // fix did not. Verified against all three patterns before being written down.
+  test.each([
+    ['git -C "$PWD" commit -m x', "double-quoted -C argument"],
+    ["git -c 'user.name=CI' commit", "single-quoted -c argument"],
+    ['git --no-pager -C "/r" commit', "options before a quoted -C"],
+    ['git -C "$PWD" -c user.name=CI commit -m x', "an option between the quoted -C and commit"],
+    ["git -C \"$PWD\" commit -F - <<'EOF'\nwip\nEOF", "quoted -C argument, heredoc message body"],
+    ['git -C "" commit', "quoted empty -C argument"],
+    ['git -C "${REPO}" commit -m x', "quoted brace expansion"],
+    ['git -C "$(pwd)" commit', "quoted command substitution"],
+  ])("%s — %s", (command) => {
+    expect(parseGitCommitInvocation(command).isCommit).toBe(true);
+  });
+
+  // The counterpart: blanking a quoted span must not start matching text that only MENTIONS a
+  // commit. Guards the widening direction of the same change.
+  test.each([
+    ['cat <<EOF\ngit -C "/r" commit\nEOF', "a heredoc body is not an invocation"],
+    ['echo "you should run git -C /r commit later"', "a quoted echo argument is not an invocation"],
+    ["git status", "another subcommand is not an invocation"],
+  ])("%s — %s", (command) => {
+    expect(parseGitCommitInvocation(command).isCommit).toBe(false);
+  });
+
+  // `-C` no longer pairs with an option-shaped token, so those forms fall to the generic
+  // alternative and the star still reaches `commit`. master matched all three.
+  test.each([
+    ["git -C commit", "a bare -C before commit"],
+    ["git -c commit", "a bare -c before commit"],
+    ["git -C -C x commit", "a -C whose argument is itself -C"],
+  ])("%s — %s", (command) => {
+    expect(parseGitCommitInvocation(command).isCommit).toBe(true);
+  });
+
+  // The second regression this fix cleaned up, and the reason the lookahead tests the WHOLE
+  // token rather than its first two characters. `-a.b` starts option-shaped, so a lookahead
+  // reading only `-{1,2}[A-Za-z]` blocks the pair alternative on it — but the generic
+  // alternative cannot consume it either, because `[\w-]*` stops at the `.` and there is no `=`
+  // for `(?:=\S+)?` to take. Neither alternative crosses the token, the star cannot advance, and
+  // the whole match is lost, which decide() and main() read as ALLOW. Every case below is one master
+  // matched. They are the shapes an alphabet of `-a`, `--no-pager` and `--flag=v` cannot express.
+  test.each([
+    ["git -C -a.b commit", "a -C argument with a dot"],
+    ["git -C -a/b commit -m x", "a -C argument with a slash"],
+    ["git -C -a:b commit", "a -C argument with a colon"],
+    ["git -C -a,b commit", "a -C argument with a comma"],
+    ["git -C -a.b=c commit", "a non-consumable character before the ="],
+    ["git -c -a.b commit", "the same shape on -c"],
+  ])("%s — %s", (command) => {
+    expect(parseGitCommitInvocation(command).isCommit).toBe(true);
+  });
+
+  // The pair alternative is blocked exactly when the generic alternative can consume the token
+  // whole, so these two cases have to disagree: `--odd-dir-name` fits the generic alternative and
+  // loses its capture, `-a.b` does not fit it and keeps master's. One assertion each way, because
+  // a fix that simply stopped capturing option-shaped arguments would pass the first alone.
+  test("a -C argument keeps master's capture when the generic alternative cannot consume it whole", () => {
+    expect(parseGitCommitInvocation("git -C -a.b commit").repoPath).toBe("-a.b");
+    expect(parseGitCommitInvocation("git -C --odd-dir-name commit -m x").repoPath).toBeUndefined();
+  });
+
+  // One test, three assertions, because the middle one is the only one that could fail against
+  // the pattern this replaces and the other two would read as coverage without it.
+  test("repoPath is the -C argument when that argument survived scrubbing, and undefined when it did not", () => {
+    // Survives: an ordinary path.
+    expect(parseGitCommitInvocation("git -C /tmp/some-repo commit -am 'msg'").repoPath).toBe("/tmp/some-repo");
+    // Blanked by the scrubber: there is no argument left to capture, and master's answer here was
+    // undefined too.
+    const quoted = parseGitCommitInvocation('git -C "$PWD" commit');
+    expect(quoted.isCommit).toBe(true);
+    expect(quoted.repoPath).toBeUndefined();
+    // Option-shaped: master captured `--odd-dir-name` and the gate then resolved it as a
+    // directory, which does not exist, so getStagedAbsPaths threw and the hook failed OPEN. Not
+    // capturing it leaves gitCwd at the session cwd, where the gate can actually see the staged
+    // files. This is the one place the shipped pattern deliberately differs from master.
+    const optionShaped = parseGitCommitInvocation("git -C --odd-dir-name commit -m x");
+    expect(optionShaped.isCommit).toBe(true);
+    expect(optionShaped.repoPath).toBeUndefined();
+  });
+
+  // Timing budget. Measured on this machine through parseGitCommitInvocation on bun: 92.7 ms at
+  // n=32, 640.3 ms at n=36, 1878.3 ms at n=40 before the fix; under 1 ms after. The budget sits
+  // ~19x under the pre-fix number and ~100x over the post-fix one, so it discriminates without
+  // being a stopwatch on a busy machine.
+  const REDOS_BUDGET_MS = 100;
+
+  /** Best of `runs` timings, stopping early once one run comes in under budget. Best-of, not mean:
+   * a single scheduling or GC hiccup inflates a run, but no hiccup makes an exponential walk fast,
+   * so the minimum is the noise-robust statistic here. */
+  function fastestMs(fn: () => void, runs = 3): number {
+    let best = Infinity;
+    for (let i = 0; i < runs; i++) {
+      const t0 = performance.now();
+      fn();
+      best = Math.min(best, performance.now() - t0);
+      if (best < REDOS_BUDGET_MS) break;
+    }
+    return best;
+  }
+
+  test(
+    "125 characters of `git -C -C -C … x` parses in linear time, not Fibonacci-many tilings",
+    () => {
+      const attack = `git${" -C".repeat(40)} x`;
+      expect(attack.length).toBe(125);
+      parseGitCommitInvocation("git commit"); // warm the regex/JIT before timing
+      const elapsed = fastestMs(() => parseGitCommitInvocation(attack));
+      expect(parseGitCommitInvocation(attack).isCommit).toBe(false);
+      expect(elapsed).toBeLessThan(REDOS_BUDGET_MS);
+    },
+    30_000,
+  );
+});
+
 // --- findUnreviewedFiles --------------------------------------------------------------------------
 
 describe("findUnreviewedFiles() — pure, fabricated transcripts", () => {
