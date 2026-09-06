@@ -1190,7 +1190,7 @@ Describe "Install-Account" {
             # Task 10 review, finding 3: the line above re-wraps $s.hooks.PreToolUse in @() before
             # reading it, so it reads the same whether the merged event serialised as a genuine
             # one-element JSON array or a bare object (the single-element pipeline-output collapse
-            # Install-Harness.ps1:822-826 already names). Asserted against the raw file text, which
+            # Install-Harness.ps1:851-853 already names). Asserted against the raw file text, which
             # a re-parse cannot paper over.
             $raw | Should -Match '"PreToolUse":\s*\['
         }

@@ -31,7 +31,17 @@ $script:AccountRootFiles = @('statusline-command.ps1', 'statusline-command.sh')
 # Payload-relative paths that never travel. model-tier-gate.ts is core-owned: the installer
 # copies it from core/claude/hooks/ in the same clone, and two copies in one repo would drift.
 # The HANDOFF is internal agent traffic naming a script that no longer exists under that name.
-$script:AccountSkipFiles = @('hooks/model-tier-gate.ts', 'hooks/Guard-ModelTier.HANDOFF.md')
+#
+# memory-transition-log.ts joins them for the same reason, found 2026-09-06: it was shipping in
+# both trees at the same blob hash, so the repo carried 178 duplicated lines and two copies free
+# to rot apart. It is a skip rather than a delete of core's copy on purpose. The hook's own header
+# says to wire it at user level rather than per project, so the live copy has to be the one under
+# ~/.claude, and deleting core's would break that copy on the next Install-Account run.
+$script:AccountSkipFiles = @(
+    'hooks/model-tier-gate.ts',
+    'hooks/Guard-ModelTier.HANDOFF.md',
+    'hooks/memory-transition-log.ts'
+)
 
 # Payload-relative directory prefixes that never travel, whole subtree, regardless of what
 # files end up inside them. Operator ruling on the review's N1 finding: skills/appsec-kpi-deck

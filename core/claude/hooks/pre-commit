@@ -36,7 +36,7 @@
 #
 # CONFIG RESOLUTION
 # Mirrors lint-doc-prose.ts's project-then-global order (see that file's
-# resolveValeConfig, lines ~85-87): a repo-vendored kit at
+# resolveValeConfig, line 125): a repo-vendored kit at
 # .claude/tools/prose-lint/.vale.ini first, then the machine-global kit under
 # the user's home. No env-var override here — that candidate in
 # lint-doc-prose.ts exists for its own CI callers, not this hook.
@@ -70,9 +70,9 @@ hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # message wherever the real one would read. pre-commit does not walk
 # history the way pre-push does, but every git invocation in this hook
 # still inherits this, and setting it costs nothing when unused. See
-# identity-patterns.sh's pre-push counterpart for the reproduction this
-# closes (a replace ref that made all four push-stage channels read a
-# clean stand-in while the real object shipped to the remote).
+# the pre-push hook, lines 68-79, for the reproduction this closes: a
+# replace ref that made all four push-stage channels read a clean
+# stand-in while the real object shipped to the remote.
 export GIT_NO_REPLACE_OBJECTS=1
 
 # --- identity gate: refuse before Vale ever runs ------------------------
@@ -113,8 +113,18 @@ if [ ! -f "$identity_lib" ]; then
 fi
 . "$identity_lib"
 
-identity_load || exit 1
-identity_control || exit 1
+# Three states, not two. 0 configured, 1 broken and must refuse, 2 not
+# configured. Only 1 blocks: a file that exists and cannot be read means
+# something was declared and this gate cannot see it. State 2 already printed
+# its own notice to stderr and the rest of this hook still runs, so a project
+# that installs the harness without an identity file gets prose linting rather
+# than a repository it cannot commit to.
+identity_load
+identity_state=$?
+[ "$identity_state" -eq 1 ] && exit 1
+if [ "$identity_state" -eq 0 ]; then
+  identity_control || exit 1
+fi
 
 # `d` (lowercase) excludes only Deleted -- there is no content left to scan
 # for a deleted path. ACMR (uppercase, include-only) used to be here and
@@ -137,7 +147,7 @@ if [ -n "$identity_staged" ]; then
       exit 1
     fi
     # Content channel: `git show ":$f"` reads the blob straight from the
-    # index, the same way identity-patterns.sh's pre-push counterpart reads
+    # index, the same way the pre-push hook reads
     # it via `git cat-file` -- never through a `git diff`/`git log -p` call,
     # which inherits every diff-shaping knob measured against this gate: a
     # leading NUL byte git's own binary heuristic reacts to, a `-diff`
@@ -258,6 +268,24 @@ while IFS= read -r f; do
   # always correct; the temp path underneath it is a Vale-internal detail.
   findings=$("$vale_bin" --config "$config" --output=line "$staged_file" 2>/dev/null)
   [ -n "$findings" ] || continue
+
+  # Strip the scratch path off every finding BEFORE the identity check below.
+  # Vale reports the absolute path of the file it linted, which here is the
+  # blob copy under mktemp -- and on Windows that resolves to something like
+  # C:\Users\<name>\AppData\Local\Temp\tmp.XXXX\<path>. The username is in
+  # that prefix, so identity_match fired on every finding regardless of
+  # content and this whole lint pass went silent on the author's machine the
+  # day it was written. Measured: five matches across two findings, none of
+  # them from the prose being linted.
+  #
+  # The prefix is an artifact of how this hook works, not something the
+  # commit contains, so removing it is not weakening the check that follows.
+  # Matched on the mktemp directory's leaf name rather than on $scratch_dir
+  # itself, because the two spellings differ: the shell holds a POSIX path
+  # (/tmp/tmp.XXXX) while Vale prints the Windows one for the same directory.
+  # The leaf is common to both.
+  findings=$(printf '%s\n' "$findings" | sed "s|^.*${scratch_dir##*/}[\\\\/]||")
+
   echo "== $f ==" >&2
   # Vale prints the matched excerpt around each finding, which can itself
   # carry an identifying string if the content channel above somehow missed
