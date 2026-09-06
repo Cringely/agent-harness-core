@@ -49,6 +49,20 @@
 # re-ran with. Nothing in this file uses -F, and identity_control below is
 # the check that catches a recurrence of exactly this failure shape,
 # whatever causes it this time.
+#
+# KNOWN LIMIT: NON-ASCII CASE FOLDING
+# `grep -i` folds ASCII case only under the locale this file runs with (LANG
+# and LC_ALL both unset, by design, above). A declared name containing a
+# non-ASCII letter -- "Zoë Farbleworth" -- is matched exactly as declared and
+# in any all-lowercase or all-uppercase rendering of its ASCII letters, but
+# a rendering that also case-folds the non-ASCII letter itself ("ZOË") does
+# not fold to match, because grep -i never touches that byte. Measured
+# 2026-09-05. Fixing this needs a UTF-8-aware locale (LC_ALL=C.UTF-8 or
+# similar) for -i's folding, which reopens the `grep -P` locale-crash class
+# of failure this file exists to avoid for a gap this narrow, so it is
+# documented here rather than patched. The same byte-orientation is why
+# identity_edge_ok below treats a non-ASCII byte at either edge of a
+# declared entry as non-word: it is the same limitation, not a second one.
 
 # --- pattern-set construction -------------------------------------------
 
@@ -88,24 +102,31 @@ identity_json_array() {
 # Resolves the identity file, derives the workstation username and machine
 # hostname, and builds IDENTITY_PATTERN (one grep -iE alternation covering
 # every declared name, every declared email, the username, and the
-# hostname) plus IDENTITY_CANARY (one concrete value guaranteed to be in the
-# pattern set, consumed by identity_control below). Every failure mode is
-# fail-closed with a message on stderr and a non-zero return: a missing or
-# unreadable file, a file that is not JSON-shaped, or an environment where
-# the username or hostname cannot be discovered. This is deliberately
-# stricter than Export-Account.ps1's own loader, which warns and continues
-# on a missing identity file because its derived-username arm still runs
-# either way -- issue #64's mandate for this gate is explicit: "the gate
-# exits non-zero when its pattern file is missing or unreadable. It must
-# never scan for nothing and report clean."
+# hostname) plus IDENTITY_CANARIES (one line per entry in that alternation,
+# consumed by identity_control below so every arm gets proved, not just
+# one). Every failure mode is fail-closed with a message on stderr and a
+# non-zero return: a missing or unreadable file, a file that is not
+# JSON-shaped, an environment where the username or hostname cannot be
+# discovered, or a declared entry that could never match anything once
+# wrapped in \b (see identity_edge_ok below). This is deliberately stricter
+# than Export-Account.ps1's own loader, which warns and continues on a
+# missing identity file because its derived-username arm still runs either
+# way -- issue #64's mandate for this gate is explicit: "the gate exits
+# non-zero when its pattern file is missing or unreadable. It must never
+# scan for nothing and report clean."
 #
-# CLAUDE_IDENTITY_FILE, IDENTITY_USERNAME_OVERRIDE and
-# IDENTITY_HOSTNAME_OVERRIDE are test seams, not operator-facing knobs --
-# nothing in install/Install-Harness.ps1 sets them. Real runs resolve the
-# file from ${USERPROFILE:-$HOME}, the same precedence hooks/pre-commit
-# already uses for the reason recorded there: Git Bash's $HOME can point at
-# a Documents subfolder rather than the real Windows profile that
-# .claude-account-identity.json actually lives under.
+# NO ENV-VAR OVERRIDE FOR THE FILE PATH OR THE DERIVED USERNAME/HOSTNAME.
+# An earlier revision read CLAUDE_IDENTITY_FILE, IDENTITY_USERNAME_OVERRIDE
+# and IDENTITY_HOSTNAME_OVERRIDE ahead of the real sources below, labelled
+# "test seams, not operator-facing knobs" in a comment. Nothing enforced
+# that label: pointing CLAUDE_IDENTITY_FILE at an empty or unpopulated file
+# disabled every channel silently, with the hook still reporting success --
+# worse than --no-verify, because a log shows a gate that ran and passed.
+# Measured 2026-09-05. Tests get the same coverage a different way: set
+# USERPROFILE (and HOME, for the Git-Bash-on-Windows case below) to a
+# fixture directory holding a real .claude-account-identity.json, and set
+# USERNAME/COMPUTERNAME directly -- both already read below, so a test
+# needs no special-cased knob to control them.
 identity_load() {
     # Prove the matcher works before ANYTHING trusts it, the parse below
     # included. identity_json_array uses grep to pull values out of the
@@ -123,7 +144,7 @@ identity_load() {
         return 1
     fi
 
-    identity_file=${CLAUDE_IDENTITY_FILE:-${USERPROFILE:-$HOME}/.claude-account-identity.json}
+    identity_file=${USERPROFILE:-$HOME}/.claude-account-identity.json
 
     if [ ! -f "$identity_file" ]; then
         echo "identity gate: no identity file at '$identity_file'. Refusing to scan for nothing and report clean -- see install/Export-Account.ps1's -IdentityFile doc for the shape ({\"names\": [...], \"emails\": [...]})." >&2
@@ -181,7 +202,7 @@ identity_load() {
     # the same Git-Bash-vs-real-profile hazard hooks/pre-commit's own
     # USERPROFILE fallback exists for, and a git hook's inherited
     # environment cannot be assumed to be an interactive Git Bash session.
-    username=${IDENTITY_USERNAME_OVERRIDE:-${USERNAME:-}}
+    username=${USERNAME:-}
     if [ -z "$username" ]; then
         username=$(whoami 2>/dev/null || id -un 2>/dev/null)
     fi
@@ -190,7 +211,7 @@ identity_load() {
         return 1
     fi
 
-    hostname_val=${IDENTITY_HOSTNAME_OVERRIDE:-${COMPUTERNAME:-}}
+    hostname_val=${COMPUTERNAME:-}
     if [ -z "$hostname_val" ]; then
         hostname_val=$(hostname 2>/dev/null)
     fi
@@ -201,12 +222,26 @@ identity_load() {
 
     entries=$(printf '%s\n%s\n%s\n%s\n' "$names" "$emails" "$username" "$hostname_val")
 
+    # A single newline character, built once here rather than at every
+    # accumulation site below. Needed because ${var:+word} requires "word" to
+    # be inline text, and the plain single-quoted assignment spanning two
+    # physical lines is the ordinary POSIX sh way to get one literal newline
+    # into a variable without spawning a subshell for it.
+    identity_nl='
+'
+
     pattern=
+    canaries=
     count=0
     while IFS= read -r entry; do
         [ -n "$entry" ] || continue
+        if ! identity_edge_ok "$entry"; then
+            echo "identity gate: '$identity_file' or the derived username/hostname declares an entry whose first or last character is not a word character. Wrapped in \\b<entry>\\b, an entry like that can never match anything -- a dead arm that would otherwise report healthy from both identity_load and identity_control (finding 9, 2026-09-05: a name pasted as a whole author line, 'Name <email>', or with a trailing space). The offending value is deliberately not printed; check names/emails in '$identity_file' for a pasted author line or stray leading/trailing punctuation or whitespace." >&2
+            return 1
+        fi
         escaped=$(identity_regex_escape "$entry")
         pattern="${pattern}${pattern:+|}\\b${escaped}\\b"
+        canaries="${canaries}${canaries:+$identity_nl}canary-${entry}-canary"
         count=$((count + 1))
     done <<EOF
 $entries
@@ -218,20 +253,56 @@ EOF
     fi
 
     IDENTITY_PATTERN=$pattern
-    IDENTITY_CANARY=$username
+    IDENTITY_CANARIES=$canaries
     return 0
+}
+
+# True (0) when $1's first and last characters are both a "word" character
+# ([A-Za-z0-9_], the exact byte class \b tests a transition against in the C
+# locale this file already runs under -- LANG and LC_ALL both unset). \b
+# requires a word/non-word transition at that position; a non-word
+# character AT either edge of the literal text makes that transition
+# impossible for any real content the entry could appear in, so the arm
+# this entry builds can never fire. A non-ASCII character at an edge is
+# byte-wise non-word here too (every byte of a multi-byte UTF-8 sequence
+# has its high bit set, outside [A-Za-z0-9_]) and gets refused for the same
+# reason grep's own \b would not treat it as a word character in this
+# locale -- the same ASCII-oriented limitation already accepted for case
+# folding elsewhere in this file, not a new one, and fail-closed (refusing
+# the whole load) rather than silently building a dead arm.
+identity_edge_ok() {
+    case $1 in
+        '') return 1 ;;
+        [A-Za-z0-9_]) return 0 ;;
+        [A-Za-z0-9_]*[A-Za-z0-9_]) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 # Before trusting any negative result from identity_match below, prove the
 # exact matcher (same grep binary resolved off PATH, same -iE invocation,
-# same pattern variable) still finds a string built from a real entry in the
-# pattern set. This is what would have caught 2026-09-05's incident: a grep
+# same pattern variable) still finds a string built from EVERY entry in the
+# pattern set, not only one. A single fixed canary (originally just the
+# username) proved the matcher works in general but left every other arm
+# unproven -- a declared name could be a completely dead arm (identity_edge_ok
+# above closes the known way that happens) while this control still reported
+# healthy, because it never actually tried to match that arm. This is also
+# what would have caught 2026-09-05's incident in the first place: a grep
 # that crashes, or a PATH-shadowed grep that silently answers "no match" to
-# everything, fails this check before either hook ever trusts a clean scan.
+# everything, fails every one of these canaries before either hook ever
+# trusts a clean scan.
 identity_control() {
-    canary="canary-${IDENTITY_CANARY}-canary"
-    if ! printf '%s\n' "$canary" | grep -qiE "$IDENTITY_PATTERN"; then
-        echo "identity gate: the matcher did not find its own canary string. Refusing rather than trusting a scan that may not have actually run -- 2026-09-05's incident was exactly this shape, a crashed grep -F whose surrounding '|| echo NONE' printed a clean result over the top." >&2
+    identity_control_ok=1
+    while IFS= read -r canary; do
+        [ -n "$canary" ] || continue
+        if ! printf '%s\n' "$canary" | grep -qiE "$IDENTITY_PATTERN"; then
+            identity_control_ok=0
+        fi
+    done <<EOF
+$IDENTITY_CANARIES
+EOF
+    if [ "$identity_control_ok" -eq 0 ]; then
+        echo "identity gate: the matcher did not find the canary for at least one declared entry. Refusing rather than trusting a scan where an arm may be dead -- 2026-09-05's incident was exactly this shape for the whole matcher; this is the same check applied per declared entry, so one dead arm does not read as a healthy gate. The failing entry is deliberately not printed." >&2
         return 1
     fi
     return 0

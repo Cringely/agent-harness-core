@@ -65,6 +65,16 @@ set -u
 
 hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
+# `git log`/`git show`/`git diff` all honour refs/replace/* by default,
+# silently substituting a replacement object's content, identity and
+# message wherever the real one would read. pre-commit does not walk
+# history the way pre-push does, but every git invocation in this hook
+# still inherits this, and setting it costs nothing when unused. See
+# identity-patterns.sh's pre-push counterpart for the reproduction this
+# closes (a replace ref that made all four push-stage channels read a
+# clean stand-in while the real object shipped to the remote).
+export GIT_NO_REPLACE_OBJECTS=1
+
 # --- identity gate: refuse before Vale ever runs ------------------------
 # security.md's mandate: the operator's legal name, personal email
 # addresses, the workstation username, and the machine hostname must never
@@ -106,15 +116,41 @@ fi
 identity_load || exit 1
 identity_control || exit 1
 
-identity_staged=$(git -c core.quotePath=false diff --cached --name-only --diff-filter=ACMR)
+# `d` (lowercase) excludes only Deleted -- there is no content left to scan
+# for a deleted path. ACMR (uppercase, include-only) used to be here and
+# silently dropped typechanges (symlink <-> regular file, T status): the
+# file just disappeared from this list and was never checked at either
+# stage. Content is read directly below via `git show ":$f"` rather than
+# any `git diff` call, so nothing here depends on how git would render a
+# diff for the path.
+identity_staged=$(git -c core.quotePath=false diff --cached --name-only --diff-filter=d)
 if [ -n "$identity_staged" ]; then
   while IFS= read -r f; do
     [ -n "$f" ] || continue
-    # Mirrors git's own binary/text call (numstat prints "-\t-\t<path>" for
-    # a binary diff) rather than re-sniffing bytes: one definition of
-    # "binary", asked of the tool that already computes it.
-    identity_bin=$(git diff --cached --numstat -- "$f" | awk -F'\t' '{print $1; exit}')
-    [ "$identity_bin" = "-" ] && continue
+    # Path channel first, and its own refusal never echoes $f -- if the path
+    # itself is the identifying string, printing it back would be the leak
+    # this gate exists to prevent.
+    if identity_match "$f"; then
+      echo "pre-commit: refused. A staged file's path carries an identifying string. The matched value is deliberately not printed." >&2
+      echo "  security.md: identifying information must never reach a remote repository," >&2
+      echo "  and only a human can waive that. Fix it at the source, then re-stage." >&2
+      exit 1
+    fi
+    # Content channel: `git show ":$f"` reads the blob straight from the
+    # index, the same way identity-patterns.sh's pre-push counterpart reads
+    # it via `git cat-file` -- never through a `git diff`/`git log -p` call,
+    # which inherits every diff-shaping knob measured against this gate: a
+    # leading NUL byte git's own binary heuristic reacts to, a `-diff`
+    # gitattributes entry (tracked, untracked, or via the `binary` macro),
+    # core.bigFileThreshold shrunk on the command line or via
+    # GIT_CONFIG_PARAMETERS, and (now moot, since diff-filter no longer
+    # excludes it either) a typechange. A prior revision of this loop asked
+    # `git diff --cached --numstat -- "$f"` per file to decide "binary,
+    # skip" before ever reading content, which carried all of the above plus
+    # its own defect: "$f" there is a pathspec, and git globs pathspecs, so
+    # a bracket in one staged filename could make the numstat check answer
+    # for a DIFFERENT staged file. Reading every staged blob unconditionally
+    # removes the pathspec argument entirely along with the skip it gated.
     identity_body=$(git show ":$f" 2>/dev/null) || continue
     [ -n "$identity_body" ] || continue
     if identity_match "$identity_body"; then
@@ -223,6 +259,18 @@ while IFS= read -r f; do
   findings=$("$vale_bin" --config "$config" --output=line "$staged_file" 2>/dev/null)
   [ -n "$findings" ] || continue
   echo "== $f ==" >&2
+  # Vale prints the matched excerpt around each finding, which can itself
+  # carry an identifying string if the content channel above somehow missed
+  # it -- the identity gate above deliberately never prints a matched value,
+  # and an advisory lint pass three code blocks later should not undo that.
+  # Measured: with the content channel bypassed, this echo put a fragment of
+  # the identity string on the commit console. identity_match/IDENTITY_PATTERN
+  # are already loaded (the identity gate above ran first), so this is the
+  # same check, not a new one.
+  if identity_match "$findings"; then
+    echo "(Vale findings withheld: they carry an identifying string. The matched value is deliberately not printed.)" >&2
+    continue
+  fi
   echo "$findings" >&2
 done <<EOF
 $staged_md
