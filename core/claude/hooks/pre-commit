@@ -268,6 +268,24 @@ while IFS= read -r f; do
   # always correct; the temp path underneath it is a Vale-internal detail.
   findings=$("$vale_bin" --config "$config" --output=line "$staged_file" 2>/dev/null)
   [ -n "$findings" ] || continue
+
+  # Strip the scratch path off every finding BEFORE the identity check below.
+  # Vale reports the absolute path of the file it linted, which here is the
+  # blob copy under mktemp -- and on Windows that resolves to something like
+  # C:\Users\<name>\AppData\Local\Temp\tmp.XXXX\<path>. The username is in
+  # that prefix, so identity_match fired on every finding regardless of
+  # content and this whole lint pass went silent on the author's machine the
+  # day it was written. Measured: five matches across two findings, none of
+  # them from the prose being linted.
+  #
+  # The prefix is an artifact of how this hook works, not something the
+  # commit contains, so removing it is not weakening the check that follows.
+  # Matched on the mktemp directory's leaf name rather than on $scratch_dir
+  # itself, because the two spellings differ: the shell holds a POSIX path
+  # (/tmp/tmp.XXXX) while Vale prints the Windows one for the same directory.
+  # The leaf is common to both.
+  findings=$(printf '%s\n' "$findings" | sed "s|^.*${scratch_dir##*/}[\\\\/]||")
+
   echo "== $f ==" >&2
   # Vale prints the matched excerpt around each finding, which can itself
   # carry an identifying string if the content channel above somehow missed
