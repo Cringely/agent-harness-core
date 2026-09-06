@@ -597,7 +597,7 @@ if (-not $SkipSettings) {
             # hazard these @() guard against is a single-match FILTERING pipeline result (a
             # Where-Object or ForEach-Object -First 1) unwrapping to a bare scalar, which would
             # then serialise "hooks": {...} instead of "hooks": [...]
-            # (install/Install-Harness.ps1:822-826). Nothing in this loop is a pipeline today, so
+            # (install/Install-Harness.ps1:851-853). Nothing in this loop is a pipeline today, so
             # removing either @() here currently changes nothing observable. Kept anyway, so a
             # future edit that does introduce a filtering step here does not reintroduce that
             # exact defect silently.
@@ -980,7 +980,7 @@ if (-not $WhatIfPreference) {
     # -cmatch and not -match: POSIX paths are case-sensitive and .Contains was ordinal, so the
     # case-insensitive default would widen the gate past the boundary this is here to add.
     #
-    # $WslHome is already trimmed of whitespace and of a trailing '/' by the validation at :198-203,
+    # $WslHome is already trimmed of whitespace and of a trailing '/' by the validation at :215-221,
     # which also refuses a supplied value that does not name an absolute POSIX directory. So the
     # only thing left to distinguish here is present from absent. A trailing slash would otherwise
     # make the escaped literal end in '/', the boundary would demand a second separator that a real
