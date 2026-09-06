@@ -1049,4 +1049,203 @@ Describe "Install-Harness" {
         # bun, and the hooks and registrations are correct on disk either way.
         Test-Path "$script:target/.claude/hooks/agent-worktree-gate.ts" | Should -BeTrue
     }
+
+    # -Prune retires a manifest key for a file core no longer ships. Built the same way the
+    # existing 'orphaned' audit test above builds one: a hand-edited manifest key with no real
+    # core source, since no currently-shipped file can stand in for "core stopped shipping this".
+    # This replaces an automatic prune loop that shipped and was reverted after adversarial
+    # review executed four defects against it (arbitrary file deletion via an untrusted manifest
+    # key, a mid-loop abort that left files gone and the manifest not yet updated, a silently
+    # overridden -Accept pin, and a settings.json hook registration left pointing at a deleted
+    # file) -- -Prune is the standalone, operator-invoked, one-key-at-a-time replacement.
+    It "-Prune deletes an orphaned file whose on-disk copy still matches the recorded hash" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $manifestPath = "$script:target/.claude/.harness-manifest.json"
+        $orphanPath = "$script:target/.claude/agents/retired-agent.md"
+        'retired agent body' | Set-Content $orphanPath
+        $orphanHash = (Get-FileHash -LiteralPath $orphanPath -Algorithm SHA256).Hash
+
+        $m = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+        $m['files']['agents/retired-agent.md'] = $orphanHash
+        $m | ConvertTo-Json -Depth 20 | Set-Content $manifestPath
+
+        $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Prune 'agents/retired-agent.md' *>&1 |
+            Out-String -Width 500
+        $out | Should -Match "Pruned 'agents/retired-agent\.md': deleted the file"
+
+        Test-Path -LiteralPath $orphanPath | Should -BeFalse
+        $after = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+        $after['files'].Contains('agents/retired-agent.md') | Should -BeFalse
+    }
+
+    It "-Prune keeps a modified orphaned file, drops only the manifest record, and -Accept then pins it" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $manifestPath = "$script:target/.claude/.harness-manifest.json"
+        $orphanPath = "$script:target/.claude/agents/retired-agent.md"
+        'retired agent body' | Set-Content $orphanPath
+
+        $m = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+        # 'DEADBEEF' is not SHA256 hex, so it can never equal the real file's hash -- the same
+        # non-recomputable sentinel the migration tests above use, proving the record was left
+        # alone rather than happening to match.
+        $m['files']['agents/retired-agent.md'] = 'DEADBEEF'
+        $m | ConvertTo-Json -Depth 20 | Set-Content $manifestPath
+
+        $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Prune 'agents/retired-agent.md' *>&1 |
+            Out-String -Width 500
+        $out | Should -Match "Dropped the manifest record for 'agents/retired-agent\.md'"
+        $out | Should -Match "-Accept 'agents/retired-agent\.md'"
+
+        (Get-Content $orphanPath -Raw) | Should -Match 'retired agent body'
+        $after = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+        $after['files'].Contains('agents/retired-agent.md') | Should -BeFalse
+
+        # The two-step this unlocks: -Accept refuses any key tracked in `files`, and -Prune just
+        # dropped this one from `files`, so -Accept now takes it without a hand-edited manifest.
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Accept 'agents/retired-agent.md' | Out-Null
+        $pinned = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+        $pinned['accepted']['agents/retired-agent.md'] | Should -Be (Get-FileHash -LiteralPath $orphanPath -Algorithm SHA256).Hash
+    }
+
+    It "-Prune drops a stale manifest record when the orphaned file is already gone from disk" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $manifestPath = "$script:target/.claude/.harness-manifest.json"
+        $m = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+        $m['files']['agents/retired-agent.md'] = 'DEADBEEF'
+        $m | ConvertTo-Json -Depth 20 | Set-Content $manifestPath
+        # No backing file created at all: the "already removed" case, not "unmodified".
+
+        $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Prune 'agents/retired-agent.md' *>&1 |
+            Out-String -Width 500
+        $out | Should -Match "Pruned manifest record 'agents/retired-agent\.md': already gone from disk"
+
+        $after = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+        $after['files'].Contains('agents/retired-agent.md') | Should -BeFalse
+    }
+
+    It "-Prune refuses a key core still ships, leaving the file and record untouched" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Prune 'agents/task-reviewer.md' } |
+            Should -Throw -ExpectedMessage '*core still ships this file*'
+        Test-Path "$script:target/.claude/agents/task-reviewer.md" | Should -BeTrue
+        $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+        $m['files'].Contains('agents/task-reviewer.md') | Should -BeTrue
+    }
+
+    It "-Prune refuses a ceremony file even when this project never installed it" {
+        # Get-CoreFilesMap lists every ceremony file unconditionally (the same map -Audit uses),
+        # so a ceremony-gated file this run's switches withheld still reads 'core still ships
+        # this' -- the gate holding it back is not core dropping it.
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Prune 'agents/soc-monitor.md' } |
+            Should -Throw -ExpectedMessage '*core still ships this file*'
+    }
+
+    It "-Prune refuses ceremony-ledger.json, live state core never shipped a source for" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -IncludeCeremonies
+        $ledgerPath = "$script:target/.claude/ceremony-ledger.json"
+        Test-Path -LiteralPath $ledgerPath | Should -BeTrue
+
+        { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Prune 'ceremony-ledger.json' } |
+            Should -Throw -ExpectedMessage '*live ceremony state*'
+        Test-Path -LiteralPath $ledgerPath | Should -BeTrue
+        $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+        $m['files'].Contains('ceremony-ledger.json') | Should -BeTrue
+    }
+
+    It "-Prune refuses a key pinned as an accepted overlay, naming -Unaccept" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        'project fork body' | Set-Content "$script:target/.claude/project-overlay.md"
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Accept 'project-overlay.md' | Out-Null
+
+        { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Prune 'project-overlay.md' } |
+            Should -Throw -ExpectedMessage '*-Unaccept*'
+        Test-Path "$script:target/.claude/project-overlay.md" | Should -BeTrue
+        $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+        $m['accepted'].Contains('project-overlay.md') | Should -BeTrue
+    }
+
+    It "-Prune refuses a key that is not tracked in the manifest at all" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Prune 'agents/never-existed.md' } |
+            Should -Throw -ExpectedMessage '*nothing to prune*'
+    }
+
+    It "-Prune refuses a manifest key that resolves outside the project's .claude directory" {
+        # The defect the deleted automatic prune loop shipped with: Join-Path plus Remove-Item
+        # on an untrusted manifest key, with no containment check. Resolve-LayerPath's existing
+        # escape check closes it by construction; this is the regression guard for that.
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        'do not delete me' | Set-Content "$script:target/OUTSIDE.txt"
+        $outsideHash = (Get-FileHash -LiteralPath "$script:target/OUTSIDE.txt" -Algorithm SHA256).Hash
+        $manifestPath = "$script:target/.claude/.harness-manifest.json"
+        $m = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+        $m['files']['../OUTSIDE.txt'] = $outsideHash
+        $m | ConvertTo-Json -Depth 20 | Set-Content $manifestPath
+
+        { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Prune '../OUTSIDE.txt' } |
+            Should -Throw -ExpectedMessage '*outside the project*'
+        Test-Path "$script:target/OUTSIDE.txt" | Should -BeTrue
+    }
+
+    It "-Prune warns, without refusing, when settings.json still registers a hook command for the pruned file" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $manifestPath = "$script:target/.claude/.harness-manifest.json"
+        $orphanPath = "$script:target/.claude/hooks/retired-hook.ts"
+        'retired hook body' | Set-Content $orphanPath
+        $orphanHash = (Get-FileHash -LiteralPath $orphanPath -Algorithm SHA256).Hash
+
+        $m = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+        $m['files']['hooks/retired-hook.ts'] = $orphanHash
+        $m | ConvertTo-Json -Depth 20 | Set-Content $manifestPath
+
+        $settingsPath = "$script:target/.claude/settings.json"
+        $s = Get-Content $settingsPath -Raw | ConvertFrom-Json
+        $s.hooks | Add-Member -NotePropertyName 'CustomTestEvent' -NotePropertyValue @(
+            [pscustomobject]@{
+                hooks = @([pscustomobject]@{
+                    type    = 'command'
+                    command = 'bun "$CLAUDE_PROJECT_DIR/.claude/hooks/retired-hook.ts"'
+                })
+            }
+        )
+        $s | ConvertTo-Json -Depth 20 | Set-Content $settingsPath
+
+        $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Prune 'hooks/retired-hook.ts' *>&1 |
+            Out-String -Width 500
+        $out | Should -Match 'settings\.json still registers a hook command'
+        # Warned, not blocked -- the delete still went through.
+        Test-Path -LiteralPath $orphanPath | Should -BeFalse
+    }
+
+    It "audit distinguishes the three orphaned sub-statuses and counts all three as needing attention" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $manifestPath = "$script:target/.claude/.harness-manifest.json"
+        $m = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+
+        'retired agent body' | Set-Content "$script:target/.claude/agents/retired-unmodified.md"
+        $m['files']['agents/retired-unmodified.md'] =
+            (Get-FileHash -LiteralPath "$script:target/.claude/agents/retired-unmodified.md" -Algorithm SHA256).Hash
+
+        'retired agent body, edited' | Set-Content "$script:target/.claude/agents/retired-modified.md"
+        $m['files']['agents/retired-modified.md'] = 'DEADBEEF'
+
+        $m['files']['agents/retired-gone.md'] = 'DEADBEEF'
+
+        $m | ConvertTo-Json -Depth 20 | Set-Content $manifestPath
+        $manifestBefore = Get-Content $manifestPath -Raw
+
+        $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $audit | Should -Match 'agents/retired-unmodified\.md\s+orphaned \(unmodified\)'
+        $audit | Should -Match 'agents/retired-modified\.md\s+orphaned \(modified\)'
+        $audit | Should -Match 'agents/retired-gone\.md\s+orphaned \(already removed\)'
+        # Every one of the three now has a clearing command (-Prune, or -Prune then -Accept for
+        # the modified case), unlike 'not-installed (ceremony-gated)', which no command clears
+        # and which is excluded from the count for exactly that reason -- so all three count here
+        # rather than being excluded the way that class is.
+        $audit | Should -Match '3 file\(s\) need attention'
+
+        # -Audit's own contract: report-only, nothing written.
+        (Get-Content $manifestPath -Raw) | Should -Be $manifestBefore
+    }
 }

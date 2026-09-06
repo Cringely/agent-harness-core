@@ -23,6 +23,16 @@
     ceremony-ledger.json and their hook registrations) assume wave/standup ceremony
     infrastructure most projects lack, and are only installed with -IncludeCeremonies.
 
+    A file dropped from core since a project's last install stays in that project's manifest
+    forever, flagged 'orphaned' by -Audit with no repair path, unless the operator prunes it
+    with -Prune. That is deliberately a standalone command rather than an automatic step on
+    every install: an earlier version did it automatically and unconditionally, keyed off
+    whatever manifest entry core no longer recognized, and adversarial review found it would
+    delete an arbitrary file outside the project from a manifest key like '../../victim.txt'
+    carrying that file's real hash, among other defects. -Prune resolves its argument through
+    the same containment check -Accept and -Unaccept already use, so it can only ever touch a
+    path inside the project's own .claude directory.
+
 .PARAMETER Target
     Project root to install into. Must already exist.
 
@@ -46,6 +56,30 @@
     reasons to drop one. Throws when the key is not pinned. Writes the manifest and nothing
     else, and never restores or deletes a file.
 
+.PARAMETER Prune
+    Retire a manifest key for a file core no longer ships. A standalone action, matching -Accept
+    and -Unaccept — never composed with an install. Takes a path relative to the project's
+    .claude directory, resolved and containment-checked the same way -Accept and -Unaccept
+    resolve theirs.
+
+    Refuses when core still ships the key (this is not an orphan — re-run the installer, or with
+    -IncludeCeremonies, instead) and when the key is pinned in the manifest's `accepted` map (a
+    pin means the project owns the file; drop the pin first with -Unaccept). ceremony-ledger.json
+    is refused too: it is live state core never shipped a source for, not an orphan of one it
+    dropped.
+
+    Otherwise, three outcomes: a file whose on-disk copy still matches the manifest's recorded
+    hash is deleted along with the record; a file that has since diverged is left on disk and
+    only the manifest record is dropped, which is what then lets -Accept pin it — the file is no
+    longer tracked under `files`, so the guard that refuses to pin a tracked key no longer
+    applies, handing the operator a supported two-step (-Prune, then -Accept) in place of a
+    hand-edited manifest; and a record whose file is already gone from disk is dropped by itself.
+
+    Warns, without refusing, when a command in the project's settings.json still names the file
+    being pruned — left for the operator to see and fix by hand, since a de-registration
+    mechanism is more machinery than a one-file, operator-invoked command needs. Writes the
+    manifest and nothing else.
+
 .PARAMETER Audit
     Report-only drift check; writes nothing. Three-way compare (core source vs
     manifest hash vs installed file) classifies every managed file:
@@ -56,7 +90,16 @@
       missing            in manifest but deleted from the project
       not-installed      new in core since last install
       untracked          present in .claude but never installed via manifest
-      orphaned           in manifest but no longer shipped by core
+      orphaned (already removed)
+                         in manifest, no longer shipped by core, already gone from disk —
+                         -Prune drops the stale record
+      orphaned (unmodified)
+                         in manifest, no longer shipped by core, on-disk copy still matches
+                         the recorded hash — -Prune deletes it and the record
+      orphaned (modified)
+                         in manifest, no longer shipped by core, on-disk copy has diverged —
+                         -Prune leaves the file alone and drops only the record, then -Accept
+                         pins it as an overlay
       overlay (accepted) pinned fork, still at the hash it was pinned at
       overlay (changed)  pinned fork has moved since pinning — re-review, re-pin
       not-installed (ceremony-gated)
@@ -84,6 +127,8 @@ param(
     [string]$Accept,
 
     [string]$Unaccept,
+
+    [string]$Prune,
 
     [switch]$Audit,
 
@@ -119,7 +164,7 @@ $scratchDst = Join-Path $claudeDir 'scratch'
 # conjure a .claude tree. A missing directory there is the "file does not exist" / "nothing is
 # pinned" case each one's own guard reports, and reporting that beats silently creating an empty
 # layout.
-if (-not $Audit -and -not $Accept -and -not $Unaccept) {
+if (-not $Audit -and -not $Accept -and -not $Unaccept -and -not $Prune) {
     foreach ($dir in @($claudeDir, $agentsDst, $hooksDst, $scratchDst)) {
         if (-not (Test-Path -LiteralPath $dir)) {
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
@@ -196,6 +241,24 @@ function Resolve-LayerPath {
         Key      = ($relative -replace '\\', '/')
         FullPath = $fullPath
     }
+}
+
+# Map of every file core ships (ceremony files included — if a project installed them, they
+# should be audited/pruned regardless of which switches this run got). Shared by -Audit and
+# -Prune: both need the identical answer to "does core still ship this key", and two copies of
+# that scan are two chances for one to drift from the other and call a still-shipped ceremony
+# file orphaned.
+function Get-CoreFilesMap {
+    $map = [ordered]@{}
+    Get-ChildItem -LiteralPath $agentsSrc -Filter '*.md' -File | ForEach-Object {
+        $map["agents/$($_.Name)"] = $_.FullName
+    }
+    Get-ChildItem -LiteralPath $hooksSrc -File | Where-Object { $_.Name -ne '.gitkeep' } | ForEach-Object {
+        $map["hooks/$($_.Name)"] = $_.FullName
+    }
+    $map['guardrails.md'] = Join-Path $templatesSrc 'guardrails.template.md'
+    $map['scratch/.gitignore'] = Join-Path $templatesSrc 'scratch.gitignore'
+    return $map
 }
 
 # Claude Code plugins install to ~/.claude/plugins/cache/<marketplace>/<plugin>/ at
@@ -466,6 +529,87 @@ if ($Unaccept) {
     return
 }
 
+# -Prune: standalone for the same reason as -Accept and -Unaccept, and deliberately one key per
+# invocation rather than a loop over every orphan. An earlier version pruned every orphaned
+# manifest key automatically on every install; adversarial review found it would delete an
+# arbitrary file outside the project from a manifest key like '../../victim.txt' carrying that
+# file's real hash (Join-Path + Remove-Item with no containment check on an untrusted key), abort
+# mid-loop after some files were already gone and before the manifest recorded that, silently
+# override an -Accept pin, and leave a settings.json hook registration pointing at a file it had
+# just deleted. Resolve-LayerPath's existing containment check closes the first defect by
+# construction: a key resolving outside .claude throws before Remove-Item ever sees it. The rest
+# follow from doing this one key at a time, as an operator decision, instead of in a loop nothing
+# reads before it runs.
+if ($Prune) {
+    $resolvedPrune = Resolve-LayerPath -RelativePath $Prune -LayerDir $claudeDir -Flag '-Prune'
+    $pruneKey = $resolvedPrune.Key
+    $prunePath = $resolvedPrune.FullPath
+
+    # Live ceremony state, not a file core ships or ever shipped a source for — -Audit already
+    # carves this key out of every hash-based classification for the same reason ('stateful (not
+    # audited)'). It falls outside Get-CoreFilesMap the same way a genuine orphan does, so without
+    # this check -Prune would read it as one and delete an operator's ceremony history.
+    if ($pruneKey -eq 'ceremony-ledger.json') {
+        throw "-Prune 'ceremony-ledger.json': this is live ceremony state, not a file core ships or ever shipped, so pruning it is not what this command is for. Delete it by hand if it is genuinely unwanted."
+    }
+
+    $coreFiles = Get-CoreFilesMap
+    if ($coreFiles.Contains($pruneKey)) {
+        throw "-Prune '$pruneKey': core still ships this file, so it is not an orphan. Re-run the installer to bring it back in sync, or with -IncludeCeremonies if it is gated on that switch."
+    }
+
+    if ($manifest['accepted'].Contains($pruneKey)) {
+        throw "-Prune '$pruneKey': pinned as an accepted overlay. A pin means the project owns this file, so -Prune must not silently override it. Run -Unaccept '$pruneKey' first if the pin should go too."
+    }
+
+    if (-not $manifest['files'].Contains($pruneKey)) {
+        throw "-Prune '$pruneKey': not tracked in the manifest's files map, so there is nothing to prune. Run -Audit to see which keys are orphaned."
+    }
+
+    # Warn, don't block: -Prune is operator-invoked, one path at a time, so the warning is read
+    # here in a way it never was in the automatic loop's scroll of output. A de-registration
+    # mechanism would be more machinery than a one-file command needs.
+    $referencingCommands = New-Object System.Collections.Generic.List[string]
+    if ($settings.PSObject.Properties['hooks']) {
+        foreach ($eventType in $settings.hooks.PSObject.Properties.Name) {
+            foreach ($group in @($settings.hooks.$eventType)) {
+                foreach ($h in @($group.hooks)) {
+                    if ($h.command -like "*$pruneKey*") { $referencingCommands.Add("$eventType`: $($h.command)") }
+                }
+            }
+        }
+    }
+    if ($referencingCommands.Count -gt 0) {
+        $refList = ($referencingCommands | ForEach-Object { "  $_" }) -join "`n"
+        Write-Warning "-Prune '$pruneKey': settings.json still registers a hook command naming this file. Pruning it will leave that registration pointing at a file this manifest no longer tracks:`n$refList"
+    }
+
+    if (-not (Test-Path -LiteralPath $prunePath -PathType Leaf)) {
+        $manifest['files'].Remove($pruneKey)
+        $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
+        Write-Host "Pruned manifest record '$pruneKey': already gone from disk. Nothing to delete."
+        return
+    }
+
+    $pruneCurrentHash = Get-FileHashHex -Path $prunePath
+    $pruneRecordedHash = $manifest['files'][$pruneKey]
+    if ($pruneCurrentHash -eq $pruneRecordedHash) {
+        Remove-Item -LiteralPath $prunePath -Force
+        $manifest['files'].Remove($pruneKey)
+        $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
+        Write-Host "Pruned '$pruneKey': deleted the file (matched the manifest's recorded hash) and dropped the manifest record."
+        return
+    }
+
+    # Diverged from what this installer last wrote: the project's own file from this point on.
+    # Deleting it because core stopped shipping the original would be a worse defect than the
+    # permanent 'orphaned' row this command exists to clear, so only the record goes.
+    $manifest['files'].Remove($pruneKey)
+    $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
+    Write-Host "Dropped the manifest record for '$pruneKey'; the file on disk has diverged from what this installer last wrote, so it was left in place. It is now the project's own file -- run -Accept '$pruneKey' to pin it, or delete it by hand if it is not wanted."
+    return
+}
+
 $results = New-Object System.Collections.Generic.List[pscustomobject]
 # Wrap the call, not just the function's internal `return @()`: a function's empty-array
 # return crosses the pipeline like any other output, and zero pipeline objects captured
@@ -476,17 +620,7 @@ $detectedOutputStyles = @(Get-DetectedOutputStyles)
 $detectedMcpServers = @(Get-DetectedMcpServers -TargetPath $Target)
 
 if ($Audit) {
-    # Map of every file core ships (ceremony files included — if a project installed
-    # them, they should be audited regardless of which switches this run got).
-    $coreFiles = [ordered]@{}
-    Get-ChildItem -LiteralPath $agentsSrc -Filter '*.md' -File | ForEach-Object {
-        $coreFiles["agents/$($_.Name)"] = $_.FullName
-    }
-    Get-ChildItem -LiteralPath $hooksSrc -File | Where-Object { $_.Name -ne '.gitkeep' } | ForEach-Object {
-        $coreFiles["hooks/$($_.Name)"] = $_.FullName
-    }
-    $coreFiles['guardrails.md'] = Join-Path $templatesSrc 'guardrails.template.md'
-    $coreFiles['scratch/.gitignore'] = Join-Path $templatesSrc 'scratch.gitignore'
+    $coreFiles = Get-CoreFilesMap
 
     if (-not $Quiet -and -not (Test-Path -LiteralPath $manifestPath)) {
         Write-Host "No .harness-manifest.json in $claudeDir — harness was never installed here via the installer."
@@ -533,7 +667,19 @@ if ($Audit) {
         }
 
         if (-not $srcPath) {
-            $results.Add([pscustomobject]@{ File = $key; Status = 'orphaned' })
+            # Every key reaching here came from manifest['files'].Keys (an accepted key already
+            # returned above, and a coreFiles key always carries a non-null srcPath), so
+            # $manifest['files'][$key] is always a real recorded hash. Split three ways because
+            # -Prune answers each one differently: it deletes the first two outright and leaves
+            # the third for the operator (-Prune's own block above has the same three-way split).
+            if (-not $dstExists) {
+                $results.Add([pscustomobject]@{ File = $key; Status = 'orphaned (already removed)' })
+                continue
+            }
+            $dstHash = Get-FileHashHex -Path $dstPath
+            $recHash = $manifest['files'][$key]
+            $status = if ($dstHash -eq $recHash) { 'orphaned (unmodified)' } else { 'orphaned (modified)' }
+            $results.Add([pscustomobject]@{ File = $key; Status = $status })
             continue
         }
 
@@ -606,7 +752,7 @@ if ($Audit) {
         # recovery for one and the pin-drop for the other rather than sending both to the
         # installer. (CONTRIBUTING.md's drift-detection gate: every class the audit reports needs
         # a standing response, and the classes that must never be auto-repaired are named as such.)
-        Write-Host "$($attention.Count) file(s) need attention. project-modified/untracked-differs = candidates to promote into core; core-updated/not-installed = re-run installer to pull down; overlay-changed = re-review the fork, then re-pin with -Accept; missing = re-run the installer if the row is a tracked file, but a missing pinned overlay exists only in the project's own history, so restore it from there or drop the pin with -Unaccept."
+        Write-Host "$($attention.Count) file(s) need attention. project-modified/untracked-differs = candidates to promote into core; core-updated/not-installed = re-run installer to pull down; overlay-changed = re-review the fork, then re-pin with -Accept; missing = re-run the installer if the row is a tracked file, but a missing pinned overlay exists only in the project's own history, so restore it from there or drop the pin with -Unaccept; orphaned (already removed)/orphaned (unmodified) = -Prune the key to drop the stale manifest record (unmodified also deletes the file, since core no longer ships it); orphaned (modified) = -Prune the key to drop the record while leaving your edited file alone, then -Accept it to pin the fork."
     }
 
     # Stack drift: report-only, same as the file audit above — never writes the manifest.
