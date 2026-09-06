@@ -4,11 +4,28 @@
 // spawn, no network: editing living-doc prose lints; generated paths and
 // non-doc files do not.
 
-import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, describe, expect, test } from "bun:test";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { planLint, resolveValeConfig, shouldLint } from "../core/claude/hooks/lint-doc-prose";
+
+const HOOK = join(import.meta.dir, "..", "core", "claude", "hooks", "lint-doc-prose.ts");
+
+/** Runs the hook as a real process with `stdinText` on stdin. Never goes through a shell.
+ * `env` defaults to the test runner's own so a real, installed `vale` is found the same way an
+ * operator's machine would find it; the no-config case below overrides HOME/USERPROFILE instead
+ * of relying on vale being absent, so it passes on a machine that has vale installed too. */
+function runHook(stdinText: string, env: Record<string, string | undefined> = process.env) {
+  const proc = Bun.spawnSync({
+    cmd: [process.execPath, HOOK],
+    stdin: new TextEncoder().encode(stdinText),
+    stdout: "pipe",
+    stderr: "pipe",
+    env,
+  });
+  return { exitCode: proc.exitCode, stdout: proc.stdout.toString(), stderr: proc.stderr.toString() };
+}
 
 describe("shouldLint() — living-doc scope", () => {
   // These MUST lint.
@@ -469,5 +486,185 @@ describe("prose-lint exemption — no mechanism carries an undeclared segment", 
     expect(sorted(accountSkipTokens().map(accountSegment))).toEqual(
       expectedSegments(ACCOUNT_EXTRAS),
     );
+  });
+});
+
+// --- #78: the import.meta.main stdin/stdout entrypoint itself, spawned for real ------------------
+//
+// This hook has no deny path — it is advisory only — so its failure mode is different in kind: a
+// warning hook that never fires reads exactly like one that is working, from outside. An ablated
+// entrypoint (the `if (import.meta.main)` block deleted) produces exit 0 and empty stdout on every
+// input, which is indistinguishable from the legitimate silent paths (out-of-scope, a clean Vale
+// run). The two cases below are the ones that are NOT indistinguishable: a real finding on stdout,
+// and a real diagnostic on stderr, neither of which an ablated entrypoint can produce.
+
+const spawnFixtureRoot = mkdtempSync(join(tmpdir(), "lint-doc-prose-spawn-"));
+
+afterAll(() => {
+  rmSync(spawnFixtureRoot, { recursive: true, force: true });
+});
+
+describe("spawned process — a real finding reaches stdout", () => {
+  // Requires a real `vale` on PATH and a resolvable config: this specifically exercises Vale's
+  // OWN rule engine end to end (real binary, real Cringely styles, a real AI-tell match), which
+  // is what the fake `vale` in the next describe block below cannot cover. Skipped rather than
+  // faked when either is missing: a monkeypatched Bun.spawnSync (or a hook refactored to inject
+  // one) would prove nothing about the real call, which is exactly the defect #78 exists to
+  // close. That is a different thing from a PATH-injected real executable named `vale` — the
+  // hook still resolves it via its own real Bun.which(), still calls its own real Bun.spawnSync,
+  // still parses real stdout — and the next describe block uses exactly that to cover the
+  // stdout-emission path host-independently, with no dependency on Vale's rule engine at all.
+  const valeReady = Bun.which("vale") !== null && resolveValeConfig() !== null;
+
+  test.skipIf(!valeReady)(
+    "a living doc with a known AI-tell: exit 0, finding text lands in additionalContext",
+    () => {
+      const file = join(spawnFixtureRoot, "README.md");
+      writeFileSync(file, "# Test fixture\n\nWe should leverage a holistic approach here.\n");
+      const result = runHook(JSON.stringify({ tool_input: { file_path: file } }));
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.length).toBeGreaterThan(0);
+      const parsed = JSON.parse(result.stdout);
+      expect(parsed.hookSpecificOutput.hookEventName).toBe("PostToolUse");
+      expect(parsed.hookSpecificOutput.additionalContext).toContain(file);
+      expect(parsed.hookSpecificOutput.additionalContext).toContain("leverage");
+    },
+  );
+
+  test("the cheap negative: an out-of-scope path is exit 0 with no stdout, no vale needed", () => {
+    const result = runHook(JSON.stringify({ tool_input: { file_path: join(spawnFixtureRoot, "x.ts") } }));
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("");
+  });
+});
+
+/** One canned --output=line-shaped finding, printed verbatim by the fake `vale`. The marker
+ * proves the finding text this test asserts on actually came out of the spawned process rather
+ * than out of `buildContext`'s own boilerplate (which already contains `file` on every run,
+ * finding or not). */
+const FAKE_VALE_FINDING = "fixture.md:1:1:Fake.Finding:fake-vale-finding-marker";
+
+/**
+ * Installs a fake `vale` in a fresh temp dir and returns the dir, to prefix onto PATH. Platform-
+ * specific because the hook's own Bun.which()/Bun.spawnSync() go straight to the OS process
+ * launcher, not through a shell: on Windows, Bun.which() resolves a bare "vale" via PATHEXT and
+ * needs a .cmd/.exe/.bat, never an extensionless shebang script (confirmed empirically — an
+ * extensionless "vale" file in an otherwise-matching dir resolves to null); on POSIX it needs an
+ * extensionless file with the exec bit and a real shebang, which Windows can't run directly.
+ *
+ * The fake echoes its own argv (prefixed "ARGV:") ahead of FAKE_VALE_FINDING. Earlier this ignored
+ * argv entirely, which closed the mutation this test was written for (dropping every finding) but
+ * left a different one dark: nothing asserted what the hook actually PASSES to the spawn. Dropping
+ * `"--config", plan.config` from the real spawn call still produces exit 0 plus a finding line —
+ * Vale itself would print a stderr error and no stdout, but this fake can't reproduce that
+ * distinction, so the ARGV echo is what catches a dropped or reordered arg instead. It is echoed
+ * space-joined in call order so one assertion can pin the whole list; see the test below for why
+ * order matters and why per-argument checks are not enough.
+ */
+function installFakeVale(): string {
+  const dir = mkdtempSync(join(tmpdir(), "lint-doc-prose-fakevale-"));
+  if (process.platform === "win32") {
+    writeFileSync(
+      join(dir, "vale.cmd"),
+      ["@echo off", "echo ARGV:%*", `echo ${FAKE_VALE_FINDING}`, ""].join("\r\n"),
+    );
+  } else {
+    const stubPath = join(dir, "vale");
+    writeFileSync(
+      stubPath,
+      ["#!/bin/sh", 'echo "ARGV:$@"', `echo "${FAKE_VALE_FINDING}"`, ""].join("\n"),
+    );
+    chmodSync(stubPath, 0o755);
+  }
+  return dir;
+}
+
+describe("spawned process — stdout emission path via a PATH-injected fake vale", () => {
+  // Host-independent counterpart to the vale-gated describe block above: runs the same on this
+  // workstation and on a vale-less CI runner, where that block's test.skipIf leaves the stdout-
+  // emission path dark. Reproduces #97/#78's residual gap directly: mutating the entrypoint's
+  // `if (findings === "") process.exit(0)` to an unconditional `process.exit(0)` (dropping every
+  // finding) leaves the CI-only suite green with no other guard catching it — this test is that
+  // guard, verified failing against the mutation before being written.
+  const fakeValeDir = installFakeVale();
+  const dummyConfig = join(fakeValeDir, "fake.vale.ini");
+  writeFileSync(dummyConfig, ""); // resolveValeConfig() only checks existsSync, never reads it
+
+  afterAll(() => {
+    rmSync(fakeValeDir, { recursive: true, force: true });
+  });
+
+  test("a finding from the fake binary reaches stdout, independent of a real vale being installed", () => {
+    const sep = process.platform === "win32" ? ";" : ":";
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      PATH: [fakeValeDir, process.env.PATH ?? ""].join(sep),
+      PROSE_LINT_VALE_CONFIG: dummyConfig,
+    };
+    // Must satisfy shouldLint()'s own allowlist (README.md at any depth, or under docs/) —
+    // this is exercising the spawn/parse/emit path, not shouldLint(), so the fixture goes under
+    // docs/ rather than relying on a bare filename to happen to match.
+    const docsDir = join(spawnFixtureRoot, "docs");
+    mkdirSync(docsDir, { recursive: true });
+    const file = join(docsDir, "fake-vale-target.md");
+    writeFileSync(file, "# Fixture\n\nContent doesn't matter — the fake vale ignores it.\n");
+    const result = runHook(JSON.stringify({ tool_input: { file_path: file } }), env);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.length).toBeGreaterThan(0);
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed.hookSpecificOutput.hookEventName).toBe("PostToolUse");
+    expect(parsed.hookSpecificOutput.additionalContext).toContain(file);
+    expect(parsed.hookSpecificOutput.additionalContext).toContain("fake-vale-finding-marker");
+    // The ARGV echo, not the two lines above: `file` and the finding marker both reach
+    // additionalContext regardless of what the hook actually spawned (buildContext's own
+    // boilerplate names `file` unconditionally, and the fake prints its finding line no matter
+    // its argv). What only the ARGV echo can prove is that the hook's OWN spawn call carried the
+    // flags, the config path plan.config resolved to, and the target — not just any file text.
+    //
+    // One assertion over the whole argument list rather than four independent toContain calls,
+    // because separate substring checks are order-blind and order is load-bearing here. Vale is a
+    // Go binary whose flag parsing stops at the first positional, so `vale <file> --config <cfg>`
+    // silently demotes both flags to extra input paths: a real breakage that four order-blind
+    // checks would pass. Each argument also has to be asserted against the argv specifically and
+    // not against the context as a whole — dropping the target from the spawn leaves
+    // `toContain(file)` satisfied by that boilerplate, which is a silent no-op in production and
+    // was green on every vale-less host until this line replaced those checks.
+    expect(parsed.hookSpecificOutput.additionalContext).toContain(
+      `--config ${dummyConfig} --output=line ${file}`,
+    );
+  });
+});
+
+describe("spawned process — the no-config degrade path stays open and says why", () => {
+  // Deterministic regardless of whether this machine has vale installed: overriding HOME/
+  // USERPROFILE removes the machine-global config candidate, and this repo carries no
+  // core/claude/tools/prose-lint/.vale.ini of its own (the resolution order's other two rungs), so
+  // resolveValeConfig() finds nothing before Bun.which("vale") is ever consulted.
+  const noConfigHome = mkdtempSync(join(tmpdir(), "lint-doc-prose-nohome-"));
+  mkdirSync(noConfigHome, { recursive: true });
+
+  afterAll(() => {
+    rmSync(noConfigHome, { recursive: true, force: true });
+  });
+
+  test("in-scope file, no reachable config: exit 0, advisory line on stderr", () => {
+    const env: Record<string, string | undefined> = { ...process.env };
+    delete env.PROSE_LINT_VALE_CONFIG;
+    env.HOME = noConfigHome;
+    env.USERPROFILE = noConfigHome;
+    const result = runHook(
+      JSON.stringify({ tool_input: { file_path: join(spawnFixtureRoot, "README.md") } }),
+      env,
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("lint-doc-prose: no Vale config found");
+  });
+
+  test("malformed JSON exits 0, no stdout, and leaves a diagnostic instead of vanishing", () => {
+    const result = runHook("{not json");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("lint-doc-prose: hook error, skipping:");
   });
 });
