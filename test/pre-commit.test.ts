@@ -26,21 +26,29 @@ const valePath = Bun.which("vale");
 // unconditionally, before Vale ever runs, and refuses to proceed at all if
 // its pattern file can't be loaded. None of the tests in THIS file exercise
 // that gate; they need it to load cleanly and find nothing so Vale's own
-// behaviour is what's actually under test. A synthetic fixture, disjoint
-// from every string these tests stage (the vale FLAG_TOKEN is "delve
-// into"), shared across the whole file and merged into every runHook() call
-// regardless of what env a given test already passes.
-const identityFixtureDir = mkdtempSync(join(tmpdir(), "precommit-identity-fixture-"));
-const identityFixtureFile = join(identityFixtureDir, "identity.json");
-writeFileSync(
-  identityFixtureFile,
-  JSON.stringify({ names: ["Fixture Person"], emails: ["fixture@example.test"] }),
-);
-const IDENTITY_ENV = {
-  CLAUDE_IDENTITY_FILE: identityFixtureFile,
-  IDENTITY_USERNAME_OVERRIDE: "precommit-fixture-user",
-  IDENTITY_HOSTNAME_OVERRIDE: "precommit-fixture-host",
-};
+// behaviour is what's actually under test.
+//
+// The gate resolves its identity file from ${USERPROFILE:-$HOME}, the same
+// variables this file's own Vale-config tests already manipulate to probe
+// project-vs-global config resolution. There is no separate env-var knob
+// (CLAUDE_IDENTITY_FILE) to decouple the two anymore — an earlier revision
+// had one, labelled a test seam, and it turned out to double as a
+// production bypass (identity-gate.test.ts's "CLAUDE_IDENTITY_FILE has no
+// effect" pins the fix). So every runHook() call here forces HOME and
+// USERPROFILE to a fixture directory holding a real
+// .claude-account-identity.json, by default the same directory for both.
+// Tests that need to probe global-vs-project Vale config resolution pass
+// their own { home, userProfile } to keep exercising THAT precedence
+// without losing a loadable identity file at whichever one wins.
+function writeIdentityFixture(dir: string) {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, ".claude-account-identity.json"),
+    JSON.stringify({ names: ["Fixture Person"], emails: ["fixture@example.test"] }),
+  );
+}
+const DEFAULT_IDENTITY_HOME = mkdtempSync(join(tmpdir(), "precommit-identity-home-"));
+writeIdentityFixture(DEFAULT_IDENTITY_HOME);
 
 const tempDirs: string[] = [];
 
@@ -168,17 +176,26 @@ function posixSh(): string {
   throw new Error(`no POSIX sh found: not on PATH, and no sh.exe at ${candidate} (git --exec-path was "${execPath}")`);
 }
 
-function runHook(dir: string, env: Record<string, string | undefined> = process.env) {
+function runHook(
+  dir: string,
+  env: Record<string, string | undefined> = process.env,
+  identityHome: { home?: string; userProfile?: string } = {},
+) {
   // sh, not bash: the hook is written against POSIX sh and must not lean on
   // bash-only features.
   const sh = posixSh();
-  // Appended, never prepended: tests that put a stub binary first must keep winning.
-  // IDENTITY_ENV always lands last: it carries no PATH key, so it never fights the
-  // PATH computation above, and every test gets a loadable identity fixture whether
-  // or not it bothered to think about the gate that now runs ahead of Vale.
+  // HOME/USERPROFILE are always explicit, never inherited from `env`
+  // (typically `{ ...process.env, ... }`): the gate resolves its identity
+  // file from ${USERPROFILE:-$HOME}, so leaving either one to the real
+  // machine's value would make a test's outcome depend on whether this
+  // machine happens to have a real .claude-account-identity.json. Default
+  // is DEFAULT_IDENTITY_HOME for both; a test probing Vale's global-config
+  // fallback (which reads the same two vars) passes its own fixture homes.
+  const home = identityHome.home ?? DEFAULT_IDENTITY_HOME;
+  const userProfile = identityHome.userProfile ?? home;
   const childEnv = cachedShDir
-    ? { ...env, PATH: `${env.PATH ?? process.env.PATH ?? ""}${delimiter}${cachedShDir}`, ...IDENTITY_ENV }
-    : { ...env, ...IDENTITY_ENV };
+    ? { ...env, PATH: `${env.PATH ?? process.env.PATH ?? ""}${delimiter}${cachedShDir}`, HOME: home, USERPROFILE: userProfile }
+    : { ...env, HOME: home, USERPROFILE: userProfile };
   return Bun.spawnSync([sh, join(dir, ".claude", "hooks", "pre-commit")], {
     cwd: dir,
     env: childEnv,
@@ -228,19 +245,19 @@ describe("pre-commit hook — vale binary and config availability", () => {
     const dir = initRepo();
     const stubDir = installValeStub();
     // No installValeConfig() call — no project config. Both HOME and
-    // USERPROFILE point at an empty dir so the global-kit fallback misses
-    // regardless of which one the hook prefers.
+    // USERPROFILE point at an empty (but identity-loadable) dir so the
+    // global-kit fallback misses regardless of which one the hook prefers.
     const fakeHome = mkdtempSync(join(tmpdir(), "precommit-home-"));
     tempDirs.push(fakeHome);
+    writeIdentityFixture(fakeHome);
     writeFileSync(join(dir, "docs.md"), "Let's delve into this topic.\n");
     git(["add", "docs.md"], dir);
 
-    const result = runHook(dir, {
-      ...process.env,
-      PATH: pathWithStubFirst(stubDir),
-      HOME: fakeHome,
-      USERPROFILE: fakeHome,
-    });
+    const result = runHook(
+      dir,
+      { ...process.env, PATH: pathWithStubFirst(stubDir) },
+      { home: fakeHome, userProfile: fakeHome },
+    );
     expect(result.exitCode).toBe(0);
     expect(result.stdout.toString()).toBe("");
     expect(result.stderr.toString()).toContain("no Vale config found");
@@ -251,20 +268,23 @@ describe("pre-commit hook — vale binary and config availability", () => {
     const stubDir = installValeStub();
     // Simulates Git Bash on Windows, where $HOME can resolve to a Documents
     // subfolder while $USERPROFILE is the real profile holding the kit.
+    // The identity gate resolves ${USERPROFILE:-$HOME} too, so USERPROFILE
+    // is the one that needs the fixture; fakeHome is never actually read
+    // while USERPROFILE is set, for either purpose.
     const fakeUserProfile = mkdtempSync(join(tmpdir(), "precommit-userprofile-"));
     tempDirs.push(fakeUserProfile);
     const fakeHome = mkdtempSync(join(tmpdir(), "precommit-home-"));
     tempDirs.push(fakeHome);
     installValeConfig(fakeUserProfile);
+    writeIdentityFixture(fakeUserProfile);
     writeFileSync(join(dir, "docs.md"), "Let's delve into this topic.\n");
     git(["add", "docs.md"], dir);
 
-    const result = runHook(dir, {
-      ...process.env,
-      PATH: pathWithStubFirst(stubDir),
-      HOME: fakeHome,
-      USERPROFILE: fakeUserProfile,
-    });
+    const result = runHook(
+      dir,
+      { ...process.env, PATH: pathWithStubFirst(stubDir) },
+      { home: fakeHome, userProfile: fakeUserProfile },
+    );
     expect(result.exitCode).toBe(0);
     const stderr = result.stderr.toString();
     expect(stderr).toContain("docs.md");
@@ -427,5 +447,68 @@ describe("pre-commit hook — staged filenames that need core.quotePath=false", 
     const stderr = result.stderr.toString();
     expect(stderr).toContain(fname);
     expect(stderr).toContain("Stub.Finding");
+  });
+});
+
+// The identity gate deliberately never prints a matched value. Vale runs
+// after it and echoes finding text (a quoted excerpt plus the rule's own
+// message) straight to stderr, which is fine for ordinary findings but
+// would undo the gate's own restraint if a finding's text ever carried an
+// identifying string — measured against a live content-channel bypass in
+// the attack report this fix responds to (now closed on every known
+// vector; see identity-gate.test.ts's "content channel reads blob bytes"
+// describe block). This is the belt for that suspenders: whatever produces
+// the finding text, if it carries an identifying string, it gets withheld
+// rather than printed.
+describe("pre-commit hook — Vale findings never leak an identifying string", () => {
+  /** Test double for `vale`: always reports a finding whose message quotes
+   * the fixture identity name, regardless of what it was asked to lint —
+   * standing in for a Vale finding that echoes matched text back, the one
+   * way this leak could still happen once the content channel itself is
+   * fixed. */
+  function installValeIdentityLeakStub(): string {
+    const stubDir = mkdtempSync(join(tmpdir(), "precommit-valeleak-"));
+    tempDirs.push(stubDir);
+    const stubPath = join(stubDir, "vale");
+    writeFileSync(
+      stubPath,
+      [
+        "#!/bin/sh",
+        'for arg in "$@"; do file="$arg"; done',
+        'echo "$file:1:1:Stub.Finding:excerpt mentions Fixture Person right here"',
+        "",
+      ].join("\n"),
+    );
+    chmodSync(stubPath, 0o755);
+    return stubDir;
+  }
+
+  test("a finding whose text carries the declared identity name is withheld, not printed", () => {
+    const dir = initRepo();
+    installValeConfig(dir);
+    const stubDir = installValeIdentityLeakStub();
+    writeFileSync(join(dir, "docs.md"), "This is clean prose with no flagged terms in the file itself.\n");
+    git(["add", "docs.md"], dir);
+
+    const result = runHook(dir, { ...process.env, PATH: pathWithStubFirst(stubDir) });
+    expect(result.exitCode).toBe(0);
+    const stderr = result.stderr.toString();
+    expect(stderr).toContain("docs.md");
+    expect(stderr).toContain("withheld");
+    expect(stderr).not.toContain("Fixture Person");
+  });
+
+  test("a finding whose text does not carry an identity string still prints normally", () => {
+    const dir = initRepo();
+    installValeConfig(dir);
+    const stubDir = installValeStub();
+    writeFileSync(join(dir, "docs.md"), "Let's delve into this topic.\n");
+    git(["add", "docs.md"], dir);
+
+    const result = runHook(dir, { ...process.env, PATH: pathWithStubFirst(stubDir) });
+    expect(result.exitCode).toBe(0);
+    const stderr = result.stderr.toString();
+    expect(stderr).toContain("Stub.Finding");
+    expect(stderr).not.toContain("withheld");
   });
 });
