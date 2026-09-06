@@ -4,7 +4,7 @@
 # tool call is pending. CONTRIBUTING.md:43 asks anything under core/claude/hooks/ for a test
 # asserting a DENY, and there is no denial here for a test to assert, so the file beside it
 # (test/session-start-drift-check.test.ts) pins output shape instead and says so at the top.
-# docs/backlog.md item 9 is the open question about that rule's scope.
+# Issue #87 is the open question about that rule's scope.
 #
 # What it does: read .claude/.harness-manifest.json, resolve the core checkout the layer
 # was installed from, run that checkout's audit against this project, and print one
@@ -28,7 +28,7 @@
 
 set -eu
 # pipefail where the shell has it. Guarded rather than bare, which is the simpler form and
-# the one docs/backlog.md item 12 proposes for the other -eu hooks: `set -o pipefail`
+# the one adopted for the other -eu hooks: `set -o pipefail`
 # predates POSIX Issue 8, older /bin/sh implementations reject the option, and `set` is a
 # special builtin whose error aborts a non-interactive shell. Bare, this hook would die at
 # line 2 on such a host and take the session start with it. The subshell absorbs that abort.

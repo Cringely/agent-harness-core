@@ -23,6 +23,19 @@ Describe "Install-Harness" {
         $out | Should -Not -Match 'bun is not on PATH'
     }
 
+    It "installs the guardrails template with the invariant-promotion, spec-before-implementation, and review-termination rules from issue #21" {
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $guardrails = Get-Content "$script:target/.claude/guardrails.md" -Raw
+        # Gap 1: the promotion lifecycle's negative half (what never promotes) is the part most
+        # likely to get cut for space, so the marker checks that half, not just the header.
+        $guardrails | Should -Match 'real subject is a single machine'
+        # Gap 2: the spec-and-plan-before-implementation requirement, new in this repo, quoted
+        # verbatim from the issue thread's own plugin-independent restatement.
+        $guardrails | Should -Match 'exist as artifacts before implementation starts'
+        # Ported from account/claude/rules/fix-quality.md's "Work has to be able to end".
+        $guardrails | Should -Match 'Finding something files it'
+    }
+
     It "merges hook registrations into existing settings.json without clobbering" {
         New-Item -ItemType Directory -Path "$script:target/.claude" | Out-Null
         '{"permissions":{"allow":["Bash(ls:*)"]}}' | Set-Content "$script:target/.claude/settings.json"
