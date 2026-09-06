@@ -175,6 +175,23 @@ describe("identity gate — pre-commit (cheap stage: content, pending author/com
     expect(result.stderr.toString()).toContain("no identity file at");
   });
 
+  // Found by running the gate rather than by reading it. The count check that
+  // rejects an empty pattern set fires only when the WHOLE set is empty, and
+  // the username and hostname arms always contribute because they come from
+  // the environment. So a file declaring no names and no emails still built a
+  // pattern, still passed the canary, and allowed a commit whose content
+  // carried the name that file was supposed to name. The name is the channel
+  // that leaked thirty commits on 2026-09-05.
+  test("gate exits non-zero when the identity file parses but declares no names and no emails", () => {
+    const dir = initPreCommitRepo();
+    const emptyFile = join(dir, "empty-identity.json");
+    writeFileSync(emptyFile, JSON.stringify({ names: [], emails: [] }));
+    stageClean(dir);
+    const result = runPreCommit(dir, envWith({ CLAUDE_IDENTITY_FILE: emptyFile }));
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("declares no names and no emails");
+  });
+
   test("gate exits non-zero when the identity file is not JSON-shaped", () => {
     const dir = initPreCommitRepo();
     const badFile = join(dir, "bad-identity.json");

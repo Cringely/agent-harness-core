@@ -107,6 +107,22 @@ identity_json_array() {
 # a Documents subfolder rather than the real Windows profile that
 # .claude-account-identity.json actually lives under.
 identity_load() {
+    # Prove the matcher works before ANYTHING trusts it, the parse below
+    # included. identity_json_array uses grep to pull values out of the
+    # identity file, so a grep that answers "no match" to everything makes a
+    # populated file parse as empty -- and every downstream check then reports
+    # accurately on a pattern set that was never built. Found by breaking grep
+    # deliberately: the empty-arrays guard fired first and blamed the file,
+    # which is a confident, wrong diagnosis of a broken tool.
+    #
+    # A fixed literal, not a value from the file, because at this point the
+    # file has not been read and its contents cannot be assumed. Same grep
+    # resolved off the same PATH, same -iE invocation as every later scan.
+    if ! printf '%s\n' "identity-gate-canary" | grep -qiE 'identity-gate-canary'; then
+        echo "identity gate: the matcher did not find its own canary in a fixed literal, before any file was read. grep is broken, shadowed on PATH, or crashing. Refusing rather than trusting anything it says -- 2026-09-05's incident was exactly this shape, a crashed grep -F whose surrounding '|| echo NONE' printed a clean result over the top." >&2
+        return 1
+    fi
+
     identity_file=${CLAUDE_IDENTITY_FILE:-${USERPROFILE:-$HOME}/.claude-account-identity.json}
 
     if [ ! -f "$identity_file" ]; then
@@ -133,6 +149,27 @@ identity_load() {
 
     names=$(identity_json_array "$raw" names)
     emails=$(identity_json_array "$raw" emails)
+
+    # Both empty is fail-closed, and the count check further down does not
+    # cover it. That check fires only when the WHOLE pattern set is empty, and
+    # the username and hostname arms below always contribute because they are
+    # derived from the environment rather than read from the file. So a file
+    # declaring `{"names": [], "emails": []}` -- or one whose keys got renamed
+    # by an edit -- builds a pattern that still matches a username and a
+    # hostname, passes the canary, and reports clean on a staged legal name.
+    # Measured on 2026-09-05: with both arrays empty, a commit whose content
+    # carried the name in the file was allowed.
+    #
+    # The name is the channel that actually leaked. Thirty commits carried one
+    # in author and committer while a content scan of the same repository
+    # reported clean, which is the incident this gate exists for. Degrading
+    # silently to username-and-hostname is checking less than the gate claims
+    # to, and the JSON-shape refusal above already states that rule; this
+    # applies it to the case where the file parses and says nothing.
+    if [ -z "$names" ] && [ -z "$emails" ]; then
+        echo "identity gate: '$identity_file' parsed but declares no names and no emails. A file that names nothing cannot protect the channel this gate exists for -- populate it, or the gate is checking only the username and hostname it derived from the environment." >&2
+        return 1
+    fi
 
     # Derived, not read from the identity file: install/Export-Account.ps1's
     # own doc comment on -IdentityFile draws this line already -- the file
