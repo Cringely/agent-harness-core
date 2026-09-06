@@ -98,10 +98,15 @@ against the repo itself.
 pwsh install/Install-Harness.ps1 -Target .
 ```
 
-Worth knowing before relying on that. The `pre-commit` hook is a prose linter that reports and never
-refuses; its final line is an unconditional `exit 0`, documented in the file as advisory because of
-the false-positive rate. A probe staging six banned words and an em dash passes it. Nothing in this
-repo blocks a commit today.
+Worth knowing before relying on that. Vale's prose pass inside `pre-commit` still only reports; its
+own check ends in an unconditional `exit 0`, documented in the file as advisory because of the
+false-positive rate, and a probe staging six banned words and an em dash passes it. The
+identity-string gate ahead of it is not advisory: it refuses a commit whose staged content, pending
+author or committer identity, or branch name carries the operator's declared name, email,
+workstation username, or hostname, and `pre-push` refuses the same channels, plus commit messages
+and tag objects, over the whole range being pushed. Both exit non-zero when
+`~/.claude-account-identity.json` is missing, so a fresh install with no identity file configured
+refuses every commit until one exists.
 
 ## Account layer
 

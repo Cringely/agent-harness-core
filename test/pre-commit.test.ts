@@ -19,7 +19,28 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 
 const HOOK_SRC = join(import.meta.dir, "..", "core", "claude", "hooks", "pre-commit");
+const IDENTITY_LIB_SRC = join(import.meta.dir, "..", "core", "claude", "hooks", "identity-patterns.sh");
 const valePath = Bun.which("vale");
+
+// pre-commit now runs an identity-string gate (see identity-gate.test.ts)
+// unconditionally, before Vale ever runs, and refuses to proceed at all if
+// its pattern file can't be loaded. None of the tests in THIS file exercise
+// that gate; they need it to load cleanly and find nothing so Vale's own
+// behaviour is what's actually under test. A synthetic fixture, disjoint
+// from every string these tests stage (the vale FLAG_TOKEN is "delve
+// into"), shared across the whole file and merged into every runHook() call
+// regardless of what env a given test already passes.
+const identityFixtureDir = mkdtempSync(join(tmpdir(), "precommit-identity-fixture-"));
+const identityFixtureFile = join(identityFixtureDir, "identity.json");
+writeFileSync(
+  identityFixtureFile,
+  JSON.stringify({ names: ["Fixture Person"], emails: ["fixture@example.test"] }),
+);
+const IDENTITY_ENV = {
+  CLAUDE_IDENTITY_FILE: identityFixtureFile,
+  IDENTITY_USERNAME_OVERRIDE: "precommit-fixture-user",
+  IDENTITY_HOSTNAME_OVERRIDE: "precommit-fixture-host",
+};
 
 const tempDirs: string[] = [];
 
@@ -43,6 +64,7 @@ function initRepo(): string {
   git(["config", "user.name", "t"], dir);
   mkdirSync(join(dir, ".claude", "hooks"), { recursive: true });
   Bun.write(join(dir, ".claude", "hooks", "pre-commit"), Bun.file(HOOK_SRC));
+  Bun.write(join(dir, ".claude", "hooks", "identity-patterns.sh"), Bun.file(IDENTITY_LIB_SRC));
   return dir;
 }
 
@@ -151,9 +173,12 @@ function runHook(dir: string, env: Record<string, string | undefined> = process.
   // bash-only features.
   const sh = posixSh();
   // Appended, never prepended: tests that put a stub binary first must keep winning.
+  // IDENTITY_ENV always lands last: it carries no PATH key, so it never fights the
+  // PATH computation above, and every test gets a loadable identity fixture whether
+  // or not it bothered to think about the gate that now runs ahead of Vale.
   const childEnv = cachedShDir
-    ? { ...env, PATH: `${env.PATH ?? process.env.PATH ?? ""}${delimiter}${cachedShDir}` }
-    : env;
+    ? { ...env, PATH: `${env.PATH ?? process.env.PATH ?? ""}${delimiter}${cachedShDir}`, ...IDENTITY_ENV }
+    : { ...env, ...IDENTITY_ENV };
   return Bun.spawnSync([sh, join(dir, ".claude", "hooks", "pre-commit")], {
     cwd: dir,
     env: childEnv,
