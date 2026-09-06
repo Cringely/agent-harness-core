@@ -56,6 +56,27 @@ pwsh install/Install-Harness.ps1 -Target <project-root>
 runs standup/wave ceremonies. `-Force` overwrites files the project has modified since install; the
 default is to skip a modified file and warn.
 
+### The identity gate is off until you configure it
+
+The installer wires a `pre-commit` and a `pre-push` hook that refuse to let an identifying string
+reach a remote: a legal name, a personal email address, the workstation username, the machine
+hostname. Until you tell them what to look for, they print a notice on every commit saying identity
+checks are skipped, and check nothing.
+
+To turn them on, create `~/.claude-account-identity.json`:
+
+```json
+{ "names": ["Your Name"], "emails": ["you@personal.example"] }
+```
+
+The username and hostname arms are derived from the environment and need no configuration. That file
+is read from your home directory and never committed anywhere, which is the point: a gate searching
+for your name cannot carry your name in the repository it protects.
+
+Once the file exists, a file that cannot be read is a hard refusal rather than a skip. Something was
+declared and the gate cannot see it, which is a different situation from never having declared
+anything.
+
 The `.harness-manifest.json` behind that is a record of two different things, not one. `files` maps
 each installed path to the SHA256 it had at install time, which is what makes a project edit
 detectable. `accepted` maps a path to the hash of the project's own fork, pinned deliberately, and
