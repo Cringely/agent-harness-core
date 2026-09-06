@@ -14,6 +14,19 @@ import {
   readWriteScope,
 } from "../core/claude/hooks/agent-write-scope";
 
+const HOOK = join(import.meta.dir, "..", "core", "claude", "hooks", "agent-write-scope.ts");
+
+/** Runs the hook as a real process with `stdinText` on stdin. Never goes through a shell. */
+function runHook(stdinText: string) {
+  const proc = Bun.spawnSync({
+    cmd: [process.execPath, HOOK],
+    stdin: new TextEncoder().encode(stdinText),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  return { exitCode: proc.exitCode, stdout: proc.stdout.toString(), stderr: proc.stderr.toString() };
+}
+
 const CWD = "/home/runner/project";
 
 describe("inScratch() — path classification", () => {
@@ -189,5 +202,85 @@ describe("readWriteScope() — item 38: only a filename-safe agent name resolves
     ["empty string", ""],
   ])("%s in agent_type reads nothing: %p", (_label, agentType) => {
     expect(readWriteScope(agentType, scopeProjectDir)).toBeNull();
+  });
+});
+
+// --- #78: the import.meta.main stdin/stdout entrypoint itself, spawned for real ------------------
+//
+// Every test above calls decide()/readWriteScope() directly, which proves the policy is correct
+// but not that the entrypoint reads stdin, calls that policy, and serializes its answer the way
+// Claude Code expects. Deleting the `if (import.meta.main)` block leaves this hook doing nothing at
+// all: no stdin read, no stdout, exit 0 — indistinguishable from the allow path on any assertion
+// that only checks "exit 0, empty output". The deny case below is the one that is NOT
+// indistinguishable: a genuine deny needs the entrypoint to have read stdin, called decide(), and
+// printed its JSON, none of which an ablated entrypoint does, so this is what actually catches it.
+
+const spawnScopeRoot = mkdtempSync(join(tmpdir(), "write-scope-spawn-"));
+const spawnAgentsDir = join(spawnScopeRoot, ".claude", "agents");
+mkdirSync(spawnAgentsDir, { recursive: true });
+writeFileSync(
+  join(spawnAgentsDir, "scratch-spawn-agent.md"),
+  ["---", "name: scratch-spawn-agent", "writeScope: scratch", "---", "", "Body."].join("\n"),
+);
+
+afterAll(() => {
+  rmSync(spawnScopeRoot, { recursive: true, force: true });
+});
+
+describe("spawned process — the deny path is observable", () => {
+  test("a scratch-scoped agent writing outside scratch: exit 0, deny JSON on stdout", () => {
+    const filePath = join(spawnScopeRoot, "src", "index.ts");
+    const result = runHook(
+      JSON.stringify({
+        agent_type: "scratch-spawn-agent",
+        cwd: spawnScopeRoot,
+        tool_input: { file_path: filePath },
+      }),
+    );
+    // The exact reason text is decide()'s own policy, already covered above; recomputing it here
+    // rather than hand-duplicating the string keeps this assertion about the ENTRYPOINT's wiring,
+    // not a second copy of decide()'s wording that could drift from it.
+    const expectedReason = (decide("scratch", filePath, spawnScopeRoot) as { reason: string }).reason;
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe(
+      JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: expectedReason,
+        },
+      }) + "\n",
+    );
+  });
+
+  test("the same agent writing inside scratch: exit 0, silent (no opinion)", () => {
+    const result = runHook(
+      JSON.stringify({
+        agent_type: "scratch-spawn-agent",
+        cwd: spawnScopeRoot,
+        tool_input: { file_path: join(spawnScopeRoot, "scratchpad", "report.md") },
+      }),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("");
+  });
+});
+
+describe("spawned process — the fail-open path stays open and says why", () => {
+  test("malformed JSON exits 0, no stdout, and leaves a diagnostic instead of vanishing", () => {
+    const result = runHook("{not json");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("agent-write-scope:");
+  });
+
+  test("an unscoped agent (no agent_type) is untouched: exit 0, silent", () => {
+    const result = runHook(
+      JSON.stringify({ cwd: spawnScopeRoot, tool_input: { file_path: "/anywhere/at/all.md" } }),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("");
   });
 });

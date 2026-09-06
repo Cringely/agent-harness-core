@@ -1,12 +1,12 @@
 // Offline tests for the worktree-isolation PreToolUse gate
 // (core/claude/hooks/agent-worktree-gate.ts). Classification and the full
 // stdin-payload decision live in the exported pure requiresIsolation() and
-// decide(), so these run against real temp agent-definition files but never
-// spawn the hook process itself. Note the header at lines 53-55 also claims
-// the stdin/stdout CLI wrapper (the `import.meta.main` block) is "covered
-// separately by spawn tests in the same style" — no such spawn test exists
-// here or anywhere else in test/; only the pure decide()/requiresIsolation()
-// half of that claim is made true by this file.
+// decide(), so most of these run against real temp agent-definition files but
+// never spawn the hook process itself. The header used to claim (at lines
+// 53-55) that the stdin/stdout CLI wrapper was "covered separately by spawn
+// tests in the same style" while no such spawn test existed here or anywhere
+// else in test/ (#78) — the "spawned process" describe block at the end of
+// this file is what makes that claim true now.
 
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -18,6 +18,19 @@ import {
   PROJECT_EXCEPTIONS,
   requiresIsolation,
 } from "../core/claude/hooks/agent-worktree-gate";
+
+const HOOK = join(import.meta.dir, "..", "core", "claude", "hooks", "agent-worktree-gate.ts");
+
+/** Runs the hook as a real process with `stdinText` on stdin. Never goes through a shell. */
+function runHook(stdinText: string) {
+  const proc = Bun.spawnSync({
+    cmd: [process.execPath, HOOK],
+    stdin: new TextEncoder().encode(stdinText),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  return { exitCode: proc.exitCode, stdout: proc.stdout.toString(), stderr: proc.stderr.toString() };
+}
 
 // --- Fixture agent-definitions directory, built once. Every scenario below
 // gets its own subagent_type name so none of them collide in the module's
@@ -334,5 +347,76 @@ describe("requiresIsolation() — item 38: only a filename-safe type name resolv
       traversalAgentsDir,
     );
     expect(verdict.action).toBe("deny");
+  });
+});
+
+// --- #78: the import.meta.main stdin/stdout entrypoint itself, spawned for real ------------------
+//
+// Every test above calls decide()/requiresIsolation() directly with an injected agentsDir, which
+// proves the classification policy is correct but not that the entrypoint reads stdin, calls
+// decide() with the REAL default agents directory, and serializes the answer the way Claude Code
+// expects. The CLI wrapper takes no agentsDir override (unlike decide() itself), so this test uses
+// the hardcoded BUILTIN classification (general-purpose requires isolation, explore does not)
+// rather than a planted fixture def — those two are stable regardless of what
+// core/claude/agents/*.md happens to contain.
+//
+// Deleting the `if (import.meta.main)` block leaves this hook doing nothing at all: no stdin read,
+// no stdout, exit 0 — identical to the allow path on any assertion that only checks "exit 0, empty
+// output". Confirmed live during this fix (ablate, then restore): with the block deleted, a
+// general-purpose dispatch with no isolation — which should deny — instead exits 0 silently, and
+// nothing in this file's PRE-#78 suite caught it, since none of it spawned the process. The deny
+// case below is what actually catches that.
+
+describe("spawned process — the deny path is observable", () => {
+  test("general-purpose with no isolation and no override: exit 0, deny JSON on stdout", () => {
+    const result = runHook(
+      JSON.stringify({
+        tool_name: "Agent",
+        tool_input: { subagent_type: "general-purpose", description: "d", prompt: "do a thing" },
+      }),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.length).toBeGreaterThan(0);
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain("general-purpose");
+    expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain(OVERRIDE_TOKEN);
+  });
+
+  test("the same dispatch with isolation: worktree: exit 0, silent (no opinion)", () => {
+    const result = runHook(
+      JSON.stringify({
+        tool_name: "Agent",
+        tool_input: { subagent_type: "general-purpose", prompt: "do a thing", isolation: "worktree" },
+      }),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("");
+  });
+
+  test("a built-in read-only type (explore): exit 0, silent, no isolation required", () => {
+    const result = runHook(
+      JSON.stringify({ tool_name: "Agent", tool_input: { subagent_type: "explore", prompt: "look around" } }),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("");
+  });
+});
+
+describe("spawned process — the fail-open path stays open and says why", () => {
+  test("malformed JSON exits 0, no stdout, and leaves a diagnostic instead of vanishing", () => {
+    const result = runHook("{not json");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("agent-worktree-gate: hook error, allowing dispatch:");
+  });
+
+  test("a non-Agent/Task tool is ignored: exit 0, silent", () => {
+    const result = runHook(JSON.stringify({ tool_name: "Bash", tool_input: { command: "ls" } }));
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("");
   });
 });

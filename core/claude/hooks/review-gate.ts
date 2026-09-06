@@ -52,10 +52,11 @@
 // CONTRACT). Interpreting shell output well enough to attribute a file write to a specific Bash
 // invocation is out of scope; this is a disclosed limitation, not an oversight.
 //
-// ORDERING, not turn-bucketing. dispatch-audit.ts's approach buckets the transcript into turns
-// delimited by real user prompts, and one of its two documented open defects is that
-// `isRealUserPrompt()` never checks `entry.isMeta`, so an injected skill body or an agent-message
-// delivery wrongly resets a turn boundary. This hook does not adopt that turn-bucketing at all:
+// ORDERING, not turn-bucketing. dispatch-audit.ts (deleted, #97 — shipped untested and unused,
+// see git history for the file) took a different approach: it bucketed the transcript into turns
+// delimited by real user prompts, and one of its two documented open defects was that
+// `isRealUserPrompt()` never checked `entry.isMeta`, so an injected skill body or an agent-message
+// delivery wrongly reset a turn boundary. This hook does not adopt that turn-bucketing at all:
 // the actual invariant needed is a total order over transcript entries — dispatch at or after
 // edit, by raw index within the merged evidence set — and a same-turn dispatch that happens to
 // precede the edit it's meant to review must NOT count, which turn-level comparison alone would
@@ -167,10 +168,9 @@
 // the parent+subagent merge) are exercised separately against real temp git repos and real temp
 // transcript directory trees, matching how test/agent-worktree-gate.test.ts covers its own I/O
 // edge (`requiresIsolation()` reading real temp agent-definition files) rather than mocking `fs`.
-// The `import.meta.main` stdin/stdout entrypoint itself is NOT spawn-tested, the same disclosed gap
-// dispatch-audit.ts states for its own entrypoint (dispatch-audit.ts:79-82): neither of this
-// repo's other TS PreToolUse hooks spawn-tests its entrypoint either, so this is consistent with
-// existing coverage, not a gap specific to this hook.
+// The `import.meta.main` stdin/stdout entrypoint itself IS spawn-tested (#78): a real temp git
+// repo, a real temp transcript file, the hook run as a child process via `Bun.spawnSync`. See the
+// "spawned process" describe blocks at the end of test/review-gate.test.ts.
 //
 // ALLOWLIST ENUMERATION IN THE DENY MESSAGE, a judgment call rather than an obvious default: the
 // deny reason names every REVIEW_ALLOWLIST entry, including general-purpose, as the remediation.
@@ -191,7 +191,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import { readTranscript, type TranscriptEntry } from "./dispatch-audit";
+import { readTranscript, type TranscriptEntry } from "./transcript-utils";
 
 /**
  * subagent_type values, lowercased, whose dispatch counts as a qualifying review. general-purpose
@@ -215,8 +215,10 @@ export const REVIEW_ALLOWLIST = new Set([
 /** Tool names, lowercased, treated as edits for the "last touch" lookup. */
 const WRITE_TOOL_NAMES = new Set(["write", "edit", "notebookedit"]);
 
-/** Tool names, lowercased, treated as a subagent dispatch. Matches dispatch-audit.ts's set: the
- * dispatch tool's `tool_use` block is named "Agent"; "task" kept as a defensive alias. */
+/** Tool names, lowercased, treated as a subagent dispatch: the dispatch tool's `tool_use` block
+ * is named "Agent"; "task" kept as a defensive alias in case a future Claude Code version renames
+ * the tool, since nothing here proves it won't (matched the now-deleted dispatch-audit.ts's
+ * identical set). */
 const DISPATCH_TOOL_NAMES = new Set(["agent", "task"]);
 
 /** Conscious in-band bypass. See the header's ESCAPE HATCH note. */
