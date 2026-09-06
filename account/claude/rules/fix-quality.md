@@ -61,3 +61,40 @@ When contributing to someone else's codebase, the achievable bar is a correct, m
 plus a clean diagnosis the owner can accept or reimplement in minutes — not matching the
 owner's intent model, which no amount of reading their code fully yields. Surfacing a real,
 verified defect with a minimal fix is the win condition.
+
+## Work has to be able to end
+
+Operator challenge, 2026-09-05: "you tend to find new work in every work stream I ask you to do.
+how can we limit that so you don't derive an infinite amount of work that never gets completed?"
+
+The session that prompted it had a backlog that shrank, roughly fourteen items closed against five
+filed. The growth was not in the backlog. It was in the review loop, which has no terminating
+condition: adversarial review always finds something, so "done" defined as "no reviewer has an open
+finding" cannot be reached. Reviewers were correctly told to report everything including
+low-confidence items, with the promise that filtering happened downstream. The filtering never
+happened. Unfiltered review output got treated as a work queue, and each round of fixes earned a
+round of review that produced the next queue.
+
+Four rules, and the first is the one the other three follow from.
+
+**Close on the invariant, not on the absence of findings.** `fix-quality.md` already requires naming
+the violated invariant before writing a fix. Name it before starting the work as well, and let it
+define done: the invariant is restored and a test pins it. A finding outside that invariant is
+someone's next task, not this one's blocker.
+
+**Put a severity floor on what gets acted on.** Correctness, security, and anything that fails open
+get fixed in the round that found them. Comment accuracy, stale citations, naming, and coverage gaps
+get filed. The distinction is not how true the finding is. All of them were true in the session that
+produced this rule, and two full rounds went to corrections of what a comment claimed about itself.
+
+**One review round per artifact.** A second round happens for a load-bearing finding and for nothing
+else. That bar is real and it does get cleared: the round that earned its place here found a
+security gate failing open, and the round after it found that the fix had introduced a regression on
+the path it did not cover. Neither would have been caught by stopping earlier. The two rounds spent
+on comment wording would have been.
+
+**Discovery is not commitment.** Finding something files it. Filing is cheap, complete in itself, and
+leaves the decision to spend effort with the person whose effort it is.
+
+The failure this prevents is not zeal. It is the quiet substitution of an unreachable finish line for
+a reachable one, which reads as diligence right up until someone asks when it ends.

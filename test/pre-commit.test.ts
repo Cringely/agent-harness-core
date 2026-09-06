@@ -330,6 +330,10 @@ describe("pre-commit hook — internal agent traffic is exempt", () => {
     "docs/handoffs/2026-08-10-session.md",
     "scratchpad/plan.md",
     ".scratch/probe.md",
+    // The subagent-driven-development workspace. Usually gitignored, so this
+    // hook rarely sees it — force-add one and it must still be exempt, and the
+    // three prose-lint mechanisms carry one exemption set by contract.
+    ".superpowers/sdd/2026-09-03-account-layer/task-1-report.md",
     "council-transcripts/2026-08-01-scope.md",
   ])("staged %s is not linted", (relPath) => {
     const dir = initRepo();
@@ -346,7 +350,16 @@ describe("pre-commit hook — internal agent traffic is exempt", () => {
 // a path outside docs/ entirely, both still lint — the second because this hook
 // has no allowlist and must not grow one by accident.
 describe("pre-commit hook — the exemption is segment-anchored, not substring", () => {
-  test.each(["docs/guide.md", "docs/memory-system.md", "docs/claude-setup.md", "notes/scratch.md"])(
+  // docs/superpowers/ is the dot's whole job: a repository commits plans and
+  // specs there, and a dotless `superpowers/` arm would silence them along with
+  // the .superpowers/ workspace above.
+  test.each([
+    "docs/guide.md",
+    "docs/memory-system.md",
+    "docs/claude-setup.md",
+    "notes/scratch.md",
+    "docs/superpowers/plans/2026-09-03-account-layer-portability.md",
+  ])(
     "staged %s is still linted",
     (relPath) => {
       const dir = initRepo();

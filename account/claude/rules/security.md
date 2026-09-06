@@ -15,6 +15,42 @@ Every access grant should be the minimum needed.
 - Network: services only on required networks; databases never on front network
 - File permissions: `0644` for bind-mount Docker secrets (non-root UIDs can't read 0600); `0600` for host-only secrets
 
+## Identifying Information Never Reaches a Remote Repo
+
+Mandate, 2026-09-05. Never provide identifying information to a remote repository. **Only a human
+can override this.** An agent may not waive it, may not decide a particular case is harmless, and
+may not treat a prior push as precedent for the next one.
+
+Identifying information means the operator's legal name, personal email addresses, the workstation
+username, absolute paths that contain any of them, machine and host names, and anything else that
+ties the work to a person or a physical machine. It covers every channel a repo carries, not only
+file contents:
+
+- **Commit metadata.** `user.name` and `user.email` on both author and committer, and the two fields
+  fail independently. This is the channel that gets missed, because scrubbing file content leaves it
+  untouched — a content-only scan of this repo on 2026-09-05 reported clean while 30 commits carried
+  a real name in both the author and committer fields. Their email was already the noreply address
+  on every one of the 30, which is exactly why the leak survived: a repo can be clean on the field
+  people check and dirty on the field beside it. Scan for the name and the email separately.
+- **File contents**, including generated payloads and vendored trees.
+- **Commit messages**, which `git-filter-repo --replace-text` does not rewrite; that needs
+  `--message-callback`.
+- **Branch names, tags, PR and issue text.**
+
+The identity for public work is `Cringely <Cringely@users.noreply.github.com>`. Set it per repo
+(`git config --local`) rather than relying on the global value: the global on this workstation is a
+real name, so a repo without a local override silently inherits it on every commit.
+
+**Before any push to a remote, verify both channels.** Content:
+`git grep -I -l -i -e <name> -e <username> -e <email>`. Metadata:
+`git log --format='%an <%ae> | %cn <%ce>' <upstream>..HEAD | sort -u`. A clean content scan is not
+evidence about metadata, and neither is a clean metadata scan about content.
+
+A generator that produces a payload for a public repo carries this as a gate, not a convention. It
+must refuse to write a payload containing identifying strings rather than trusting that a scrub
+happened somewhere upstream — a one-time external cleanup leaves the generator able to reintroduce
+what was removed, with nothing to catch it.
+
 ## Secrets
 
 Never hardcode credentials, tokens, keys, or sensitive IPs in any file. Applies to scripts, configs, changelogs, commits, docs, and comments.

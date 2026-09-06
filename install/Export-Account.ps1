@@ -47,12 +47,41 @@
     {{WSL_HOME}} unexpanded on purpose, since a receiver may have no WSL at all and guessing a
     username would make a dead entry look resolved.
 
+    The FOLD applies to mcpServers strings and to settings.json's hook and statusLine commands,
+    both of which ConvertTo-TemplatedCommand rewrites with the whole fold table. The GATE that
+    catches an unfolded WSL home applies to every file the export writes, because those are the
+    ones no WSL_HOME fold reaches: a copied rules, agents, skills, hooks or statusline file gets
+    no fold pass at all, and a templated file is folded only for the tokens its own
+    AccountTemplatedFiles row names, none of which is WSL_HOME. Where -WslHome resolved, the gate
+    scans for that literal on a path boundary; where it did not, the mcpServers gate falls back to
+    the POSIX-home shapes enumerated at $script:PosixHomeShape.
+
 .PARAMETER VaultPath
     The literal folded into {{OBSIDIAN_VAULT}}. Defaults to $env:CLAUDE_OBSIDIAN_VAULT, else
     $HOME/Documents/Obsidian Vault/Claude Code.
 
 .PARAMETER HomeSlug
     The literal folded into {{HOME_SLUG}}. Defaults to Get-ProjectSlug $HOME.
+
+.PARAMETER AccountUser
+    The workstation username. Redacted to a neutral placeholder wherever it appears as a profile
+    path segment in the payload, and refused by the identity gate wherever it survives anywhere
+    else. Defaults to the leaf of $HOME, which is the spelling every occurrence in the live
+    account layer actually carries. A test seam as much as an override: the default is this
+    machine's real username, and a test asserting against it would print that username in its own
+    failure output.
+
+.PARAMETER IdentityFile
+    JSON declaring the identifying strings that cannot be derived from the environment -- the
+    operator's legal name and personal email addresses:
+
+        { "names": ["First Last"], "emails": ["someone@example.com"] }
+
+    Defaults to $HOME/.claude-account-identity.json, deliberately OUTSIDE both this repo and
+    ~/.claude: a file inside the repo is one `git add -f` from being published, and a file under
+    ~/.claude is inside the tree this script exports. Absent means nothing extra to check, with a
+    warning -- never "check nothing", since the derived username arm runs either way. Malformed
+    JSON throws rather than degrading the gate silently.
 
 .PARAMETER SkipSettings
     Skip the settings.account.json rewrite. Test seam.
@@ -96,6 +125,8 @@ param(
     [string]$WslHome,
     [string]$VaultPath,
     [string]$HomeSlug,
+    [string]$AccountUser,
+    [string]$IdentityFile,
     [switch]$SkipSettings,
     [switch]$SkipMcp,
     [switch]$Force
@@ -139,9 +170,54 @@ if (-not $PSBoundParameters.ContainsKey('NpmGlobal')) {
 # on the machine running THIS export, not on whatever eventually installs the payload.
 if (-not $PSBoundParameters.ContainsKey('WslHome')) {
     $WslHome = if (Get-Command wsl -ErrorAction SilentlyContinue) {
-        $v = (& wsl -e sh -c 'echo $HOME' 2>$null | Select-Object -First 1)
-        if ($LASTEXITCODE -eq 0 -and $v) { $v.Trim() } else { $null }
+        # Collect the whole stream, THEN read $LASTEXITCODE. Piping straight into
+        # `Select-Object -First 1` lets Select stop the pipeline as soon as it has its one object,
+        # and a stopped pipeline can leave $LASTEXITCODE unset from this call -- so the exit-status
+        # check reads whatever the previous native command left behind, or nothing at all. The
+        # repo's own auto-resolution test fails in isolation for exactly this reason while passing
+        # in a full run, which is the signature of a check reading a stale global.
+        $lines = @(& wsl -e sh -c 'echo $HOME' 2>$null)
+        $rc = $LASTEXITCODE
+        $v = if ($lines.Count -gt 0) { $lines[0] } else { $null }
+        if ($rc -eq 0 -and $v) { $v.Trim() } else { $null }
     } else { $null }
+}
+
+# Validate the RESOLVED -WslHome here, at the producer, rather than where the literal is consumed
+# ~770 lines below. Two consumers read this one value in contradictory ways: the fold table takes
+# it as a path literal with IsPath = $true, and the residual scan takes it as the thing to search
+# for. A degenerate value satisfies the first and defeats the second, so by the time the scan
+# could notice, every separator in the payload has already been rewritten by the fold.
+#
+# Measured, against the merged exporter with -WslHome '/': the export COMPLETES, writes its
+# marker, ships '/home/wsluser/code-context-mcp.sh' verbatim in a copied rules file, and rewrites
+# mcp-servers.json args to "C:{{WSL_HOME}}tools{{WSL_HOME}}srv.js". The mcpServers shape gate does
+# not catch it either -- the '/' fold rewrites every separator, so $script:PosixHomeShape finds no
+# POSIX home left to match. Both gates off, one silent success, which is the exact outcome the
+# residual scan exists to prevent.
+#
+# Trailing whitespace is the same bug wearing different clothes. The auto-resolution branch above
+# calls .Trim(); the explicit-parameter path did not, so -WslHome '/home/wsluser ' built the
+# pattern '/home/wsluser\ (?!...)' and degraded the scan to a near-total no-op, completing the
+# export with the literal shipped.
+#
+# An UNRESOLVED WslHome is a different case and stays legal: $null means this machine has no WSL
+# and there is nothing to fold or scan for.
+#
+# Judged wherever the value came from, NOT only when the caller supplied it. A first version of
+# this guard read `$PSBoundParameters.ContainsKey('WslHome') -and $WslHome`, which left the
+# auto-resolution branch above unguarded while the consumer-side TrimEnd it replaced was deleted --
+# so it removed a defence that path already had. Measured with a stub `wsl` and -WslHome omitted:
+# a distro echoing '/home/stubwsl/' threw before that change and completed after it, marker written
+# and the literal shipped; a distro echoing '/' reproduced the original defect whole, mangled
+# mcp-servers.json included. `wsl -e sh -c 'echo $HOME'` returns whatever that distro's passwd
+# entry says, which is not a value this script gets to assume is well-formed.
+if ($WslHome) {
+    $wslHomeGiven = $WslHome
+    $WslHome = $WslHome.Trim().TrimEnd('/')
+    if ($WslHome -notmatch '^/[^/]') {
+        throw "WslHome must name an absolute POSIX directory, and '$wslHomeGiven' does not. It is used both as a fold literal and as the string the residual scan searches for; a value that trims to nothing, or that is a bare '/', folds every separator in the payload and leaves the scan with nothing to match, so the export completes while shipping the WSL home it was meant to catch. Pass -WslHome a path like '/home/<user>', or fix what ``wsl -e sh -c 'echo `$HOME'`` returns on this machine."
+    }
 }
 
 if (-not (Test-Path -LiteralPath $ClaudeHome)) { throw "No account layer at '$ClaudeHome'." }
@@ -192,6 +268,138 @@ if ((Test-Path -LiteralPath $outputRootFull) -and
         "from a previous export. Re-run with -Force if overwriting it is intentional, or pick a " +
         "different -OutputRoot."
 }
+
+# --- identifying strings -----------------------------------------------------
+# security.md's mandate: identifying information must never reach a remote repository, and only a
+# human can override that. account/claude/ is a generated payload committed to a PUBLIC repo, so
+# this script has to carry the mandate as a gate rather than trust that a scrub happened somewhere
+# upstream. It had not. A content scan of this repo for the username comes back clean, and that
+# cleanliness is the residue of a one-time git-filter-repo run performed entirely outside this
+# generator. Nothing here stopped the next export from writing the username straight back in: six
+# payload files hold a neutral placeholder exactly where their live sources under ~/.claude hold
+# the username, and no code anywhere made that substitution.
+#
+# Two mechanisms, deliberately different widths, and the difference is the point.
+#
+#   REDACTION rewrites the workstation username to a neutral placeholder, but only where it sits
+#   in a profile-path position. Mechanical and narrow.
+#
+#   The GATE refuses the export when any identifying string survives into the payload. Strictly
+#   WIDER than the redaction: it matches the username anywhere, not only inside a path, so it
+#   still fires on everything redaction is not allowed to paper over. It is the only mechanism for
+#   the other two classes. A legal name or a personal email reaching the payload is a defect in
+#   the source for a human to fix, never something a generator should quietly rewrite -- rewriting
+#   a name means substituting somebody else's, and a redactor that edits arbitrary prose is how a
+#   document gets mangled.
+#
+# Resolved and loaded HERE, before the first copy, so a malformed identity file fails the run
+# before 218 files are on disk rather than after.
+
+# Derived, not declared. The leaf of $HOME is the spelling every occurrence in the live tree
+# actually carries (C:\Users\<leaf>, /c/Users/<leaf>, C--Users-<leaf>), and $HOME is already the
+# source every other fold in this file derives from. Rejected $env:USERNAME, the obvious
+# alternative: that is the ACCOUNT name, which a renamed account or a roaming profile lets diverge
+# from the PROFILE directory name, and it is the profile directory that appears in a path.
+if (-not $AccountUser) { $AccountUser = Split-Path ($HOME.TrimEnd('\', '/')) -Leaf }
+if (-not $AccountUser) {
+    throw "Could not derive the workstation username from `$HOME ('$HOME'). Pass -AccountUser explicitly."
+}
+
+if (-not $IdentityFile) { $IdentityFile = Join-Path $HOME '.claude-account-identity.json' }
+$declaredNames = @()
+$declaredEmails = @()
+if (Test-Path -LiteralPath $IdentityFile) {
+    try { $identity = Get-Content -LiteralPath $IdentityFile -Raw | ConvertFrom-Json }
+    catch {
+        # Throw, not warn. A security gate reading its own config must not degrade to "checked
+        # less than you think" because a comma went missing.
+        throw "Identity file '$IdentityFile' is not valid JSON ($($_.Exception.Message)). Fix the file, or pass -IdentityFile; a gate must not silently check less than it claims to."
+    }
+    # @($identity.names) when the key is absent is @($null) -- a ONE-element array holding $null,
+    # not an empty one, the same trap the mcpServers env loop below documents. The Where-Object is
+    # what makes an absent key mean zero entries; the outer @() is what keeps a single surviving
+    # entry an array instead of a bare string.
+    $declaredNames = @(@($identity.names) | Where-Object { $_ })
+    $declaredEmails = @(@($identity.emails) | Where-Object { $_ })
+}
+else {
+    Write-Warning ("No identity file at '$IdentityFile': only the workstation username is " +
+        "checked. Create it to also refuse the operator's legal name and personal email -- " +
+        '{"names":["First Last"],"emails":["someone@example.com"]} -- ' +
+        "and note entries are matched verbatim, so declare each token you want caught.")
+}
+
+# Word-boundary LOOKAROUNDS, not \b and not a bare substring. Measured on the live account layer:
+# skills/owasp-llm/references/08-vector-and-embedding-weaknesses.md:117 contains "adjusting",
+# which holds the operator's declared first name as a substring. A bare containment check reads
+# that as a hit and aborts every export against a vendored third-party document nobody here may
+# edit. Same failure the WSL gate's /root boundary already fixed, one class up. And the reason
+# this comment describes the collision instead of quoting it is the rule above: a file that ships
+# to the public repo must not carry the strings the gate defends, least of all in the gate's own
+# source. \b is not the substitute here either: \b asserts a
+# transition, so its answer depends on whether the declared entry happens to start and end with a
+# word character, and an entry like "@example.com" inverts it. The lookarounds say what is meant
+# regardless of the entry -- not preceded or followed by another identifier character.
+#
+# IgnoreCase throughout, unlike the WSL gate's deliberate -cmatch. That gate asks whether two
+# POSIX paths are the same path, where case is significant. This one asks whether a string
+# identifies a person, where it is not.
+function New-IdentityCheck {
+    param([string]$Class, [string[]]$Value)
+    return @(@($Value) | Where-Object { $_ } | ForEach-Object {
+            [pscustomobject]@{
+                Class = $Class
+                Regex = '(?<![A-Za-z0-9])' + [regex]::Escape($_) + '(?![A-Za-z0-9])'
+            }
+        })
+}
+$identityChecks = @(New-IdentityCheck -Class 'workstation username' -Value $AccountUser) +
+    @(New-IdentityCheck -Class 'declared name' -Value $declaredNames) +
+    @(New-IdentityCheck -Class 'declared email' -Value $declaredEmails)
+
+# The redaction is narrower than the gate on purpose, and this lookbehind is the whole of that
+# narrowing: the username only where a path separator puts it in a profile directory position.
+# That covers all 12 occurrences the live account layer carries today -- 3 in
+# rules/change-management.md, 1 in rules/ssh.md, and 1+3+2+2 across four tools/prose-lint style
+# files -- in every spelling they use (C:\Users\x, /c/Users/x, /mnt/c/Users/x).
+#
+# Rejected a tree-wide blind replace of the bare username, the smaller expression: a username
+# short or common enough to read as an ordinary word (root, admin, user) turns it into exactly the
+# false-positive failure the WSL gate's /root boundary exists to stop, and there it mangles the
+# document instead of merely aborting.
+#
+# Rejected extending the lookbehind to `home[\\/]` as well: no live occurrence needs it, and it
+# would overlap the WSL-home gate below -- redacting /home/<user> before that gate reads it would
+# swallow the unfolded-WSL-home signal and ship a silently wrong path in its place.
+#
+# Rejected extending it to the `C--Users-<user>` slug spelling for the same reason: the two files
+# carrying that spelling are $AccountTemplatedFiles rows folded to {{HOME_SLUG}} before this runs,
+# that fold already throws when it stops matching, and redacting a slug the installer does not
+# expand would hand a receiver a wrong slug instead of an abort. The gate still catches it.
+#
+# {1,2} on the separator, because JSON doubles every backslash and both generated payload files
+# are JSON. Without it the same logical path gets two different treatments decided by nothing but
+# its spelling: C:/Users/<user> inside mcp-servers.json redacts (JSON does not escape a forward
+# slash) while C:\\Users\\<user> in the same file does not match and takes the gate's abort
+# instead. Either answer is defensible; picking one by accident of separator arithmetic is not,
+# and the inconsistency is invisible until the day an unfoldable path lands in one of them. One
+# mechanism, every spelling, with the Write-Host below naming any file it touches -- a redaction
+# inside a generated config is worth seeing, and that line is what makes it visible.
+$userRedactPattern = '(?<=Users[\\/]{1,2})' + [regex]::Escape($AccountUser) + '(?![A-Za-z0-9])'
+
+# 'user', not '{{USERNAME}}'. Two reasons, and the first is measured: substituting this exact
+# shape into the six live source files reproduces the committed account/claude/ byte for byte,
+# 12 occurrences, so folding the operator's one-time scrub into the generator changes no committed
+# content and keeps "a second export with nothing changed produces no content diff" true.
+#
+# The second is that a token would be wrong even if it were free. Every {{TOKEN}} in this file is
+# a PORTABILITY fold: Install-Account.ps1's Get-AccountTokenMap expands it to the receiver's own
+# answer. This is a REDACTION, and there is no receiver-side answer to expand it to -- these
+# sentences are measured claims about THIS workstation (where Git Bash puts $HOME, where the ssh
+# config lives), so rewriting the username to a receiver's would turn a true statement into a
+# false one. That is the objection Get-AccountTokenMap already records against expanding
+# {{WSL_HOME}}, one step worse: not a dead entry looking resolved, but a wrong one.
+$userPlaceholder = 'user'
 
 Write-Host "Account home : $ClaudeHome"
 Write-Host "Output root  : $OutputRoot"
@@ -271,13 +479,25 @@ foreach ($f in $script:AccountRootFiles) {
 # --- fold table --------------------------------------------------------------
 # Each fold has one named source. {{CLAUDE_HOME}} is the -ClaudeHome value, {{NPM_GLOBAL}} is
 # `npm root -g`, {{CORE_REPO}} is the main checkout, {{OBSIDIAN_VAULT}} and {{HOME_SLUG}} come
-# from $HOME, {{WSL_HOME}} is `wsl -e sh -c 'echo $HOME'`. Order is immaterial: no literal
-# contains another, since the npm path and the vault both sit under the bare home rather than
-# under .claude, and the slug shares no characters with any path spelling. {{WSL_HOME}} is the
-# sixth and needs its own reason: it is POSIX-rooted (`/home/<user>`), and the other four paths
-# are all Windows-rooted (`C:\...` or `E:\...`). No Windows-side literal can contain a
-# `/`-rooted string as a substring and no POSIX-side literal can contain a drive letter, so the
-# two families cannot collide regardless of the actual usernames or paths on either side.
+# from $HOME, {{WSL_HOME}} is `wsl -e sh -c 'echo $HOME'`.
+#
+# The rows are declared in the order a reader wants to meet them and RETURNED longest-literal
+# first, because the callers apply them in the order they arrive and a literal that is a prefix
+# of another must not go first. Today's six do not overlap -- the npm path and the vault both
+# sit under the bare home rather than under .claude, the slug shares no characters with any path
+# spelling, and {{WSL_HOME}} is POSIX-rooted while the other four are Windows-rooted, so no
+# Windows literal can contain a `/`-rooted string and no POSIX literal can contain a drive
+# letter. That held by luck of which paths were needed, not by construction: a {{HOME}} token
+# (backlog item 30) is a literal prefix of both the .claude path and the vault path, so folding
+# it first would yield `{{HOME}}/.claude` where `{{CLAUDE_HOME}}` belongs.
+#
+# Sorting here rather than restating the precondition in a comment: the precondition was already
+# written down, nothing checked it, and the sort is one line. The smaller alternative -- keep the
+# comment and hand-order the rows -- makes the next person to add a row rediscover the rule,
+# which is how item 30 came to be filed in the first place.
+#
+# No tie-break key is needed. Two literals of equal length cannot contain one another unless they
+# are the same string, so the relative order of equal-length rows cannot change any output.
 function Get-AccountFoldTable {
     param(
         [string]$ClaudeHome,
@@ -287,7 +507,7 @@ function Get-AccountFoldTable {
         [string]$VaultPath,
         [string]$HomeSlug
     )
-    return @(
+    $rows = @(
         [pscustomobject]@{ Token = '{{CLAUDE_HOME}}';    Literal = $ClaudeHome; IsPath = $true }
         [pscustomobject]@{ Token = '{{NPM_GLOBAL}}';     Literal = $NpmGlobal;  IsPath = $true }
         [pscustomobject]@{ Token = '{{WSL_HOME}}';       Literal = $WslHome;    IsPath = $true }
@@ -295,6 +515,7 @@ function Get-AccountFoldTable {
         [pscustomobject]@{ Token = '{{OBSIDIAN_VAULT}}'; Literal = $VaultPath;  IsPath = $true }
         [pscustomobject]@{ Token = '{{HOME_SLUG}}';      Literal = $HomeSlug;   IsPath = $false }
     )
+    return @($rows | Sort-Object -Property { if ($_.Literal) { $_.Literal.Length } else { 0 } } -Descending)
 }
 
 # Folds one literal into its token. A path fold matches both separator spellings and
@@ -443,10 +664,58 @@ if ($PSCmdlet.ShouldProcess($OutputRoot, 'fold model-read machine paths')) {
                 Write-Warning "${rel}: token $($f.Token) did not match the file's text; it still carries whatever machine path it had."
             }
         }
+        # A row that folds NONE of its tokens is a different failure from a row that folds some
+        # of them, and printing both through the same Write-Host below put them in the same
+        # register. Every row in the table exists because that file carries a machine path; a
+        # zero count says the file no longer carries any of the literals the row names, which
+        # means the table and the source text have drifted apart. That is the failure the report
+        # was added to catch, so it throws rather than warns.
+        #
+        # Zero, not "fewer than all". A partial match (the two-token row where one token lands)
+        # is a real signal too, and the per-token Write-Warning above already names exactly which
+        # token stopped matching; promoting that to a throw would make a file legitimately losing
+        # one of its two literals block every export until the table was edited.
+        #
+        # Scope note: backlog item 29 asked for this on "the two files where a fold is required
+        # rather than incidental" and named neither. Nothing in the repo records which two. All
+        # six rows have the same character -- each is model-read text that a placeholder cannot
+        # be written into at source -- so this applies to all six. Measured against the live
+        # account layer before shipping it: every row folds at least one token today (five at
+        # 1 of 1, subagent-prompting at 2 of 2), so no real export changes behaviour.
+        #
+        # Names $AccountTemplatedFiles, not "the fold table". Review round 3: the message used to
+        # say "the fold table in AccountShared.ps1", which points at a table that is not there --
+        # Get-AccountFoldTable is defined above in this file, and what lives in AccountShared.ps1
+        # is the $AccountTemplatedFiles row this loop is iterating. "Fix the row" was already
+        # right; the table it named was not.
+        if ($substituted -eq 0) {
+            throw "Templated file '$rel' folded none of its $(@($rowFolds).Count) token(s) ($($wanted -join ', ')). The AccountTemplatedFiles row in AccountShared.ps1 and the file's text have drifted apart; the payload would ship whatever machine path this file carries. Fix the row or the source text."
+        }
         Set-Content -LiteralPath $target -Value $text -NoNewline
         Write-Host "  ${rel}: folded $substituted of $(@($rowFolds).Count) token(s)$dryRun"
     }
 }
+
+# --- POSIX home shapes -------------------------------------------------------
+# The shapes a WSL home takes, for the gate that runs when -WslHome did not resolve and there is
+# therefore no literal to scan for. Enumerated rather than keyed on `/home/`, which was one of
+# four spellings and named the gate after the narrowest of them (backlog item 23):
+#
+#   /home/<user>          the default for a distro-created user account
+#   /root                 a WSL root account, which has no /home entry at all
+#   /Users/<name>         distro images that mirror the macOS layout
+#   /mnt/<drive>/Users/<name>   a WSL path reaching back into Windows. This is the awkward one:
+#                         it carries the WINDOWS username, and it escapes both sides -- this gate
+#                         did not know the prefix, and the Windows folds match on backslashes.
+#
+# The drive-letter lookbehind keeps a forward-slashed Windows path out of it: `C:/Users/<name>`
+# is not a POSIX home and an mcpServers entry is free to carry one. `--flag=/home/<user>` still
+# matches, which a whitespace-or-quote lookbehind would have missed.
+#
+# Two-valued over an unenumerated domain is the failure change-management.md's scope-filter
+# invariant records, so the enumeration is the fix and this comment is the enumeration.
+$script:PosixHomeShape =
+    '(?<![A-Za-z]:)(?:/mnt/[A-Za-z]/Users/[^/"''\s]+|/home/[^/"''\s]+|/Users/[^/"''\s]+|/root(?![^/"''\s]))'
 
 # --- mcpServers --------------------------------------------------------------
 # The pattern table is read out of the live secret scanner rather than copied, so the gate here
@@ -597,12 +866,16 @@ if (-not $SkipMcp) {
                     # username verbatim with exit 0 and no warning naming {{WSL_HOME}}. Gating on
                     # "$WslHome is falsy" directly would need this file to reason about every
                     # falsy shape ($null, '', a value that resolves but happens not to match)
-                    # separately. Scanning the actual post-fold string for the one shape that must
-                    # never survive a successful fold -- a bare /home/<user> segment -- covers all
-                    # of those at once, and reuses the same scan-and-throw shape the secret gate
-                    # right above already established, rather than adding a second kind of gate.
-                    if ($s -match '/home/[^/"''\s]+') {
-                        throw "Refusing to export mcpServers entry '$name': carries an unfolded WSL home path ('$($Matches[0])'). -WslHome did not resolve (wsl absent, the distro stopped, or an empty override) so the fold could not apply; pass a real -WslHome, or fix the account layer's WSL entry, before exporting."
+                    # separately. Scanning the post-fold string for the shapes that must never
+                    # survive a successful fold covers all of those at once, and reuses the same
+                    # scan-and-throw shape the secret gate right above already established,
+                    # rather than adding a second kind of gate.
+                    #
+                    # Backlog item 23: the shape list used to be `/home/<user>` alone, which is
+                    # one of four spellings a WSL home takes. $script:PosixHomeShape carries the
+                    # enumeration and the reason for each entry.
+                    if ($s -match $script:PosixHomeShape) {
+                        throw "Refusing to export mcpServers entry '$name': carries an unfolded POSIX home path ('$($Matches[0])'). -WslHome did not resolve (wsl absent, the distro stopped, or an empty override) so the fold could not apply; pass a real -WslHome, or fix the account layer's WSL entry, before exporting."
                     }
                 }
             }
@@ -610,6 +883,179 @@ if (-not $SkipMcp) {
             [pscustomobject]@{ mcpServers = $servers } | ConvertTo-Json -Depth 20 |
                 Set-Content -LiteralPath (Join-Path $OutputRoot 'mcp-servers.json') -Encoding utf8
             Write-Host "  mcp-servers.json: $(@($serverNames).Count) server(s)$dryRun"
+        }
+    }
+}
+
+# --- residual WSL home, whole payload ----------------------------------------
+# The gate inside the mcpServers loop sees mcpServers strings and nothing else. Copy-AccountTree
+# copies every rules, agents, skills, hooks and tools/prose-lint file verbatim, and the two
+# $AccountRootFiles statusline scripts with them; no fold pass runs over any of those, so a WSL
+# home literal written into one ships as written. The six $AccountTemplatedFiles rows are folded,
+# but only for the tokens their own row names, and no row names WSL_HOME today, which leaves them
+# in the same position. Every one of those files is on disk by the time this runs. That was the
+# second half of backlog item 23: the gate's guarantee read wider than its scope.
+#
+# Review round 3: this comment and 2f3b196's message both named "a settings hook command" as one
+# of the paths reaching here. It is not one, and cannot be. ConvertTo-TemplatedCommand rewrites
+# every hook command and statusLine.command above with the WHOLE fold table, {{WSL_HOME}}
+# included, and this block only runs when $WslHome is truthy -- which is exactly the condition
+# under which that fold lands. A hook command is folded before the scan starts. The path that can
+# fire is a copied file, which is what the copied-file It in Export-Account.Tests.ps1 exercises.
+#
+# Scans for the resolved LITERAL, not for $script:PosixHomeShape. The shape cannot be used over
+# the whole tree: the payload legitimately names POSIX home paths in prose, and
+# skills/owasp-mcp/references/05-command-injection-execution.md names /root beside /etc/passwd
+# and /proc, so a shape scan across 218 files fails on documentation rather than on drift.
+# Measured on the live payload before choosing this: an exact-literal scan for the WSL home
+# matches nothing there, and the same scan for {{CORE_REPO}} or {{CLAUDE_HOME}} matches nine
+# prose-lint calibration comments that carry those paths on purpose -- which is why this scans
+# for the one literal that must never survive and not for every fold literal.
+#
+# When -WslHome did not resolve there is no literal to scan for, and the shape gate on mcpServers
+# is what stands. The two are complements: exact where a literal exists, shape where none does.
+#
+# Throws after the copy rather than before it, unlike the mcpServers gate. Rejected the
+# alternative of staging the payload in a temp tree and moving it on success: the marker below is
+# what a repeat export trusts, it is written only once every gate has passed, and a destination
+# left without one already demands -Force. The cost of the small fix is a partially written
+# -OutputRoot on a failed run; the cost of the large one is copying 218 files twice on every run.
+# The copied-file It in Export-Account.Tests.ps1 pins that disclosed behaviour, because the
+# mcpServers gate's Its in the same file assert the opposite ("a failed gate must leave nothing
+# behind to commit") and the file should not state both without saying which is intended.
+
+# --- identity redaction and gate, whole payload ------------------------------
+# Same traversal, not a second one. Everything the identity gate must see is already the set this
+# loop walks: Copy-AccountTree's verbatim copies, the folded $AccountTemplatedFiles rows, and the
+# two files written from parsed JSON above. A second pass over the same 218 files would double the
+# read for nothing, and the two scans would drift on which files they agree to skip -- the binary
+# sniff below is a rule both need and neither should own alone.
+#
+# Order inside the loop is load-bearing. The WSL gate reads the body BEFORE redaction, so it sees
+# exactly the bytes it saw before this block existed and its behaviour is unchanged. Redaction
+# then runs, and the identity gate scans what SURVIVED it. Reversing the last two would make the
+# gate refuse the very occurrences redaction exists to handle; reversing the first two is the
+# /home/<user> overlap argued at $userRedactPattern above.
+#
+# The loop condition widened from `$WslHome -and -not $WhatIfPreference` to drop the $WslHome
+# half: the identity gate has to run on every export, including the one where wsl is absent, and
+# $WslHome now gates only the WSL arm inside. Under -WhatIf nothing was copied at all, so there is
+# still nothing here to read.
+if (-not $WhatIfPreference) {
+    # Boundary, not a bare substring test. Review round 3, reproduced on the live payload:
+    # $body.Contains($WslHome) reads ANY occurrence of the literal as a machine path, and /root --
+    # one of the four shapes $script:PosixHomeShape above declares supported, and what a
+    # `wsl --import` distro gives its default user -- is also a substring of the vendored
+    # skills/owasp-mcp/references/05-command-injection-execution.md line
+    # "Access to sensitive paths (/etc/passwd, /root, /proc/, ~/.ssh)." So `-WslHome /root` aborted
+    # after writing 216 files and no marker, and told the operator to edit a third-party OWASP
+    # document where the string is not a machine path at all. Direction 1 of item 23 declared
+    # /root supported; direction 2 made it fatal. The literal scan chosen above is still the right
+    # scan -- it is the BOUNDARY that was missing, not the mechanism.
+    #
+    # Same idiom $script:PosixHomeShape uses on its own /root arm, but NOT the same class: this
+    # scan's boundary was widened to cover a closing bracket, a backtick and '>', and that arm was
+    # not. So the two gates no longer agree on where a POSIX home ends, and a `(/root)` or a
+    # backticked `/root` fires here and not there. Deliberate, and left that way: widening a second
+    # gate is a behaviour change that needs its own fixtures, and this scan is the one that runs
+    # over every copied file. Recorded rather than quietly tolerated, because an earlier version of
+    # this comment claimed the two agreed and was wrong after the widening landed.
+    #
+    # Here, the next character must be a separator, a quote, whitespace, a closing bracket or
+    # backtick, '>', or nothing at all. `/root/x` and a bare `/root` at end of line still fire;
+    # `/root,` and `/rootkit` do not.
+    #
+    # Review round 4: the boundary as first shipped closed on `,`, `;`, `:` and friends but not on
+    # `)`, `]`, a backtick, or `>` -- so `(/root)`, `[/root]`, `` `/root` `` and a markdown link
+    # `[link](/root)` all read as clean. A code span or a parenthetical is exactly how a bare home
+    # path gets written into a rules or skills file, so the negated class now also excludes those
+    # four. Sentence-final `/root.` is still a miss and is left one: a trailing `.` is not locally
+    # distinguishable from the trailing `,` the boundary exists to ignore.
+    #
+    # Rejected \b, the obvious smaller boundary: `t` is a word character and `,` is not, so \b
+    # matches at exactly the position that has to stop matching and the OWASP line still takes the
+    # export down. Rejected excluding vendored trees from the scan: that is a denylist, and it
+    # would blind the gate to a vendored file that did carry the operator's own home.
+    #
+    # -cmatch and not -match: POSIX paths are case-sensitive and .Contains was ordinal, so the
+    # case-insensitive default would widen the gate past the boundary this is here to add.
+    #
+    # $WslHome is already trimmed of whitespace and of a trailing '/' by the validation at :198-203,
+    # which also refuses a supplied value that does not name an absolute POSIX directory. So the
+    # only thing left to distinguish here is present from absent. A trailing slash would otherwise
+    # make the escaped literal end in '/', the boundary would demand a second separator that a real
+    # path never has ('/home/user//launcher.sh' does not exist), and the scan would degrade from
+    # fail-closed to a near-total no-op on every copied file, with no error.
+    #
+    # Null when -WslHome did not resolve, meaning the machine has no WSL. The arm below is skipped
+    # in that case, exactly as the old `$WslHome -and` loop condition skipped the whole loop.
+    #
+    # An earlier resolution of this merge nulled the pattern for a degenerate value too, calling
+    # that fail-safe. Review measured it fail-OPEN: -WslHome '/' then completed the export, wrote
+    # its marker, and shipped the WSL home verbatim. The producer-side throw replaces it, which is
+    # also the right locus -- a '/' is consumed as a fold literal some 770 lines before anything
+    # here could object to it.
+    $wslHomePattern = if ($WslHome) { [regex]::Escape($WslHome) + '(?![^/"''\s)\]`>])' } else { $null }
+    $ignoreCase = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+    # One buffer for the whole scan, not one per file. IndexOf below is bounded by $read, so bytes
+    # left over from a longer previous file are never looked at.
+    $head = [byte[]]::new(8000)
+    # $outputRootFull, not $OutputRoot: FullName below is absolute, and -OutputRoot may be
+    # relative, so the Substring that builds $rel has to be taken against the resolved root.
+    foreach ($f in @(Get-ChildItem -LiteralPath $outputRootFull -Recurse -File -Force)) {
+        # Skip binary files instead of text-decoding them. Get-Content -Raw decodes every byte of
+        # skills/wiring-diagram/examples/'s two PNGs on every export, 600 KB between them, and a
+        # decoded byte run that happened to match would abort the export pointing at an image the
+        # operator cannot edit. A NUL byte in the head is git's own binary test.
+        #
+        # Rejected an extension ALLOWLIST of text types: a new text extension would silently drop
+        # OUT of the gate, which is the one failure a gate must not have. Rejected a denylist of
+        # binary extensions: it needs a new entry per format shipped, and this needs none. Head
+        # only, not ReadAllBytes, so the megabyte is never read at all. Measured on the live
+        # 218-file payload: exactly the two PNGs carry a NUL byte, the other 216 files carry none.
+        $stream = [System.IO.File]::OpenRead($f.FullName)
+        try { $read = $stream.Read($head, 0, $head.Length) } finally { $stream.Dispose() }
+        if ($read -gt 0 -and [System.Array]::IndexOf($head, [byte]0, 0, $read) -ge 0) { continue }
+
+        $body = Get-Content -LiteralPath $f.FullName -Raw
+        # -Raw on an empty file yields $null, and there is nothing to redact or scan in one.
+        if (-not $body) { continue }
+        $rel = ($f.FullName.Substring($outputRootFull.Length).TrimStart('\', '/')) -replace '\\', '/'
+
+        if ($wslHomePattern -and $body -cmatch $wslHomePattern) {
+            throw "Refusing to complete the export: '$rel' still carries the WSL home literal after folding. No fold pass covers {{WSL_HOME}} there -- Copy-AccountTree copies verbatim, and a templated file is folded only for the tokens its own AccountTemplatedFiles row names, none of which is WSL_HOME. Remove it at source, or add the file to AccountTemplatedFiles with a WSL_HOME row."
+        }
+
+        # Write back only when something actually changed. On a real export that is 6 files out of
+        # 218, so the other 212 keep the exact bytes Copy-Item gave them -- which is what keeps the
+        # idempotence guarantee ("a second export with nothing changed writes identical bytes")
+        # true without this pass having to reason about encodings it never touches.
+        $redacted = [regex]::Replace($body, $userRedactPattern, $userPlaceholder, $ignoreCase)
+        if ($redacted -ne $body) {
+            $n = @([regex]::Matches($body, $userRedactPattern, $ignoreCase)).Count
+            Set-Content -LiteralPath $f.FullName -Value $redacted -NoNewline
+            # Reported, not silent, and this line is the mechanism's only audit trail. A redaction
+            # inside settings.account.json or mcp-servers.json would mean a machine path the fold
+            # table has no rule for, and rewriting it there produces a config that is wrong on the
+            # receiver rather than merely neutral. Naming every redacted file makes that visible in
+            # the export output beside the six prose files expected there, so the count itself is a
+            # regression detector. Rejected making those two files a gate instead of a redaction:
+            # that is a per-file rule for a failure with no live instance, and this line surfaces
+            # it for one line of code and no new table.
+            Write-Host "  ${rel}: redacted $n workstation-username occurrence(s)"
+            $body = $redacted
+        }
+
+        foreach ($check in $identityChecks) {
+            if ([regex]::IsMatch($body, $check.Regex, $ignoreCase)) {
+                # Names the file and the CLASS, never the matched value. Printing it would put the
+                # string this gate exists to contain into console output, CI logs and any transcript
+                # of the run -- the mandate covers every channel, not only the committed file. The
+                # WSL gate above prints its match on purpose and the difference is deliberate: a
+                # WSL home is a path the operator must locate and edit, an identity string is one
+                # they already know and must not see copied around.
+                throw "Refusing to complete the export: '$rel' carries the $($check.Class). Identifying information must never reach a remote repository (security.md), and only a human can waive that -- this script cannot. The matched value is deliberately not printed. Remove it at source under '$ClaudeHome', then re-run."
+            }
         }
     }
 }
