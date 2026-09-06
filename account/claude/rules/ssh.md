@@ -2,7 +2,7 @@
 
 ## Authentication
 
-Always use the SSH agent (1Password, via `//./pipe/openssh-ssh-agent`) or the on-disk key (`~/.ssh/lan_key.pub`). Never pass `-o IdentitiesOnly no`, `-i` with a non-existent path, or any flag that bypasses the configured auth. The global `~/.ssh/config` `Host *` block sets this up correctly — rely on it.
+Always use the configured SSH agent or the configured on-disk key. Never pass `-o IdentitiesOnly no`, `-i` with a non-existent path, or any flag that bypasses the configured auth. The global `~/.ssh/config` `Host *` block sets this up correctly — rely on it.
 
 Never add `-o "IdentitiesOnly no"` or otherwise override the key/agent config. If SSH fails with a key error, diagnose the config rather than falling back to password or disabling key restrictions.
 
@@ -24,4 +24,4 @@ Always use the Windows OpenSSH binary: `C:/Windows/System32/OpenSSH/ssh.exe`. Gi
 
 ## SSH Config Location
 
-`~/.ssh/config` is at `C:\Users\user\.ssh\config` (or `~/.ssh/config` in Git Bash). The `Host *` block already configures the 1Password agent and key — all hosts inherit it automatically.
+`~/.ssh/config` resolves to `%USERPROFILE%\.ssh\config` (or `~/.ssh/config` in Git Bash). The `Host *` block already configures the agent and key — all hosts inherit it automatically.
