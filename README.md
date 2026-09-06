@@ -125,9 +125,18 @@ false-positive rate, and a probe staging six banned words and an em dash passes 
 identity-string gate ahead of it is not advisory: it refuses a commit whose staged content, pending
 author or committer identity, or branch name carries the operator's declared name, email,
 workstation username, or hostname, and `pre-push` refuses the same channels, plus commit messages
-and tag objects, over the whole range being pushed. Both exit non-zero when
-`~/.claude-account-identity.json` is missing, so a fresh install with no identity file configured
-refuses every commit until one exists.
+and tag objects, over the whole range being pushed.
+
+Both distinguish three states rather than two. With `~/.claude-account-identity.json` present and
+readable they refuse as described. With it present and unreadable they refuse outright, because
+something was declared and the gate cannot see it. With it absent they print a notice on every
+commit saying identity checks are skipped, and let the commit through: a gate cannot protect an
+identity nobody declared.
+
+Until 2026-09-06 an absent file was treated as the unreadable case, which meant a fresh install
+refused every commit in the project it was installed into. This paragraph described that behaviour
+accurately and nobody read it as a defect, which is the argument for the note in the install section
+above rather than a correction buried here.
 
 ## Account layer
 
