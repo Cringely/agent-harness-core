@@ -557,7 +557,9 @@ const FAKE_VALE_FINDING = "fixture.md:1:1:Fake.Finding:fake-vale-finding-marker"
  * left a different one dark: nothing asserted what the hook actually PASSES to the spawn. Dropping
  * `"--config", plan.config` from the real spawn call still produces exit 0 plus a finding line —
  * Vale itself would print a stderr error and no stdout, but this fake can't reproduce that
- * distinction, so the ARGV echo is what catches a dropped/reordered arg instead.
+ * distinction, so the ARGV echo is what catches a dropped or reordered arg instead. It is echoed
+ * space-joined in call order so one assertion can pin the whole list; see the test below for why
+ * order matters and why per-argument checks are not enough.
  */
 function installFakeVale(): string {
   const dir = mkdtempSync(join(tmpdir(), "lint-doc-prose-fakevale-"));
@@ -617,10 +619,19 @@ describe("spawned process — stdout emission path via a PATH-injected fake vale
     // additionalContext regardless of what the hook actually spawned (buildContext's own
     // boilerplate names `file` unconditionally, and the fake prints its finding line no matter
     // its argv). What only the ARGV echo can prove is that the hook's OWN spawn call carried the
-    // flags and config path plan.config resolved to, not just any file/finding text.
-    expect(parsed.hookSpecificOutput.additionalContext).toContain("--output=line");
-    expect(parsed.hookSpecificOutput.additionalContext).toContain("--config");
-    expect(parsed.hookSpecificOutput.additionalContext).toContain(dummyConfig);
+    // flags, the config path plan.config resolved to, and the target — not just any file text.
+    //
+    // One assertion over the whole argument list rather than four independent toContain calls,
+    // because separate substring checks are order-blind and order is load-bearing here. Vale is a
+    // Go binary whose flag parsing stops at the first positional, so `vale <file> --config <cfg>`
+    // silently demotes both flags to extra input paths: a real breakage that four order-blind
+    // checks would pass. Each argument also has to be asserted against the argv specifically and
+    // not against the context as a whole — dropping the target from the spawn leaves
+    // `toContain(file)` satisfied by that boilerplate, which is a silent no-op in production and
+    // was green on every vale-less host until this line replaced those checks.
+    expect(parsed.hookSpecificOutput.additionalContext).toContain(
+      `--config ${dummyConfig} --output=line ${file}`,
+    );
   });
 });
 
