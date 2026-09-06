@@ -3,6 +3,10 @@ Describe "Install-Account" {
     BeforeAll {
         $script:install = "$PSScriptRoot/Install-Account.ps1"
         $script:repoRoot = Split-Path $PSScriptRoot -Parent
+        # Resolve-ContainmentPath lives here now, so Export-Account.ps1 can call the same
+        # function. One It below dot-sources this file to call it directly; every other
+        # containment test still reaches it through the installer.
+        $script:shared = "$PSScriptRoot/AccountShared.ps1"
 
         # A payload shaped like account/claude, planted rather than exported, so these tests
         # never depend on Task 14 having run and never read the operator's live ~/.claude.
@@ -329,6 +333,182 @@ Describe "Install-Account" {
         }
     }
 
+    # Backlog item 19. The three spellings that walked past the old string-only guard, one It
+    # each so a regression in one is not masked by another failing first. The junction case is
+    # the one that compounds: reproduced before the fix at 22, 33, 44 and 55 files over four
+    # consecutive runs, gaining one more rules\nested\ level each time, because the copy's
+    # destination sat inside its own source and only the -ClaudeHome spelling hid it.
+    It "refuses a -ClaudeHome that reaches inside -PayloadRoot through an NTFS junction" {
+        if (-not $IsWindows) {
+            Set-ItResult -Skipped -Because 'NTFS junctions are a Windows filesystem feature'
+            return
+        }
+        $p = New-StandInPayload
+        # A real directory under the payload's own rules/, which is what makes the copy write
+        # into the tree it reads. The junction is only how -ClaudeHome gets spelled.
+        $realHome = Join-Path $p 'rules\nested'
+        New-Item -ItemType Directory -Path $realHome -Force | Out-Null
+        $junc = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-junc-" + [guid]::NewGuid())
+        cmd /c mklink /J "$junc" "$realHome" *>$null
+        try {
+            # Precondition, not the assertion: without it a machine that refused to create the
+            # junction would leave -ClaudeHome pointing at nothing, the guard would correctly
+            # not fire, and the failure would read as a regression in the guard.
+            Test-Path -LiteralPath $junc | Should -BeTrue -Because 'the junction is the whole fixture'
+            { & $script:install -PayloadRoot $p -ClaudeHome $junc `
+                    -ClaudeJson (Join-Path ([System.IO.Path]::GetTempPath()) "acct-cj-$([guid]::NewGuid()).json") `
+                    -SkipPreflight } |
+                Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
+        }
+        finally {
+            cmd /c rmdir "$junc" *>$null
+            Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "refuses a -ClaudeHome spelled with 8.3 short components that is the same directory as -PayloadRoot" {
+        if (-not $IsWindows) {
+            Set-ItResult -Skipped -Because '8.3 short names are a Windows filesystem feature'
+            return
+        }
+        $p = New-StandInPayload
+        try {
+            $short = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($p).ShortPath
+            if (-not $short -or $short -eq $p) {
+                # 8.3 name creation can be switched off per volume (fsutil 8dot3name). Skipped
+                # rather than passed: with no short name there is no bypass to refuse, and a
+                # green result here would claim coverage the run did not have.
+                Set-ItResult -Skipped -Because '8.3 name creation is disabled on this volume'
+                return
+            }
+            { & $script:install -PayloadRoot $p -ClaudeHome $short `
+                    -ClaudeJson (Join-Path ([System.IO.Path]::GetTempPath()) "acct-cj-$([guid]::NewGuid()).json") `
+                    -SkipPreflight } |
+                Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
+        }
+        finally { Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue }
+    }
+
+    It "refuses a \\?\-prefixed -ClaudeHome that is the same directory as -PayloadRoot" {
+        if (-not $IsWindows) {
+            Set-ItResult -Skipped -Because 'the \\?\ extended-length prefix is Windows-only'
+            return
+        }
+        $p = New-StandInPayload
+        try {
+            { & $script:install -PayloadRoot $p -ClaudeHome "\\?\$p" `
+                    -ClaudeJson (Join-Path ([System.IO.Path]::GetTempPath()) "acct-cj-$([guid]::NewGuid()).json") `
+                    -SkipPreflight } |
+                Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
+        }
+        finally { Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue }
+    }
+
+    # The three Its above are all Windows-only, so on a Linux runner the only thing left
+    # exercising Resolve-ContainmentPath was the -ClaudeJson It below, which passes whether or not
+    # link resolution works. Ablating the ResolveLinkTarget line would have left a Linux suite
+    # green -- the unfalsifiable-guard shape items 26 and 27 exist to remove. ResolveLinkTarget
+    # resolves POSIX symlinks too, and New-Item makes one without a filesystem-specific helper, so
+    # this is the junction test's Linux-runnable sibling. It also runs on a Windows host that
+    # allows symlink creation; where it does not, the junction It above is the Windows coverage
+    # and this one skips rather than reporting a pass it did not earn.
+    It "refuses a -ClaudeHome that reaches inside -PayloadRoot through a symlink" {
+        $p = New-StandInPayload
+        $realHome = Join-Path $p 'rules/nested'
+        New-Item -ItemType Directory -Path $realHome -Force | Out-Null
+        $link = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-symlink-" + [guid]::NewGuid())
+        try {
+            try { New-Item -ItemType SymbolicLink -Path $link -Target $realHome -ErrorAction Stop | Out-Null }
+            catch {
+                $link = $null
+                Set-ItResult -Skipped -Because "this host will not create a directory symlink: $($_.Exception.Message)"
+                return
+            }
+            { & $script:install -PayloadRoot $p -ClaudeHome $link `
+                    -ClaudeJson (Join-Path ([System.IO.Path]::GetTempPath()) "acct-cj-$([guid]::NewGuid()).json") `
+                    -SkipPreflight } |
+                Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
+        }
+        finally {
+            # Directory.Delete removes the reparse point and never the target. Remove-Item on a
+            # directory symlink is the shape that has historically prompted about children
+            # instead, and a prompt in a finally block hangs the whole run.
+            if ($link) { try { [System.IO.Directory]::Delete($link) } catch { } }
+            Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue
+        }
+    }
+
+    # The refusal message used to interpolate only the resolved spellings, so an operator who
+    # typed a junction got an error naming a directory they never typed and no way to tell which
+    # argument was refused. Both spellings now appear. Needs a fixture where the two differ, and
+    # the cheapest such spelling is platform-specific: a \\?\ prefix on Windows, which needs no
+    # privilege, and a symlink everywhere else.
+    It "names the -ClaudeHome spelling the caller passed, not only the directory it resolves to" {
+        $p = New-StandInPayload
+        $link = $null
+        try {
+            if (($PSVersionTable.PSVersion.Major -lt 6) -or $IsWindows) {
+                $spelling = "\\?\$p"
+            }
+            else {
+                $link = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-symlink-msg-" + [guid]::NewGuid())
+                try { New-Item -ItemType SymbolicLink -Path $link -Target $p -ErrorAction Stop | Out-Null }
+                catch {
+                    $link = $null
+                    Set-ItResult -Skipped -Because "this host will not create a directory symlink: $($_.Exception.Message)"
+                    return
+                }
+                $spelling = $link
+            }
+            # Escaped: a \\?\ prefix carries a literal '?', which -ExpectedMessage would otherwise
+            # read as a single-character wildcard and match a spelling this test means to exclude.
+            $wanted = [System.Management.Automation.WildcardPattern]::Escape("-ClaudeHome ('$spelling')")
+            { & $script:install -PayloadRoot $p -ClaudeHome $spelling `
+                    -ClaudeJson (Join-Path ([System.IO.Path]::GetTempPath()) "acct-cj-$([guid]::NewGuid()).json") `
+                    -SkipPreflight } |
+                Should -Throw -ExpectedMessage "*$wanted*"
+        }
+        finally {
+            if ($link) { try { [System.IO.Directory]::Delete($link) } catch { } }
+            Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue
+        }
+    }
+
+    # Resolve-ContainmentPath is shared now, so the platform flag has to be an argument rather
+    # than a variable the function finds in whatever scope dot-sourced it. Nothing under install/
+    # sets Set-StrictMode, so an ambient read of an unassigned $onWindowsHost is $null with no
+    # error, and Export-Account.ps1 resolves its paths before it assigns that flag: the \\?\ strip
+    # would be skipped there silently while every test above still passed, since Install-Account's
+    # own ordering happens to be safe. Pinned by putting a $false $onWindowsHost in scope and
+    # passing -OnWindows $true; only a function reading its parameter strips the prefix. Called
+    # directly rather than through the installer because the installer cannot discriminate the two.
+    It 'takes the platform from -OnWindows, not from an ambient $onWindowsHost' {
+        # Prefixed onto the platform's own temp path rather than a literal C:\ one: on Linux a
+        # drive-qualified path sends GetUnresolvedProviderPathFromPSPath looking for a PSDrive
+        # named C, and the test would fail there for a reason that has nothing to do with the
+        # parameter. Nothing is created at the path; only the spelling matters.
+        $probe = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-onwindows-" + [guid]::NewGuid())
+        $onWindowsHost = $false
+        . $script:shared
+        $resolved = Resolve-ContainmentPath -Path "\\?\$probe" -OnWindows $true
+        $resolved.Contains('\\?\') |
+            Should -BeFalse -Because "the -OnWindows argument decides whether the prefix is stripped"
+    }
+
+    # Backlog item 20. -ClaudeJson sat outside the containment guard, so the mcpServers merge
+    # could be pointed at a file inside the payload tree the same install reads from. The
+    # opposite shape, -ClaudeJson inside -ClaudeHome, is what every other It in this file passes
+    # and must keep working, so no separate It pins it.
+    It "refuses a -ClaudeJson that sits inside -PayloadRoot" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            { & $script:install -PayloadRoot $p -ClaudeHome $h `
+                    -ClaudeJson (Join-Path $p 'claude.json') -SkipPreflight } |
+                Should -Throw -ExpectedMessage '*-ClaudeJson*must not sit inside -PayloadRoot*'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
     # Review round 1, item 2: an explicitly empty or $null -ClaudeHome used to fall through to
     # the live $HOME/.claude default, since `if (-not $ClaudeHome)` cannot tell "the caller did
     # not ask" from "the caller asked for nothing". This never touches the live account layer:
@@ -506,6 +686,13 @@ Describe "Install-Account" {
         }
         finally { $env:PATH = $savedPath; Remove-Item -Recurse -Force $stubBin -EA SilentlyContinue }
         try {
+            # Backlog item 26: this It used to carry the negative alone, and an empty $out
+            # satisfies a negative. Making Test-Prerequisite return an empty list reddened eight
+            # tests and left this one green, so it could not tell whether the npm probe had found
+            # anything -- the only thing it claims to prove. Same positive control its sibling
+            # two Its down already carries. PATH holds nothing but the npm stub, so vale is
+            # genuinely absent and the preflight warning must name it.
+            $out | Should -Match '\bvale\b' -Because "the warning must actually fire for the jq check below to mean anything"
             $out | Should -Not -Match '\bjq\b'
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
@@ -1462,6 +1649,59 @@ Describe "Install-Account" {
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
 
+    # Backlog item 26: Get-ResidualToken de-duplicates with | Select-Object -Unique, and dropping
+    # that left the suite at 96 pass, 0 fail while a file carrying one token twice reported it
+    # twice. Cosmetic, but stated behaviour with nothing behind it. Reads the warning through
+    # -WarningVariable rather than Out-String: the anchor here is what follows the token list,
+    # and a formatted stream can wrap a long warning anywhere.
+    It "names a token carried twice in one file once, not once per occurrence" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            'Core repo: {{CORE_REPO}}. See {{TWICE}}, and again {{TWICE}}.' |
+                Set-Content (Join-Path $p 'rules/harness-core.md')
+
+            $warnings = $null
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -SkipPreflight -WarningVariable warnings -WarningAction SilentlyContinue *>$null
+
+            (@($warnings) -join "`n") |
+                Should -Match 'in rules/harness-core\.md: \{\{TWICE\}\}\. Left verbatim'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Backlog item 27, first half. AccountShared.ps1 lifts three functions out of
+    # Restore-ClaudeProject.ps1 by AST and throws by name when one is missing, so a rename over
+    # there becomes a loud failure here instead of an undefined call at run time. Nothing
+    # exercised the throw: replacing it with `if ($false)` left both suites green, because the
+    # failure it exists for needs the RENAME, not the guard's removal. This plants the rename in
+    # a fixture copy of both files and asserts the message names the function.
+    #
+    # Lives in this file rather than in an AccountShared suite of its own because
+    # Install-Account.ps1 dot-sources AccountShared.ps1 on line 2 of its body: a broken lift
+    # takes this script down before it reads a single parameter.
+    It "throws by name when Restore-ClaudeProject.ps1 no longer defines a function the lift wants" {
+        $dir = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-lift-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        try {
+            Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'AccountShared.ps1') `
+                -Destination (Join-Path $dir 'AccountShared.ps1')
+            $restore = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Restore-ClaudeProject.ps1') -Raw
+            $renamed = $restore -replace 'function Convert-HookCommand\b', 'function Convert-HookCommandGone'
+            # The rename has to have landed, or the fixture is the original file and the throw
+            # correctly never fires.
+            $renamed | Should -Not -Be $restore -Because 'the fixture is the renamed copy, not the original'
+            Set-Content -LiteralPath (Join-Path $dir 'Restore-ClaudeProject.ps1') -Value $renamed -NoNewline
+
+            # Dot-sourced inside a scriptblock so the lifted definitions land in that scope
+            # rather than in this suite's.
+            { & { . (Join-Path $dir 'AccountShared.ps1') } } |
+                Should -Throw -ExpectedMessage '*no longer defines Convert-HookCommand*'
+        }
+        finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
+    }
+
     # Task 11: -ClaudeJson gets the same empty-string guard Task 8 gave -ClaudeHome and
     # -PayloadRoot. Without it, this is the one script that now writes outside ~/.claude at all
     # (~/.claude.json), so a caller that meant to pass a real path and got an empty one from an
@@ -1599,6 +1839,39 @@ Describe "Install-Account" {
                 -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight | Out-Null
 
             (Get-Item $cj).LastWriteTimeUtc | Should -Be $before
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Backlog item 20, second half. The mcpServers block writes -ClaudeJson as well as
+    # $ClaudeHome, and its catch used to emit the shared warning that names only $ClaudeHome.
+    # Set-Content can fail with the file already truncated, so the operator was told the run
+    # damaged one file when it had damaged two. Locks claude.json against writers the same way
+    # the settings.json mixed-state test locks settings.json, and needs a server the receiver
+    # lacks, since Merge-McpServer only writes when it has something to add.
+    It "names -ClaudeJson too when the mcpServers write fails, not just -ClaudeHome" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            $cj = Join-Path $h 'claude.json'
+            @{ mcpServers = @{ alpha = @{ type = 'stdio'; command = 'uvx'; args = @('alpha'); env = @{} } } } |
+                ConvertTo-Json -Depth 20 | Set-Content $cj
+            @{ mcpServers = @{ beta = @{ type = 'stdio'; command = 'uvx'; args = @('beta'); env = @{} } } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
+
+            $stream = [System.IO.File]::Open($cj, 'Open', 'Read', 'Read')
+            $threw = $false
+            $warnings = $null
+            try {
+                try {
+                    & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
+                        -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight `
+                        -WarningVariable warnings -WarningAction SilentlyContinue *>$null
+                }
+                catch { $threw = $true }
+            }
+            finally { $stream.Dispose() }
+            $threw | Should -BeTrue -Because "a failed mcpServers write must still fail the run"
+            (@($warnings) -join "`n") | Should -Match ([regex]::Escape($cj))
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }

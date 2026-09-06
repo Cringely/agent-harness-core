@@ -56,6 +56,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { isValidAgentName } from "./agent-name";
 
 /**
  * Project-specific escape hatch: subagent_type values this project has
@@ -149,12 +150,30 @@ function frontmatterRequiresIsolation(text: string): boolean {
  * Derived classification: does `subagentType` (already trimmed + lowercased)
  * need worktree isolation? Ground truth is the agent-definition frontmatter;
  * built-ins are the only hardcoded cases; unknown fails toward isolation.
+ *
+ * The "already trimmed + lowercased" precondition above is a claim about the caller, and
+ * `decide()` is not the only caller of an exported function. So the name is checked against the
+ * agent-name allowlist here, at the line that turns it into a path, rather than at the payload
+ * read (backlog item 38): a name that is not filename-safe proves nothing about the role, which
+ * is what "requires isolation" already means for every unknown type, so it takes that answer.
+ *
+ * BELOW the exceptions check, not above it. The first version had it above, on the reasoning
+ * that an exception names a role and a traversal is not a role. That reasoning holds for a
+ * traversal and misses `:`, which is outside the allowlist because it is the alternate-data-
+ * stream separator on Windows, and which is also how Claude Code names a plugin's agent
+ * (`caveman:cavecrew-investigator`). Six such types are on this session's roster. Checking the
+ * name first made every plugin-namespaced exception entry silently inert in a consumer project,
+ * and the resulting deny blamed the role's tools frontmatter, which was not the reason. The
+ * ordering is safe because an exception entry is an operator-written literal in this file and the
+ * early return never builds a path from it: the allowlist exists to keep payload text out of
+ * `join()`, and nothing below this line is reached on the exception path.
  */
 export function requiresIsolation(
   subagentType: string,
   agentsDir: string = DEFAULT_AGENTS_DIR,
 ): boolean {
   if (PROJECT_EXCEPTIONS.includes(subagentType)) return false;
+  if (!isValidAgentName(subagentType)) return true;
 
   const key = `${agentsDir} ${subagentType}`;
   const cached = classificationCache.get(key);

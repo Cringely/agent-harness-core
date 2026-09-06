@@ -22,7 +22,6 @@ import {
   checkAgent,
   checkWorkflow,
   decide,
-  effortViolation,
   OVERRIDE_TOKEN,
   scanAgentCalls,
   VALID_TIERS,
@@ -583,8 +582,17 @@ describe("checkAgent() — a dispatch has to name a tier", () => {
     expect(checkAgent({ prompt: "go", model: "haiku" })).toEqual(ALLOW);
   });
 
-  test.each(VALID_TIERS.filter((t) => t !== "sonnet"))("%s is accepted as a tier", (model) => {
+  // Written out by hand rather than derived from VALID_TIERS. A case list built by filtering the
+  // constant under test deletes its own case when a value is deleted from the constant, which is
+  // how a mutation audit found this suite staying green through exactly that deletion. The four
+  // names below are the contract; the equality case beneath them fails if the constant and this
+  // list ever disagree in either direction.
+  test.each(["haiku", "sonnet", "opus", "fable"])("%s is accepted as a tier", (model) => {
     expect(checkAgent({ prompt: "go", model })).toEqual(ALLOW);
+  });
+
+  test("the accepted tiers are exactly those four", () => {
+    expect(VALID_TIERS).toEqual(["haiku", "sonnet", "opus", "fable"]);
   });
 
   test("a tier this project does not recognize is denied", () => {
@@ -613,36 +621,36 @@ describe("checkAgent() — a dispatch has to name a tier", () => {
   });
 });
 
-describe("checkAgent() — the sonnet effort mandate", () => {
-  test("sonnet with no effort is denied", () => {
-    const verdict = checkAgent({ prompt: "go", model: "sonnet" });
-    expect(verdict.action).toBe("deny");
-    if (verdict.action === "deny") expect(verdict.reason).toContain("xhigh");
+describe("checkAgent() — effort is not judged", () => {
+  // This gate used to deny any sonnet dispatch that did not also state effort: "xhigh". The Agent
+  // tool's input schema carries no `effort` parameter, so on the path this hook fires on most
+  // often that denial had no legal answer: the only way past it was to escalate to a premium tier,
+  // inverting the quality-per-dollar the rule was written to protect. Operator directive
+  // 2026-09-05 dropped the mandate. Every effort value is now the dispatcher's call.
+  test("sonnet with no effort allows", () => {
+    expect(checkAgent({ prompt: "go", model: "sonnet" })).toEqual(ALLOW);
   });
 
   test("sonnet at xhigh allows", () => {
     expect(checkAgent({ prompt: "go", model: "sonnet", effort: "xhigh" })).toEqual(ALLOW);
   });
 
-  test("sonnet at any other effort is denied", () => {
-    expect(checkAgent({ prompt: "go", model: "sonnet", effort: "high" }).action).toBe("deny");
+  test("sonnet at a lower effort allows", () => {
+    expect(checkAgent({ prompt: "go", model: "sonnet", effort: "low" })).toEqual(ALLOW);
   });
 
-  test("haiku has no mandated effort", () => {
+  test("haiku and opus are unaffected", () => {
     expect(checkAgent({ prompt: "go", model: "haiku" })).toEqual(ALLOW);
+    expect(checkAgent({ prompt: "go", model: "opus", effort: "low" })).toEqual(ALLOW);
   });
 
-  test("opus has no mandated effort", () => {
-    expect(checkAgent({ prompt: "go", model: "opus" })).toEqual(ALLOW);
-  });
-
-  test("an override waives the effort mandate too", () => {
-    expect(checkAgent({ prompt: `${OVERRIDE_TOKEN} deliberate`, model: "sonnet" })).toEqual(ALLOW);
-  });
-
-  test("effortViolation() reports nothing for a tier with no mandate", () => {
-    expect(effortViolation("haiku", "")).toBeNull();
-    expect(effortViolation("opus", "low")).toBeNull();
+  // The half of the rule that survives, and the half that is satisfiable on every surface. Stated
+  // here as well as under "a dispatch has to name a tier" because dropping one clause of a
+  // two-clause rule is exactly when the other clause gets dropped by accident.
+  test("stating an effort is not a substitute for stating a tier", () => {
+    const verdict = checkAgent({ prompt: "go", effort: "xhigh" });
+    expect(verdict.action).toBe("deny");
+    if (verdict.action === "deny") expect(verdict.reason).toContain("inherits the session model");
   });
 });
 
@@ -765,22 +773,38 @@ describe("checkWorkflow() — a stated tier still has to be one of the accepted 
   });
 });
 
-describe("checkWorkflow() — the sonnet effort mandate applies per call site", () => {
-  test("a sonnet call with no effort is denied", () => {
-    expect(checkWorkflow({ script: `await agent("a",{model:"sonnet"})` }, noRead).action).toBe("deny");
+describe("checkWorkflow() — effort is not judged per call site either", () => {
+  // Workflow's agent() does accept an effort, unlike the Agent tool, so the dropped mandate was
+  // satisfiable here and nowhere else. It goes anyway: one rule, one behaviour on both surfaces.
+  test("a sonnet call with no effort allows", () => {
+    expect(checkWorkflow({ script: `await agent("a",{model:"sonnet"})` }, noRead)).toEqual(ALLOW);
   });
 
-  test("a sonnet call at xhigh allows", () => {
-    expect(checkWorkflow({ script: `await agent("a",{model:"sonnet",effort:"xhigh"})` }, noRead)).toEqual(ALLOW);
+  test("a sonnet call at a lower effort allows", () => {
+    expect(checkWorkflow({ script: `await agent("a",{model:"sonnet",effort:"low"})` }, noRead)).toEqual(ALLOW);
   });
 
-  test("mixing haiku and sonnet-at-xhigh allows", () => {
+  test("mixing tiers and efforts allows", () => {
     expect(
       checkWorkflow(
         { script: `await agent("a",{model:"haiku"}); await agent("b",{model:"sonnet",effort:"xhigh"})` },
         noRead,
       ),
     ).toEqual(ALLOW);
+  });
+
+  test("a bare call beside a sonnet one still denies, and names only the bare one", () => {
+    const verdict = checkWorkflow(
+      { script: `await agent("a",{model:"sonnet",label:"tiered"});\nawait agent("b",{label:"bare"})` },
+      noRead,
+    );
+    expect(verdict.action).toBe("deny");
+    if (verdict.action === "deny") {
+      expect(verdict.reason).toContain("1 of 2 agent() calls name no model");
+      expect(verdict.reason).toContain("line 2");
+      expect(verdict.reason).toContain("bare");
+      expect(verdict.reason).not.toContain("line 1");
+    }
   });
 });
 
@@ -865,15 +889,19 @@ describe("spawned process — the deny path is observable", () => {
     expect(result.stderr).toBe("");
   });
 
-  test("sonnet without effort xhigh exits 2", () => {
+  // Was "sonnet without effort xhigh exits 2" until the mandate was dropped. Kept as a spawned
+  // case rather than deleted: this gate's whole failure mode is a silent no-op, and the pure
+  // checkAgent() case above cannot tell an allow from a hook that never ran.
+  test("sonnet without an effort exits 0 and says nothing", () => {
     const result = runHook(
       JSON.stringify({
         tool_name: "Agent",
         tool_input: { description: "d", prompt: "do a thing", model: "sonnet" },
       }),
     );
-    expect(result.exitCode).toBe(2);
-    expect(result.stderr).toContain("xhigh");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("");
   });
 
   test("a Workflow payload with a bare agent() call exits 2 and names the call site", () => {

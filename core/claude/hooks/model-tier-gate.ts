@@ -12,7 +12,7 @@
 // the dispatch that names no tier at all. Naming one costs a single word and converts a wrong tier
 // into a visible choice someone can argue with in review.
 //
-// Three checks:
+// Two checks:
 //   1. An Agent/Task dispatch with no `model` denies. `subagent_type: "fork"` is exempt, because a
 //      fork inherits the parent model by design and ignores a model override, so demanding the
 //      field would be asking for a value with no effect.
@@ -36,9 +36,17 @@
 //      `phase` are only picked up as keys at code positions sitting directly in the call's own
 //      argument list — same paren depth, one brace deeper, same template-frame depth. A key one
 //      object deeper, one call deeper, or inside any string or comment is not this call's.
-//   3. Any agent on `sonnet` without `effort: "xhigh"` denies. Sonnet gets chosen for work that
-//      needs real reasoning at a lower price, and inherited effort throws away the reason it was
-//      chosen. The other tiers set effort by judgment; sonnet does not get a choice.
+//
+// NO EFFORT CHECK, and why it is not coming back. There used to be a third check: any agent on
+// `sonnet` without `effort: "xhigh"` denied. The Agent tool's input schema carries no `effort`
+// parameter at all, so on the path this hook fires on most often that denial had no legal answer.
+// The only way past it was to escalate to a premium tier, which inverted the quality-per-dollar
+// the rule was written to protect. Workflow's `agent()` does take an effort, so the check was
+// satisfiable there and nowhere else. Operator directive 2026-09-05 dropped the mandate outright:
+// prefer xhigh where the work justifies it, pick a sensible level otherwise. A softer "sonnet must
+// state SOME effort" rule carries the identical defect and is not the replacement. The tier check
+// stays, because naming a model is satisfiable on every surface. The scanner still records each
+// call's declared `effort` as descriptive output; nothing judges it.
 //
 // MATCHER NOTE, and the part of it that is not verified. "Agent" and "Task" are observed tool
 // names: agent-worktree-gate.ts in this same directory registers on `Agent|Task`, and Task is the
@@ -105,7 +113,7 @@
 // of which come back as zero call sites rather than a guess. So does a scanned
 // `model:` whose value the scanner cannot read as a plain short literal, a variable reference or a
 // string past twenty characters being the usual causes: the call still counts as having named a
-// tier, and the tier and effort checks are skipped for it rather than guessed at. A broken gate must
+// tier, and the tier vocabulary check is skipped for it rather than guessed at. A broken gate must
 // never block real work. The error path logs one line to stderr and exits 0, which Claude Code
 // reads as no opinion, so a gate that has stopped working is visible to an operator rather than
 // invisibly absent.
@@ -114,13 +122,6 @@ import { readFileSync } from "node:fs";
 
 /** Tiers this project accepts as an answer to "which model". */
 export const VALID_TIERS = ["haiku", "sonnet", "opus", "fable"];
-
-/**
- * Tiers whose effort is not a judgment call. One entry today, so it stays a lookup rather than a
- * policy engine or a templated config file; if per-tier policy grows past a couple of rows it wants
- * to become data the installer can template per project.
- */
-const MANDATED_EFFORT: Record<string, string> = { sonnet: "xhigh" };
 
 /** Conscious in-band bypass. See the header's ESCAPE HATCH note. */
 export const OVERRIDE_TOKEN = "MODEL-OVERRIDE:";
@@ -133,9 +134,8 @@ const RULE = [
   "A search agent is judgment despite looking mechanical, because choosing search breadth is not",
   "fetching.",
   "",
-  'A sonnet agent always runs effort: "xhigh". Sonnet gets picked for work that needs real reasoning',
-  "at a lower price, and running it at inherited effort throws away the reason it was picked. The",
-  "other tiers set effort by judgment; sonnet does not get a choice.",
+  "Effort is not part of this rule and is not checked. Prefer xhigh where the work justifies it and",
+  "a sensible level otherwise.",
   "",
   "See the model-tier row in the rule catalog in guardrails.md.",
 ].join("\n");
@@ -148,16 +148,6 @@ const ALLOW: GateDecision = { action: "allow" };
 
 function hasOverride(text: unknown): boolean {
   return typeof text === "string" && OVERRIDE_RE.test(text);
-}
-
-/** The effort complaint for a tier whose effort is mandated, or null when there is none. */
-export function effortViolation(model: string, effort: string): string | null {
-  const required = MANDATED_EFFORT[model];
-  if (!required) return null;
-  if (effort === required) return null;
-  return effort
-    ? `model "${model}" must run effort: "${required}", not "${effort}"`
-    : `model "${model}" must state effort: "${required}" (omitted, so it inherits session effort)`;
 }
 
 // ---------------------------------------------------------------------------
@@ -594,21 +584,10 @@ export function checkAgent(input: unknown): GateDecision {
         ].join("\n"),
       };
     }
-    if (hasOverride(t.prompt)) return ALLOW;
-    const effort = typeof t.effort === "string" ? t.effort.trim() : "";
-    const bad = effortViolation(model, effort);
-    if (bad) {
-      return {
-        action: "deny",
-        reason: [
-          `BLOCKED: ${bad}.`,
-          "",
-          RULE,
-          "",
-          'Add effort: "xhigh" to the dispatch.',
-        ].join("\n"),
-      };
-    }
+    // No override check here, and none is needed: a valid tier is the whole requirement, so there
+    // is nothing left for an override to waive. It was read at this point only to waive the effort
+    // mandate. An unrecognized tier above is deliberately not waivable, which is the one place
+    // checkAgent is stricter than checkWorkflow.
     return ALLOW;
   }
 
@@ -654,7 +633,6 @@ export function checkWorkflow(
   if (calls.length === 0) return ALLOW; // nothing to spawn, or unparsable, so fail open
 
   const bare = calls.filter((c) => !c.hasModel);
-  const wrongEffort = calls.filter((c) => c.hasModel && effortViolation(c.model, c.effort));
   // The same tier vocabulary checkAgent enforces, applied per call site. Without this a misspelled
   // `"sonet"` in a fan-out script reads as a stated tier and inherits the session model anyway,
   // which is the failure this whole gate exists to close. A value the scanner could not read comes
@@ -662,7 +640,7 @@ export function checkWorkflow(
   // from checkAgent: a script-level override waives this check, because the override is read before
   // the script is scanned at all.
   const unknownTier = calls.filter((c) => c.hasModel && c.model && !VALID_TIERS.includes(c.model));
-  if (bare.length === 0 && wrongEffort.length === 0 && unknownTier.length === 0) return ALLOW;
+  if (bare.length === 0 && unknownTier.length === 0) return ALLOW;
 
   const lines: string[] = ["BLOCKED: this workflow's agent tiers are not all stated and valid.", ""];
 
@@ -674,16 +652,6 @@ export function checkWorkflow(
       ...shown.map((c) => `  line ${c.line}  ${c.label}`),
     );
     if (bare.length > shown.length) lines.push(`  ... and ${bare.length - shown.length} more`);
-    lines.push("");
-  }
-
-  if (wrongEffort.length > 0) {
-    const shown = wrongEffort.slice(0, 12);
-    lines.push(
-      `${wrongEffort.length} call(s) name a model whose effort is mandated and do not set it:`,
-      ...shown.map((c) => `  line ${c.line}  ${c.label}: ${effortViolation(c.model, c.effort)}`),
-    );
-    if (wrongEffort.length > shown.length) lines.push(`  ... and ${wrongEffort.length - shown.length} more`);
     lines.push("");
   }
 
@@ -701,9 +669,9 @@ export function checkWorkflow(
   lines.push(
     RULE,
     "",
-    'Set both on each opts object, for example { label: "...", model: "sonnet", effort: "xhigh" }.',
-    "A typical split: measurement and fetching on haiku, verification on sonnet at xhigh, synthesis",
-    "on the premium tier.",
+    'Name a tier on each opts object, for example { label: "...", model: "sonnet" }.',
+    "A typical split: measurement and fetching on haiku, verification on sonnet, synthesis on the",
+    "premium tier.",
     `To run without choosing, put \`${OVERRIDE_TOKEN} <reason>\` anywhere in the script.`,
   );
   return { action: "deny", reason: lines.join("\n") };
