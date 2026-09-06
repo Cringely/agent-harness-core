@@ -52,7 +52,8 @@
 //
 // Decision logic lives in the exported pure `decide()`, exercised offline by
 // test/agent-worktree-gate.test.ts without spawning a process. The stdin/stdout
-// contract itself has no spawn-level test.
+// contract itself IS spawn-tested (#78): see the "spawned process" describe
+// block at the end of that file.
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";

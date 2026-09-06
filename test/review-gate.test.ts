@@ -25,7 +25,20 @@ import {
   REVIEW_ALLOWLIST,
   scrubQuotesAndHeredocs,
 } from "../core/claude/hooks/review-gate";
-import type { TranscriptEntry } from "../core/claude/hooks/dispatch-audit";
+import type { TranscriptEntry } from "../core/claude/hooks/transcript-utils";
+
+const HOOK = join(import.meta.dir, "..", "core", "claude", "hooks", "review-gate.ts");
+
+/** Runs the hook as a real process with `stdinText` on stdin. Never goes through a shell. */
+function runHook(stdinText: string) {
+  const proc = Bun.spawnSync({
+    cmd: [process.execPath, HOOK],
+    stdin: new TextEncoder().encode(stdinText),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  return { exitCode: proc.exitCode, stdout: proc.stdout.toString(), stderr: proc.stderr.toString() };
+}
 
 // --- Fixture helpers for building transcript entries in the real shape --------------------------
 
@@ -1033,5 +1046,104 @@ describe("end to end — real staged file, real transcript file, pure decide()",
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// --- #78: the import.meta.main stdin/stdout entrypoint itself, spawned for real ------------------
+//
+// Every test above calls decide()/getStagedAbsPaths()/readAllTranscriptEntries() directly, which
+// proves the gate's policy is correct but not that the entrypoint reads stdin, resolves gitCwd,
+// runs the real git and transcript I/O, and serializes the answer the way Claude Code expects.
+// Deleting the `if (import.meta.main)` block leaves this hook doing nothing at all: no stdin read,
+// no stdout, exit 0 — identical to the fail-open contract on any assertion that only checks "exit
+// 0, empty output". This is the highest-value spawn test of the four hooks in #78's scope, since
+// review-gate.ts is the only one of them that actually blocks a mutating action: an ablated
+// entrypoint here silently lets an unreviewed commit through, which is exactly the failure #78
+// exists to catch.
+
+describe("spawned process — the deny path is observable", () => {
+  test("a real staged file with an edit but no dispatch: exit 0, deny JSON naming it", () => {
+    const dir = initRepo();
+    try {
+      writeFileSync(join(dir, "changed.txt"), "v2\n");
+      execFileSync("git", ["add", "changed.txt"], { cwd: dir });
+      const transcriptPath = writeTranscript([write(join(dir, "changed.txt"))]);
+      const command = "git commit -m test";
+
+      const result = runHook(
+        JSON.stringify({
+          tool_name: "Bash",
+          tool_input: { command },
+          cwd: dir,
+          transcript_path: transcriptPath,
+        }),
+      );
+
+      // The exact reason text is decide()'s own policy, already covered by the end-to-end describe
+      // above; recomputing it here (via the same exported I/O the entrypoint itself calls) keeps
+      // this assertion about the ENTRYPOINT's wiring, not a second copy of decide()'s wording.
+      const stagedAbsPaths = getStagedAbsPaths(dir);
+      const { entries } = readAllTranscriptEntries(transcriptPath);
+      const expected = decide(command, stagedAbsPaths, entries);
+      expect(expected.action).toBe("deny");
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe(
+        JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            permissionDecision: "deny",
+            permissionDecisionReason: (expected as { reason: string }).reason,
+          },
+        }) + "\n",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The one in-band bypass this gate offers, proven to reach the real stdout channel from a live
+  // process rather than only from decide() in isolation.
+  test("the same setup with REVIEW_OVERRIDE appended: exit 0, announced allow instead", () => {
+    const dir = initRepo();
+    try {
+      writeFileSync(join(dir, "changed.txt"), "v2\n");
+      execFileSync("git", ["add", "changed.txt"], { cwd: dir });
+      const transcriptPath = writeTranscript([write(join(dir, "changed.txt"))]);
+
+      const result = runHook(
+        JSON.stringify({
+          tool_name: "Bash",
+          tool_input: { command: `git commit -m test ${OVERRIDE_TOKEN}incident` },
+          cwd: dir,
+          transcript_path: transcriptPath,
+        }),
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.length).toBeGreaterThan(0);
+      const parsed = JSON.parse(result.stdout);
+      expect(parsed.hookSpecificOutput.permissionDecision).toBe("allow");
+      expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain(OVERRIDE_TOKEN);
+      expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain("incident");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("spawned process — the fail-open path stays open and says why", () => {
+  test("malformed JSON exits 0, no stdout, and leaves a diagnostic instead of vanishing", () => {
+    const result = runHook("{not json");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("review-gate: hook error, allowing:");
+  });
+
+  test("a non-Bash tool is ignored before any git/transcript I/O: exit 0, silent", () => {
+    const result = runHook(JSON.stringify({ tool_name: "Read", tool_input: { file_path: "x" } }));
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("");
   });
 });
