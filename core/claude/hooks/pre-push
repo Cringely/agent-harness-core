@@ -83,8 +83,17 @@ if [ ! -f "$identity_lib" ]; then
 fi
 . "$identity_lib"
 
-identity_load || exit 1
-identity_control || exit 1
+# Three states, not two. 0 configured, 1 broken and must refuse, 2 not
+# configured. Only 1 blocks: a file that exists and cannot be read means
+# something was declared and this gate cannot see it. State 2 already printed
+# its own notice to stderr and the rest of this hook still runs, so a
+# project that installs the harness without an identity file can still push.
+identity_load
+identity_state=$?
+[ "$identity_state" -eq 1 ] && exit 1
+if [ "$identity_state" -eq 0 ]; then
+  identity_control || exit 1
+fi
 
 # True (0) when $1 is an all-zero object id, whatever length the
 # repository's hash algorithm gives it (SHA-1: 40, SHA-256: 64). Checked by
