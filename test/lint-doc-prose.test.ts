@@ -4,11 +4,28 @@
 // spawn, no network: editing living-doc prose lints; generated paths and
 // non-doc files do not.
 
-import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { planLint, resolveValeConfig, shouldLint } from "../core/claude/hooks/lint-doc-prose";
+
+const HOOK = join(import.meta.dir, "..", "core", "claude", "hooks", "lint-doc-prose.ts");
+
+/** Runs the hook as a real process with `stdinText` on stdin. Never goes through a shell.
+ * `env` defaults to the test runner's own so a real, installed `vale` is found the same way an
+ * operator's machine would find it; the no-config case below overrides HOME/USERPROFILE instead
+ * of relying on vale being absent, so it passes on a machine that has vale installed too. */
+function runHook(stdinText: string, env: Record<string, string | undefined> = process.env) {
+  const proc = Bun.spawnSync({
+    cmd: [process.execPath, HOOK],
+    stdin: new TextEncoder().encode(stdinText),
+    stdout: "pipe",
+    stderr: "pipe",
+    env,
+  });
+  return { exitCode: proc.exitCode, stdout: proc.stdout.toString(), stderr: proc.stderr.toString() };
+}
 
 describe("shouldLint() — living-doc scope", () => {
   // These MUST lint.
@@ -469,5 +486,83 @@ describe("prose-lint exemption — no mechanism carries an undeclared segment", 
     expect(sorted(accountSkipTokens().map(accountSegment))).toEqual(
       expectedSegments(ACCOUNT_EXTRAS),
     );
+  });
+});
+
+// --- #78: the import.meta.main stdin/stdout entrypoint itself, spawned for real ------------------
+//
+// This hook has no deny path — it is advisory only — so its failure mode is different in kind: a
+// warning hook that never fires reads exactly like one that is working, from outside. An ablated
+// entrypoint (the `if (import.meta.main)` block deleted) produces exit 0 and empty stdout on every
+// input, which is indistinguishable from the legitimate silent paths (out-of-scope, a clean Vale
+// run). The two cases below are the ones that are NOT indistinguishable: a real finding on stdout,
+// and a real diagnostic on stderr, neither of which an ablated entrypoint can produce.
+
+const spawnFixtureRoot = mkdtempSync(join(tmpdir(), "lint-doc-prose-spawn-"));
+
+afterAll(() => {
+  rmSync(spawnFixtureRoot, { recursive: true, force: true });
+});
+
+describe("spawned process — a real finding reaches stdout", () => {
+  // Requires a real `vale` on PATH and a resolvable config, the same prerequisite the hook itself
+  // documents as advisory-degrade-if-absent. Skipped rather than faked when either is missing: an
+  // offline stub asserting nothing about the real Bun.spawnSync(["vale", ...]) call would pass for
+  // the wrong reason, which is exactly the defect #78 exists to close.
+  const valeReady = Bun.which("vale") !== null && resolveValeConfig() !== null;
+
+  test.skipIf(!valeReady)(
+    "a living doc with a known AI-tell: exit 0, finding text lands in additionalContext",
+    () => {
+      const file = join(spawnFixtureRoot, "README.md");
+      writeFileSync(file, "# Test fixture\n\nWe should leverage a holistic approach here.\n");
+      const result = runHook(JSON.stringify({ tool_input: { file_path: file } }));
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.length).toBeGreaterThan(0);
+      const parsed = JSON.parse(result.stdout);
+      expect(parsed.hookSpecificOutput.hookEventName).toBe("PostToolUse");
+      expect(parsed.hookSpecificOutput.additionalContext).toContain(file);
+      expect(parsed.hookSpecificOutput.additionalContext).toContain("leverage");
+    },
+  );
+
+  test("the cheap negative: an out-of-scope path is exit 0 with no stdout, no vale needed", () => {
+    const result = runHook(JSON.stringify({ tool_input: { file_path: join(spawnFixtureRoot, "x.ts") } }));
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("");
+  });
+});
+
+describe("spawned process — the no-config degrade path stays open and says why", () => {
+  // Deterministic regardless of whether this machine has vale installed: overriding HOME/
+  // USERPROFILE removes the machine-global config candidate, and this repo carries no
+  // core/claude/tools/prose-lint/.vale.ini of its own (the resolution order's other two rungs), so
+  // resolveValeConfig() finds nothing before Bun.which("vale") is ever consulted.
+  const noConfigHome = mkdtempSync(join(tmpdir(), "lint-doc-prose-nohome-"));
+  mkdirSync(noConfigHome, { recursive: true });
+
+  afterAll(() => {
+    rmSync(noConfigHome, { recursive: true, force: true });
+  });
+
+  test("in-scope file, no reachable config: exit 0, advisory line on stderr", () => {
+    const env: Record<string, string | undefined> = { ...process.env };
+    delete env.PROSE_LINT_VALE_CONFIG;
+    env.HOME = noConfigHome;
+    env.USERPROFILE = noConfigHome;
+    const result = runHook(
+      JSON.stringify({ tool_input: { file_path: join(spawnFixtureRoot, "README.md") } }),
+      env,
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("lint-doc-prose: no Vale config found");
+  });
+
+  test("malformed JSON exits 0, no stdout, and leaves a diagnostic instead of vanishing", () => {
+    const result = runHook("{not json");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("lint-doc-prose: hook error, skipping:");
   });
 });
