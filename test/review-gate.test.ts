@@ -14,7 +14,7 @@ import { describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   decide,
   findUnreviewedFiles,
@@ -313,6 +313,45 @@ describe("parseGitCommitInvocation() — item 37: a quoted option argument still
     const optionShaped = parseGitCommitInvocation("git -C --odd-dir-name commit -m x");
     expect(optionShaped.isCommit).toBe(true);
     expect(optionShaped.repoPath).toBeUndefined();
+  });
+
+  // Pre-fix, the `-C` pair alternative's own capture group sat inside the star's alternation, so
+  // it was nested inside a quantified group. ECMAScript resets a nested capture on every iteration
+  // that takes a DIFFERENT alternative — so a real, well-formed `-C <path>` lost its capture the
+  // moment any other option followed it before `commit`, regardless of how the path itself was
+  // written. Not the master-equivalence case above (an option-shaped -C argument): this is a plain
+  // path, reset by an unrelated flag two tokens later. Confirmed live pre-fix:
+  // `GIT_COMMIT_RE.exec("git -C /r --no-pager commit")` returned undefined for that nested group
+  // even though group 1 (the whole option run) held `" -C /r --no-pager"` intact — the text
+  // survived, only the nested capture did not. See `repoPathFromOptionRun()` for the fix.
+  test("repoPath survives when -C is not the last option before commit", () => {
+    expect(parseGitCommitInvocation("git -C /r --no-pager commit").repoPath).toBe("/r");
+    expect(parseGitCommitInvocation("git -C /r -c user.name=CI commit -m x").repoPath).toBe("/r");
+    expect(parseGitCommitInvocation("git --no-pager -C /r commit").repoPath).toBe("/r");
+    expect(parseGitCommitInvocation("git -C /r --no-pager -c user.name=CI commit").repoPath).toBe("/r");
+  });
+
+  // Repeated -C chains rather than tie-breaking. `git -C /a -C b` runs in /a/b: git resolves each
+  // -C against the one before it. Taking the last returned a bare "b", which main() then resolved
+  // against the session cwd — a different, usually existing, directory, and the gate would review
+  // its staged files without saying so.
+  //
+  // The group-1 rescan above is what made this reachable in a new way. Before it, the second -C
+  // followed by an option produced undefined and the gate fell back to the session cwd; after it,
+  // the same command produced a path git never named. Two of these rows fail against the last-wins
+  // form, and the assertions are written against resolve() so they read the same on either OS.
+  test("repeated -C chains like git does, rather than the last one winning", () => {
+    expect(parseGitCommitInvocation("git -C /a -C b commit").repoPath).toBe(resolve("/a", "b"));
+    expect(parseGitCommitInvocation("git -C /a -C b --no-pager commit").repoPath).toBe(
+      resolve("/a", "b"),
+    );
+    // A later absolute -C discards what came before it, which is resolve()'s own rule and git's.
+    expect(parseGitCommitInvocation("git -C /a -C /b commit").repoPath).toBe(resolve("/b"));
+    expect(parseGitCommitInvocation("git -C a -C b -C c commit").repoPath).toBe(
+      resolve("a", "b", "c"),
+    );
+    // One -C is unchanged: still the raw argument, not resolved against the session cwd.
+    expect(parseGitCommitInvocation("git -C /r commit").repoPath).toBe("/r");
   });
 
   // Timing budget. Measured on this machine through parseGitCommitInvocation on bun: 92.7 ms at
@@ -716,7 +755,11 @@ describe("getStagedAbsPaths() — real git, real temp repo", () => {
     }
   });
 
-  test("cheap fix: a non-ASCII filename round-trips as the real name, not a C-quoted octal escape", () => {
+  // Was misattributed to `-c core.quotePath=false`, dropped from getStagedAbsPaths as dead code:
+  // `-z` alone suppresses git's C-style quoting regardless of that config's value (verified live,
+  // git 2.53.0 — see the doc comment above getStagedAbsPaths). The behavior this pins is real; only
+  // the mechanism credited for it was wrong.
+  test("a non-ASCII filename round-trips as the real name, not a C-quoted octal escape", () => {
     const dir = initRepo();
     try {
       const filename = "café.ts";

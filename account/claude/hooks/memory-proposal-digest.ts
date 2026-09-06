@@ -15,7 +15,7 @@
 //   bun ~/.claude/hooks/memory-proposal-digest.ts --selftest   # parse + expiry math check
 
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -194,15 +194,25 @@ function note(fm: string, body = "\n## Decision\n\nbody\n", crlf = false): strin
 }
 
 function selftest(): void {
-  const root = join(tmpdir(), `memory-proposal-digest-selftest-${process.pid}`);
-  const empty = join(root, "..", `memory-proposal-digest-empty-${process.pid}`);
+  // mkdtempSync, not join(tmpdir(), <predictable name>): it creates the directory atomically at
+  // 0700 with a random suffix, so the path cannot be guessed and cannot pre-exist. The old form
+  // composed a name from process.pid, which a local attacker on a shared /tmp can predict and
+  // plant as a symlink ahead of the run — every mkdirSync and writeFileSync below then follows it
+  // and overwrites whatever the operator can write. CodeQL reported that as eight alerts, one per
+  // write sink; all eight, plus mkdirSync(empty) and the spawnSync --root below that it did not
+  // report, come from these two lines. Fixing it here rather than at the sinks is what closes the
+  // three it missed.
+  const root = mkdtempSync(join(tmpdir(), "memory-proposal-digest-selftest-"));
+  const empty = mkdtempSync(join(tmpdir(), "memory-proposal-digest-empty-"));
   const projA = join(root, "P--alpha", "memory");
   const projB = join(root, "P--beta", "memory");
   try {
     mkdirSync(projA, { recursive: true });
     mkdirSync(projB, { recursive: true });
     mkdirSync(join(root, "P--no-memory"), { recursive: true });
-    mkdirSync(empty, { recursive: true });
+    // No mkdirSync(empty) here: mkdtempSync above already created it. The call was left behind by
+    // the mkdtempSync change and is inert under recursive:true, but it reads as though `empty`
+    // still needs creating, which is the opposite of the invariant that change established.
 
     // CRLF throughout, quoted description: the shape that a bare "\n" split breaks.
     writeFileSync(

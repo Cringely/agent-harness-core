@@ -369,11 +369,13 @@ export function scrubQuotesAndHeredocs(command: string): string {
  * lookahead fires only where the blocked token is one the generic alternative consumes whole, so
  * wherever the pair reading is refused the generic reading exists and the star still crosses the
  * token: every match on master is a match here. The languages are equal. The one behavioural
- * divergence left is which token group 2 captures: where master captured an option-shaped token
- * as if it were a directory, this pattern leaves it uncaptured, because `main()` resolves that
- * capture and hands it to git as a cwd that does not exist, so getStagedAbsPaths throws and the
- * hook fails OPEN. Uncaptured keeps gitCwd at the session directory, where the gate can see the
- * staged files.
+ * divergence left is which `-C` token `repoPathFromOptionRun()` treats as the repo path (below):
+ * where master captured an option-shaped token as if it were a directory, this pattern leaves it
+ * uncaptured, because `main()` resolves that capture and hands it to git as a cwd that does not
+ * exist, so getStagedAbsPaths throws and the hook fails OPEN. Uncaptured keeps gitCwd at the
+ * session directory, where the gate can see the staged files. (The `-C` pair alternative's own
+ * inner group is non-capturing now — see `repoPathFromOptionRun()` for why deriving repoPath from
+ * it directly was unsafe regardless of this divergence.)
  *
  * An earlier revision of this comment cited a differential-corpus count here instead, and it is
  * gone on purpose. The generator behind it enumerated no option-shaped token carrying a character
@@ -393,7 +395,64 @@ export function scrubQuotesAndHeredocs(command: string): string {
  * (~/.claude/rules/fix-quality.md).
  */
 const GIT_COMMIT_RE =
-  /\bgit(?=\s)((?:\s+-C\s+(?!-{1,2}[A-Za-z][\w-]*(?:=\S+)?(?=\s|$))(\S+)|\s+-c\s+(?!-{1,2}[A-Za-z][\w-]*(?:=\S+)?(?=\s|$))\S+|\s+-{1,2}[A-Za-z][\w-]*(?:=\S+)?)*)\s+commit(?=\s|$)/;
+  /\bgit(?=\s)((?:\s+-C\s+(?!-{1,2}[A-Za-z][\w-]*(?:=\S+)?(?=\s|$))(?:\S+)|\s+-c\s+(?!-{1,2}[A-Za-z][\w-]*(?:=\S+)?(?=\s|$))\S+|\s+-{1,2}[A-Za-z][\w-]*(?:=\S+)?)*)\s+commit(?=\s|$)/;
+
+/**
+ * Re-derives the `-C` argument from group 1's whole option run instead of trusting a capture
+ * taken from inside the star above. That inner capture used to live in the `-C` pair alternative
+ * (formerly its own group) and is provably unsafe: ECMAScript resets a capturing group nested
+ * inside a quantified group on every repetition that matches through a DIFFERENT alternative, so
+ * `git -C /r --no-pager commit` — a perfectly well-formed `-C` followed by one more flag — matched
+ * `-C /r` on the star's first pass and `--no-pager` on its second, and the second pass reset the
+ * first's capture to `undefined` even though nothing about the `-C` itself was wrong. Confirmed
+ * live: `GIT_COMMIT_RE.exec("git -C /r --no-pager commit")` returned `undefined` for that inner
+ * group while group 1 (the whole run, captured OUTSIDE the repetition and not subject to the
+ * per-iteration reset) held `" -C /r --no-pager"` intact. `main()` then resolved `repoPath` as
+ * undefined, fell back to the session `cwd`, and reviewed the wrong repository's staged files —
+ * the fail-open case is confined to option-shaped `-C` arguments by design (see the comment above
+ * GIT_COMMIT_RE and the `--odd-dir-name` test); a plain, well-formed path being discarded because
+ * of an unrelated later flag was not.
+ *
+ * Fix scans the already-matched, already-bounded group-1 text with the identical option-shaped
+ * guard used above, so the master-equivalence property for option-shaped `-C` arguments is
+ * unchanged; it just no longer depends on which alternative happened to run last. Global `.exec()`
+ * in a plain loop, not the starred alternation, so it carries none of GIT_COMMIT_RE's ReDoS
+ * history — no nested quantifiers, no overlapping alternatives to tile.
+ *
+ * Rejected: rewriting GIT_COMMIT_RE itself so the capture survives repetition. ECMAScript has no
+ * way to make a group nested inside a quantified alternation retain a prior iteration's value —
+ * the reset is a language rule, not a bug in this expression — so the only in-regex fix is
+ * flattening the star into explicit, bounded alternatives (one for "no options", one for "one
+ * option", one for "two", …), which reintroduces the exact overlapping-alternative shape the
+ * item-37 ReDoS fix spent its docstring proving safe. Rescanning group 1 is smaller and leaves
+ * that proof untouched.
+ *
+ * Repeated `-C` CHAINS, it does not tie-break. git resolves each `-C` relative to the one before
+ * it, so `git -C /a -C b commit` runs in `/a/b`. Taking the last one instead returned a bare `b`
+ * for that command, which the caller then resolved against the session cwd — a real directory,
+ * usually, and not the one git meant. Both ways of being wrong here are silent: a path that does
+ * not exist throws into the outer catch and exits 0, and one that exists with nothing staged
+ * reaches `decide()`'s bare ALLOW, which carries no `reason` and so never hits the announcement
+ * branch. Nothing tells the operator the gate looked at the wrong repository.
+ *
+ * Worth being precise about the provenance, because it changes who owns it. Before the group-1
+ * rescan above, `git -C /a -C b --no-pager commit` produced `undefined` and fell back to the
+ * session cwd; now it produces a resolved path. The rescan did not introduce chained `-C`, but it
+ * did turn one shape of this bug from "silently reviews the session cwd" into "silently reviews a
+ * path git never named", so the fix belongs with it rather than in the backlog.
+ *
+ * `resolve()` gives the chaining for free: it returns its last absolute argument unchanged and
+ * joins a relative one onto the accumulated path, which is exactly git's rule.
+ */
+function repoPathFromOptionRun(optionRun: string): string | undefined {
+  const re = /-C\s+(?!-{1,2}[A-Za-z][\w-]*(?:=\S+)?(?=\s|$))(\S+)/g;
+  let repoPath: string | undefined;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(optionRun))) {
+    repoPath = repoPath === undefined ? m[1] : resolve(repoPath, m[1]);
+  }
+  return repoPath;
+}
 
 /**
  * True (with the `-C` path, if any) when `command` invokes `git commit`, after blanking quoted
@@ -409,7 +468,7 @@ const GIT_COMMIT_RE =
  *   const re = new RegExp(GIT_COMMIT_RE.source, "g");
  *   let m; while ((m = re.exec(scrubbed))) {
  *     if (m.index === re.lastIndex) re.lastIndex++; // zero-width guard: pattern can match empty flag groups
- *     ...compute tail up to next separator or `--` pathspec...; if (!/(^|\s)--dry-run\b/.test(tail)) return { isCommit: true, repoPath: m[2] };
+ *     ...compute tail up to next separator or `--` pathspec...; if (!/(^|\s)--dry-run\b/.test(tail)) return { isCommit: true, repoPath: repoPathFromOptionRun(m[1]) };
  *   }
  * That rewrites this function, the most consequential parsing code in the file, and needs its
  * own review round rather than riding back in as a one-line fix. Deferred; not fixed here.
@@ -419,7 +478,7 @@ export function parseGitCommitInvocation(command: string): { isCommit: boolean; 
   const scrubbed = scrubQuotesAndHeredocs(command);
   const m = GIT_COMMIT_RE.exec(scrubbed);
   if (!m) return { isCommit: false };
-  return { isCommit: true, repoPath: m[2] };
+  return { isCommit: true, repoPath: repoPathFromOptionRun(m[1]) };
 }
 
 /** `tool_use` blocks an assistant entry invoked, with name and input intact. Non-assistant
@@ -624,15 +683,18 @@ export function decide(
 }
 
 /** Staged files as absolute paths, resolved against the repo's actual top level (which `git diff`
- * reports paths relative to — not necessarily `gitCwd`, if that's a subdirectory). `-c
- * core.quotePath=false` stops git C-style-escaping non-ASCII paths (`café.ts` → `"caf\303\251.ts"`)
- * regardless of the repo's own config; `-z` NUL-separates so a filename containing a literal
- * newline still splits correctly. Real `git` I/O; a throw here (not a repo, git missing, …) is
- * left to the caller's fail-open contract. */
+ * reports paths relative to — not necessarily `gitCwd`, if that's a subdirectory). `-z` NUL-
+ * separates so a filename containing a literal newline still splits correctly, and (verified live,
+ * git 2.53.0) also suppresses git's C-style quoting of non-ASCII paths on its own —
+ * `core.quotePath` only affects the human-readable, non-`-z` form (`café.ts` → `"caf\303\251.ts"`);
+ * under `-z` the byte-identical unquoted UTF-8 name comes back whether the config is true, false,
+ * or unset. An earlier revision passed `-c core.quotePath=false` here on the belief that it was
+ * load-bearing for that; it was dead the whole time and is gone. Real `git` I/O; a throw here (not
+ * a repo, git missing, …) is left to the caller's fail-open contract. */
 export function getStagedAbsPaths(gitCwd: string): string[] {
   const raw = execFileSync(
     "git",
-    ["-c", "core.quotePath=false", "diff", "--cached", "--name-only", "-z"],
+    ["diff", "--cached", "--name-only", "-z"],
     { cwd: gitCwd, encoding: "utf8" },
   );
   const staged = raw.split("\0").filter((s) => s !== "");

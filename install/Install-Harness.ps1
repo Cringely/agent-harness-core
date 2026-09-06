@@ -739,6 +739,22 @@ if ($settingsParseError) {
     throw "Target settings.json does not parse as JSON: $settingsPath. Merging the hook registrations into it would destroy whatever it holds, so nothing was copied and the manifest was not written. Fix or move that file, then re-run. Parser reported: $settingsParseError"
 }
 
+# Prerequisite probe. Every TypeScript hook this installs is registered below as a bare
+# `bun ...` command, so on a machine without bun the layer installs looking complete and the
+# gates never run. README.md's install section is the only place that has said so, and a
+# documented prerequisite nothing checks is a prerequisite that gets skipped.
+#   Warns rather than throws: installing the layer before installing bun is legitimate (a fresh
+# clone being equipped ahead of its toolchain), and nothing this run writes is wrong without it:
+# the registrations are correct either way, so bun arriving later needs no re-install.
+#   Only bun is probed, not the whole prerequisite list Install-Account.ps1 warns about. A vale
+# probe would be noise, since its consumer degrades to a documented advisory skip by design; an
+# sh probe would rest on an unverified claim about how Claude Code resolves `sh` for a hook
+# command, which is not resolved against this script's PATH. Widen this when either turns into
+# a measured failure rather than a guess.
+if (-not (Get-Command bun -ErrorAction SilentlyContinue)) {
+    Write-Warning "bun is not on PATH. The TypeScript hooks installed below are registered as bare 'bun' commands, so the gates stop enforcing and Claude Code surfaces an error notice on stderr per dispatch. Install bun to make them enforce; the registrations this run writes are already correct, so no re-install is needed."
+}
+
 # Agents
 Get-ChildItem -LiteralPath $agentsSrc -Filter '*.md' -File | ForEach-Object {
     if (-not $IncludeCeremonies -and $ceremonyAgentNames -contains $_.Name) { return }

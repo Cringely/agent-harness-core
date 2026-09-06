@@ -51,11 +51,21 @@ if ($norm -notmatch '\.(md|markdown)$') { exit 0 }
 # the 20 hand-authored notes elsewhere in that vault are the operator's own prose,
 # which has to keep linting.
 #
-# One token is deliberately absent. '/scratch/' without the dot would match any
-# directory literally named "scratch", and a repo may keep real drafts in one;
-# '/.scratch/' is unambiguously tool-created.
+# '/.superpowers/' is the subagent-driven-development workspace. That skill writes
+# every task brief, implementer report and review report to
+# <repo>/.superpowers/sdd/<plan>/, which no other token here reaches, so those
+# reports linted until 2026-09-05: a reviewer's report drew ai-tells findings on
+# quoted Pester output and code identifiers and had to overrule them by hand.
+# Same traffic as a scratchpad report by every test row 5 applies.
+#
+# Two tokens are deliberately shaped the way they are. '/scratch/' without the dot
+# would match any directory literally named "scratch", and a repo may keep real
+# drafts in one; '/.scratch/' is unambiguously tool-created. '/.superpowers/'
+# carries its dot for the same reason and for a live case: this repository's own
+# docs/superpowers/{plans,specs}/ holds committed deliverables, and a dotless
+# token would silence them.
 $skip = @(
-    '/memory/', '/handoffs/', '/scratchpad/', '/.scratch/',
+    '/memory/', '/handoffs/', '/scratchpad/', '/.scratch/', '/.superpowers/',
     '/council-transcripts/', '/obsidian vault/claude code/',
     '/node_modules/', '/.git/', '/.obsidian/', '/.claude/'
 )
