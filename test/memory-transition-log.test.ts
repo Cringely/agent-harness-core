@@ -371,12 +371,22 @@ function readLines(home: string): unknown[] {
     .map((l) => JSON.parse(l));
 }
 
-// Mirrors the hook's own `resolve(...).replace(/\\/g, "/")`. Legitimate here (not
-// circular): a POSIX-style path like "/home/runner/..." is drive-relative on
-// Windows, so the only portable way to know what absolute path it resolves to
-// on THIS host is to ask the same stdlib function the hook uses. The
-// Windows-separator test below instead hand-writes its expectation, which is
-// what actually proves the backslash-to-forward-slash normalization fires.
+// Mirrors the hook's own `resolve(...).replace(/\\/g, "/")`. The `resolve` half is
+// legitimate rather than circular: a POSIX-style path like "/home/runner/..." is
+// drive-relative on Windows, so the only portable way to know what absolute path it
+// resolves to on THIS host is to ask the same stdlib function the hook uses.
+//
+// The `.replace` half is a different matter and the distinction is worth stating,
+// because it is not the same on both platforms. That normalization exists for
+// Windows: on POSIX `resolve` never emits a backslash, so both the hook and this
+// helper are no-ops there and a hook that dropped the replace entirely would still
+// match. It is the Windows-separator test below that proves the normalization fires,
+// and that test is Windows-guarded, so on a POSIX runner the replace has no
+// falsifying test here. That is honest rather than a gap to paper over: on POSIX it
+// has no behaviour to falsify. Do not manufacture a POSIX case for it by feeding a
+// filename with a literal backslash -- that is a legal POSIX filename the hook would
+// mangle into a separator, so such a test would pin a latent bug as intended
+// behaviour rather than cover this one.
 function notePathFor(filePath: string): string {
   return resolve(filePath).replace(/\\/g, "/");
 }
@@ -434,6 +444,14 @@ describe("spawned process — gating branches that decide whether it acts at all
     const result = spawnHook(EDIT_PAYLOAD("/home/runner/project/memory/note.md", sameText, sameText));
     expect(result.exitCode).toBe(0);
     expect(() => readLines(result.home)).toThrow();
+    // The second half of this test's name, which until now it did not check. What
+    // makes "no directory" true is an ordering: the hook's zero-transition exit
+    // sits ahead of its mkdirSync, so nothing is created on this path. That is
+    // exactly why the claim needs its own assertion -- move the mkdirSync above
+    // the exit and the state directory appears, while readLines still throws
+    // because no file was ever written, so the assertion above stays green and
+    // the regression goes unseen.
+    expect(existsSync(join(result.home, ".claude", "state"))).toBe(false);
   });
 });
 
@@ -510,7 +528,7 @@ describe("spawned process — happy path writes, one per transition kind", () =>
   test.each([
     ["present in payload", { session_id: "sess-fixture-1" }, true],
     ["absent from payload", {}, false],
-  ])("sessionId %s: field %s on the written line", (_label, extra, present) => {
+  ])("sessionId %s on the written line", (_label, extra, present) => {
     const result = spawnHook(
       EDIT_PAYLOAD("/home/runner/project/memory/note.md", withStatus("proposed"), withStatus("accepted"), extra),
     );
@@ -521,14 +539,27 @@ describe("spawned process — happy path writes, one per transition kind", () =>
 
   // Windows-style absolute path end to end: inMemoryDir's backslash split has to
   // find the segment, and the written notePath has to come out forward-slashed.
-  test("Windows-separator absolute file_path resolves and normalizes notePath to forward slashes", () => {
-    const result = spawnHook(
-      EDIT_PAYLOAD("C:\\Users\\fixture\\project\\memory\\note.md", withStatus("proposed"), withStatus("accepted")),
-    );
-    expect(result.exitCode).toBe(0);
-    const [line] = readLines(result.home) as Record<string, unknown>[];
-    expect(line.notePath).toBe("C:/Users/fixture/project/memory/note.md");
-  });
+  //
+  // Windows-only, and the guard is load-bearing rather than defensive. On POSIX
+  // `isAbsolute("C:\\Users\\...")` is FALSE, so the hook takes its `resolve(cwd, ...)`
+  // branch and prefixes the runner's own working directory, making the expected
+  // string unsatisfiable in principle rather than merely wrong -- the payload
+  // supplies no cwd, so there is no constant that could stand in for it. CI runs
+  // `bun test` unfiltered on ubuntu-24.04, so without this guard the commit reds
+  // the pipeline. Same convention as test/identity-gate.test.ts and
+  // test/pre-commit.test.ts, and the same platform assumption
+  // .github/workflows/test.yml already names as one that broke the Pester tier.
+  test.skipIf(process.platform !== "win32")(
+    "Windows-separator absolute file_path resolves and normalizes notePath to forward slashes",
+    () => {
+      const result = spawnHook(
+        EDIT_PAYLOAD("C:\\Users\\fixture\\project\\memory\\note.md", withStatus("proposed"), withStatus("accepted")),
+      );
+      expect(result.exitCode).toBe(0);
+      const [line] = readLines(result.home) as Record<string, unknown>[];
+      expect(line.notePath).toBe("C:/Users/fixture/project/memory/note.md");
+    },
+  );
 
   // Relative file_path resolved against the payload's own cwd field, not
   // process.cwd() — the same convention agent-write-scope.ts uses.
