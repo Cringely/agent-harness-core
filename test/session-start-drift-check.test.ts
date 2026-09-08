@@ -39,8 +39,9 @@ const pwshPath = Bun.which("pwsh");
 // pwsh is absent (session-start-drift-check.sh:108); the cases that install a project need
 // it a second time. So a host without PowerShell runs a fraction of this file. Bun prints
 // the skip count, but a total read off the last line of a run does not carry that caveat
-// with it: 558 was quoted as this suite's size more than once, and 558 is the no-pwsh
-// number. Say it once, at the top, where it is unmissable.
+// with it, and a raw pass count from one host has already been quoted more than once as
+// though it measured the suite. Say it once, at the top, where it is unmissable. No number
+// here on purpose: this file does not own the suite total and cannot keep one current.
 if (!pwshPath) {
   console.warn(
     "session-start-drift-check.test.ts: pwsh not found, installer-backed cases skipped. " +
