@@ -35,6 +35,19 @@ const INSTALL_TIMEOUT_MS = 120_000;
 
 const pwshPath = Bun.which("pwsh");
 
+// Every case here drives the real hook, and the hook exits 0 before printing anything when
+// pwsh is absent (session-start-drift-check.sh:108); the cases that install a project need
+// it a second time. So a host without PowerShell runs a fraction of this file. Bun prints
+// the skip count, but a total read off the last line of a run does not carry that caveat
+// with it: 558 was quoted as this suite's size more than once, and 558 is the no-pwsh
+// number. Say it once, at the top, where it is unmissable.
+if (!pwshPath) {
+  console.warn(
+    "session-start-drift-check.test.ts: pwsh not found, installer-backed cases skipped. " +
+      "This host's suite total is not comparable to a host with PowerShell installed.",
+  );
+}
+
 const tempDirs: string[] = [];
 
 afterEach(() => {
@@ -430,7 +443,7 @@ describe("session-start drift-check hook — coreRepo is untrusted input", () =>
     INSTALL_TIMEOUT_MS,
   );
 
-  test("a coreRepo naming the real core still works when it arrives Windows-escaped", () => {
+  test.skipIf(!pwshPath)("a coreRepo naming the real core still works when it arrives Windows-escaped", () => {
     const dir = bareProject();
     // The installer writes native separators, so a Windows manifest holds "E:\\projects\\core".
     // JSON.stringify produces the same doubling, which is what the hook's unescape undoes;
