@@ -217,12 +217,43 @@ describe("resolveValeConfig() — resolution order", () => {
     }
   });
 
+  // Both fallbacks below have to actually exist on disk, or the env var wins by
+  // elimination (nothing else was reachable) rather than by precedence. Moving
+  // PROSE_LINT_VALE_CONFIG to the back of the candidates array must redden this.
   test("explicit PROSE_LINT_VALE_CONFIG wins over the filesystem fallbacks", () => {
     const dir = mkdtempSync(join(tmpdir(), "prose-envconfig-"));
+    const scriptDir = join(dir, "scripts");
+    const home = join(dir, "home");
+    mkdirSync(join(dir, "tools", "prose-lint"), { recursive: true });
+    mkdirSync(join(home, ".claude", "tools", "prose-lint"), { recursive: true });
     const cfg = join(dir, "custom.vale.ini");
-    writeFileSync(cfg, "StylesPath = styles\n");
+    const scriptDirFallback = join(scriptDir, "..", "tools", "prose-lint", ".vale.ini");
+    const homeFallback = join(home, ".claude", "tools", "prose-lint", ".vale.ini");
+    writeFileSync(cfg, "StylesPath = env-styles\n");
+    writeFileSync(scriptDirFallback, "StylesPath = scriptdir-styles\n");
+    writeFileSync(homeFallback, "StylesPath = home-styles\n");
     try {
-      expect(resolveValeConfig({ PROSE_LINT_VALE_CONFIG: cfg }, dir, dir)).toBe(cfg);
+      expect(resolveValeConfig({ PROSE_LINT_VALE_CONFIG: cfg }, home, scriptDir)).toBe(cfg);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The other half: with no env var, the array order between the two fallbacks
+  // themselves has to hold. Swapping the scriptDir-relative and home-relative
+  // candidates must redden this.
+  test("with no env var, the scriptDir-relative fallback wins over the home-relative one", () => {
+    const dir = mkdtempSync(join(tmpdir(), "prose-fallback-order-"));
+    const scriptDir = join(dir, "scripts");
+    const home = join(dir, "home");
+    mkdirSync(join(dir, "tools", "prose-lint"), { recursive: true });
+    mkdirSync(join(home, ".claude", "tools", "prose-lint"), { recursive: true });
+    const scriptDirFallback = join(scriptDir, "..", "tools", "prose-lint", ".vale.ini");
+    const homeFallback = join(home, ".claude", "tools", "prose-lint", ".vale.ini");
+    writeFileSync(scriptDirFallback, "StylesPath = scriptdir-styles\n");
+    writeFileSync(homeFallback, "StylesPath = home-styles\n");
+    try {
+      expect(resolveValeConfig({}, home, scriptDir)).toBe(scriptDirFallback);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
