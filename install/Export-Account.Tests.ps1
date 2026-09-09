@@ -2066,7 +2066,7 @@ exit 0
     }
 
     It "gates a secret carried in a property NAME, not only its value" {
-        # review round 2, item 1/3: Get-AccountString's PSCustomObject branch used to walk only
+        # review round 2, item 1/3: Update-AccountServerStrings's predecessor walked only
         # $p.Value, never $p.Name. The code it replaced scanned $k (the env key) as well as
         # $srv.env.$k, so a server whose env var NAME is itself secret-shaped is the regression
         # this fix restores coverage for. env is a real property the fold pass already knows
