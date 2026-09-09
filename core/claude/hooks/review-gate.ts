@@ -173,20 +173,11 @@
 // "spawned process" describe blocks at the end of test/review-gate.test.ts.
 //
 // ALLOWLIST ENUMERATION IN THE DENY MESSAGE, a judgment call rather than an obvious default: the
-// deny reason names every REVIEW_ALLOWLIST entry, including general-purpose, as the remediation.
-// That is also, necessarily, a disclosure of exactly what satisfies the check — a model told "any
+// deny reason names every REVIEW_ALLOWLIST entry, including general-purpose, as the remediation —
+// which is also, necessarily, a disclosure of exactly what satisfies the check. A model told "any
 // general-purpose dispatch clears this" could dispatch one that does nothing resembling a review.
-// Kept anyway, for three reasons. First, this file is a plaintext, committed part of the repo the
-// model itself can read at any time; withholding the list from the deny message doesn't withhold
-// it from a model that goes looking, it only withholds it from one that doesn't — security through
-// omission in the message buys nothing real against the stated threat model. Second, that same
-// threat model is an omitted step, not an adversary routing around the gate on purpose: for that
-// model, telling the agent exactly what will clear the check makes correct, fast compliance MORE
-// likely, not less, which is the outcome this hook exists to produce. Third, general-purpose is
-// already a legitimate, sanctioned review path in this repo's own practice (see the allowlist's
-// own comment below) — naming it as remediation is honest, not a hint toward gaming the gate.
-// The "one dispatch clears everything" gap this enables is the same one named under KNOWN, NOT
-// CHASED above and isn't made meaningfully worse by the message disclosing it.
+// Kept anyway: this file is plaintext and committed, readable by the model at any time, so
+// withholding the list from the deny message buys nothing real against the stated threat model.
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";

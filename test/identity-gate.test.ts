@@ -37,9 +37,10 @@ import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 // annotated per test, because the next slow case would otherwise inherit the
 // 5s default and reintroduce this.
 setDefaultTimeout(30_000);
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, join } from "node:path";
+import { posixSh, posixShDir } from "./posix-sh";
 
 const PRE_COMMIT_SRC = join(import.meta.dir, "..", "core", "claude", "hooks", "pre-commit");
 const PRE_PUSH_SRC = join(import.meta.dir, "..", "core", "claude", "hooks", "pre-push");
@@ -95,33 +96,9 @@ function envWith(extra: Record<string, string | undefined> = {}): Record<string,
   return { ...process.env, ...BASE_IDENTITY_ENV, ...extra };
 }
 
-/**
- * A POSIX sh to run pre-commit with directly (mirrors pre-commit.test.ts).
- * pre-push tests below do not need this: they invoke the hook through a
- * real `git push`, which resolves and executes .git/hooks/pre-push via
- * git's own shebang handling rather than through an explicit `sh <path>`.
- */
-let cachedSh: string | undefined;
-let cachedShDir: string | undefined;
-
-function posixSh(): string {
-  if (cachedSh) return cachedSh;
-  try {
-    const probe = Bun.spawnSync(["sh", "-c", "exit 0"], { stdout: "ignore", stderr: "ignore" });
-    if (probe.success) return (cachedSh = "sh");
-  } catch {
-    // not on PATH; fall through to git's copy
-  }
-  const out = Bun.spawnSync(["git", "--exec-path"], { stdout: "pipe", stderr: "pipe" });
-  const execPath = new TextDecoder().decode(out.stdout).trim();
-  const root = execPath.replace(/[\\/](?:mingw\d*|usr|clang\d*)[\\/]libexec[\\/]git-core[\\/]?$/i, "");
-  const candidate = join(root, "usr", "bin", "sh.exe");
-  if (existsSync(candidate)) {
-    cachedShDir = dirname(candidate);
-    return (cachedSh = candidate);
-  }
-  throw new Error(`no POSIX sh found: not on PATH, and no sh.exe at ${candidate} (git --exec-path was "${execPath}")`);
-}
+// pre-push tests below do not need posixSh: they invoke the hook through a real `git push`,
+// which resolves and executes .git/hooks/pre-push via git's own shebang handling rather than
+// through an explicit `sh <path>`.
 
 function initPreCommitRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "identity-precommit-"));
@@ -141,8 +118,9 @@ function initPreCommitRepo(): string {
 
 function runPreCommit(dir: string, env: Record<string, string | undefined>) {
   const sh = posixSh();
-  const childEnv = cachedShDir
-    ? { ...env, PATH: `${env.PATH ?? process.env.PATH ?? ""}${delimiter}${cachedShDir}` }
+  const shDir = posixShDir();
+  const childEnv = shDir
+    ? { ...env, PATH: `${env.PATH ?? process.env.PATH ?? ""}${delimiter}${shDir}` }
     : env;
   return Bun.spawnSync([sh, join(dir, ".claude", "hooks", "pre-commit")], {
     cwd: dir,

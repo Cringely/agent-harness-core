@@ -8,6 +8,15 @@
 # from Restore's the moment either was edited, and the slug rule is the one place where a
 # silent divergence produces session folders that look healthy while --resume reports nothing.
 # Restore-ClaudeProject.Tests.ps1:8-17 already lifts the same three the same way.
+#
+# The lift, rather than a move (deleting the three from Restore-ClaudeProject.ps1 and having it
+# dot-source this file instead): rejected on inspection, not merely undone.
+# Restore-ClaudeProject.ps1 moves an arbitrary project between machines and predates this file
+# by about a month (2026-08-02 vs. 2026-09-04); it has no other dependency on the account layer.
+# Dot-sourcing this file into it for three pure functions would also pull $AccountTreeDirs and
+# friends, plus Get-MainCheckout and Resolve-ContainmentPath, into its scope for no reason, and
+# would make the general-purpose script depend on the account-layer-specific one rather than the
+# other way around.
 
 $restoreScript = Join-Path $PSScriptRoot 'Restore-ClaudeProject.ps1'
 $restoreAst = [System.Management.Automation.Language.Parser]::ParseFile(
