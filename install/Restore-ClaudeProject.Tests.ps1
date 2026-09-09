@@ -4,7 +4,9 @@ Describe "Restore-ClaudeProject" {
         $script:restore = "$PSScriptRoot/Restore-ClaudeProject.ps1"
 
         # These functions are pure, but they live inside a script that takes mandatory parameters,
-        # so dot-sourcing would prompt. Lift them out via the AST instead.
+        # so dot-sourcing would prompt. Lift them out via the AST instead. AccountShared.ps1:6-19
+        # does the same lift for the same reason and records why importing them from there instead
+        # (a move) was rejected rather than just not considered.
         $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:restore, [ref]$null, [ref]$null)
         $defs = $ast.FindAll(
             { param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
