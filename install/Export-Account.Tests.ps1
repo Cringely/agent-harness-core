@@ -1208,6 +1208,40 @@ exit 0
         }
     }
 
+    It "folds a trailing-slash -WslHome to a single separator in mcpServers, not a missing or doubled one" {
+        # Issue #81: a prior fix normalised how the fold handles a trailing-slash -WslHome
+        # (.Trim().TrimEnd('/') at the producer, :215-221), but nothing pinned the FOLD's own
+        # output shape. The trailing-slash rows already in this file (the degenerate-value table
+        # above, and "still fails closed on a copied-file literal when -WslHome carries a
+        # trailing slash" further down) both exercise the payload-wide fail-closed identity scan,
+        # not this. A silent revert of the TrimEnd would build the pattern from
+        # '/home/wsluser/' -- ending in '/' -- and the tail group's leading separator would then
+        # have to match a SECOND '/' that a real path never has, degrading the fold to a near-
+        # total no-op: it would leave 'code-context-mcp.sh' after the token with no leading
+        # separator at all, i.e. '{{WSL_HOME}}code-context-mcp.sh', rather than either shipping
+        # the literal or doubling the slash.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            $cj = Join-Path $stand '.claude.json'
+            @{ mcpServers = @{
+                    'code-context' = @{ type = 'stdio'; command = 'wsl'
+                        args = @('-e', '/home/wsluser/code-context-mcp.sh'); env = @{} }
+                } } | ConvertTo-Json -Depth 20 | Set-Content $cj
+
+            & $script:export -ClaudeHome $ch -ClaudeJson $cj -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -WslHome '/home/wsluser/' -SkipSettings | Out-Null
+
+            $parsed = Get-Content (Join-Path $out 'mcp-servers.json') -Raw | ConvertFrom-Json
+            @($parsed.mcpServers.'code-context'.args)[1] |
+                Should -Be '{{WSL_HOME}}/code-context-mcp.sh' `
+                -Because "not '{{WSL_HOME}}code-context-mcp.sh' (missing separator) or '{{WSL_HOME}}//code-context-mcp.sh' (doubled)"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
     It "fails closed instead of shipping the WSL home verbatim when -WslHome does not resolve" {
         # Review round 1, B3, reproduced: an explicit empty -WslHome (standing in for wsl being
         # absent, its distro stopped, or the shell-out timing out) used to leave the fold's own
@@ -2032,7 +2066,7 @@ exit 0
     }
 
     It "gates a secret carried in a property NAME, not only its value" {
-        # review round 2, item 1/3: Get-AccountString's PSCustomObject branch used to walk only
+        # review round 2, item 1/3: Update-AccountServerStrings's predecessor walked only
         # $p.Value, never $p.Name. The code it replaced scanned $k (the env key) as well as
         # $srv.env.$k, so a server whose env var NAME is itself secret-shaped is the regression
         # this fix restores coverage for. env is a real property the fold pass already knows
@@ -2141,6 +2175,35 @@ exit 0
 
             $m = Get-Content (Join-Path $out 'mcp-servers.json') -Raw | ConvertFrom-Json
             @($m.mcpServers.local.args)[0] | Should -Be '{{CLAUDE_HOME}}/tools/srv/index.js'
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "folds a machine path carried in a non-stdio server's headers, not only command/args/env" {
+        # Issue #69: the fold used to walk a hand-maintained command/args/env list while the
+        # gate above (see "gates a secret carried in a property the fold pass has no rule for")
+        # already walked every string reachable under the entry, so an http/sse server's headers
+        # or url -- exactly where MCP auth material and per-machine config live -- shipped any
+        # machine path they carried unfolded even though the gate scanned it correctly on the way
+        # in. Update-AccountServerStrings replaces both walks with one, so this asserts the FOLD
+        # side of that unification: the header value must come out as the token, not the literal.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            $cj = Join-Path $stand '.claude.json'
+            $chBackslashed = $ch -replace '/', '\'
+            @{ mcpServers = @{ remote = @{ type = 'http'
+                        url = 'https://example.invalid/mcp'
+                        headers = @{ 'X-Client-Root' = "$chBackslashed\tools\srv" } } } } |
+                ConvertTo-Json -Depth 20 | Set-Content $cj
+
+            & $script:export -ClaudeHome $ch -ClaudeJson $cj -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipSettings | Out-Null
+
+            $m = Get-Content (Join-Path $out 'mcp-servers.json') -Raw | ConvertFrom-Json
+            $m.mcpServers.remote.headers.'X-Client-Root' | Should -Be '{{CLAUDE_HOME}}/tools/srv'
         }
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
     }
