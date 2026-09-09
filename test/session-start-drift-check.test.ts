@@ -21,7 +21,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, join } from "node:path";
+import { posixSh, posixShDir } from "./posix-sh";
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const INSTALLER = join(REPO_ROOT, "install", "Install-Harness.ps1");
@@ -57,41 +58,6 @@ afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
-
-/**
- * A POSIX sh to run the hook with, and the directory it came from. Duplicated from
- * pre-commit.test.ts rather than shared: extracting it would edit a passing test file
- * for this change's convenience, and the copy is a locator, not logic.
- * Always an absolute path, never a bare "sh": some cases spawn it with a child PATH
- * that carries none of the ambient PATH, and a bare name would resolve only against
- * whatever PATH the child happens to get. On Unix and on Git Bash it resolves off the
- * ambient PATH; a PowerShell or cmd session on Windows has none there, so fall back to
- * the one git ships, located from `git --exec-path`.
- */
-let cachedSh: string | undefined;
-/** Set only when sh came from git's own directory. The hook calls sed, tr and awk, which
- * on Windows live beside that sh rather than on PATH, so the child needs this appended. */
-let cachedShDir: string | undefined;
-
-function posixSh(): string {
-  if (cachedSh) return cachedSh;
-  try {
-    const probe = Bun.spawnSync(["sh", "-c", "exit 0"], { stdout: "ignore", stderr: "ignore" });
-    const resolved = probe.success && Bun.which("sh");
-    if (resolved) return (cachedSh = resolved);
-  } catch {
-    // not on PATH; fall through to git's copy
-  }
-  const out = Bun.spawnSync(["git", "--exec-path"], { stdout: "pipe", stderr: "pipe" });
-  const execPath = new TextDecoder().decode(out.stdout).trim();
-  const root = execPath.replace(/[\\/](?:mingw\d*|usr|clang\d*)[\\/]libexec[\\/]git-core[\\/]?$/i, "");
-  const candidate = join(root, "usr", "bin", "sh.exe");
-  if (existsSync(candidate)) {
-    cachedShDir = dirname(candidate);
-    return (cachedSh = candidate);
-  }
-  throw new Error(`no POSIX sh found: not on PATH, and no sh.exe at ${candidate} (git --exec-path was "${execPath}")`);
-}
 
 /** A project with the full layer installed. A plain install by default, which is the
  * configuration the operator is told to use: the audit classifies the two ceremony-gated
@@ -132,7 +98,7 @@ function runHook(dir: string) {
   const basePath = process.env.PATH ?? "";
   const childEnv = {
     ...process.env,
-    PATH: cachedShDir ? `${basePath}${delimiter}${cachedShDir}` : basePath,
+    PATH: posixShDir() ? `${basePath}${delimiter}${posixShDir()}` : basePath,
     CLAUDE_PROJECT_DIR: dir,
   };
   return Bun.spawnSync([sh, join(dir, HOOK_REL)], {
