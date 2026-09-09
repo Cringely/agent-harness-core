@@ -2141,6 +2141,49 @@ Describe "Install-Account" {
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
+
+    # Issue #73: the residual-path report used to read $ClaudeHome/settings.json and -ClaudeJson
+    # back off disk after the install ran. Both are written by Set-Content, which is
+    # ShouldProcess-aware and no-ops under -WhatIf, so on a genuine first-time install -- no
+    # -ClaudeJson pre-created, matching a receiver's actual first run -- the report's disk read
+    # found nothing and silently dropped both entries the report's own trailer line names as
+    # expected. Reproduced against this exact fixture before the fix: the identical payload run
+    # without -WhatIf printed both lines below; with -WhatIf, the whole "Still carrying a
+    # source-machine path" block did not print at all.
+    It "still reports 1password and code-context as residuals on a first-time -WhatIf install" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            # No claude.json written here -- -ClaudeJson names a path that does not exist yet,
+            # the shape a first-time install actually has, unlike the pre-populated $cj every
+            # other It in this file starts from.
+            $cj = Join-Path $h 'claude.json'
+            @{ mcpServers = @{
+                    '1password' = @{ type = 'stdio'
+                        command = 'C:\Program Files\WindowsApps\Agilebits.1Password_8.12.26.40_x64__amwd9z03whsfe\onepassword-mcp.exe'
+                        args = @(); env = @{} }
+                    'code-context' = @{ type = 'stdio'; command = 'wsl'
+                        args = @('-e', '/home/wsluser/code-context-mcp.sh'); env = @{} } } } |
+                ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
+
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -SkipPreflight -WhatIf *>&1 | Out-String
+
+            Test-Path -LiteralPath $cj |
+                Should -BeFalse -Because "a -WhatIf run must not create the file it is reporting on"
+
+            # Same $parts split used by the sibling tests above: the classifier tag on each
+            # per-entry line ("[Windows-shaped]" / "[POSIX-shaped]") only ever prints once that
+            # entry was actually flagged, unlike the unconditional trailer sentence naming both
+            # servers regardless of what the scan found.
+            $parts = @($out -split 'Still carrying a source-machine path')
+            $parts.Count | Should -Be 2 -Because "a first-time -WhatIf install must still print the report"
+            $report = $parts[1]
+            $report | Should -Match 'mcpServers\.1password \[Windows-shaped\]'
+            $report | Should -Match 'mcpServers\.code-context \[POSIX-shaped\]'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
 }
 
 Describe "Account layer round trip" {
