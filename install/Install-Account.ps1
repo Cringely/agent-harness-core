@@ -732,6 +732,16 @@ function Backup-BrokenSettings {
     }
 }
 
+# Issue #73: the residual-path report further down used to read this file back off disk after
+# the block below wrote it. Set-Content is ShouldProcess-aware and no-ops under -WhatIf, so on a
+# first-time install (no pre-existing settings.json) a dry run left nothing on disk to read and
+# the report silently under-counted what a real run would produce. $reportSettings holds the
+# merged object this block computes in memory -- true regardless of -WhatIf, since only the
+# final write is gated -- so the report can predict a real run correctly under -WhatIf and match
+# the on-disk result exactly when not. Stays $null when the payload ships no settings.account.json
+# at all, the one case where this install does not touch settings.json either way; the report
+# falls back to reading whatever is already there, since nothing here changes it.
+$reportSettings = $null
 $settingsSrc = Join-Path $PayloadRoot 'settings.account.json'
 if (Test-Path -LiteralPath $settingsSrc) {
     # Task 10 review: a failure anywhere in this block (a lock on settings.json, or any
@@ -785,6 +795,7 @@ if (Test-Path -LiteralPath $settingsSrc) {
             Write-Warning "Unexpanded placeholder(s) in settings.json: $($residual -join ', '). Left verbatim; a hook command carrying one cannot run."
         }
         $merged = Merge-AccountSettings -Payload $payloadSettings -Existing $existing
+        $reportSettings = $merged
         $settingsJson = $merged | ConvertTo-Json -Depth 20
         $settingsJson | Set-Content -LiteralPath $liveSettings -Encoding utf8
         Write-Host "  settings.json: merged$dryRun"
@@ -833,7 +844,15 @@ function Expand-McpServer {
 function Merge-McpServer {
     param([pscustomobject]$PayloadServers, [string]$ClaudeJsonPath)
     $added = @()
-    if (-not $PayloadServers) { return $added }
+    # Issue #73: returns the merged document alongside $added, not $added alone. The caller's
+    # residual-path report used to re-read -ClaudeJsonPath off disk after this function's own
+    # Set-Content ran, and that Set-Content is a ShouldProcess-aware cmdlet that no-ops under
+    # -WhatIf -- so on a first-time install (no pre-existing -ClaudeJsonPath) a dry run's report
+    # found nothing at all. $doc.mcpServers below is computed in memory before that gated write
+    # and is exactly what a real run would produce either way, so handing it back lets the
+    # report predict a real run correctly under -WhatIf and match the on-disk result exactly
+    # when not.
+    if (-not $PayloadServers) { return [pscustomobject]@{ Added = $added; Servers = $null } }
 
     $doc = if (Test-Path -LiteralPath $ClaudeJsonPath) {
         Get-Content -LiteralPath $ClaudeJsonPath -Raw | ConvertFrom-Json
@@ -882,9 +901,13 @@ function Merge-McpServer {
     if ($added.Count -gt 0) {
         $doc | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $ClaudeJsonPath -Encoding utf8
     }
-    return @($added)
+    return [pscustomobject]@{ Added = @($added); Servers = $doc.mcpServers }
 }
 
+# Issue #73: same fallback shape as $reportSettings above. Stays $null when the payload ships
+# no mcp-servers.json at all, the one case where this install does not touch -ClaudeJson either
+# way; the report then falls back to reading whatever is already there.
+$reportServers = $null
 $mcpSrc = Join-Path $PayloadRoot 'mcp-servers.json'
 if (Test-Path -LiteralPath $mcpSrc) {
     # Same reasoning and placement as the settings-merge try/catch above: this writes
@@ -918,7 +941,9 @@ if (Test-Path -LiteralPath $mcpSrc) {
         if ($mcpResidual.Count -gt 0) {
             Write-Warning "Unexpanded placeholder(s) in mcpServers: $($mcpResidual -join ', '). Left verbatim; this entry cannot run as shipped on this host."
         }
-        $added = @(Merge-McpServer -PayloadServers $payloadServers -ClaudeJsonPath $ClaudeJson)
+        $mcpMergeResult = Merge-McpServer -PayloadServers $payloadServers -ClaudeJsonPath $ClaudeJson
+        $added = @($mcpMergeResult.Added)
+        $reportServers = $mcpMergeResult.Servers
         # Review F8: the count is computed before Merge-McpServer's own gated Set-Content, so it
         # is a prediction under -WhatIf, not a report of what landed on disk. House style, per
         # Task 10's own equivalent ("under -WhatIf, does not claim a backup it never made"), is
@@ -1033,29 +1058,44 @@ function Get-ResidualCommand {
     return $found
 }
 
-# Both halves of this report read the INSTALLED state, never the payload: settings.json as it
-# now sits under $ClaudeHome, and mcpServers as they now sit in -ClaudeJson. One source, so the
-# report says what is on this machine rather than half of that and half of what shipped.
-# Reading the payload's servers instead would re-name 1password and code-context on every
-# install after the receiver hand-fixed them, and preserving that hand-fix is the whole reason
-# the merge above is add-if-missing.
+# Both halves of this report read what THIS RUN computed, not the payload and not a fresh disk
+# read: $reportSettings and $reportServers, set above alongside the settings merge and the
+# mcpServers merge. Reading the payload's servers directly (instead of the merged result) would
+# re-name 1password and code-context on every install after the receiver hand-fixed them, and
+# preserving that hand-fix is the whole reason the merge above is add-if-missing; that is why
+# this reads the merged object rather than the payload.
 #
-# Both reads are wrapped: under -WhatIf a pre-existing, unparseable settings.json is left
-# exactly as it was, since Set-Content's own ShouldProcess check skips the write that would
-# otherwise have replaced it (Backup-BrokenSettings already warned about the same file during
-# the merge above). Reproduced: "under -WhatIf, does not claim a backup it never made" crashed
-# here with a raw JsonReaderException before this try/catch existed, reading the same malformed
-# text a second time. Scanning malformed JSON for residual paths is not a meaning that exists,
-# so this falls back to "nothing to scan" instead of taking the whole dry run down with it.
-$liveForReport = Join-Path $ClaudeHome 'settings.json'
-$reportSettings = [pscustomobject]@{ hooks = [pscustomobject]@{} }
-if (Test-Path -LiteralPath $liveForReport) {
-    try { $reportSettings = Get-Content -LiteralPath $liveForReport -Raw | ConvertFrom-Json }
-    catch { }
+# Issue #73: this used to read $ClaudeHome/settings.json and -ClaudeJson back off disk instead,
+# on the theory that "the installed state" is the only thing worth reporting on. Both files are
+# written by cmdlets (Set-Content) that are ShouldProcess-aware and no-op under -WhatIf, so on a
+# first-time install -- no pre-existing settings.json, no pre-existing -ClaudeJson -- a dry run
+# left nothing on disk for either read to find, and the report silently under-counted what a
+# real run would produce: neither the 1password nor the code-context entry this report exists to
+# name would appear. $reportSettings/$reportServers are computed above whether or not the
+# matching write actually lands, and match the eventual on-disk content exactly when it does, so
+# using them here removes the gap in both directions rather than only closing it for -WhatIf.
+#
+# Both variables fall back to a disk read (guarded above) only for the one case where this
+# install did not touch the file at all -- the payload shipped no settings.account.json, or no
+# mcp-servers.json -- since nothing here changed it and whatever already exists on disk is the
+# accurate report input either way. That fallback is still wrapped: under -WhatIf a pre-existing,
+# unparseable settings.json is left exactly as it was, since Set-Content's own ShouldProcess
+# check skips the write that would otherwise have replaced it (Backup-BrokenSettings already
+# warned about the same file during the merge above). Reproduced: "under -WhatIf, does not claim
+# a backup it never made" crashed here with a raw JsonReaderException before this try/catch
+# existed, reading the same malformed text a second time. Scanning malformed JSON for residual
+# paths is not a meaning that exists, so this falls back to "nothing to scan" instead of taking
+# the whole dry run down with it.
+if ($null -eq $reportSettings) {
+    $liveForReport = Join-Path $ClaudeHome 'settings.json'
+    $reportSettings = [pscustomobject]@{ hooks = [pscustomobject]@{} }
+    if (Test-Path -LiteralPath $liveForReport) {
+        try { $reportSettings = Get-Content -LiteralPath $liveForReport -Raw | ConvertFrom-Json }
+        catch { }
+    }
 }
 
-$reportServers = $null
-if (Test-Path -LiteralPath $ClaudeJson) {
+if ($null -eq $reportServers -and (Test-Path -LiteralPath $ClaudeJson)) {
     try { $reportServers = (Get-Content -LiteralPath $ClaudeJson -Raw | ConvertFrom-Json).mcpServers }
     catch { }
 }
