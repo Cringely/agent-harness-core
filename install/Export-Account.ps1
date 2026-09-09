@@ -780,43 +780,67 @@ function Test-AccountSecret {
     return @($hits)
 }
 
-# review round 1, F1: walks an arbitrary JSON-shaped value (PSCustomObject / array / scalar, the
-# shapes ConvertFrom-Json produces) and returns every string reachable inside it. The gate's
-# input must be built from the same object the writer below serialises, not a hand-maintained
-# list of property names -- a fixed list of command/args/env covers today's three stdio servers
-# and misses an http or sse server's headers or url, which is exactly where MCP auth material
-# lives. A non-string scalar (bool, number, $null) has no secret shape and contributes nothing.
-function Get-AccountString {
-    param($Value)
-    if ($null -eq $Value) { return @() }
-    if ($Value -is [string]) { return @($Value) }
-    # review round 2, item 1 (F1 entry-name regression): scans the KEY as well as the value on
-    # both object shapes. The code this walk replaced scanned $k (the env key name) as well as
-    # $srv.env.$k; without the key, a secret-shaped property or header name reaches the payload
-    # unscanned, which is a coverage regression against what was deleted.
+# Issue #69: the fold pass used to walk a hand-maintained command/args/env list while this
+# collector, built for the identity/secret gate below, already walked every string reachable
+# under an arbitrary JSON-shaped value (PSCustomObject / array / scalar, the shapes
+# ConvertFrom-Json produces). The two lists drifted -- a fixed command/args/env fold covers
+# today's three stdio servers and misses an http or sse server's headers or url, which is
+# exactly where MCP auth material and per-machine config live -- so this is now one traversal
+# that both REWRITES every string value it finds (through each PSNoteProperty's settable
+# .Value -- the same mutation `$hook.command = ...` above performs by dotted name, done here
+# through the PSPropertyInfo the recursion is handed instead, because the recursive call does not
+# know the property's name -- so $Value is mutated in place and the caller's own reference sees
+# the change) and COLLECTS every string reachable, key names included, into $Collected after the
+# fold has run on it. A fold pass and a gate pass that can no longer see different properties is
+# what "one traversal" buys: nothing added past this point needs a second hand-maintained list to
+# remember. A non-string scalar (bool, number, $null) has no path or secret shape and is neither
+# folded nor collected.
+function Update-AccountServerStrings {
+    param($Value, [pscustomobject[]]$Folds, [System.Collections.Generic.List[string]]$Collected)
+    if ($null -eq $Value) { return $Value }
+    if ($Value -is [string]) {
+        $folded = ConvertTo-TemplatedCommand -Text $Value -Folds $Folds
+        $Collected.Add($folded)
+        return $folded
+    }
+    # review round 2, item 1 (F1 entry-name regression), carried over unchanged: collects the KEY
+    # as well as the value on both object shapes, never folds it -- a property or header NAME is
+    # not a path, so the fold table has no rule that should touch one, but a secret-shaped key
+    # (an env var literally named for a token) still has to reach the gate.
     #
-    # review round 2, item 6: [System.Collections.IDictionary] handled on this same branch,
-    # rather than falling through to the generic IEnumerable branch below, where foreach over a
-    # Hashtable yields the hashtable itself rather than its entries and recurses forever. Nothing
-    # in this file calls ConvertFrom-Json with -AsHashtable (every object node is a
-    # PSCustomObject), so this path is unreachable today; left deliberately untested since there
-    # is no live call path that reaches it.
+    # review round 2, item 6's [System.Collections.IDictionary] branch also carries over
+    # unchanged, and stays untested for the same reason it was left untested there: nothing in
+    # this file calls ConvertFrom-Json with -AsHashtable, so every object node is a
+    # PSCustomObject and no live call path builds a Hashtable here.
     if ($Value -is [System.Management.Automation.PSCustomObject] -or $Value -is [System.Collections.IDictionary]) {
-        $out = @()
         if ($Value -is [System.Collections.IDictionary]) {
-            foreach ($k in @($Value.Keys)) { $out += @($k) + @(Get-AccountString -Value $Value[$k]) }
+            foreach ($k in @($Value.Keys)) {
+                $Collected.Add([string]$k)
+                $Value[$k] = Update-AccountServerStrings -Value $Value[$k] -Folds $Folds -Collected $Collected
+            }
         }
         else {
-            foreach ($p in @($Value.PSObject.Properties)) { $out += @($p.Name) + @(Get-AccountString -Value $p.Value) }
+            foreach ($p in @($Value.PSObject.Properties)) {
+                $Collected.Add($p.Name)
+                $p.Value = Update-AccountServerStrings -Value $p.Value -Folds $Folds -Collected $Collected
+            }
         }
-        return @($out)
+        return $Value
     }
     if ($Value -is [System.Collections.IEnumerable]) {
         $out = @()
-        foreach ($item in $Value) { $out += @(Get-AccountString -Value $item) }
-        return @($out)
+        foreach ($item in $Value) {
+            $out += , (Update-AccountServerStrings -Value $item -Folds $Folds -Collected $Collected)
+        }
+        # Unary comma on the append and on the return: the recursive call can itself return an
+        # array (a nested array element), and appending it bare would splice its elements into
+        # $out instead of preserving the position; returning $out bare hits the same @()-as-only-
+        # statement trap change-management.md's invariants record elsewhere in this file -- an
+        # empty or single-element array unrolls to $null or a bare scalar at the call site instead
+        # of surviving as an array.
+        return , $out
     }
-    return @()
+    return $Value
 }
 
 if (-not $SkipMcp) {
@@ -834,40 +858,28 @@ if (-not $SkipMcp) {
 
             # review round 1, F4: .PSObject.Properties.Name on a PSCustomObject with zero
             # NoteProperties (the round trip for "mcpServers": {}) is $null rather than an empty
-            # collection, and @($null) is a one-element array holding $null, not an empty one --
-            # the same shape as the env loop's phantom-null defect below. Computed once and
-            # reused for both the loop and the reported count, so "mcpServers": {} runs zero
-            # iterations and reports 0 servers rather than a phantom 1.
+            # collection, and @($null) is a one-element array holding $null, not an empty one.
+            # Computed once and reused for both the loop and the reported count, so
+            # "mcpServers": {} runs zero iterations and reports 0 servers rather than a phantom 1.
+            # Update-AccountServerStrings below does not need this guard itself: it enumerates
+            # .PSObject.Properties directly rather than .PSObject.Properties.Name, and that
+            # collection is never $null even when empty -- only the .Name projection off it is.
             $serverNames = @($servers.PSObject.Properties.Name) | Where-Object { $_ }
 
             # Fold and gate in one pass. The gate throws before anything is written, so a failed
             # export leaves no half-written file for someone to commit.
             foreach ($name in $serverNames) {
                 $srv = $servers.$name
-                if ($srv.command) {
-                    $srv.command = ConvertTo-TemplatedCommand -Text $srv.command -Folds $folds
-                }
-                if ($null -ne $srv.args) {
-                    $srv.args = @(@($srv.args) | ForEach-Object {
-                            ConvertTo-TemplatedCommand -Text $_ -Folds $folds })
-                }
-                if ($srv.env) {
-                    # ConvertFrom-Json on an empty JSON object ("env": {}) yields a PSCustomObject
-                    # with zero NoteProperties. Its .PSObject.Properties.Name is $null rather than
-                    # an empty collection (measured on pwsh 7.6.5), and @($null) is a one-element
-                    # array holding $null, not an empty array. Without the filter, a server with
-                    # no env vars (the common case: garmin, 1password) iterates once with $k =
-                    # $null, and $srv.env.$k = ... throws PSArgumentException on the null name.
-                    foreach ($k in @($srv.env.PSObject.Properties.Name) | Where-Object { $_ }) {
-                        $srv.env.$k = ConvertTo-TemplatedCommand -Text $srv.env.$k -Folds $folds
-                    }
-                }
 
-                # review round 1, F1: gate every string reachable under the POST-FOLD entry, not
-                # only command/args/env. The write below serialises the whole $srv object, so a
-                # property the fold pass has no rule for reached the file unscanned under the
-                # earlier hand-maintained list.
-                $strings = @($name) + @(Get-AccountString -Value $srv)
+                # Issue #69: Update-AccountServerStrings folds every string value reachable under
+                # $srv -- command, args, env, and now a non-stdio server's url or headers too --
+                # and collects every string reachable, key names included, post-fold, into
+                # $collected for the gate below. $srv is the live reference $servers.$name already
+                # points at, so mutating it in place is enough; nothing needs writing back.
+                $collected = [System.Collections.Generic.List[string]]::new()
+                $null = Update-AccountServerStrings -Value $srv -Folds $folds -Collected $collected
+
+                $strings = @($name) + @($collected)
                 foreach ($s in $strings) {
                     $hits = @(Test-AccountSecret -Text $s -Patterns $patterns)
                     if ($hits.Count -gt 0) {
