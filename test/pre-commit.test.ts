@@ -22,6 +22,26 @@ const HOOK_SRC = join(import.meta.dir, "..", "core", "claude", "hooks", "pre-com
 const IDENTITY_LIB_SRC = join(import.meta.dir, "..", "core", "claude", "hooks", "identity-patterns.sh");
 const valePath = Bun.which("vale");
 
+// Every case in this file spawns real processes: initRepo() runs `git init`
+// plus two `git config` calls, and runHook() runs the hook itself through
+// `sh`, which in turn shells out to grep/sed/git diff/git show. None of that
+// is pure-function work, so (unlike session-start-drift-check.test.ts) there
+// is no cheap subset here left on bun's 5000ms default — every test below
+// gets this one.
+//
+// Measured 2026-09-09 on this workstation with `bun test --timeout=60000
+// --reporter=junit` (so nothing truncates at the old default), two
+// consecutive runs: per-case wall time ranged 4.7s-10.4s, file total
+// 208s-213s for 27 cases. The two cases under 5s were the two that skip
+// both installValeConfig() and installValeStub() (no config file, no stub
+// binary to spawn); every case that installs the config and/or the stub
+// cleared 5s outright — that's the flake #107 was filed over, not a couple
+// of outliers. 30s is roughly 3x the worst case observed, enough headroom
+// to absorb this machine's routine background load (#107 itself reproduced
+// worse numbers while a second `bun test` was running in another worktree)
+// without being sized to hide a genuine hang.
+const HOOK_TIMEOUT_MS = 30_000;
+
 // pre-commit now runs an identity-string gate (see identity-gate.test.ts)
 // unconditionally, before Vale ever runs, and refuses to proceed at all if
 // its pattern file can't be loaded. None of the tests in THIS file exercise
@@ -215,7 +235,7 @@ describe("pre-commit hook — staged-markdown gate", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout.toString()).toBe("");
     expect(result.stderr.toString()).toBe("");
-  });
+  }, HOOK_TIMEOUT_MS);
 
   test("nothing staged at all: silent no-op, exit 0", () => {
     const dir = initRepo();
@@ -225,7 +245,7 @@ describe("pre-commit hook — staged-markdown gate", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout.toString()).toBe("");
     expect(result.stderr.toString()).toBe("");
-  });
+  }, HOOK_TIMEOUT_MS);
 });
 
 describe("pre-commit hook — vale binary and config availability", () => {
@@ -239,7 +259,7 @@ describe("pre-commit hook — vale binary and config availability", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout.toString()).toBe("");
     expect(result.stderr.toString()).toBe("");
-  });
+  }, HOOK_TIMEOUT_MS);
 
   test("no Vale config reachable: exits 0, names where it looked on stderr", () => {
     const dir = initRepo();
@@ -261,7 +281,7 @@ describe("pre-commit hook — vale binary and config availability", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout.toString()).toBe("");
     expect(result.stderr.toString()).toContain("no Vale config found");
-  });
+  }, HOOK_TIMEOUT_MS);
 
   test("USERPROFILE (Windows profile) wins over a HOME that doesn't hold the kit", () => {
     const dir = initRepo();
@@ -289,7 +309,7 @@ describe("pre-commit hook — vale binary and config availability", () => {
     const stderr = result.stderr.toString();
     expect(stderr).toContain("docs.md");
     expect(stderr).toContain("Stub.Finding");
-  });
+  }, HOOK_TIMEOUT_MS);
 });
 
 describe("pre-commit hook — lints the staged blob, not the working tree", () => {
@@ -305,7 +325,7 @@ describe("pre-commit hook — lints the staged blob, not the working tree", () =
     const stderr = result.stderr.toString();
     expect(stderr).toContain("docs.md");
     expect(stderr).toContain("Stub.Finding");
-  });
+  }, HOOK_TIMEOUT_MS);
 
   test("finding survives a working-tree edit after staging", () => {
     const dir = initRepo();
@@ -321,7 +341,7 @@ describe("pre-commit hook — lints the staged blob, not the working tree", () =
     const stderr = result.stderr.toString();
     expect(stderr).toContain("docs.md");
     expect(stderr).toContain("Stub.Finding");
-  });
+  }, HOOK_TIMEOUT_MS);
 
   test("staged-then-unstaged-edit with a clean staged version: no finding", () => {
     const dir = initRepo();
@@ -336,7 +356,7 @@ describe("pre-commit hook — lints the staged blob, not the working tree", () =
     const result = runHook(dir, { ...process.env, PATH: pathWithStubFirst(stubDir) });
     expect(result.exitCode).toBe(0);
     expect(result.stderr.toString()).toBe("");
-  });
+  }, HOOK_TIMEOUT_MS);
 
   test.skipIf(!valePath)("clean staged content, real vale: no finding, no output", () => {
     const dir = initRepo();
@@ -347,7 +367,7 @@ describe("pre-commit hook — lints the staged blob, not the working tree", () =
     const result = runHook(dir);
     expect(result.exitCode).toBe(0);
     expect(result.stderr.toString()).toBe("");
-  });
+  }, HOOK_TIMEOUT_MS);
 });
 
 /** Write `relPath` (creating parents) and stage exactly that path. */
@@ -388,7 +408,7 @@ describe("pre-commit hook — internal agent traffic is exempt", () => {
 
     const result = runHook(dir, { ...process.env, PATH: pathWithStubFirst(stubDir) });
     expect(result.stderr.toString()).toBe("");
-  });
+  }, HOOK_TIMEOUT_MS);
 });
 
 // The other half. A deliverable whose name merely contains an exempt word, and
@@ -415,6 +435,7 @@ describe("pre-commit hook — the exemption is segment-anchored, not substring",
       const result = runHook(dir, { ...process.env, PATH: pathWithStubFirst(stubDir) });
       expect(result.stderr.toString()).toContain(relPath);
     },
+    HOOK_TIMEOUT_MS,
   );
 });
 
@@ -432,7 +453,7 @@ describe("pre-commit hook — staged filenames that need core.quotePath=false", 
     const stderr = result.stderr.toString();
     expect(stderr).toContain(fname);
     expect(stderr).toContain("Stub.Finding");
-  });
+  }, HOOK_TIMEOUT_MS);
 
   test("staged filename with a space is linted as one path, not split", () => {
     const dir = initRepo();
@@ -447,7 +468,7 @@ describe("pre-commit hook — staged filenames that need core.quotePath=false", 
     const stderr = result.stderr.toString();
     expect(stderr).toContain(fname);
     expect(stderr).toContain("Stub.Finding");
-  });
+  }, HOOK_TIMEOUT_MS);
 });
 
 // The identity gate deliberately never prints a matched value. Vale runs
@@ -496,7 +517,7 @@ describe("pre-commit hook — Vale findings never leak an identifying string", (
     expect(stderr).toContain("docs.md");
     expect(stderr).toContain("withheld");
     expect(stderr).not.toContain("Fixture Person");
-  });
+  }, HOOK_TIMEOUT_MS);
 
   test("a finding whose text does not carry an identity string still prints normally", () => {
     const dir = initRepo();
@@ -510,5 +531,5 @@ describe("pre-commit hook — Vale findings never leak an identifying string", (
     const stderr = result.stderr.toString();
     expect(stderr).toContain("Stub.Finding");
     expect(stderr).not.toContain("withheld");
-  });
+  }, HOOK_TIMEOUT_MS);
 });
