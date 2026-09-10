@@ -19,6 +19,25 @@ from .policy import GenrePolicy, get_policy
 
 WORD_RE = re.compile(r"\b[A-Za-z]+(?:'[A-Za-z]+)?\b")
 SENTENCE_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'])")
+
+# Markdown structure that is not prose. sentence_length_sd, opening_types,
+# max_same_opening, long_over_30, short_under_8 and max_consecutive_short all
+# describe the rhythm of written sentences, and a fenced code block, a heading,
+# and a table row carry none of that rhythm to measure. Folding them into the
+# same punctuation-based split as running text is what produced a 38.6
+# words-per-sentence reading on this repository's own docs (issue #122): a
+# heading has no terminal period, so it glues onto the paragraph under it; a
+# table's `|`-delimited cells never terminate either; and a list item without
+# a trailing period glues onto its neighbour or the paragraph that follows the
+# list. Every one of those five joins produces one artificially long
+# "sentence" out of several real ones, which is exactly the failure mode
+# `_prose_blocks` below exists to stop.
+FENCE_RE = re.compile(r"^ {0,3}(```+|~~~+)")
+ATX_HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?:\s|$)")
+LIST_MARKER_RE = re.compile(r"^(?:\s*)(?:[-*+]|\d+[.)])\s+(?P<content>\S.*)$")
+TABLE_ROW_RE = re.compile(r"^\s*\|")
+TABLE_SEPARATOR_RE = re.compile(r"^[\s|:-]+$")
+
 CONTRACTION_RE = re.compile(
     r"\b(?:[A-Za-z]+n't|[A-Za-z]+'(?:re|ve|ll|d|m|s))\b", re.IGNORECASE
 )
@@ -78,9 +97,111 @@ def words(text: str) -> list[str]:
     return WORD_RE.findall(text)
 
 
+def _prose_blocks(text: str) -> list[str]:
+    """Partition markdown into paragraph- and list-item-sized units of prose.
+
+    Excludes fenced code (program text, not prose), ATX (`#`-style) headings,
+    and GFM tables. Headings are dropped entirely rather than kept as their
+    own one-line "sentence": a heading is a label with no subject-verb rhythm
+    to measure, and counting it as a sentence would still misrepresent the
+    prose-rhythm stats this module reports, just in the opposite direction
+    (many short "sentences" instead of one long one). A list item is its own
+    unit even with no terminal punctuation, so one bullet no longer glues onto
+    the next or onto the paragraph after the list; a line continues the open
+    item only while indented at least to the item's own content column,
+    matching how the list reads. A line indented less than that column ends
+    the item and starts a new paragraph block instead.
+
+    This is a deliberately narrow reading of markdown, not a CommonMark
+    implementation: 4-space indented code blocks and setext (underline-style)
+    headings aren't recognised, because this repository's docs use fenced
+    code and `#`-headings exclusively. Extend the patterns above if that
+    changes.
+    """
+    lines = text.splitlines()
+    blocks: list[str] = []
+    current: list[str] = []
+    content_col: int | None = None
+    in_fence = False
+    fence_char = ""
+
+    def flush() -> None:
+        nonlocal content_col
+        if current:
+            blocks.append(" ".join(current))
+            current.clear()
+        content_col = None
+
+    index = 0
+    total = len(lines)
+    while index < total:
+        line = lines[index]
+
+        fence_match = FENCE_RE.match(line)
+        if in_fence:
+            if fence_match and fence_match.group(1)[0] == fence_char:
+                in_fence = False
+            index += 1
+            continue
+        if fence_match:
+            flush()
+            in_fence = True
+            fence_char = fence_match.group(1)[0]
+            index += 1
+            continue
+
+        stripped = line.strip()
+        if not stripped:
+            flush()
+            index += 1
+            continue
+
+        if ATX_HEADING_RE.match(line):
+            flush()
+            index += 1
+            continue
+
+        if (
+            TABLE_ROW_RE.match(line)
+            and index + 1 < total
+            and TABLE_SEPARATOR_RE.match(lines[index + 1])
+            and "-" in lines[index + 1]
+            and "|" in lines[index + 1]
+        ):
+            flush()
+            index += 2
+            while index < total and lines[index].strip() and "|" in lines[index]:
+                index += 1
+            continue
+
+        list_match = LIST_MARKER_RE.match(line)
+        if list_match:
+            flush()
+            current.append(list_match.group("content"))
+            content_col = list_match.start("content")
+            index += 1
+            continue
+
+        indent = len(line) - len(line.lstrip())
+        if content_col is not None and indent < content_col:
+            flush()
+        current.append(stripped)
+        index += 1
+
+    flush()
+    return blocks
+
+
 def sentences(text: str) -> list[str]:
-    normalized = re.sub(r"\s+", " ", text.strip())
-    return [sentence.strip() for sentence in SENTENCE_RE.split(normalized) if len(words(sentence)) >= 2]
+    items: list[str] = []
+    for block in _prose_blocks(text):
+        normalized = re.sub(r"\s+", " ", block).strip()
+        if not normalized:
+            continue
+        items.extend(
+            sentence.strip() for sentence in SENTENCE_RE.split(normalized) if len(words(sentence)) >= 2
+        )
+    return items
 
 
 def _find(pattern: str, text: str) -> Iterable[re.Match[str]]:
