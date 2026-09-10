@@ -18,7 +18,12 @@ from .policy import GenrePolicy, get_policy
 
 
 WORD_RE = re.compile(r"\b[A-Za-z]+(?:'[A-Za-z]+)?\b")
-SENTENCE_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'])")
+# A literal space, not \s+. The only call site splits `normalized`, which line 216 has
+# already collapsed to single spaces, so the quantifier could never match more than one
+# character and only offered the regex engine somewhere to backtrack. CodeQL flagged it
+# as a polynomial ReDoS (js/polynomial-redos equivalent) on 2026-09-10; the fix is
+# output-identical on every document in this repository, verified before and after.
+SENTENCE_RE = re.compile(r"(?<=[.!?]) (?=[A-Z\"'])")
 
 # Markdown structure that is not prose. sentence_length_sd, opening_types,
 # max_same_opening, long_over_30, short_under_8 and max_consecutive_short all
