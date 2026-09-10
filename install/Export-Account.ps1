@@ -103,8 +103,8 @@
 # above <# .SYNOPSIS #> made Get-Help return the auto-generated syntax line and one parameter
 # instead of the synopsis and all eight. Task 13 deletes this notice; the help block stays.
 #
-# PositionalBinding=$false, not a position list: Restore-ClaudeProject.ps1:71-95 records that
-# PowerShell auto-assigns a position to every non-switch parameter lacking one, in declaration
+# PositionalBinding=$false, not a position list: Restore-ClaudeProject.ps1:71-95 records the same
+# hazard ("auto-assigns a position to every non-switch parameter that lacks one"), in declaration
 # order, so a later-added seam silently becomes positional and a stray extra argument sets it
 # without a binding error. Unlike Restore this script has no existing positional callers.
 #
@@ -255,10 +255,11 @@ if ($outputRootFull.Equals($claudeHomeFull, $pathComparison) -or
 # The guard above closes -OutputRoot landing on the account home itself. It does not cover
 # -OutputRoot aimed at some unrelated tree that happens to hold files under an allowlisted name
 # (rules/, agents/, skills/, hooks/, tools/prose-lint/): Copy-AccountTree would delete those
-# without ever noticing they belong to something else. Same shape Restore-ClaudeProject.ps1:247
-# uses for -RepoPath: refuse a non-empty destination unless it carries the marker a previous
-# export leaves behind, or the operator overrides with -Force. -Force reaches only this check;
-# the equality/nesting guard above is unconditional and -Force does not touch it.
+# without ever noticing they belong to something else. Same shape Restore-ClaudeProject.ps1:251-253
+# uses for -RepoPath ("already exists and is not empty"): refuse a non-empty destination unless it
+# carries the marker a previous export leaves behind, or the operator overrides with -Force.
+# -Force reaches only this check; the equality/nesting guard above is unconditional and -Force
+# does not touch it.
 $exportMarker = Join-Path $outputRootFull '.export-account-marker'
 if ((Test-Path -LiteralPath $outputRootFull) -and
     @(Get-ChildItem -LiteralPath $outputRootFull -Force -ErrorAction SilentlyContinue) -and
@@ -538,7 +539,8 @@ function Get-AccountFoldTable {
 # this box's originals are backslashed, so a fold that matched one spelling would leave the
 # other literal and break the round trip the design depends on.
 #
-# Only the $homePattern idiom is reused from Convert-HookCommand (Restore-ClaudeProject.ps1:192).
+# Only the $homePattern idiom ("Match both C:\Users\me\.claude and C:/Users/me/.claude spellings")
+# is reused from Convert-HookCommand (Restore-ClaudeProject.ps1:192).
 # Calling that function whole here is wrong in both directions: its Linux branch welds the
 # "& '...ps1'" to "pwsh -NoProfile -File" rewrite in at L245-247, which would ship Linux
 # commands to Windows receivers, and its Windows branch at L195-197 leaves the tail
@@ -611,8 +613,8 @@ if (-not $SkipSettings) {
             # and $group.hooks, with or without this wrap, for every fixture in this file. The
             # hazard these @() guard against is a single-match FILTERING pipeline result (a
             # Where-Object or ForEach-Object -First 1) unwrapping to a bare scalar, which would
-            # then serialise "hooks": {...} instead of "hooks": [...]
-            # (install/Install-Harness.ps1:851-853). Nothing in this loop is a pipeline today, so
+            # then serialise `"hooks": {...} instead of "hooks": [...]`
+            # (install/Install-Harness.ps1:1016-1018). Nothing in this loop is a pipeline today, so
             # removing either @() here currently changes nothing observable. Kept anyway, so a
             # future edit that does introduce a filtering step here does not reintroduce that
             # exact defect silently.
@@ -1007,12 +1009,13 @@ if (-not $WhatIfPreference) {
     # -cmatch and not -match: POSIX paths are case-sensitive and .Contains was ordinal, so the
     # case-insensitive default would widen the gate past the boundary this is here to add.
     #
-    # $WslHome is already trimmed of whitespace and of a trailing '/' by the validation at :215-221,
-    # which also refuses a supplied value that does not name an absolute POSIX directory. So the
-    # only thing left to distinguish here is present from absent. A trailing slash would otherwise
-    # make the escaped literal end in '/', the boundary would demand a second separator that a real
-    # path never has ('/home/user//launcher.sh' does not exist), and the scan would degrade from
-    # fail-closed to a near-total no-op on every copied file, with no error.
+    # $WslHome is already trimmed of whitespace and of a trailing '/' (`TrimEnd('/')`) by the
+    # validation at :215-221, which also refuses a supplied value that does not name an absolute
+    # POSIX directory. So the only thing left to distinguish here is present from absent. A
+    # trailing slash would otherwise make the escaped literal end in '/', the boundary would
+    # demand a second separator that a real path never has ('/home/user//launcher.sh' does not
+    # exist), and the scan would degrade from fail-closed to a near-total no-op on every copied
+    # file, with no error.
     #
     # Null when -WslHome did not resolve, meaning the machine has no WSL. The arm below is skipped
     # in that case, exactly as the old `$WslHome -and` loop condition skipped the whole loop.

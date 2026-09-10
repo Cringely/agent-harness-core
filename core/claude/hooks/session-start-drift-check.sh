@@ -1,9 +1,10 @@
 #!/bin/sh
 # SessionStart drift-check hook (advisory: prints at most one line, never blocks).
 # It has no deny path at all: nothing it emits can refuse a tool call, and it runs where no
-# tool call is pending. CONTRIBUTING.md:43 asks anything under core/claude/hooks/ for a test
-# asserting a DENY, and there is no denial here for a test to assert, so the file beside it
-# (test/session-start-drift-check.test.ts) pins output shape instead and says so at the top.
+# tool call is pending. CONTRIBUTING.md:47 asks anything under core/claude/hooks/ for a test with
+# "a boundary-crossing input asserted to DENY", and there is no denial here for a test to assert,
+# so the file beside it (test/session-start-drift-check.test.ts) pins output shape instead and
+# says so at the top.
 # Issue #87 is the open question about that rule's scope.
 #
 # What it does: read .claude/.harness-manifest.json, resolve the core checkout the layer
