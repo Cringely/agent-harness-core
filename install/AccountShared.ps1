@@ -35,7 +35,11 @@ foreach ($fnName in 'Get-ProjectSlug', 'Convert-HookCommand', 'Test-ResidualWind
 # --- payload tables -----------------------------------------------------------
 # The allowlist. Nothing else under ~/.claude is looked at, so a new runtime directory
 # appearing there is excluded by default rather than swept into the repo.
-$script:AccountTreeDirs = @('rules', 'agents', 'skills', 'tools/prose-lint', 'hooks')
+# tools/not-ai travels because skills/not-ai/SKILL.md invokes tools/not-ai/gate.py by path.
+# Shipping the skill without the gate installs a skill pointing at a file that is not there,
+# which is the unwired-artifact defect CONTRIBUTING.md names. The two entries are one artifact
+# split across two trees, so adding either alone is wrong.
+$script:AccountTreeDirs = @('rules', 'agents', 'skills', 'tools/prose-lint', 'tools/not-ai', 'hooks')
 $script:AccountRootFiles = @('statusline-command.ps1', 'statusline-command.sh')
 
 # Payload-relative paths that never travel. model-tier-gate.ts is core-owned: the installer
@@ -85,6 +89,7 @@ $script:AccountTemplatedFiles = [ordered]@{
     'rules/harness-core.md'              = @('CORE_REPO')
     'hooks/harness-core-reminder.sh'     = @('CORE_REPO')
     'skills/prose-lint/SKILL.md'         = @('CLAUDE_HOME')
+    'skills/not-ai/SKILL.md'             = @('CLAUDE_HOME')
     'skills/handoff/SKILL.md'            = @('OBSIDIAN_VAULT')
     'skills/council/SKILL.md'            = @('HOME_SLUG')
     'skills/subagent-prompting/SKILL.md' = @('OBSIDIAN_VAULT', 'HOME_SLUG')

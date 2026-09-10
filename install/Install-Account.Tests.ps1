@@ -2219,7 +2219,8 @@ Describe "Account layer round trip" {
             $canonHome = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-canon-" + [guid]::NewGuid())
             $ch = Join-Path $canonHome '.claude'
             foreach ($d in 'rules', 'agents', 'hooks', 'tools/prose-lint',
-                'skills/prose-lint', 'skills/handoff', 'skills/council', 'skills/subagent-prompting') {
+                'skills/prose-lint', 'skills/handoff', 'skills/council', 'skills/subagent-prompting',
+                'skills/not-ai') {
                 New-Item -ItemType Directory -Path (Join-Path $ch $d) -Force | Out-Null
             }
             $chBack = $ch -replace '/', '\'
@@ -2245,6 +2246,7 @@ $patterns = @(
 exit 0
 '@ | Set-Content (Join-Path $ch 'hooks/Scan-MemorySecrets.ps1')
             "vale --config `"$chBack\tools\prose-lint\.vale.ini`"" | Set-Content (Join-Path $ch 'skills/prose-lint/SKILL.md')
+            "python3 `"$($ch -replace '\\', '/')/tools/not-ai/gate.py`" draft.txt" | Set-Content (Join-Path $ch 'skills/not-ai/SKILL.md')
             "write to $vault\Handoffs\x.md"                  | Set-Content (Join-Path $ch 'skills/handoff/SKILL.md')
             "home folder is $slug"                           | Set-Content (Join-Path $ch 'skills/council/SKILL.md')
             "$slug and $vault\Handoffs"                      | Set-Content (Join-Path $ch 'skills/subagent-prompting/SKILL.md')
