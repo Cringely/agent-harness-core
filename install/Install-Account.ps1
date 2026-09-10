@@ -409,12 +409,19 @@ function Expand-AccountToken {
 # occurrence if a future edit ever made every {{CORE_REPO}} mention backtick-styled -- silent,
 # and in the direction a genuine renamed-token warning exists to catch. An exemption keyed to
 # the specific known-harmless literal does not touch the general pattern at all.
+#
+# Issue #74: this exemption belongs to the templated-file loop alone, where {{PROJECT}} is a
+# documented survivor (Install-Harness.ps1's own per-project placeholder, described above). It is
+# NOT a script-wide default. Get-ResidualToken takes the exemption list as a parameter, defaulting
+# to none, so the settings.json and mcpServers call sites below stay unexempted -- a real
+# {{PROJECT}} literal surfacing unexpectedly inside a hook command or an MCP server argument must
+# still be flagged, not silently dropped the way a global exemption would drop it.
 $script:AccountResidualExemptLiterals = @('{{PROJECT}}')
 function Get-ResidualToken {
-    param([string]$Text)
+    param([string]$Text, [string[]]$ExemptLiterals = @())
     if (-not $Text) { return @() }
     $found = [regex]::Matches($Text, '\{\{[A-Z_]+\}\}') | ForEach-Object { $_.Value } | Select-Object -Unique
-    return @($found | Where-Object { $script:AccountResidualExemptLiterals -notcontains $_ })
+    return @($found | Where-Object { $ExemptLiterals -notcontains $_ })
 }
 
 # Parameters, not locals. A test drives this script as a child process with a stand-in $HOME
@@ -434,7 +441,7 @@ foreach ($rel in $script:AccountTemplatedFiles.Keys) {
     if (-not (Test-Path -LiteralPath $target)) { continue }
     $text = Get-Content -LiteralPath $target -Raw
     $expanded = Expand-AccountToken -Text $text -Tokens $tokens
-    $residual = Get-ResidualToken -Text $expanded
+    $residual = Get-ResidualToken -Text $expanded -ExemptLiterals $script:AccountResidualExemptLiterals
     if ($residual.Count -gt 0) {
         Write-Warning "Unexpanded placeholder(s) in ${rel}: $($residual -join ', '). Left verbatim; a model reading this file sees the literal token."
     }
