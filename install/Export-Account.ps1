@@ -436,6 +436,15 @@ function Copy-AccountTree {
         # segment, not just the leaf, so a .git/ at any depth under an allowlisted directory is
         # excluded, the same way *.bak.* is checked on the leaf name rather than only at the top.
         if (@($rel -split '/') -contains '.git') { continue }
+        # __pycache__ for the same reason, found 2026-09-10 while vendoring a Python tool. A .pyc
+        # embeds the compile-time source path in its code object, so every file under
+        # tools/not-ai/ carried C:\Users\<username> as debug metadata and `git add` staged all six.
+        # The identity gate does not catch it: that gate skips binaries by NUL-byte detection,
+        # which is right for the vendored PNGs and blind to a .pyc. Excluded on every path segment
+        # rather than the leaf, matching the .git rule above, so a nested package cache anywhere
+        # under an allowlisted directory is dropped. Compiled output is also reproducible from the
+        # source beside it, so nothing is lost by never shipping it.
+        if (@($rel -split '/') -contains '__pycache__') { continue }
         # *.bak.* is change-management.md's timestamped convention. *.bak on its own catches
         # older, untimestamped backups (e.g. hooks/Scan-MemorySecrets.ps1.bak) that predate it
         # and would otherwise ship a machine path in the payload.
