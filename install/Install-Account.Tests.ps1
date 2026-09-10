@@ -1607,6 +1607,26 @@ Describe "Install-Account" {
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
 
+    # Issue #74 fix 1: the {{PROJECT}} exemption on $script:AccountResidualExemptLiterals belongs
+    # to the templated-file loop alone (Get-ResidualToken's -ExemptLiterals parameter, default
+    # @()). The settings.json and mcpServers call sites never pass it, so a {{PROJECT}} literal
+    # reaching either one must still warn -- pinning that the exemption did not become a
+    # script-wide default that would also swallow a real {{PROJECT}} surfacing where it does not
+    # belong.
+    It "still warns about {{PROJECT}} reaching settings.json, since the exemption is scoped to templated files only" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            @{ env = @{ X = '{{PROJECT}}' } } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
+
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -SkipPreflight *>&1 | Out-String
+
+            $out | Should -Match 'Unexpanded placeholder\(s\) in settings\.json: \{\{PROJECT\}\}'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
     # F2, final review round: Get-ResidualToken's catch-all is deliberately generic ([A-Z_]+),
     # by its own comment, specifically to catch a STALE or RENAMED token this script does not
     # know about. harness-core.md:13 names {{PROJECT}} in prose, inside a markdown code span, as

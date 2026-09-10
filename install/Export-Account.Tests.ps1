@@ -317,15 +317,25 @@ exit 0
         }
     }
 
+    # Issue #74: the bare Should -Throw here, with a trailing Test-Path pair, was the named
+    # pre-existing sibling to the F1 test below -- $claude is this test's -OutputRoot, which
+    # always pre-exists and is never empty, so the unrelated marker guard ("already exists, is
+    # not empty, and carries no marker") throws for this exact scenario independently of the
+    # containment guard under test. A bare Should -Throw is satisfied by either guard, so
+    # deleting the containment guard entirely left this It green. -ExpectedMessage pins the
+    # assertion to the containment guard's own text, the same fix applied to F1 and C1, which
+    # forces a message mismatch (and a red test) once the containment guard stops firing. The
+    # trailing Test-Path pair is then dead by the identical F1/C1 argument: a passing message
+    # match already proves $claude untouched, since the guard throws before Copy-AccountTree is
+    # ever called. Removed rather than kept as decoration.
     It "refuses when -OutputRoot equals -ClaudeHome, and deletes nothing" {
         $stand = New-StandInHome
         $claude = Join-Path $stand '.claude'
         try {
             { & $script:export -ClaudeHome $claude -OutputRoot $claude `
                     -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
-                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp } | Should -Throw
-            Test-Path -LiteralPath (Join-Path $claude 'rules/security.md') | Should -BeTrue
-            Test-Path -LiteralPath (Join-Path $claude 'agents/appsec-sme.md') | Should -BeTrue
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp } |
+                Should -Throw -ExpectedMessage '*must not be the account home or a path inside it*'
         }
         finally {
             Remove-Item -Recurse -Force $stand -ErrorAction SilentlyContinue
