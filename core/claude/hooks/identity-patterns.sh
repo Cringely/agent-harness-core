@@ -29,11 +29,12 @@
 # depending on the caller's locale is exactly the failure this file exists
 # to close, so -P is not used anywhere here. GNU grep -E's `\b` extension
 # needs no locale. Measured against the exact collision the exporter's own
-# comment and its Export-Account.Tests.ps1 fixture record (Export-Account.
-# Tests.ps1's "does not read a declared name out of an ordinary word that
-# contains it"): skills/owasp-llm/references/08-vector-and-embedding-
-# weaknesses.md:117 reads "adjusting the augmentation process", which
-# contains the operator's declared first name as a substring. That test
+# comment and its Export-Account.Tests.ps1 fixture record
+# (Export-Account.Tests.ps1's "does not read a declared name out of an
+# ordinary word that contains it"):
+# skills/owasp-llm/references/08-vector-and-embedding-weaknesses.md:117
+# reads "adjusting the augmentation process", which contains the operator's
+# declared first name as a substring. That test
 # fixture uses a synthetic four-letter declaration rather than the real
 # name for the reason recorded there -- writing the real name into a file
 # in this repo is the thing being prevented -- and this comment does the
