@@ -136,8 +136,11 @@ overrides.
 beautiful_prose skill is canonical for the banned-vocabulary list; this file mirrors it. Long-form
 deliverables use the skill. Layer differences:
 
-- Em dashes: skill bans absolutely (`—` and `--`); this file keeps the rare-exception allowance
-  for everyday output.
+- Em dashes: no longer a layer difference. The skill banned them absolutely until 2026-09-10 and
+  now carries the same rare-exception allowance this file does, so one rule covers every surface.
+  Measured before the change: 0.0 per 10,000 words across 59,034 words of linted deliverables,
+  against 15.5 in hand-authored human notes and 43.9 in this rules corpus, which no hook lints.
+  A ban that produces exactly zero across sixty thousand words is not a preference being expressed.
 - Structural entropy and registers: skill-only; everyday output just avoids monotony (see
   Monotonous prose below).
 - Second-pass self-critique and lint checklist: skill-only workflow steps.

@@ -14,7 +14,9 @@ A style contract, not a vibe. Treat violations as failures.
 
 ## Absolute prohibitions
 
-1. **Em dashes**: ban both `—` (U+2014) and `--`. Use periods, commas, colons, semicolons, or line breaks. Single hyphens are legitimate in structural positions: headings, filenames (`Artist - Song Name.mp3`), ranges, and `label - value` pairs. Do not use a spaced single hyphen as an em-dash substitute in prose asides.
+1. **Em dashes**: default to not using them. Prefer periods, commas, colons, semicolons, or line breaks. Single hyphens are legitimate in structural positions: headings, filenames (`Artist - Song Name.mp3`), ranges, and `label - value` pairs. Do not use a spaced single hyphen as an em-dash substitute in prose asides.
+
+   Rare exception, matching `writing-style.md`: a genuine aside that reads worse as a parenthetical may take one. This was an absolute ban until 2026-09-10 and was relaxed on measurement. Prose written under the absolute version ran at **0.0 em dashes per 10,000 words across 59,034 words** of this operator's linted documents, against **15.5** in their hand-authored notes and **43.9** in their own rules files, which are exempt from linting. Human writing uses them; a corpus at exactly zero is a corpus that has been filtered, and reads that way. The exception is rare, not open: if a draft carries several, the drafting is the problem rather than the rule.
 2. **Reversals**: ban "It's not X, it's Y" and variants ("This isn't about X. It's about Y", "Not X but Y", "X is a symptom; Y is the cause" as a cheap pivot).
 3. **Filler transitions**: "At its core", "In today's world", "In a world where", "That said", "Let's explore", "Ultimately", "What this means is", "It's important to note", "On the one hand".
 4. **Therapeutic language**: "I hear you", "That sounds hard", "You're valid", "Give yourself grace", "Be kind to yourself".
@@ -54,7 +56,7 @@ Four registers with assigned entropy intensity. Details and examples: `reference
 ## Lint checklist
 
 Fail the draft if any are true:
-- Contains `—` or `--` used as an em dash.
+- Uses `—` or `--` as an em dash more than once, or once where a comma or a full stop would have served.
 - Contains a reversal pivot ("not X, it's Y" in any variant).
 - Contains a filler transition, therapy language, or meta writing talk.
 - Contains banned vocabulary.
