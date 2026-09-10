@@ -332,6 +332,40 @@ export interface CheckResult {
   tokenChecked: boolean;
 }
 
+// SPECIFICITY. A token that recurs often in the TARGET FILE cannot tell the cited range apart
+// from the rest of that file: a match on it proves the word exists somewhere in the file, not
+// that it exists at THIS range. Review round on #98's repair found this passing three citations
+// to Install-Harness.ps1:1016-1018 on the token "hooks" alone -- 78 occurrences in a 1145-line
+// file -- and confirmed the false-positive rate by sweeping the target: drifting the cited range
+// by every offset from -12 to +12 lines still matched "hooks" (falsely "verifying") 14 of those
+// 24 wrong ranges. A common word inside a cited range is exactly as likely to appear by
+// coincidence as by correctness once it recurs enough times in the file, so a match on it is not
+// evidence either way.
+//
+// MAX_DISCRIMINATING_OCCURRENCES = 5, chosen by measuring every token currently extracted from
+// this tree's 31 live citations against its own target file's full text (not just the cited
+// range). Every legitimate token measured at 3 occurrences or fewer; the two illegitimate ones
+// this repair round found measured 17 ("Get-ProjectSlug", spread across all 478 lines of
+// Restore-ClaudeProject.Tests.ps1, not clustered near either citing range) and 78 ("hooks", the
+// case above). Any cutoff from 4 to 16 separates this population identically; 5 leaves one
+// occurrence of headroom above the largest legitimate token without approaching the smallest
+// illegitimate one. Re-measure this population if a future citation's own legitimate token needs
+// more than 3 occurrences to exist honestly.
+const MAX_DISCRIMINATING_OCCURRENCES = 5;
+
+function countOccurrences(haystack: string, needle: string): number {
+  if (needle.length === 0) return 0;
+  let count = 0;
+  let idx = 0;
+  while (true) {
+    const found = haystack.indexOf(needle, idx);
+    if (found === -1) break;
+    count++;
+    idx = found + 1;
+  }
+  return count;
+}
+
 // `text.split(/\r?\n/)` counts one line too many whenever the file ends with a trailing
 // newline: "a\nb\n".split(/\r?\n/) is ["a", "b", ""], and that trailing "" is a split artifact,
 // not a real line. Left uncorrected this both fails OPEN (a citation to the line one past the
@@ -383,11 +417,18 @@ export function checkCitation(
   }
 
   const cited = lines.slice(citation.startLine - 1, citation.endLine).join("\n");
-  const tokens = extractTokens(citation.context);
+  // Filtered against the FULL target text, not just `cited`: a token common enough in the whole
+  // file to fail this check would fail it the same way whether or not it happens to also sit
+  // inside the cited range, which is the whole point (see MAX_DISCRIMINATING_OCCURRENCES above).
+  const tokens = extractTokens(citation.context).filter(
+    (t) => countOccurrences(text, t) <= MAX_DISCRIMINATING_OCCURRENCES,
+  );
   if (tokens.length === 0) {
-    // No explicit marker to check against. Structural resolution already passed above, which is
-    // the honest ceiling here — see the file header on why this checker does not guess a token
-    // out of ordinary prose.
+    // Either no explicit marker at all, or every marker found is too common in the target to
+    // discriminate this range from the rest of the file. Structural resolution already passed
+    // above, which is the honest ceiling here — see the file header on why this checker does not
+    // guess a token out of ordinary prose, and the SPECIFICITY note above on why a common word is
+    // treated the same as no word at all.
     return { ok: true, tokenChecked: false };
   }
   const matched = tokens.some((t) => cited.includes(t));

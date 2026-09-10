@@ -1633,9 +1633,14 @@ exit 0
         # literal ('/home/wsluser/code-context-mcp.sh', '/root/code-context-mcp.sh'), so nothing
         # exercised the quote/whitespace/EOF arm of the boundary. Narrowing
         # '(?![^/"''\s)\]`>])' to the single arm '(?=/)' still passes every other It in this file but
-        # leaves this one green, because a bare literal at end of line has no '/' after it. The two
-        # code comments at :739-742 and :744-749 assert that ablation is caught; this It is what
-        # makes that true.
+        # leaves this one green, because a bare literal at end of line has no '/' after it.
+        # (Repair round on #98: the same-file shorthand this paragraph used to carry, ":739-742"
+        # and ":744-749", was never same-file -- checked against f47563e, the commit that wrote it,
+        # both ranges landed on Export-Account.ps1's own boundary comments at those exact line
+        # numbers, so the filename prefix was dropped by mistake, not drift. Repointed below.)
+        # Export-Account.ps1:993-995 ("a bare `/root` at end of line still fire") and
+        # Export-Account.ps1:997-1002 ("the negated class now also excludes those") are the two
+        # comments that assert ablation is caught; this It is what makes that true.
         $stand = New-StandInHome
         $out = New-OutputRoot
         try {
