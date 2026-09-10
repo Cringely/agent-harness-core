@@ -143,6 +143,33 @@ Before ending any session with code or config changes:
 2. **Push to remote** — ensure the commit is on GitHub, not just local.
 3. **Sync production** — pull on the production host if production was the work target.
 
+## Deliverables Do Not Live in the Scratchpad
+
+The session scratchpad is for intermediate state: agent reports, working notes, throwaway
+scripts, anything read once and discarded. It is session-specific and gets wiped. Nothing the
+user is meant to keep may end its life there.
+
+A deliverable is anything the user asked for or will use again: a generated file, an export, a
+report they will act on, a data artifact that cost real work to produce. The test is whether
+losing it tomorrow would mean redoing work. If yes, it lands on disk somewhere durable before
+the session ends, and the path is named in the response.
+
+Where it lands, in order of preference: the repo the work belongs to, gitignored if it must not
+reach a remote (most repos already keep a local-only block for exactly this, so add a line to it
+rather than inventing a location); a directory the user names; the user's home. Never
+`%TEMP%`, `/tmp`, or the session scratchpad.
+
+Sending a file to the user does not discharge this. The file card points at the path it was sent
+from, so a scratchpad path stays a scratchpad path.
+
+Delegated work needs the durable path in the brief. An agent told to write its output to the
+scratchpad writes it to the scratchpad, and the fix afterwards is a copy the dispatcher has to
+remember to make. Give the agent the real destination up front, and keep the scratchpad for the
+report about the work rather than the work itself.
+
+Operator directive after repeated instances across projects: "Stop putting persistent output
+into temp storage. This has happened many times, it needs to stop."
+
 ## Temporary and Diagnostic Script Hygiene
 
 Scripts that are not permanently deployed cron jobs or part of the stack must be cleaned up before any git commit or session close:
