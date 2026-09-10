@@ -1149,7 +1149,8 @@ exit 0
     # functional assertions (garmin's command, 1password's command, the top-level key set) would
     # leave the three secrecy assertions (userID/anonymousId/lastCost must not travel) unrun --
     # exactly the assertions that matter for this test's name. Shared BeforeAll/AfterAll, one It
-    # per independently-falsifiable claim, matching the file's own C1 convention at :205-250 and
+    # per independently-falsifiable claim, matching the file's own C1 convention at :205-250
+    # (e.g. "a cloned skill's git internals are not the account layer the operator authors") and
     # the "folds all three quoting forms" Context above.
     Context "lifts only the mcpServers key out of claude.json" {
         BeforeAll {
@@ -1244,14 +1245,14 @@ exit 0
 
     It "folds a trailing-slash -WslHome to a single separator in mcpServers, not a missing or doubled one" {
         # Issue #81: a prior fix normalised how the fold handles a trailing-slash -WslHome
-        # (.Trim().TrimEnd('/') at the producer, :215-221), but nothing pinned the FOLD's own
-        # output shape. The trailing-slash rows already in this file (the degenerate-value table
-        # above, and "still fails closed on a copied-file literal when -WslHome carries a
-        # trailing slash" further down) both exercise the payload-wide fail-closed identity scan,
-        # not this. A silent revert of the TrimEnd would build the pattern from
-        # '/home/wsluser/' -- ending in '/' -- and the tail group's leading separator would then
-        # have to match a SECOND '/' that a real path never has, degrading the fold to a near-
-        # total no-op: it would leave 'code-context-mcp.sh' after the token with no leading
+        # (`$WslHome.Trim().TrimEnd('/')` at the producer, Export-Account.ps1:215-221), but
+        # nothing pinned the FOLD's own output shape. The trailing-slash rows already in this file
+        # (the degenerate-value table above, and "still fails closed on a copied-file literal
+        # when -WslHome carries a trailing slash" further down) both exercise the payload-wide
+        # fail-closed identity scan, not this. A silent revert of the TrimEnd would build the
+        # pattern from '/home/wsluser/' -- ending in '/' -- and the tail group's leading separator
+        # would then have to match a SECOND '/' that a real path never has, degrading the fold to
+        # a near-total no-op: it would leave 'code-context-mcp.sh' after the token with no leading
         # separator at all, i.e. '{{WSL_HOME}}code-context-mcp.sh', rather than either shipping
         # the literal or doubling the slash.
         $stand = New-StandInHome

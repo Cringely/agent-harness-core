@@ -31,7 +31,8 @@
 # always (a broken hook must never block a merge).
 
 set -eu
-# Guarded pipefail, no pipeline here yet — see session-start-drift-check.sh:30-34 for why guarded.
+# No pipeline here yet, but see session-start-drift-check.sh:30-34, "Guarded rather than bare",
+# for why this stays guarded.
 if (set -o pipefail) 2>/dev/null; then set -o pipefail; fi
 
 payload="$(cat)"

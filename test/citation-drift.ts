@@ -9,11 +9,13 @@
 // An exact-line assertion is brittle against any edit above the target and would need updating on
 // every unrelated diff that shifts line numbers, which is exactly the kind of noisy check that
 // gets disabled or ignored (issue #98's own framing). The alternative that survives contact with
-// the real citations in this repo: extract a literal, unambiguous marker already sitting next to
+// the real citations in this repo: extract a literal, unambiguous marker already sitting near
 // the citation — a "quoted phrase", a `backtick span`, or a `{{PLACEHOLDER}}` — and assert it is
 // still a substring of the cited line(s). That costs the author nothing beyond writing the
 // comment they were already going to write, because roughly a quarter of the citations audited
-// for this checker already quote something next to the citation without being asked to.
+// for this checker already quote something next to the citation without being asked to. How near
+// "near" means is the WINDOW decision, below the extraction code, not here — this repair round
+// widened it, and that is a separate, later decision from the one this paragraph is about.
 //
 // REJECTED ALTERNATIVE: extracting a "distinctive" word from the surrounding prose automatically
 // (longest word, rarest word, first capitalized word, anything short of real NLP). Tried against
@@ -23,14 +25,10 @@
 // fail a citation that is correct right now. A heuristic that flags a correct citation as broken
 // is worse than no check: it is the exact "noisy check gets ignored" failure the issue warns
 // against, demonstrated against this repo's own text rather than assumed. So: only explicit,
-// unambiguous markup counts as a token. A citation with no such markup nearby still gets a real
-// check — file exists, cited lines are in bounds — it just cannot be verified at the content
-// level, and this checker says so (`tokenChecked: false`) rather than pretending otherwise. That
-// trade-off is real: a review round on this checker found the reverse failure it accepts as the
-// cost — five citations in core/ and install/ drifted with no adjacent token to catch them, this
-// one among them (it cited :810 until the same round fixed it back to :803). Under-verifying a
-// stale citation is the accepted risk, not a hidden one; see MEMORY.md and issues #116/#118 for
-// the drifted citations that trade-off let through, fixed where in scope, filed where not.
+// unambiguous markup counts as a token. A citation with no such markup within the window still
+// gets a real check — file exists, cited lines are in bounds — it just cannot be verified at the
+// content level, and this checker says so (`tokenChecked: false`) rather than pretending
+// otherwise; the live-scan section at the bottom of the test file pins how many that is today.
 //
 // FAIL CLOSED on a citation this cannot resolve. A target path that matches zero tracked files
 // (renamed, deleted, or never existed) is a failure, not a skip — an unresolvable citation is
@@ -54,8 +52,17 @@ const NAMED_EXTENSIONLESS = "pre-commit|pre-push|commit-msg";
 
 // Lookbehind keeps a match from starting mid-path (so "sub/file.ts:12" is one match, not two);
 // the trailing (?!\d) keeps a longer number like "123" from being read as "12" followed by "3".
+//
+// The path-prefix group `(?:[\w.-]+/)*` sits OUTSIDE the extensioned/named-extensionless
+// alternation, not inside just the first arm. Review round on #98's repair found it originally
+// nested inside the first arm only, so a real path-qualified citation to a named-extensionless
+// hook -- "core/claude/hooks/pre-commit:42" -- could never match: the regex engine could only
+// start the NAMED_EXTENSIONLESS alternative at "pre-commit" itself, and the lookbehind then saw
+// the "/" right before it and refused to start a match there at all. Hoisting the prefix out so
+// it applies to both alternatives fixes that without changing anything about the extensioned
+// arm's own grammar (a bare filename was always `(?:[\w.-]+/)*[\w.-]+\.ext` before, and still is).
 const CROSS_FILE_RE = new RegExp(
-  String.raw`(?<![\w./-])((?:[\w.-]+/)*[\w.-]+\.(?:${FILE_EXT})|${NAMED_EXTENSIONLESS}):(\d+)(?:-(\d+))?(?!\d)`,
+  String.raw`(?<![\w./-])((?:[\w.-]+/)*(?:[\w.-]+\.(?:${FILE_EXT})|${NAMED_EXTENSIONLESS})):(\d+)(?:-(\d+))?(?!\d)`,
   "g",
 );
 // Same-file shorthand only fires right after whitespace, which is what every real instance in
@@ -73,13 +80,49 @@ function getExt(path: string): string {
 // Is this line (already trimmed) part of a comment, for the given file's extension? A markdown
 // file has no code to separate comments from, so every non-blank line counts; a JSON file has no
 // comment syntax at all, so nothing in it is ever a citation source, matching the issue's own
-// scope ("comments").
-function isCommentLine(trimmed: string, ext: string): boolean {
+// scope ("comments"). `inPsBlockComment` covers a PowerShell `<# ... #>` help block: a
+// continuation line inside one (e.g. a `.PARAMETER` description) carries none of the leading
+// markers below, so testing leading characters alone made every such line invisible to this
+// checker. Review round on #98's repair found the live cost: install/Install-Account.ps1's
+// `<# .SYNOPSIS ... #>` header cites Restore-ClaudeProject.ps1:88-95 and was never even
+// structurally checked before this fix, because the line was never recognised as a comment
+// in the first place — not "unverified", genuinely invisible to extractCitations.
+function isCommentLine(trimmed: string, ext: string, inPsBlockComment: boolean): boolean {
   if (ext === "json") return false;
   if (ext === "md") return trimmed !== "";
+  if (inPsBlockComment) return true;
   return (
     trimmed.startsWith("//") || trimmed.startsWith("#") || trimmed.startsWith("*") || trimmed.startsWith("/*")
   );
+}
+
+// Tracks `<# ... #>` state across a whole .ps1 file and reports, per line, whether any part of
+// that line sat inside an open block comment. Non-nesting: PowerShell block comments do not
+// nest in practice in this repo, and a state machine that tried to would need to distinguish a
+// block-close token from a literal "#>" inside a string, which nothing here writes.
+function computePsBlockCommentLines(lines: readonly string[]): boolean[] {
+  const flags = new Array(lines.length).fill(false);
+  let inBlock = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (inBlock) flags[i] = true; // already open when this line starts
+    let pos = 0;
+    while (pos < line.length) {
+      if (!inBlock) {
+        const start = line.indexOf("<#", pos);
+        if (start === -1) break;
+        inBlock = true;
+        flags[i] = true;
+        pos = start + 2;
+      } else {
+        const end = line.indexOf("#>", pos);
+        if (end === -1) break; // still open past the end of this line
+        inBlock = false;
+        pos = end + 2;
+      }
+    }
+  }
+  return flags;
 }
 
 export interface Citation {
@@ -89,11 +132,11 @@ export interface Citation {
   targetSpec: string | null;
   startLine: number;
   endLine: number;
-  /** Text to run extractTokens against for this citation only. Usually the citation's whole
-   * physical comment line — see extractCitations for why the line, not the surrounding block. When
-   * another citation shares that physical line, this holds only the quote/backtick/placeholder
-   * spans nearest to THIS citation's own match, so two citations on one line never see each
-   * other's tokens (see extractCitations' FINDING 1 note). */
+  /** Text to run extractTokens against for this citation only. Usually the citing line plus one
+   * comment line immediately before and after it — see extractCitations' WINDOW note for why that
+   * width, not the whole surrounding block. When another citation's own match falls inside that
+   * same window, this holds only the quote/backtick/placeholder spans nearest to THIS citation's
+   * own match, so two nearby citations never see each other's tokens (see the FINDING 1 note). */
   context: string;
   raw: string;
 }
@@ -123,27 +166,10 @@ export function extractCitations(sourceFile: string, text: string): Citation[] {
     return lo + 1;
   }
 
-  // The token-search context is deliberately just the citation's own physical line, not the
-  // whole surrounding comment block or even a one-line lookaround. Both wider options were tried
-  // and both produced a real false failure on this repo's own text, not a hypothetical one:
-  //
-  // - Whole block: agent-write-scope.ts:132 cites review-gate.ts:803, in a 14-line JSDoc comment
-  //   that also backtick-quotes `agent_type`, `cwd`, `inScratch()`, `join(42, …)` and
-  //   `resolve({}, …)` for unrelated reasons earlier in the same comment. None of those describe
-  //   the target line, so a whole-block search reports a correct citation as broken.
-  // - One line either side: Export-Account.Tests.ps1:1118 cites `:205-250` and, one line later in
-  //   the SAME SENTENCE, names a second, separate reference by title ('the "folds all three
-  //   quoting forms" Context above') that carries no line number of its own. A one-line lookaround
-  //   attaches that quoted title to the numbered citation next to it and reports the same false
-  //   failure, because the two references share a sentence rather than a block.
-  //
-  // Same-line-only misses a token when a citation and its quote are split by a genuine line wrap
-  // (one real instance today: Export-Account.Tests.ps1:1840, where the citation is followed by
-  // `# reads "adjusting the augmentation process"` on the next line). That citation still passes
-  // — structurally resolved, just not content-verified — which is the correct failure direction:
-  // under-verifying a good citation is safe, flagging a good one as broken is the noisy-check
-  // failure the issue itself warns against.
   const lineStart = (ln: number): number => (ln === 1 ? 0 : newlineIndexes[ln - 2] + 1);
+  const psBlockFlags = ext === "ps1" ? computePsBlockCommentLines(lines) : null;
+  const isCommentAt = (ln: number): boolean =>
+    isCommentLine(lines[ln - 1]?.trim() ?? "", ext, psBlockFlags ? (psBlockFlags[ln - 1] ?? false) : false);
 
   interface RawMatch {
     ln: number;
@@ -157,7 +183,7 @@ export function extractCitations(sourceFile: string, text: string): Citation[] {
   const rawMatches: RawMatch[] = [];
   for (const m of text.matchAll(CROSS_FILE_RE)) {
     const ln = lineNumberForIndex(m.index);
-    if (!isCommentLine(lines[ln - 1]?.trim() ?? "", ext)) continue; // not a comment: not a citation
+    if (!isCommentAt(ln)) continue; // not a comment: not a citation
     const start = m.index - lineStart(ln);
     rawMatches.push({
       ln,
@@ -171,7 +197,7 @@ export function extractCitations(sourceFile: string, text: string): Citation[] {
   }
   for (const m of text.matchAll(SAME_FILE_RE)) {
     const ln = lineNumberForIndex(m.index);
-    if (!isCommentLine(lines[ln - 1]?.trim() ?? "", ext)) continue;
+    if (!isCommentAt(ln)) continue;
     const start = m.index - lineStart(ln);
     rawMatches.push({
       ln,
@@ -184,49 +210,80 @@ export function extractCitations(sourceFile: string, text: string): Citation[] {
     });
   }
 
-  // FINDING 1 (review round on #98): two citations sharing one physical source line used to get
-  // the WHOLE line as context, so extractTokens' output for one citation could include a marker
-  // that was actually written for its neighbor — a citation could report tokenChecked:true using a
-  // token that names something else's target entirely. Real case in this repo today with no token
-  // on either citation yet (Export-Account.Tests.ps1:1602, ":739-742" and ":744-749" on one line),
-  // and a reproduced false pass with tokens: `// see a.ts:1 ("first thing") and b.ts:1 ("second
-  // thing")`, where a genuine drift at a.ts:1 (losing "first thing") still read ok:true because
-  // "second thing" happened to be a substring of a's rewritten target.
+  // WINDOW, widened per issue #98's repair round. The original same-line-only design measured
+  // 0 of 5 known real drifts caught: a citation whose only quoted/backtick token sits one physical
+  // line away from the reference itself (a wrapped sentence, a `.PARAMETER`-style continuation,
+  // a comment written just above or below the file:line it explains) was structurally resolved and
+  // never content-checked, which is exactly the fail-open #98 exists to close. The load-bearing
+  // example for keeping the window at one line -- agent-write-scope.ts:132's citation of
+  // review-gate.ts -- had itself already drifted (to :810) by the time that argument was made; see
+  // commit 20edd31's message for the full account. With the data now correct, this checker widens
+  // the window to the citing line plus one comment line immediately before and one immediately
+  // after (never a line that isn't itself a comment, so a window never crosses into code).
   //
-  // Fix: attribute each quote/backtick/placeholder span on the shared line to whichever citation's
-  // own match it sits closest to (by character distance, never by which half of the line it falls
-  // in), and build that citation's context out of only its own owned spans, verbatim and
-  // undivided. A line with exactly one citation keeps the full line as context, unchanged — this
-  // only activates once a line actually has more than one citation to disambiguate between.
-  function ownedContext(line: string, self: RawMatch, siblings: RawMatch[]): string {
-    if (siblings.length === 0) return line;
-    const spans: { text: string; start: number; end: number }[] = [];
-    for (const m of line.matchAll(/"[^"\n]{3,200}"/g)) spans.push({ text: m[0], start: m.index, end: m.index + m[0].length });
-    for (const m of line.matchAll(/`[^`\n]{2,200}`/g)) spans.push({ text: m[0], start: m.index, end: m.index + m[0].length });
-    for (const m of line.matchAll(/\{\{[\w.-]+\}\}/g)) spans.push({ text: m[0], start: m.index, end: m.index + m[0].length });
-    const distanceTo = (span: { start: number; end: number }, c: RawMatch): number => {
+  // Ownership is decided the same way FINDING 1 (below) already decides it for two citations
+  // sharing one physical line, generalised from "same line" to "within the window": each
+  // quote/backtick/placeholder span is attributed to whichever citation's own match sits closest to
+  // it, and a span on a citation's own line always beats a span merely adjacent to it. A citation
+  // with no other citation contesting its window keeps the window's full text as context, same as
+  // the single-line design kept the full line.
+  //
+  // Accepted cost, replayed against every citation in the tree at the time of this repair: a
+  // citation whose window contains someone ELSE's quoted phrase (not a rival citation's own token,
+  // just unrelated nearby prose -- a title reference, a variable name) can have that phrase swept in
+  // as one of its candidate tokens. This does not by itself fail the citation: checkCitation only
+  // fails when NONE of a citation's tokens match its target, so a bystander token that doesn't match
+  // rides along harmlessly as long as the citation's real token is also within reach. It only
+  // produces a false failure for a citation whose window carries no real token AT ALL -- which the
+  // repair round found for a small, now-fixed set of correct citations (moved or added a token
+  // directly onto the citing line so it always wins on distance) rather than by narrowing the window
+  // back down and reintroducing the 0-of-5 detection gap.
+  function windowContext(rm: RawMatch, allMatches: readonly RawMatch[]): string {
+    const windowLines = [rm.ln - 1, rm.ln, rm.ln + 1].filter(
+      (ln) => ln >= 1 && ln <= lines.length && isCommentAt(ln),
+    );
+    const rivals = allMatches.filter((o) => o !== rm && windowLines.includes(o.ln));
+    if (rivals.length === 0) return windowLines.map((ln) => lines[ln - 1] ?? "").join("\n");
+
+    interface Span {
+      text: string;
+      ln: number;
+      start: number;
+      end: number;
+    }
+    const spans: Span[] = [];
+    for (const ln of windowLines) {
+      const lineText = lines[ln - 1] ?? "";
+      for (const m of lineText.matchAll(/"[^"\n]{3,200}"/g)) spans.push({ text: m[0], ln, start: m.index, end: m.index + m[0].length });
+      for (const m of lineText.matchAll(/`[^`\n]{2,200}`/g)) spans.push({ text: m[0], ln, start: m.index, end: m.index + m[0].length });
+      for (const m of lineText.matchAll(/\{\{[\w.-]+\}\}/g)) spans.push({ text: m[0], ln, start: m.index, end: m.index + m[0].length });
+    }
+    // A span on a DIFFERENT line than the candidate citation is always farther than a span on the
+    // citation's own line, so cross-line distance is offset well past any possible intra-line
+    // distance; the exact magnitude only has to preserve that ordering, since the window radius is
+    // one line either side and two citations can compete for a shared span from opposite sides.
+    const distanceTo = (span: Span, c: RawMatch): number => {
+      if (span.ln !== c.ln) return 1_000_000 + Math.abs(span.ln - c.ln);
       if (span.start >= c.localEnd) return span.start - c.localEnd;
       if (span.end <= c.localStart) return c.localStart - span.end;
       return 0; // overlapping (e.g. a citation nested inside its own backtick span): treat as owned
     };
     const owned = spans.filter((span) => {
-      const selfDist = distanceTo(span, self);
-      return siblings.every((sib) => selfDist < distanceTo(span, sib));
+      const selfDist = distanceTo(span, rm);
+      return rivals.every((rival) => selfDist < distanceTo(span, rival));
     });
     return owned.map((s) => s.text).join(" ");
   }
 
   const citations: Citation[] = [];
   for (const rm of rawMatches) {
-    const line = lines[rm.ln - 1] ?? "";
-    const siblings = rawMatches.filter((o) => o !== rm && o.ln === rm.ln);
     citations.push({
       sourceFile,
       sourceLine: rm.ln,
       targetSpec: rm.targetSpec,
       startLine: rm.startLine,
       endLine: rm.endLine,
-      context: ownedContext(line, rm, siblings),
+      context: windowContext(rm, rawMatches),
       raw: rm.raw,
     });
   }
@@ -275,6 +332,18 @@ export interface CheckResult {
   tokenChecked: boolean;
 }
 
+// `text.split(/\r?\n/)` counts one line too many whenever the file ends with a trailing
+// newline: "a\nb\n".split(/\r?\n/) is ["a", "b", ""], and that trailing "" is a split artifact,
+// not a real line. Left uncorrected this both fails OPEN (a citation to the line one past the
+// real end resolves as "in bounds" because the phantom empty element covers it) and misreports
+// the count in the checker's own "out of bounds" message (one line too high). Dropping a single
+// trailing "" element is enough: a file with no trailing newline never produces one, and an
+// empty file ("".split(...) === [""]) correctly reduces to zero lines.
+function splitLines(text: string): string[] {
+  const raw = text.split(/\r?\n/);
+  return raw.length > 0 && raw[raw.length - 1] === "" ? raw.slice(0, -1) : raw;
+}
+
 export function checkCitation(
   citation: Citation,
   allFiles: readonly string[],
@@ -284,27 +353,31 @@ export function checkCitation(
   if (resolution.status === "not-found") {
     return {
       ok: false,
-      reason: `target "${citation.targetSpec}" matches no tracked file`,
+      reason: `citation \`${citation.raw}\`: target "${citation.targetSpec}" matches no tracked file`,
       tokenChecked: false,
     };
   }
   if (resolution.status === "ambiguous") {
     return {
       ok: false,
-      reason: `target "${citation.targetSpec}" is ambiguous: matches ${resolution.matches.join(", ")}`,
+      reason: `citation \`${citation.raw}\`: target "${citation.targetSpec}" is ambiguous: matches ${resolution.matches.join(", ")}`,
       tokenChecked: false,
     };
   }
 
   const text = getFileText(resolution.path);
   if (text === null) {
-    return { ok: false, reason: `could not read resolved target ${resolution.path}`, tokenChecked: false };
+    return {
+      ok: false,
+      reason: `citation \`${citation.raw}\`: could not read resolved target ${resolution.path}`,
+      tokenChecked: false,
+    };
   }
-  const lines = text.split(/\r?\n/);
+  const lines = splitLines(text);
   if (citation.startLine < 1 || citation.startLine > citation.endLine || citation.endLine > lines.length) {
     return {
       ok: false,
-      reason: `cited range ${citation.startLine}-${citation.endLine} is out of bounds for ${resolution.path} (${lines.length} lines)`,
+      reason: `citation \`${citation.raw}\`: cited range ${citation.startLine}-${citation.endLine} is out of bounds for ${resolution.path} (${lines.length} lines)`,
       tokenChecked: false,
     };
   }
@@ -321,7 +394,7 @@ export function checkCitation(
   if (!matched) {
     return {
       ok: false,
-      reason: `none of [${tokens.map((t) => JSON.stringify(t)).join(", ")}] found in ${resolution.path}:${citation.startLine}-${citation.endLine}`,
+      reason: `citation \`${citation.raw}\`: none of [${tokens.map((t) => JSON.stringify(t)).join(", ")}] found in ${resolution.path}:${citation.startLine}-${citation.endLine}`,
       tokenChecked: true,
     };
   }

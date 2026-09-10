@@ -8,12 +8,19 @@
 //   found so a drifted citation fails a test naming both ends, per the issue's "done" criterion.
 //   This is also where the mechanism gets registered into CI: it runs under the existing
 //   `bun test` job in .github/workflows/test.yml, the same way test/notice.test.ts's live
-//   repo-content scan already does, with no separate workflow step needed. See the verification
-//   note in this file's companion PR/commit for the real run this was checked against: 30
-//   citations found in the live tree at the time this landed, 0 failing after two real drifted
-//   citations this checker caught were fixed (core/claude/hooks/identity-patterns.sh's citation
-//   was wrapped across a line break mid-path, and install/Install-Harness.Tests.ps1 cited
-//   CONTRIBUTING.md:45 for text that had moved to :49).
+//   repo-content scan already does, with no separate workflow step needed.
+//
+// REPAIR ROUND (issue #98's own review): the checker's first commit resolved every citation
+// structurally but content-verified only 4 of 30, and a wider replay by hand found real drift in
+// citations that resolution alone could not see -- a 0-of-5 true-positive rate against known
+// drift. This round widened the token-search window (see citation-drift.ts's WINDOW note) and
+// fixed nine citations found genuinely stale by reading both ends against the live tree,
+// including the three from issues #116 and #118 that a prior round found but could not fix
+// in-scope. Content-verified citations went from 4 of 30 to 28 of 31 (the +1 in the denominator is
+// install/Install-Account.ps1:62, invisible to the OLD isCommentLine inside a PowerShell
+// `<# ... #>` block and only found once that was fixed too). The 3 that remain unverified are
+// named and pinned by the exact-count test at the end of the live-scan section below, not folded
+// into a percentage or left to a floor that could grow without anything noticing.
 
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -116,6 +123,20 @@ describe("extractCitations", () => {
     ]);
   });
 
+  test("finds a path-qualified named-extensionless citation, not only the bare form", () => {
+    // Repair round on #98: the path-prefix group used to sit inside the FILE_EXT alternative
+    // only, so a real path like "core/claude/hooks/pre-commit:42" could never match -- the regex
+    // engine could only start NAMED_EXTENSIONLESS's alternative at "pre-commit" itself, and the
+    // lookbehind then saw the "/" right before it and refused to start there at all. Broken and,
+    // per a live scan of core/ and install/ at the time this was found, unexercised: no citation
+    // in the tree used this shape yet, so nothing had ever turned this red. Fixed by hoisting the
+    // path-prefix group out of the alternation so it applies to both arms.
+    const citations = extractCitations("a.ts", "// see core/claude/hooks/pre-commit:42 for the guard\n");
+    expect(citations).toEqual([
+      expect.objectContaining({ targetSpec: "core/claude/hooks/pre-commit", startLine: 42 }),
+    ]);
+  });
+
   test("treats every non-blank line as commentable in a .md source file", () => {
     const citations = extractCitations("notes.md", "See other.ts:5 for background.\n");
     expect(citations).toEqual([expect.objectContaining({ targetSpec: "other.ts", startLine: 5 })]);
@@ -124,6 +145,36 @@ describe("extractCitations", () => {
   test("treats a source file's extension case-insensitively (uppercase .MD is still markdown)", () => {
     const citations = extractCitations("NOTES.MD", "See other.ts:9 for background.\n");
     expect(citations).toEqual([expect.objectContaining({ targetSpec: "other.ts", startLine: 9 })]);
+  });
+
+  test("recognizes a continuation line inside a PowerShell <# ... #> block as a comment", () => {
+    // Repair round on #98: isCommentLine tested only leading characters, so a line inside a
+    // PowerShell help block that opens with `<#` on an earlier line -- a `.PARAMETER` description,
+    // say -- carries none of `//`, `#`, `*` or `/*` and was invisible to extractCitations, not
+    // merely unverified. Live cost measured against this tree: install/Install-Account.ps1:62,
+    // inside its own `<# .SYNOPSIS ... #>` header, citing Restore-ClaudeProject.ps1:88-95.
+    const text = ["<#", ".SYNOPSIS", "    see other.ps1:9 for the reasoning", "#>", "param()"].join(
+      "\n",
+    );
+    const citations = extractCitations("a.ps1", text);
+    expect(citations).toEqual([
+      expect.objectContaining({ targetSpec: "other.ps1", startLine: 9, sourceLine: 3 }),
+    ]);
+  });
+
+  test("does not treat code after a closed PowerShell block comment as still inside one", () => {
+    // If the state machine failed to close the block, this line -- plain code, no leading `#` --
+    // would still read as commented and the string literal inside it would be (wrongly) extracted
+    // as a citation, the same false-positive shape as the very first test in this describe block.
+    const text = ['<# opens and closes here #>', '$path = "other.ps1:9"'].join("\n");
+    const citations = extractCitations("a.ps1", text);
+    expect(citations).toEqual([]);
+  });
+
+  test("does not mistake code between two PowerShell block comments for being inside one", () => {
+    const text = ["<# one #>", "$code = 'not a comment'", "<# see other.ps1:9 #>"].join("\n");
+    const citations = extractCitations("a.ps1", text);
+    expect(citations).toEqual([expect.objectContaining({ targetSpec: "other.ps1", startLine: 9, sourceLine: 3 })]);
   });
 });
 
@@ -256,6 +307,31 @@ describe("checkCitation", () => {
     expect(result.reason).toContain("out of bounds");
   });
 
+  // Repair round on #98: `text.split(/\r?\n/)` counts a trailing newline's split artifact as an
+  // extra line, so a target file ending in "\n" both FAILED OPEN on a citation to the line one
+  // past the real end (the phantom empty element covered it) and misreported the count in this
+  // checker's own "out of bounds" message. "only\ntwo\nlines\n" has two real lines; a citation to
+  // line 3 must be rejected as out of bounds, not accepted because the split produced three
+  // elements.
+  test("fails closed on the line past the real end even when the target file has a trailing newline", () => {
+    const citation = {
+      sourceFile: "a.ts",
+      sourceLine: 1,
+      targetSpec: "b.ts",
+      startLine: 3,
+      endLine: 3,
+      context: "see b.ts:3",
+      raw: "b.ts:3",
+    };
+    const getText = (p: string) => (p === "b.ts" ? "one\ntwo\n" : null);
+    const result = checkCitation(citation, files, getText);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("out of bounds");
+    // The misreport half of the same bug: the message must name the real line count (2), not the
+    // split artifact's inflated one (3).
+    expect(result.reason).toContain("(2 lines)");
+  });
+
   // FINDING 4 (review round on #98): the two tests below pin bounds-check branches the live-scan
   // generated tests never happen to exercise (no citation in this repo is written with an
   // inverted range or resolves to a file readFileSync can't read), so a regression here was
@@ -361,6 +437,17 @@ function gitLsFiles(): string[] {
 }
 
 const allFiles = gitLsFiles();
+// core/ and install/ only, matching issue #98's own scope and its audit -- deliberate, not an
+// accident of the filter's shape. test/ (this checker's own home, including this file and
+// citation-drift.ts) is excluded on purpose: those comments document the checker's reasoning
+// about ITSELF while it is under active edit, so a citation there routinely names a line number
+// that is true only in the commit that wrote it (see, e.g., the WHOLE-BLOCK/one-line-either-side
+// examples in citation-drift.ts's WINDOW note, which cite real line numbers in real files that
+// this repair round itself moved). Running the live scan against the tool's own commentary about
+// its own history would make every repair round on this file fight its own test suite over
+// numbers that describe the past, not a live invariant. Scoping to core/ and install/ means this
+// checker enforces the invariant on the repo it protects without also trying to enforce it on
+// the sentence explaining why the invariant exists.
 const sourceFiles = allFiles.filter((f) => f.startsWith("core/") || f.startsWith("install/"));
 
 const fileTextCache = new Map<string, string | null>();
@@ -392,12 +479,17 @@ describe("citation drift — live scan of core/ and install/", () => {
     expect(sourceFiles.some((f) => f.startsWith("install/"))).toBe(true);
   });
 
-  // Guards against the extractor regressing to matching nothing, which would make every case
-  // below vacuously pass -- a test that cannot fail is worse than no test. 20 is a floor below
-  // the 30 measured in the tree this checker was written against, giving room for legitimate
-  // citations to be added or removed without this floor itself needing a matching edit.
-  test("the extractor finds a real population of citations to check", () => {
-    expect(allCitations.length).toBeGreaterThanOrEqual(20);
+  // A floor of 20 against a measured 30 let ten citations vanish from the extractor's output
+  // with nothing here noticing -- ten generated `test()` cases simply stop existing, which reads
+  // as a smaller, faster suite rather than a regression. Repair round on #98 replaced the floor
+  // with the exact count: 31 in this tree today (30 the checker's first commit measured, +1 from
+  // fixing isCommentLine's PowerShell `<# ... #>` blind spot, which surfaced a citation that was
+  // previously invisible to extractCitations rather than merely unverified --
+  // install/Install-Account.ps1:62, citing Restore-ClaudeProject.ps1:88-95). A real edit to the
+  // population -- a citation added, removed, or a comment restructured so a match splits or
+  // merges -- updates this number in the same commit; that is the point, not a maintenance cost.
+  test("the extractor finds exactly the live population of citations to check", () => {
+    expect(allCitations.length).toBe(31);
   });
 
   for (const citation of allCitations) {
@@ -410,4 +502,36 @@ describe("citation drift — live scan of core/ and install/", () => {
       expect(result.ok, result.reason).toBe(true);
     });
   }
+
+  // FAIL OPEN, NAMED. `tokenChecked: false` on an `ok: true` result is this checker's honest
+  // ceiling on a citation with no explicit token within reach: file exists, range in bounds,
+  // CONTENT unverified. That gap is the whole reason #98 exists (0-of-5 true positives measured
+  // against a same-line-only design that could not see it), so leaving it silent here would
+  // recreate the exact failure this repair round closed, one level up. This asserts the count
+  // rather than merely logging it, so CI itself is the thing that notices: 28 of 31 citations in
+  // the tree are content-verified after this round (up from 4 of 30 before it), and the 3 left
+  // are named below rather than folded into a percentage.
+  //
+  // Left unresolved rather than guessed at: install/Export-Account.Tests.ps1:1603 carries two
+  // same-file citations (":739-742" and ":744-749") whose own paragraph describes content neither
+  // range holds (executable test setup, not the comments the paragraph says assert an ablation is
+  // caught), which reads as real drift, but nothing in the file names where the correct target
+  // moved to and guessing one would risk shipping a second wrong citation in its place. And
+  // install/Export-Account.Tests.ps1:1176 cites mcp-servers.json:14 for a historical incident
+  // ("task-14-addendum's scrub"), where the line today correctly holds the post-fix placeholder --
+  // plausibly a citation to where the leak WAS, not a claim about what is there now, but not
+  // provable from the text alone. Fixing the producer, not guessing at the consumer, per this
+  // repo's own fix-quality rule: a citation this checker cannot confidently repoint is a citation
+  // it reports on, not one it silently "fixes" into some other kind of wrong.
+  test("exactly 3 citations remain content-unverified, and this is the full list", () => {
+    const unverified = allCitations
+      .map((c) => ({ c, r: checkCitation(c, allFiles, getFileText) }))
+      .filter(({ r }) => r.ok && !r.tokenChecked)
+      .map(({ c }) => `${c.sourceFile}:${c.sourceLine}`);
+    expect(unverified).toEqual([
+      "install/Export-Account.Tests.ps1:1176",
+      "install/Export-Account.Tests.ps1:1603",
+      "install/Export-Account.Tests.ps1:1603",
+    ]);
+  });
 });

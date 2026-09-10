@@ -7,7 +7,8 @@
 # parameters, so dot-sourcing it would prompt. A second copy of Get-ProjectSlug would drift
 # from Restore's the moment either was edited, and the slug rule is the one place where a
 # silent divergence produces session folders that look healthy while --resume reports nothing.
-# Restore-ClaudeProject.Tests.ps1:8-17 already lifts the same three the same way.
+# Restore-ClaudeProject.Tests.ps1:8-17 already lifts the same three (`Get-ProjectSlug` among
+# them) the same way.
 #
 # The lift, rather than a move (deleting the three from Restore-ClaudeProject.ps1 and having it
 # dot-source this file instead): rejected on inspection, not merely undone.

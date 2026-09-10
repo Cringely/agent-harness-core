@@ -1190,8 +1190,8 @@ Describe "Install-Account" {
             # Task 10 review, finding 3: the line above re-wraps $s.hooks.PreToolUse in @() before
             # reading it, so it reads the same whether the merged event serialised as a genuine
             # one-element JSON array or a bare object (the single-element pipeline-output collapse
-            # Install-Harness.ps1:851-853 already names). Asserted against the raw file text, which
-            # a re-parse cannot paper over.
+            # Install-Harness.ps1:1016-1018 already names as "hooks": {...}). Asserted against the
+            # raw file text, which a re-parse cannot paper over.
             $raw | Should -Match '"PreToolUse":\s*\['
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
@@ -1255,10 +1255,11 @@ Describe "Install-Account" {
     # The brief's three tests above only ever feed the phantom-null shapes through the payload,
     # which Convert-SettingsForTarget already sanitises before Merge-AccountSettings ever sees
     # it. The receiver's own settings.json takes no such pass, and Merge-AccountSettings and
-    # Merge-HookEvent do their own @()-wrapping of its properties, so the same phantom-null
-    # hazard documented at Install-Account.ps1:366-371 recurs here, fed this time by hand-edited
-    # data instead of the exporter's own output. Four cases below, one It per site, matching
-    # this file's convention for the three sites already pinned on the payload side.
+    # Merge-HookEvent do their own @()-wrapping of its properties, so the same
+    # "Cannot index into a null array" hazard documented at Install-Account.ps1:636-648 recurs
+    # here, fed this time by hand-edited data instead of the exporter's own output. Four cases
+    # below, one It per site, matching this file's convention for the three sites already pinned
+    # on the payload side.
     It "merges a payload hook event into an existing settings.json whose same event is explicitly null" {
         $p = New-StandInPayload; $h = New-StandInClaudeHome
         try {
