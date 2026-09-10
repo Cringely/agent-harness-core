@@ -79,6 +79,52 @@ describe("extractCitations", () => {
       expect.objectContaining({ targetSpec: "target.ts", startLine: 9, sourceLine: 201 }),
     ]);
   });
+
+  // FINDING 4 (review round on #98): every citation test below the live-scan section is
+  // GENERATED from extractCitations' own output, so a regression that makes the extractor find
+  // FEWER citations deletes tests instead of turning any of them red — the only backstop is a
+  // floor on the total count, with ten citations of slack against the live population. The eight
+  // tests below pin the specific extractor behaviors a review round showed silently regress
+  // that way (each one verified to fail against the described mutation, restored after).
+
+  test("finds a cross-file citation whose target is a .md file", () => {
+    // Silent under the live-scan floor alone: dropping "md" from FILE_EXT stops the target regex
+    // from matching a .md filename at all, which happened to delete 3 of this repo's only 4
+    // token-verified citations (every one of them cites a .md target) without reddening anything.
+    const citations = extractCitations("a.ts", "// see notes.md:12 for background\n");
+    expect(citations).toEqual([expect.objectContaining({ targetSpec: "notes.md", startLine: 12 })]);
+  });
+
+  test("recognizes a JSDoc-style '*' continuation line as a comment", () => {
+    const text = ["/**", " * see other.ts:5 for the reasoning", " */", "const x = 1;"].join("\n");
+    const citations = extractCitations("a.ts", text);
+    expect(citations).toEqual([
+      expect.objectContaining({ targetSpec: "other.ts", startLine: 5, sourceLine: 2 }),
+    ]);
+  });
+
+  test("recognizes a line starting with a C-style block-comment opener as a comment", () => {
+    const text = "/* see other.ts:7 */\nconst x = 1;\n";
+    const citations = extractCitations("a.ts", text);
+    expect(citations).toEqual([expect.objectContaining({ targetSpec: "other.ts", startLine: 7 })]);
+  });
+
+  test("finds a citation whose target is a named extensionless hook file", () => {
+    const citations = extractCitations("script.sh", "# see pre-commit:10 for the guard\n");
+    expect(citations).toEqual([
+      expect.objectContaining({ targetSpec: "pre-commit", startLine: 10, endLine: 10 }),
+    ]);
+  });
+
+  test("treats every non-blank line as commentable in a .md source file", () => {
+    const citations = extractCitations("notes.md", "See other.ts:5 for background.\n");
+    expect(citations).toEqual([expect.objectContaining({ targetSpec: "other.ts", startLine: 5 })]);
+  });
+
+  test("treats a source file's extension case-insensitively (uppercase .MD is still markdown)", () => {
+    const citations = extractCitations("NOTES.MD", "See other.ts:9 for background.\n");
+    expect(citations).toEqual([expect.objectContaining({ targetSpec: "other.ts", startLine: 9 })]);
+  });
 });
 
 describe("resolveTarget", () => {
@@ -210,6 +256,42 @@ describe("checkCitation", () => {
     expect(result.reason).toContain("out of bounds");
   });
 
+  // FINDING 4 (review round on #98): the two tests below pin bounds-check branches the live-scan
+  // generated tests never happen to exercise (no citation in this repo is written with an
+  // inverted range or resolves to a file readFileSync can't read), so a regression here was
+  // invisible to the floor on citation count -- both mutations left every generated test green.
+
+  test("fails closed when the cited range is inverted (start after end)", () => {
+    const citation = {
+      sourceFile: "a.ts",
+      sourceLine: 1,
+      targetSpec: "b.ts",
+      startLine: 5,
+      endLine: 2,
+      context: "see b.ts:5-2",
+      raw: "b.ts:5-2",
+    };
+    const getText = (p: string) => (p === "b.ts" ? "one\ntwo\nthree\nfour\nfive" : null);
+    const result = checkCitation(citation, files, getText);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("out of bounds");
+  });
+
+  test("fails closed when the resolved target file cannot be read", () => {
+    const citation = {
+      sourceFile: "a.ts",
+      sourceLine: 1,
+      targetSpec: "b.ts",
+      startLine: 1,
+      endLine: 1,
+      context: "see b.ts:1",
+      raw: "b.ts:1",
+    };
+    const result = checkCitation(citation, files, () => null);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("could not read");
+  });
+
   test("passes structurally, unverified, when the citation carries no explicit token", () => {
     const citation = {
       sourceFile: "a.ts",
@@ -223,6 +305,39 @@ describe("checkCitation", () => {
     const getText = (p: string) => (p === "b.ts" ? "anything at all" : null);
     const result = checkCitation(citation, files, getText);
     expect(result).toEqual({ ok: true, tokenChecked: false });
+  });
+});
+
+describe("two citations sharing one physical line (FINDING 1, review round on #98)", () => {
+  // Reproduces the review's own repro exactly: two citations on one comment line, each with its
+  // own quoted token. Before the fix, extractCitations gave both citations the WHOLE line as
+  // context, so checkCitation's `tokens.some(t => cited.includes(t))` could pass one citation
+  // using a token that was actually written next to its neighbor. Here a.ts has genuinely
+  // drifted -- its target line no longer says "first thing" -- but it happens to contain "second
+  // thing" (b's token, not a's), which is exactly the contamination that used to produce a false
+  // pass on a real drift.
+  test("a genuine drift at one citation is not masked by its neighbor's token", () => {
+    const text = '// see a.ts:1 ("first thing") and b.ts:1 ("second thing")\n';
+    const citations = extractCitations("both.ts", text);
+    expect(citations).toHaveLength(2);
+    const [citeA, citeB] = citations;
+    expect(citeA.targetSpec).toBe("a.ts");
+    expect(citeB.targetSpec).toBe("b.ts");
+
+    const files = ["both.ts", "a.ts", "b.ts"];
+    const getText = (p: string) => {
+      if (p === "a.ts") return "totally different content, but mentions second thing anyway";
+      if (p === "b.ts") return "reads second thing here";
+      return null;
+    };
+
+    const resultA = checkCitation(citeA, files, getText);
+    expect(resultA.ok).toBe(false); // real drift: a's own token, "first thing", is gone
+    expect(resultA.tokenChecked).toBe(true);
+    expect(resultA.reason).toContain("first thing");
+
+    const resultB = checkCitation(citeB, files, getText);
+    expect(resultB).toEqual({ ok: true, tokenChecked: true }); // b's own token is genuinely there
   });
 });
 
