@@ -88,7 +88,7 @@ Vendored from https://github.com/udaysharmadev/Not-Ai at commit
 upstream LICENSE travels with both trees rather than being referenced from here, so
 this one carries stated permission that the two above do not.
 
-The skill is `SKILL.md` plus five reference files. The tools tree is a deterministic
+The skill is `SKILL.md` plus a `reference/` directory. The tools tree is a deterministic
 prose gate: `gate.py` and `not_ai_core/`, pure Python 3.10+ standard library with no
 third-party dependencies, no network access and no subprocess use.
 
