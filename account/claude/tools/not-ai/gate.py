@@ -31,6 +31,19 @@ def main() -> int:
     if args.stdin or not args.input_file:
         text = sys.stdin.read()
     else:
+        # CodeQL py/path-injection fires on the two lines below: argv reaches Path() and
+        # read_text(). Alerts #16 and #17 are dismissed as "won't fix" (2026-09-10), because
+        # the caller and the file sit in the same trust domain. The person typing the filename
+        # is the person running the process, so there is no privilege boundary for a traversal
+        # to cross. Confining to a base directory breaks documented usage, since the skill's
+        # own examples pass arbitrary paths and this repository's tests invoke the gate across
+        # drives, and making that base configurable returns argv to the sink.
+        #
+        # Dismissal rather than an inline directive or a query filter: this repository runs
+        # CodeQL default setup with no workflow file, so a config-file filter would mean
+        # converting to advanced setup and owning the workflow. Scanning stays enabled on this
+        # tree either way, which is deliberate: a genuine polynomial ReDoS was found in the
+        # sibling module the same day, and a tree-wide exclusion would have hidden it.
         path = Path(args.input_file)
         if not path.is_file():
             print(f"Error: file not found: {path}", file=sys.stderr)
