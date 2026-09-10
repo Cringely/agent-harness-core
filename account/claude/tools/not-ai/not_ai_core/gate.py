@@ -97,7 +97,7 @@ def words(text: str) -> list[str]:
     return WORD_RE.findall(text)
 
 
-def _prose_blocks(text: str) -> list[str]:
+def _prose_blocks(text: str) -> tuple[list[str], bool]:
     """Partition markdown into paragraph- and list-item-sized units of prose.
 
     Excludes fenced code (program text, not prose), ATX (`#`-style) headings,
@@ -117,6 +117,14 @@ def _prose_blocks(text: str) -> list[str]:
     headings aren't recognised, because this repository's docs use fenced
     code and `#`-headings exclusively. Extend the patterns above if that
     changes.
+
+    A fence that never closes was never rendered as code by anything reading
+    this document either, so its remainder is recovered as prose rather than
+    dropped (issue #122 finding 2: a stray opening marker used to swallow
+    every real sentence after it, silently, all the way to end of file). The
+    second return value is `True` when that recovery happened, so the caller
+    can still surface the malformed fence instead of passing silently on a
+    document whose structure is broken even though its prose got measured.
     """
     lines = text.splitlines()
     blocks: list[str] = []
@@ -124,6 +132,7 @@ def _prose_blocks(text: str) -> list[str]:
     content_col: int | None = None
     in_fence = False
     fence_char = ""
+    fence_lines: list[str] = []
 
     def flush() -> None:
         nonlocal content_col
@@ -141,12 +150,16 @@ def _prose_blocks(text: str) -> list[str]:
         if in_fence:
             if fence_match and fence_match.group(1)[0] == fence_char:
                 in_fence = False
+                fence_lines.clear()
+            else:
+                fence_lines.append(line)
             index += 1
             continue
         if fence_match:
             flush()
             in_fence = True
             fence_char = fence_match.group(1)[0]
+            fence_lines = []
             index += 1
             continue
 
@@ -189,19 +202,24 @@ def _prose_blocks(text: str) -> list[str]:
         index += 1
 
     flush()
-    return blocks
+    unterminated = in_fence
+    if unterminated and fence_lines:
+        recovered, _ = _prose_blocks("\n".join(fence_lines))
+        blocks.extend(recovered)
+    return blocks, unterminated
 
 
-def sentences(text: str) -> list[str]:
+def sentences(text: str) -> tuple[list[str], bool]:
     items: list[str] = []
-    for block in _prose_blocks(text):
+    blocks, unterminated_fence = _prose_blocks(text)
+    for block in blocks:
         normalized = re.sub(r"\s+", " ", block).strip()
         if not normalized:
             continue
         items.extend(
             sentence.strip() for sentence in SENTENCE_RE.split(normalized) if len(words(sentence)) >= 2
         )
-    return items
+    return items, unterminated_fence
 
 
 def _find(pattern: str, text: str) -> Iterable[re.Match[str]]:
@@ -233,13 +251,14 @@ def evaluate(
 ) -> GateResult:
     """Evaluate text with deterministic, genre-aware checks.
 
-    Empty output and explicitly missing protected terms are errors. Typography
-    becomes an error only when the caller requests an ASCII house style.
-    Everything else directs editorial attention without demanding a rewrite.
+    Empty output, an unterminated fence, and explicitly missing protected
+    terms are errors. Typography becomes an error only when the caller
+    requests an ASCII house style. Everything else directs editorial
+    attention without demanding a rewrite.
     """
     policy: GenrePolicy = get_policy(genre)
     tokens = words(text)
-    items = sentences(text)
+    items, unterminated_fence = sentences(text)
     lengths = [len(words(item)) for item in items]
     distinct_openings, max_opening = _opening_count(items)
     max_short_run = _max_consecutive_short(lengths)
@@ -261,6 +280,14 @@ def evaluate(
     if not text.strip():
         findings.append(Finding("nonempty", "error", "Text is empty."))
         return GateResult(policy.name, 0, counts, tuple(findings))
+    if unterminated_fence:
+        findings.append(Finding(
+            "unterminated-fence",
+            "error",
+            "A fenced code block has no closing marker. Its trailing content was "
+            "recovered as prose for measurement, but the document is malformed "
+            "until the fence is closed.",
+        ))
     punctuation_severity = "error" if ascii_punctuation else "review"
     punctuation_context = (
         "The requested ASCII house style does not allow this punctuation."

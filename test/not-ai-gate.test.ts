@@ -103,12 +103,21 @@ describe("not-ai gate — markdown-aware sentence segmentation", () => {
     // before the next bullet, so all three glue into one 32-word "sentence". Fixed: each
     // bullet is its own unit, so the short third item (4 words) counts toward
     // short_under_8 instead of being absorbed into a long fused blob.
+    //
+    // Deliberately no terminal punctuation on any bullet (issue #122 review finding 1):
+    // with periods at the end of each item, this test could not fail. Deleting the
+    // flush() that starts a new block per list item still left three "sentences", because
+    // SENTENCE_RE finds a period-space-capital break at each bullet boundary anyway once
+    // the three are joined into one glued block -- the assertion was catching punctuation,
+    // not the block boundary its name claims to measure. With no periods, a glued block has
+    // no break at all and collapses to one "sentence", so the assertion now depends on
+    // _prose_blocks actually starting a new unit per bullet.
     const { json } = runGate(
       "list-items.md",
       [
-        "- First item explains one option for handling the situation in some real detail today given context.",
-        "- Second item explains another option worth considering for handling this same case.",
-        "- Third item is short.",
+        "- First item explains one option for handling the situation in some real detail today given context",
+        "- Second item explains another option worth considering for handling this same case",
+        "- Third item is short",
         "",
       ].join("\n"),
     );
@@ -194,5 +203,37 @@ describe("not-ai gate — markdown-aware sentence segmentation", () => {
     expect(json.counts.sentence_length_sd).toBe(0.0);
     expect(json.word_count).toBeGreaterThan(0); // word_count is unchanged by this fix; see report
     expect(exitCode).toBe(0); // no error-severity finding: non-empty text, no protected terms
+  });
+
+  test("an unterminated fence does not silently discard the prose below it", () => {
+    // Review finding 2: a fence with no closing marker used to stay "in_fence" for the
+    // rest of _prose_blocks' scan, so every line after it -- including real prose two
+    // paragraphs deep -- was dropped with no trace. Measured before this fix: this exact
+    // fixture read sentences=1 (only the intro line before the fence), passed=true, exit 0.
+    // A tool that silently measures nothing is worse than one that errors, because the
+    // caller cannot tell an empty result from a clean one, so a document like this must not
+    // pass silently. Fixed: the fence's unclosed remainder is recovered as prose (it was
+    // never rendered as code by anything either, having no closing marker), so all three
+    // sentences are counted, and an explicit "unterminated-fence" error is still raised
+    // because the markdown itself stays malformed until the fence is closed.
+    const { json, exitCode } = runGate(
+      "unterminated-fence.md",
+      [
+        "Intro sentence before the stray fence explains what follows in some useful detail.",
+        "",
+        "```",
+        "",
+        "First paragraph below the unterminated fence makes one real point in enough detail to matter here today.",
+        "",
+        "Second paragraph below the unterminated fence makes a second real point in enough detail to matter here today.",
+        "",
+      ].join("\n"),
+    );
+    expect(json.counts.sentences).toBe(3);
+    expect(json.findings).toContainEqual(
+      expect.objectContaining({ rule: "unterminated-fence", severity: "error" }),
+    );
+    expect(json.passed).toBe(false);
+    expect(exitCode).toBe(1);
   });
 });
