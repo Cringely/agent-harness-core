@@ -512,12 +512,12 @@ describe("citation drift — live scan of core/ and install/", () => {
   // the tree are content-verified after this round (up from 4 of 30 before it), and the 3 left
   // are named below rather than folded into a percentage.
   //
-  // Left unresolved rather than guessed at: install/Export-Account.Tests.ps1:1603 carries two
+  // Left unresolved rather than guessed at: install/Export-Account.Tests.ps1:1637 carries two
   // same-file citations (":739-742" and ":744-749") whose own paragraph describes content neither
   // range holds (executable test setup, not the comments the paragraph says assert an ablation is
   // caught), which reads as real drift, but nothing in the file names where the correct target
   // moved to and guessing one would risk shipping a second wrong citation in its place. And
-  // install/Export-Account.Tests.ps1:1176 cites mcp-servers.json:14 for a historical incident
+  // install/Export-Account.Tests.ps1:1210 cites mcp-servers.json:14 for a historical incident
   // ("task-14-addendum's scrub"), where the line today correctly holds the post-fix placeholder --
   // plausibly a citation to where the leak WAS, not a claim about what is there now, but not
   // provable from the text alone. Fixing the producer, not guessing at the consumer, per this
@@ -529,9 +529,9 @@ describe("citation drift — live scan of core/ and install/", () => {
       .filter(({ r }) => r.ok && !r.tokenChecked)
       .map(({ c }) => `${c.sourceFile}:${c.sourceLine}`);
     expect(unverified).toEqual([
-      "install/Export-Account.Tests.ps1:1176",
-      "install/Export-Account.Tests.ps1:1603",
-      "install/Export-Account.Tests.ps1:1603",
+      "install/Export-Account.Tests.ps1:1210",
+      "install/Export-Account.Tests.ps1:1637",
+      "install/Export-Account.Tests.ps1:1637",
     ]);
   });
 });
