@@ -2,7 +2,7 @@
   "mcpServers": {
     "1password": {
       "type": "stdio",
-      "command": "C:\\Program Files\\WindowsApps\\Agilebits.1Password_8.12.26.40_x64__amwd9z03whsfe\\onepassword-mcp.exe",
+      "command": "C:\\Users\\user\\AppData\\Local\\Microsoft\\WindowsApps\\1password-mcp.exe",
       "args": [],
       "env": {}
     },
