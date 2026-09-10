@@ -12,7 +12,8 @@ Describe "Export-Account" {
             $claude = Join-Path $standHome '.claude'
             foreach ($d in 'rules', 'agents', 'hooks', 'tools/prose-lint/styles/Cringely',
                 'skills/prose-lint', 'skills/handoff', 'skills/council', 'skills/subagent-prompting',
-                'skills/cloned-skill/.git/refs/heads', 'skills/appsec-kpi-deck/references') {
+                'skills/not-ai', 'skills/cloned-skill/.git/refs/heads',
+                'skills/appsec-kpi-deck/references') {
                 New-Item -ItemType Directory -Path (Join-Path $claude $d) -Force | Out-Null
             }
             'rule body'                | Set-Content (Join-Path $claude 'rules/security.md')
@@ -35,13 +36,17 @@ Describe "Export-Account" {
             'kpi deck spec'            | Set-Content (Join-Path $claude 'skills/appsec-kpi-deck/SKILL.md')
             'kpi deck detail'          | Set-Content (Join-Path $claude 'skills/appsec-kpi-deck/references/deck-spec.md')
 
-            # All six rows of $AccountTemplatedFiles, each carrying a foldable literal. The fold
+            # All seven rows of $AccountTemplatedFiles, each carrying a foldable literal. The fold
             # pass throws on a row it cannot find, by design, so a fixture missing any of them
-            # takes down every other test in this file rather than failing one.
+            # takes down every other test in this file rather than failing one. Measured on
+            # 2026-09-10, adding the not-ai row to the table without adding it here: 20 pass,
+            # 69 fail, every failure the same throw.
             "Core repo: E:\projects\agent-harness-core"                    | Set-Content (Join-Path $claude 'rules/harness-core.md')
             "the core at E:\projects\agent-harness-core"                   | Set-Content (Join-Path $claude 'hooks/harness-core-reminder.sh')
             "vale --config `"$($claude -replace '/', '\')\tools\prose-lint\.vale.ini`"" |
                 Set-Content (Join-Path $claude 'skills/prose-lint/SKILL.md')
+            "python3 `"$($claude -replace '\\', '/')/tools/not-ai/gate.py`" draft.txt" |
+                Set-Content (Join-Path $claude 'skills/not-ai/SKILL.md')
             'write to C:\vault\Handoffs\x.md'                              | Set-Content (Join-Path $claude 'skills/handoff/SKILL.md')
             # Foldable under the exporter's default -HomeSlug, which is Get-ProjectSlug $HOME.
             # Same -creplace, inlined, because this fixture runs before AccountShared is loaded.
@@ -1638,8 +1643,8 @@ exit 0
         # and ":744-749", was never same-file -- checked against f47563e, the commit that wrote it,
         # both ranges landed on Export-Account.ps1's own boundary comments at those exact line
         # numbers, so the filename prefix was dropped by mistake, not drift. Repointed below.)
-        # Export-Account.ps1:993-995 ("a bare `/root` at end of line still fire") and
-        # Export-Account.ps1:997-1002 ("the negated class now also excludes those") are the two
+        # Export-Account.ps1:1002-1004 ("a bare `/root` at end of line still fire") and
+        # Export-Account.ps1:1006-1011 ("the negated class now also excludes those") are the two
         # comments that assert ablation is caught; this It is what makes that true.
         $stand = New-StandInHome
         $out = New-OutputRoot

@@ -27,3 +27,9 @@ node_modules/
 # skips these on the leaf name at any depth; this entry is the second half, so a
 # project that installs the harness cannot commit one either.
 *.local.md
+
+# Python bytecode. The exporter already excludes __pycache__ from the payload at the
+# producer; this catches the other producer, an interpreter run from inside the repo.
+# A .pyc embeds its compile-time source path, which on this workstation is a username.
+__pycache__/
+*.pyc

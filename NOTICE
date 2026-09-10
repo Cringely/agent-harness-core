@@ -79,6 +79,23 @@ Redistributed with attribution but without stated permission, on the same terms 
 beautiful_prose above. If an author of that collection would prefer it removed, open
 an issue and it comes out of the payload.
 
+## not-ai
+
+`account/claude/skills/not-ai/` and `account/claude/tools/not-ai/`.
+
+Vendored from https://github.com/udaysharmadev/Not-Ai at commit
+`6a07d1c1488b94a018d3409a9fde6f7c7e8f93e1`, by Uday Sharma. **MIT licensed**, and the
+upstream LICENSE travels with both trees rather than being referenced from here, so
+this one carries stated permission that the two above do not.
+
+The skill is `SKILL.md` plus a `reference/` directory. The tools tree is a deterministic
+prose gate: `gate.py` and `not_ai_core/`, pure Python 3.10+ standard library with no
+third-party dependencies, no network access and no subprocess use.
+
+Its structural figures come from Reinhart et al., PNAS 2025, which measured 66
+morphosyntactic features across 17,905 texts. Any file in this repository that uses
+those ratios cites that paper, not this vendored copy.
+
 ## Everything else
 
 Everything else under `account/claude/` is original to this workstation: rules, agent
