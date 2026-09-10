@@ -129,7 +129,7 @@ export function readWriteScope(agentType: string, projectDir: string): string | 
  * What it does need is to be a string. `join(42, …)` and `resolve({}, …)` throw, the throw is
  * caught by the outermost handler below, and the hook then exits 0 with no stdout — so a
  * malformed cwd used to convert a deny this gate would have made into silence. Falling back keeps
- * the gate deciding. Mirrors review-gate.ts:810, which narrows the same field the same way.
+ * the gate deciding. Mirrors review-gate.ts:803, which narrows the same field the same way.
  */
 export function readSessionCwd(payload: unknown): string {
   const value = (payload as Record<string, unknown> | null | undefined)?.cwd;
