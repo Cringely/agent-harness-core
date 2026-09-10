@@ -317,15 +317,25 @@ exit 0
         }
     }
 
+    # Issue #74: the bare Should -Throw here, with a trailing Test-Path pair, was the named
+    # pre-existing sibling to the F1 test below -- $claude is this test's -OutputRoot, which
+    # always pre-exists and is never empty, so the unrelated marker guard ("already exists, is
+    # not empty, and carries no marker") throws for this exact scenario independently of the
+    # containment guard under test. A bare Should -Throw is satisfied by either guard, so
+    # deleting the containment guard entirely left this It green. -ExpectedMessage pins the
+    # assertion to the containment guard's own text, the same fix applied to F1 and C1, which
+    # forces a message mismatch (and a red test) once the containment guard stops firing. The
+    # trailing Test-Path pair is then dead by the identical F1/C1 argument: a passing message
+    # match already proves $claude untouched, since the guard throws before Copy-AccountTree is
+    # ever called. Removed rather than kept as decoration.
     It "refuses when -OutputRoot equals -ClaudeHome, and deletes nothing" {
         $stand = New-StandInHome
         $claude = Join-Path $stand '.claude'
         try {
             { & $script:export -ClaudeHome $claude -OutputRoot $claude `
                     -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
-                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp } | Should -Throw
-            Test-Path -LiteralPath (Join-Path $claude 'rules/security.md') | Should -BeTrue
-            Test-Path -LiteralPath (Join-Path $claude 'agents/appsec-sme.md') | Should -BeTrue
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp } |
+                Should -Throw -ExpectedMessage '*must not be the account home or a path inside it*'
         }
         finally {
             Remove-Item -Recurse -Force $stand -ErrorAction SilentlyContinue
@@ -339,9 +349,17 @@ exit 0
         try {
             { & $script:export -ClaudeHome $claude -OutputRoot $nestedOut `
                     -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
-                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp } | Should -Throw
-            Test-Path -LiteralPath (Join-Path $claude 'rules/security.md') | Should -BeTrue
-            Test-Path -LiteralPath (Join-Path $claude 'agents/appsec-sme.md') | Should -BeTrue
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp } |
+                Should -Throw -ExpectedMessage '*must not be the account home or a path inside it*'
+            # The "deletes nothing" half of this test's name, observed rather than asserted by
+            # proxy. The two source-file checks that used to sit here could not fail: the copy
+            # writes into $nestedOut, so nothing under $claude/rules or $claude/agents is ever
+            # at risk and both passed whether the guard ran or not. What discriminates is the
+            # output root itself, which the export creates with New-Item before copying a byte.
+            # Relocate the guard below the copy loop, the mutation this case exists to catch,
+            # and $nestedOut exists.
+            Test-Path -LiteralPath $nestedOut | Should -BeFalse `
+                -Because 'the guard must refuse before the export creates its output root'
         }
         finally {
             Remove-Item -Recurse -Force $stand -ErrorAction SilentlyContinue
@@ -363,6 +381,15 @@ exit 0
         # once the containment check stops catching it first. A bare Should -Throw passed under
         # the ablation this test exists to catch, on that second guard's message instead of this
         # one's, which would have hidden exactly the regression this test is for.
+        #
+        # Issue #74: a trailing Test-Path pair here was dead on arrival and has been removed.
+        # Should -Throw -ExpectedMessage fails (and Pester aborts the remaining statements in this
+        # try block) whenever the thrown message doesn't match, so any Test-Path placed after it
+        # runs only in the branch where the match already succeeded -- which, since the containment
+        # guard throws before Copy-AccountTree is ever called, already proves $claude untouched.
+        # There is no mutation of this guard that leaves the match passing while $claude has been
+        # written to: the two are provably the same fact, not two facts. -ExpectedMessage is the
+        # whole assertion.
         $stand = New-StandInHome
         $claude = Join-Path $stand '.claude'
         try {
@@ -370,8 +397,6 @@ exit 0
                     -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
                     -VaultPath 'C:/vault' -SkipSettings -SkipMcp } |
                 Should -Throw -ExpectedMessage '*must not be the account home or a path inside it*'
-            Test-Path -LiteralPath (Join-Path $claude 'rules/security.md') | Should -BeTrue
-            Test-Path -LiteralPath (Join-Path $claude 'agents/appsec-sme.md') | Should -BeTrue
         }
         finally {
             Remove-Item -Recurse -Force $stand -ErrorAction SilentlyContinue
@@ -448,6 +473,17 @@ exit 0
     # reason and hide a C2 regression the same way an unrelated Copy-Item self-copy error did in
     # fix round 1.
 
+    # Issue #74: a trailing Test-Path pair below was dead on arrival, same reasoning as the F1 test
+    # above. Should -Throw -ExpectedMessage aborts this try block on a mismatch, so a Test-Path
+    # placed after it only ever runs once the expected message has already matched -- and that
+    # message is the C1/C2 guard's own, thrown before Copy-AccountTree is ever called, so a
+    # passing match already proves $claude untouched. Removed rather than kept as decoration.
+    #
+    # The nested-path It directly below shares this exact shape (-ExpectedMessage on the same
+    # guard family, Test-Path trailing it) and is provably dead by the identical argument. Left
+    # alone here: issue #74 named two instances, not three, and this repo's own convention is a
+    # narrow commit per named fix rather than folding in an adjacent one found along the way --
+    # worth a follow-up issue if one doesn't already cover it.
     It "refuses -OutputRoot equal to -ClaudeHome when the session location and the process CWD have diverged" {
         $stand = New-StandInHome
         $claude = Join-Path $stand '.claude'
@@ -458,8 +494,6 @@ exit 0
                     -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
                     -VaultPath 'C:/vault' -SkipSettings -SkipMcp } |
                 Should -Throw -ExpectedMessage '*must not be the account home*'
-            Test-Path -LiteralPath (Join-Path $claude 'rules/security.md') | Should -BeTrue
-            Test-Path -LiteralPath (Join-Path $claude 'agents/appsec-sme.md') | Should -BeTrue
         }
         finally {
             Set-Location -LiteralPath $startLocation
