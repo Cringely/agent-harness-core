@@ -17,15 +17,20 @@
 //
 // REJECTED ALTERNATIVE: extracting a "distinctive" word from the surrounding prose automatically
 // (longest word, rarest word, first capitalized word, anything short of real NLP). Tried against
-// the citation at agent-write-scope.ts:132 ("Mirrors review-gate.ts:810, which narrows the same
+// the citation at agent-write-scope.ts:132 ("Mirrors review-gate.ts:803, which narrows the same
 // field the same way.") — a bag-of-words match on "Mirrors"/"narrows"/"field" against the actual
-// target line (`if (stagedAbsPaths.length > 0) {`) finds nothing, which would fail a citation that
-// was correct at the time this was written. A heuristic that flags a fresh, correct fix as broken
+// target line (`const cwd = typeof payload.cwd === "string" && ...`) finds nothing, which would
+// fail a citation that is correct right now. A heuristic that flags a correct citation as broken
 // is worse than no check: it is the exact "noisy check gets ignored" failure the issue warns
 // against, demonstrated against this repo's own text rather than assumed. So: only explicit,
 // unambiguous markup counts as a token. A citation with no such markup nearby still gets a real
 // check — file exists, cited lines are in bounds — it just cannot be verified at the content
-// level, and this checker says so (`tokenChecked: false`) rather than pretending otherwise.
+// level, and this checker says so (`tokenChecked: false`) rather than pretending otherwise. That
+// trade-off is real: a review round on this checker found the reverse failure it accepts as the
+// cost — five citations in core/ and install/ drifted with no adjacent token to catch them, this
+// one among them (it cited :810 until the same round fixed it back to :803). Under-verifying a
+// stale citation is the accepted risk, not a hidden one; see MEMORY.md and issues #116/#118 for
+// the drifted citations that trade-off let through, fixed where in scope, filed where not.
 //
 // FAIL CLOSED on a citation this cannot resolve. A target path that matches zero tracked files
 // (renamed, deleted, or never existed) is a failure, not a skip — an unresolvable citation is
@@ -84,8 +89,11 @@ export interface Citation {
   targetSpec: string | null;
   startLine: number;
   endLine: number;
-  /** The citation's own physical comment line, for token extraction. See extractCitations for
-   * why this is the line only, not the surrounding block. */
+  /** Text to run extractTokens against for this citation only. Usually the citation's whole
+   * physical comment line — see extractCitations for why the line, not the surrounding block. When
+   * another citation shares that physical line, this holds only the quote/backtick/placeholder
+   * spans nearest to THIS citation's own match, so two citations on one line never see each
+   * other's tokens (see extractCitations' FINDING 1 note). */
   context: string;
   raw: string;
 }
@@ -119,10 +127,10 @@ export function extractCitations(sourceFile: string, text: string): Citation[] {
   // whole surrounding comment block or even a one-line lookaround. Both wider options were tried
   // and both produced a real false failure on this repo's own text, not a hypothetical one:
   //
-  // - Whole block: agent-write-scope.ts:132 cites review-gate.ts:810 in a 14-line JSDoc comment
+  // - Whole block: agent-write-scope.ts:132 cites review-gate.ts:803, in a 14-line JSDoc comment
   //   that also backtick-quotes `agent_type`, `cwd`, `inScratch()`, `join(42, …)` and
   //   `resolve({}, …)` for unrelated reasons earlier in the same comment. None of those describe
-  //   line 810, so a whole-block search reports a correct, freshly-fixed citation as broken.
+  //   the target line, so a whole-block search reports a correct citation as broken.
   // - One line either side: Export-Account.Tests.ps1:1118 cites `:205-250` and, one line later in
   //   the SAME SENTENCE, names a second, separate reference by title ('the "folds all three
   //   quoting forms" Context above') that carries no line number of its own. A one-line lookaround
@@ -135,31 +143,91 @@ export function extractCitations(sourceFile: string, text: string): Citation[] {
   // — structurally resolved, just not content-verified — which is the correct failure direction:
   // under-verifying a good citation is safe, flagging a good one as broken is the noisy-check
   // failure the issue itself warns against.
-  const citations: Citation[] = [];
+  const lineStart = (ln: number): number => (ln === 1 ? 0 : newlineIndexes[ln - 2] + 1);
+
+  interface RawMatch {
+    ln: number;
+    localStart: number;
+    localEnd: number;
+    targetSpec: string | null;
+    startLine: number;
+    endLine: number;
+    raw: string;
+  }
+  const rawMatches: RawMatch[] = [];
   for (const m of text.matchAll(CROSS_FILE_RE)) {
     const ln = lineNumberForIndex(m.index);
     if (!isCommentLine(lines[ln - 1]?.trim() ?? "", ext)) continue; // not a comment: not a citation
-    citations.push({
-      sourceFile,
-      sourceLine: ln,
+    const start = m.index - lineStart(ln);
+    rawMatches.push({
+      ln,
+      localStart: start,
+      localEnd: start + m[0].length,
       targetSpec: m[1],
       startLine: Number(m[2]),
       endLine: m[3] ? Number(m[3]) : Number(m[2]),
-      context: lines[ln - 1] ?? "",
       raw: m[0],
     });
   }
   for (const m of text.matchAll(SAME_FILE_RE)) {
     const ln = lineNumberForIndex(m.index);
     if (!isCommentLine(lines[ln - 1]?.trim() ?? "", ext)) continue;
-    citations.push({
-      sourceFile,
-      sourceLine: ln,
+    const start = m.index - lineStart(ln);
+    rawMatches.push({
+      ln,
+      localStart: start,
+      localEnd: start + m[0].length,
       targetSpec: null,
       startLine: Number(m[1]),
       endLine: m[2] ? Number(m[2]) : Number(m[1]),
-      context: lines[ln - 1] ?? "",
       raw: m[0],
+    });
+  }
+
+  // FINDING 1 (review round on #98): two citations sharing one physical source line used to get
+  // the WHOLE line as context, so extractTokens' output for one citation could include a marker
+  // that was actually written for its neighbor — a citation could report tokenChecked:true using a
+  // token that names something else's target entirely. Real case in this repo today with no token
+  // on either citation yet (Export-Account.Tests.ps1:1602, ":739-742" and ":744-749" on one line),
+  // and a reproduced false pass with tokens: `// see a.ts:1 ("first thing") and b.ts:1 ("second
+  // thing")`, where a genuine drift at a.ts:1 (losing "first thing") still read ok:true because
+  // "second thing" happened to be a substring of a's rewritten target.
+  //
+  // Fix: attribute each quote/backtick/placeholder span on the shared line to whichever citation's
+  // own match it sits closest to (by character distance, never by which half of the line it falls
+  // in), and build that citation's context out of only its own owned spans, verbatim and
+  // undivided. A line with exactly one citation keeps the full line as context, unchanged — this
+  // only activates once a line actually has more than one citation to disambiguate between.
+  function ownedContext(line: string, self: RawMatch, siblings: RawMatch[]): string {
+    if (siblings.length === 0) return line;
+    const spans: { text: string; start: number; end: number }[] = [];
+    for (const m of line.matchAll(/"[^"\n]{3,200}"/g)) spans.push({ text: m[0], start: m.index, end: m.index + m[0].length });
+    for (const m of line.matchAll(/`[^`\n]{2,200}`/g)) spans.push({ text: m[0], start: m.index, end: m.index + m[0].length });
+    for (const m of line.matchAll(/\{\{[\w.-]+\}\}/g)) spans.push({ text: m[0], start: m.index, end: m.index + m[0].length });
+    const distanceTo = (span: { start: number; end: number }, c: RawMatch): number => {
+      if (span.start >= c.localEnd) return span.start - c.localEnd;
+      if (span.end <= c.localStart) return c.localStart - span.end;
+      return 0; // overlapping (e.g. a citation nested inside its own backtick span): treat as owned
+    };
+    const owned = spans.filter((span) => {
+      const selfDist = distanceTo(span, self);
+      return siblings.every((sib) => selfDist < distanceTo(span, sib));
+    });
+    return owned.map((s) => s.text).join(" ");
+  }
+
+  const citations: Citation[] = [];
+  for (const rm of rawMatches) {
+    const line = lines[rm.ln - 1] ?? "";
+    const siblings = rawMatches.filter((o) => o !== rm && o.ln === rm.ln);
+    citations.push({
+      sourceFile,
+      sourceLine: rm.ln,
+      targetSpec: rm.targetSpec,
+      startLine: rm.startLine,
+      endLine: rm.endLine,
+      context: ownedContext(line, rm, siblings),
+      raw: rm.raw,
     });
   }
   return citations;
