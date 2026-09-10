@@ -18,9 +18,12 @@
 // including the three from issues #116 and #118 that a prior round found but could not fix
 // in-scope. Content-verified citations went from 4 of 30 to 28 of 31 (the +1 in the denominator is
 // install/Install-Account.ps1:62, invisible to the OLD isCommentLine inside a PowerShell
-// `<# ... #>` block and only found once that was fixed too). The 3 that remain unverified are
-// named and pinned by the exact-count test at the end of the live-scan section below, not folded
-// into a percentage or left to a floor that could grow without anything noticing.
+// `<# ... #>` block and only found once that was fixed too). The unverified count is named and
+// pinned by the exact-count test at the end of the live-scan section below, not folded into a
+// percentage or left to a floor that could grow without anything noticing -- see that test's own
+// comment for the current number, which a later repair round moved down from 3 (three of the
+// "verified" 28 turned out to be verified on a token too common to mean anything; see
+// MAX_DISCRIMINATING_OCCURRENCES in citation-drift.ts).
 
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -504,34 +507,49 @@ describe("citation drift — live scan of core/ and install/", () => {
   }
 
   // FAIL OPEN, NAMED. `tokenChecked: false` on an `ok: true` result is this checker's honest
-  // ceiling on a citation with no explicit token within reach: file exists, range in bounds,
-  // CONTENT unverified. That gap is the whole reason #98 exists (0-of-5 true positives measured
-  // against a same-line-only design that could not see it), so leaving it silent here would
-  // recreate the exact failure this repair round closed, one level up. This asserts the count
-  // rather than merely logging it, so CI itself is the thing that notices: 28 of 31 citations in
-  // the tree are content-verified after this round (up from 4 of 30 before it), and the 3 left
-  // are named below rather than folded into a percentage.
+  // ceiling on a citation with no explicit, DISCRIMINATING token within reach: file exists, range
+  // in bounds, CONTENT unverified. That gap is the whole reason #98 exists (0-of-5 true positives
+  // measured against a same-line-only design that could not see it), so leaving it silent here
+  // would recreate the exact failure this repair round closed, one level up. This asserts the
+  // count rather than merely logging it, so CI itself is the thing that notices.
   //
-  // Left unresolved rather than guessed at: install/Export-Account.Tests.ps1:1637 carries two
-  // same-file citations (":739-742" and ":744-749") whose own paragraph describes content neither
-  // range holds (executable test setup, not the comments the paragraph says assert an ablation is
-  // caught), which reads as real drift, but nothing in the file names where the correct target
-  // moved to and guessing one would risk shipping a second wrong citation in its place. And
-  // install/Export-Account.Tests.ps1:1210 cites mcp-servers.json:14 for a historical incident
-  // ("task-14-addendum's scrub"), where the line today correctly holds the post-fix placeholder --
-  // plausibly a citation to where the leak WAS, not a claim about what is there now, but not
-  // provable from the text alone. Fixing the producer, not guessing at the consumer, per this
-  // repo's own fix-quality rule: a citation this checker cannot confidently repoint is a citation
-  // it reports on, not one it silently "fixes" into some other kind of wrong.
-  test("exactly 3 citations remain content-unverified, and this is the full list", () => {
+  // REPAIR ROUND (adversarial review on #98's own repair round): the review that produced "28 of
+  // 31 verified" found three of those 28 -- all three citing Install-Harness.ps1:1016-1018 --
+  // verified on the token "hooks" alone, which occurs 78 times in that 1145-line file and caught
+  // 0 of 3 known 5-to-12-line drifts when review swept the target and re-measured. See
+  // MAX_DISCRIMINATING_OCCURRENCES in citation-drift.ts for the fix and the measurement behind its
+  // cutoff. The same sweep found a fourth citation resting on an equally non-discriminating token
+  // (AccountShared.ps1:10's "Get-ProjectSlug", 17 occurrences spread across the whole 478 lines of
+  // Restore-ClaudeProject.Tests.ps1, not clustered near the cited range). All four now carry an
+  // added, measured-unique token alongside the original one and verify on real specificity rather
+  // than coincidence.
+  //
+  // The same review round found install/Export-Account.Tests.ps1:1637's two same-file citations
+  // (":739-742" and ":744-749") were never same-file to begin with: checked against f47563e, the
+  // commit that wrote them, both ranges landed exactly on Export-Account.ps1's own boundary-design
+  // comments at those line numbers -- the "Export-Account.ps1:" prefix was dropped by mistake, not
+  // lost to drift. Repointed cross-file at their current line numbers (993-995 and 997-1002) with
+  // an added token each; see the edit at that citing paragraph for the derivation.
+  //
+  // One residual is left, unrepointed rather than guessed at: install/Export-Account.Tests.ps1:1210
+  // cites mcp-servers.json:14 for a historical incident ("task-14-addendum's scrub"), where the
+  // line today correctly holds the post-fix placeholder -- plausibly a citation to where the leak
+  // WAS, not a claim about what is there now, but not provable from the text alone. Fixing the
+  // producer, not guessing at the consumer, per this repo's own fix-quality rule: a citation this
+  // checker cannot confidently repoint is a citation it reports on, not one it silently "fixes"
+  // into some other kind of wrong.
+  //
+  // Keyed on sourceFile + citation.raw, not sourceFile:sourceLine. A location string moves on
+  // every unrelated edit that shifts line numbers above the citation, so this pin used to go red
+  // for the ordinary case (nothing wrong, lines moved) in an identical-looking diff to the one
+  // case that matters (a residual silently swapped for a different wrong one) -- both change the
+  // same three strings, so "update the pin" became the automatic response to either. raw is the
+  // citation's own matched text and does not move when the surrounding file does.
+  test("exactly 1 citation remains content-unverified, and this is the full list", () => {
     const unverified = allCitations
       .map((c) => ({ c, r: checkCitation(c, allFiles, getFileText) }))
       .filter(({ r }) => r.ok && !r.tokenChecked)
-      .map(({ c }) => `${c.sourceFile}:${c.sourceLine}`);
-    expect(unverified).toEqual([
-      "install/Export-Account.Tests.ps1:1210",
-      "install/Export-Account.Tests.ps1:1637",
-      "install/Export-Account.Tests.ps1:1637",
-    ]);
+      .map(({ c }) => `${c.sourceFile} -> ${c.raw}`);
+    expect(unverified).toEqual(["install/Export-Account.Tests.ps1 -> mcp-servers.json:14"]);
   });
 });

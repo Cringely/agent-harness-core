@@ -613,7 +613,7 @@ if (-not $SkipSettings) {
             # and $group.hooks, with or without this wrap, for every fixture in this file. The
             # hazard these @() guard against is a single-match FILTERING pipeline result (a
             # Where-Object or ForEach-Object -First 1) unwrapping to a bare scalar, which would
-            # then serialise "hooks": {...} instead of "hooks": [...]
+            # then serialise `"hooks": {...} instead of "hooks": [...]`
             # (install/Install-Harness.ps1:1016-1018). Nothing in this loop is a pipeline today, so
             # removing either @() here currently changes nothing observable. Kept anyway, so a
             # future edit that does introduce a filtering step here does not reintroduce that

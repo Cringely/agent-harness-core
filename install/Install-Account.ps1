@@ -338,7 +338,7 @@ try {
         # Round 3: `& $chmod.Source` is a native executable, not a cmdlet, so it does not read
         # $WhatIfPreference on its own the way New-Item and Copy-Item above do. A dry run used to
         # chmod the real target's hooks anyway, the one write in this script -WhatIf did not
-        # actually prevent. Gated the same way Export-Account.ps1:645-649 gates its own
+        # actually prevent. Gated the same way Export-Account.ps1:647-651 gates its own
         # "not a built-in cmdlet that already honours -WhatIf on its own" plain-script-logic step.
         if ($PSCmdlet.ShouldProcess($ClaudeHome, 'chmod +x .sh hooks')) {
             $chmodFailed = $false
@@ -488,7 +488,7 @@ function Convert-SettingsForTarget {
             # whenever $NpmPresent short-circuits the OR.
             #
             # Also wraps the pipeline OUTPUT: a single surviving hook unwraps to a bare scalar
-            # and would serialise "hooks": {...} instead of "hooks": [...]
+            # and would serialise `"hooks": {...} instead of "hooks": [...]`
             # (install/Install-Harness.ps1:1016-1018).
             $kept = @(@($group.hooks) | Where-Object {
                     $_ -and ($NpmPresent -or ($_.command -notmatch 'ccstatusline'))
