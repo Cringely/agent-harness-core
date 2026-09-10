@@ -349,9 +349,17 @@ exit 0
         try {
             { & $script:export -ClaudeHome $claude -OutputRoot $nestedOut `
                     -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
-                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp } | Should -Throw
-            Test-Path -LiteralPath (Join-Path $claude 'rules/security.md') | Should -BeTrue
-            Test-Path -LiteralPath (Join-Path $claude 'agents/appsec-sme.md') | Should -BeTrue
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp } |
+                Should -Throw -ExpectedMessage '*must not be the account home or a path inside it*'
+            # The "deletes nothing" half of this test's name, observed rather than asserted by
+            # proxy. The two source-file checks that used to sit here could not fail: the copy
+            # writes into $nestedOut, so nothing under $claude/rules or $claude/agents is ever
+            # at risk and both passed whether the guard ran or not. What discriminates is the
+            # output root itself, which the export creates with New-Item before copying a byte.
+            # Relocate the guard below the copy loop, the mutation this case exists to catch,
+            # and $nestedOut exists.
+            Test-Path -LiteralPath $nestedOut | Should -BeFalse `
+                -Because 'the guard must refuse before the export creates its output root'
         }
         finally {
             Remove-Item -Recurse -Force $stand -ErrorAction SilentlyContinue
