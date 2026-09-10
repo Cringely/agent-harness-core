@@ -59,8 +59,7 @@
 .PARAMETER TargetIsWindows
     Which platform the install is being prepared for. Defaults to the platform actually
     running. A real run should never pass it; it exists so the tests can reach the Linux-only
-    branches from a Windows host, which is the same seam and the same reason as
-    Restore-ClaudeProject.ps1:88-95.
+    branches from a Windows host, the same "Test seam" Restore-ClaudeProject.ps1:88-95 names.
 
 .PARAMETER SkipPreflight
     Skip the prerequisite probe. Test seam.
@@ -72,7 +71,8 @@
 # $WhatIfPreference for the whole run. No explicit $PSCmdlet.ShouldProcess call is needed to
 # act on it: every write below (New-Item, Copy-Item) is a built-in cmdlet that already
 # implements ShouldProcess itself and reads $WhatIfPreference from the calling scope, the same
-# way Export-Account.ps1:68-74 already established for its own copy loop.
+# way Export-Account.ps1:111-117 already established for its own copy loop, down to the same
+# "ablating it left the -WhatIf test green" measurement.
 [CmdletBinding(PositionalBinding = $false, SupportsShouldProcess)]
 param(
     [string]$ClaudeHome,
@@ -109,8 +109,8 @@ if (-not $ClaudeJson)  { $ClaudeJson = Join-Path $HOME '.claude.json' }
 if (-not $PayloadRoot) { $PayloadRoot = Join-Path (Join-Path $repoRoot 'account') 'claude' }
 
 # GetUnresolvedProviderPathFromPSPath, not [System.IO.Path]::GetFullPath: see
-# Export-Account.ps1:130-138 for the full reasoning (GetFullPath resolves a relative path
-# against the .NET process working directory, which Set-Location does not move, while
+# Export-Account.ps1:232-240 for the full reasoning (GetFullPath resolves a relative path
+# "against the .NET process current directory", which Set-Location does not move, while
 # Copy-Item and New-Item resolve against $PWD instead). Canonicalising both paths here, before
 # anything reads or writes through either, is what makes Copy-PayloadTree's
 # `$f.FullName.Substring($from.Length)` arithmetic below safe: a relative -PayloadRoot used to
@@ -135,10 +135,10 @@ $ClaudeJson  = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFrom
 # Review round 2 addendum: -PayloadRoot and -ClaudeHome must not be the same directory, or
 # nested inside each other. Copy-PayloadTree reads recursively from -PayloadRoot while writing
 # into -ClaudeHome, so either direction of nesting means the copy walks a tree it is
-# concurrently writing into. Same failure class Export-Account.ps1:141-151 guards against for
-# its own -OutputRoot/-ClaudeHome pair, though the shape of the damage differs there (its
-# mirror deletes each allowlisted directory before recopying, so containment would delete the
-# live account layer; here it would make the copy read from inside its own destination).
+# concurrently writing into. Same failure class Export-Account.ps1:249-252 guards against for its
+# own -OutputRoot/-ClaudeHome pair ("the mirror deletes each allowlisted directory"), though the
+# shape of the damage differs there (containment would delete the live account layer; here it
+# would make the copy read from inside its own destination).
 $onWindowsHost = ($PSVersionTable.PSVersion.Major -lt 6) -or $IsWindows
 
 # Backlog item 19: the comparison below is only as good as the spelling it is handed, and three
@@ -338,8 +338,8 @@ try {
         # Round 3: `& $chmod.Source` is a native executable, not a cmdlet, so it does not read
         # $WhatIfPreference on its own the way New-Item and Copy-Item above do. A dry run used to
         # chmod the real target's hooks anyway, the one write in this script -WhatIf did not
-        # actually prevent. Gated the same way Export-Account.ps1:346 gates its own plain-script-
-        # logic step that isn't a self-aware cmdlet either.
+        # actually prevent. Gated the same way Export-Account.ps1:647-651 gates its own
+        # "not a built-in cmdlet that already honours -WhatIf on its own" plain-script-logic step.
         if ($PSCmdlet.ShouldProcess($ClaudeHome, 'chmod +x .sh hooks')) {
             $chmodFailed = $false
             foreach ($s in @(Get-ChildItem -LiteralPath (Join-Path $ClaudeHome 'hooks') -Recurse -File -Filter *.sh -Force -ErrorAction SilentlyContinue)) {
@@ -488,8 +488,8 @@ function Convert-SettingsForTarget {
             # whenever $NpmPresent short-circuits the OR.
             #
             # Also wraps the pipeline OUTPUT: a single surviving hook unwraps to a bare scalar
-            # and would serialise "hooks": {...} instead of "hooks": [...]
-            # (install/Install-Harness.ps1:851-853).
+            # and would serialise `"hooks": {...} instead of "hooks": [...]`
+            # (install/Install-Harness.ps1:1016-1018).
             $kept = @(@($group.hooks) | Where-Object {
                     $_ -and ($NpmPresent -or ($_.command -notmatch 'ccstatusline'))
                 })
@@ -510,7 +510,7 @@ function Convert-SettingsForTarget {
                 #
                 # Not called at all when preparing a Windows target: with the token gone its
                 # Windows branch is a self-to-self replace, and the pwsh rewrite is Linux-only.
-                # Not inlined either -- the three lines that do the rewrite live in
+                # Not inlined either -- the three `pwsh -NoProfile -File` rewrite lines live in
                 # Restore-ClaudeProject.ps1:245-247, and AccountShared.ps1's header says why a
                 # second copy of a lifted function is the thing being avoided.
                 $hook.command = Expand-AccountToken -Text $hook.command -Tokens $Tokens
