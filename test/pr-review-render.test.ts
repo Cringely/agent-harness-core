@@ -28,16 +28,17 @@ const hostileFinding = (severity: Finding["severity"]): Finding => ({
   detail: HOSTILE,
 });
 
-// Returns an object whose toString() gives a value that passes IDENTIFIER_RE on the first call
-// (the one validation makes) and hostile markup on every later call (the one interpolation would
-// make, once the value is embedded unfenced). Without a typeof guard in front of the identifier
-// regex, RegExp#test coerces its argument through this exact path.
-function mutatingToString(): { toString(): string } {
+// Returns an object whose toString() gives `valid` on the first call (the one validation would
+// make, if there were no typeof guard) and `hostile` on every later call (the one interpolation
+// makes, once the value is embedded unfenced). Without a typeof guard in front of a regex test,
+// RegExp#test and template-literal interpolation both coerce their argument through this path,
+// and the two calls can return different strings.
+function mutatingToString(valid: string, hostile: string): { toString(): string } {
   let calls = 0;
   return {
     toString() {
       calls += 1;
-      return calls === 1 ? "claude-opus-5" : "@octocat <img src=x>";
+      return calls === 1 ? valid : hostile;
     },
   };
 }
@@ -201,7 +202,19 @@ describe("renderReviewBody(): refuses malformed code-side values", () => {
     ["a null model id", { reviewerModel: null }],
     ["an undefined model id", { reviewerModel: undefined }],
     ["a tool list containing null", { reviewerTools: [null] }],
-    ["a model id object whose toString mutates after validation", { reviewerModel: mutatingToString() }],
+    ["a tool list containing a hole", { reviewerTools: [, "Bash"] }],
+    [
+      "a model id object whose toString mutates after validation",
+      { reviewerModel: mutatingToString("claude-opus-5", "@octocat <img src=x>") },
+    ],
+    // Important 1 residual (re-review round 1): basis got a character allowlist but no typeof
+    // guard in front of it, so a non-string basis rendered outside a fence unchecked.
+    ["a null basis", { basis: null }],
+    ["a numeric basis", { basis: 42 }],
+    [
+      "a basis object whose toString mutates after validation",
+      { basis: mutatingToString("ok", "a` @octocat <img src=x>") },
+    ],
   ] as const)("%s", (_label, overrides) => {
     expect(() => renderReviewBody(input(overrides as Partial<RenderInput>))).toThrow();
   });

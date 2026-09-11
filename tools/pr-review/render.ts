@@ -59,10 +59,11 @@ export function fenced(text: string): string {
   return `${fence}text\n${clean}\n${fence}`;
 }
 
+// Severity and confidence are validated once, for every finding, in renderReviewBody before any
+// section slices its list (Minor 1). Re-checking here too left the top-level check's confidence
+// half unpinned: either copy alone still caught the position-1 test case (re-review, New Breakage
+// 1), so this function trusts its caller rather than re-attacking the same finding twice.
 function findingBlock(index: number, finding: Finding, changed: ReadonlySet<string>): string {
-  if (!SEVERITY_SET.has(finding.severity) || !CONFIDENCE_SET.has(finding.confidence)) {
-    throw new Error("a finding reached the renderer without passing validation");
-  }
   const pathLine =
     finding.path === ""
       ? ""
@@ -97,7 +98,10 @@ export function renderReviewBody(input: RenderInput): string {
     typeof input.reviewerModel !== "string" ||
     !IDENTIFIER_RE.test(input.reviewerModel) ||
     !Array.isArray(input.reviewerTools) ||
-    !input.reviewerTools.every((tool) => typeof tool === "string" && IDENTIFIER_RE.test(tool))
+    // Array.from over the array's default iterator visits every index, including a hole, as
+    // undefined; every() alone would skip a hole outright (HasProperty is false there), letting a
+    // sparse array pass and render as a shortened tool list.
+    !Array.from(input.reviewerTools).every((tool) => typeof tool === "string" && IDENTIFIER_RE.test(tool))
   ) {
     throw new Error("the reviewer model id and tool names must be plain identifiers");
   }
@@ -108,7 +112,9 @@ export function renderReviewBody(input: RenderInput): string {
   if (!VERIFICATION_STATES.has(input.verification.state)) {
     throw new Error("verification.state must be one of passed, failed, incomplete");
   }
-  if (!BASIS_RE.test(input.basis)) throw new Error("basis contains a character outside computeEvent's output set");
+  if (typeof input.basis !== "string" || !BASIS_RE.test(input.basis)) {
+    throw new Error("basis contains a character outside computeEvent's output set");
+  }
   if (input.output !== null) {
     for (const finding of input.output.findings) {
       if (!SEVERITY_SET.has(finding.severity) || !CONFIDENCE_SET.has(finding.confidence)) {
