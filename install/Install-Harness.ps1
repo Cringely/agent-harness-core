@@ -1044,16 +1044,34 @@ foreach ($eventType in $hooksTemplate.PSObject.Properties.Name) {
     foreach ($group in $filteredGroups) {
         # Same scalar-collapse hazard as above: wrap the pipeline output, not the input.
         $newHooks = @($group.hooks | Where-Object { -not $existingCommands.Contains($_.command) })
-        if ($newHooks.Count -gt 0) {
+        if ($newHooks.Count -eq 0) { continue }
+
+        # Before appending a new sibling group, look for an existing group (either carried
+        # over from the target, or added earlier in this same loop) whose matcher already
+        # equals this one's. "No matcher property" and an explicit null matcher are the same
+        # case on both sides, so a $null-vs-$null comparison must not fall through to -eq
+        # (which is unreliable with $null on the right-hand side).
+        $groupMatcher = if ($group.PSObject.Properties['matcher']) { $group.matcher } else { $null }
+        $existingMatch = $null
+        foreach ($eg in $existingGroups) {
+            $egMatcher = if ($eg.PSObject.Properties['matcher']) { $eg.matcher } else { $null }
+            $sameMatcher = if ($null -eq $groupMatcher) { $null -eq $egMatcher } else { $groupMatcher -eq $egMatcher }
+            if ($sameMatcher) { $existingMatch = $eg; break }
+        }
+
+        if ($null -ne $existingMatch) {
+            $existingMatch.hooks = @(@($existingMatch.hooks) + $newHooks)
+        }
+        else {
             $newGroup = [pscustomobject]@{}
             if ($group.PSObject.Properties['matcher']) {
                 $newGroup | Add-Member -NotePropertyName matcher -NotePropertyValue $group.matcher
             }
             $newGroup | Add-Member -NotePropertyName hooks -NotePropertyValue $newHooks
             $existingGroups.Add($newGroup)
-            foreach ($h in $newHooks) { $existingCommands.Add($h.command) }
-            $results.Add([pscustomobject]@{ File = "settings.json:$eventType"; Action = 'merged' })
         }
+        foreach ($h in $newHooks) { $existingCommands.Add($h.command) }
+        $results.Add([pscustomobject]@{ File = "settings.json:$eventType"; Action = 'merged' })
     }
     $settings.hooks.$eventType = $existingGroups.ToArray()
 }
