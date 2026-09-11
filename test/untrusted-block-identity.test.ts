@@ -65,9 +65,16 @@ function agentDefPaths(): string[] {
     .map((name) => join(AGENTS_DIR, name));
 }
 
+// The pull request reviewer's system prompt is a copy too. It is NAMED for the same reason the
+// template is: one known file, no directory to walk. It lives outside core/ and is never
+// installed, but it is the one copy that reads attacker-controlled text while a credential that
+// can approve pull requests sits in the process that launched it (#120).
+const REVIEWER_PROMPT_PATH = join(REPO_ROOT, "tools/pr-review/reviewer-prompt.md");
+
 const COPIES: Array<{ label: string; path: string }> = [
   ...agentDefPaths().map((path) => ({ label: `agents/${basename(path)}`, path })),
   { label: `templates/${basename(TEMPLATE_PATH)}`, path: TEMPLATE_PATH },
+  { label: "tools/pr-review/reviewer-prompt.md", path: REVIEWER_PROMPT_PATH },
 ];
 
 const LABELS = COPIES.map((copy) => copy.label);
