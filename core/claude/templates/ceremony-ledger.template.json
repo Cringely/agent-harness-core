@@ -5,11 +5,6 @@
     "last_run": null,
     "approx": false
   },
-  "strategy_review": {
-    "cycle_hours": 6,
-    "last_run": null,
-    "approx": false
-  },
   "council": {
     "cycle_hours": 24,
     "last_run": null,
