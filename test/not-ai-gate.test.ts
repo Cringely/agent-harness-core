@@ -269,4 +269,22 @@ describe("not-ai gate — issue #122, normalized counts", () => {
       expect(json.counts.max_same_opening).toBe(0.6);
     },
   );
+
+  test.skipIf(!PYTHON)(
+    "a possessive 's is not counted as a contraction, but a pronoun's 's is",
+    () => {
+      // Issue #122 defect 3: CONTRACTION_RE matched ANY "<word>'s", so a possessive noun
+      // ("the company's policy") inflated the contraction count the same as a genuine
+      // contraction. Fixture carries four real contractions (it's, here's, that's, there's --
+      // all in the closed pronoun/function-word set) and three possessives (company's,
+      // Alice's, team's). Measured before this fix: contractions read 7 (every 's counted).
+      // Fixed: contractions reads 4 -- the three possessives no longer count.
+      const { json } = runGate(
+        "contraction-vs-possessive.md",
+        "It's the company's policy that here's how it works: that's fine, " +
+          "and there's no problem with Alice's plan or the team's report.\n",
+      );
+      expect(json.counts.contractions).toBe(4);
+    },
+  );
 });

@@ -43,8 +43,18 @@ LIST_MARKER_RE = re.compile(r"^(?:\s*)(?:[-*+]|\d+[.)])\s+(?P<content>\S.*)$")
 TABLE_ROW_RE = re.compile(r"^\s*\|")
 TABLE_SEPARATOR_RE = re.compile(r"^[\s|:-]+$")
 
+# 's is ambiguous between a contraction ("it's" = it is) and a possessive
+# ("the company's"). Every other suffix here (n't, 're, 've, ll, d, m) has
+# no possessive reading, so a word carrying one is unambiguous. 's alone is
+# scoped to the closed set of pronoun/function-word forms below; any other
+# "<word>'s" is a possessive and must not inflate the contraction count.
+# Issue #122 defect 3, measured on the treatment corpus: 446 reported
+# contractions against 53 actual n't forms and 577 possessives -- the count
+# was mostly possessive density wearing a contraction label.
+CONTRACTION_PRONOUN_S = r"(?:it|he|she|that|there|here|what|who|let)'s"
 CONTRACTION_RE = re.compile(
-    r"\b(?:[A-Za-z]+n't|[A-Za-z]+'(?:re|ve|ll|d|m|s))\b", re.IGNORECASE
+    rf"\b(?:[A-Za-z]+n't|[A-Za-z]+'(?:re|ve|ll|d|m)|{CONTRACTION_PRONOUN_S})\b",
+    re.IGNORECASE,
 )
 PARTICIPIAL_OPENER_RE = re.compile(r"^(?:[A-Za-z]+ing)\b[^.!?]{0,100},")
 TIER_ONE = {
