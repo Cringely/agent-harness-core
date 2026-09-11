@@ -41,6 +41,21 @@ function stringList(value: unknown): string[] | null {
   return trimmed.every((item): item is string => item !== null && item !== "") ? trimmed : null;
 }
 
+// The identity file's shape is exactly { names, emails } (core/claude/hooks/identity-patterns.sh),
+// so any other top-level key is a typo the operator would want surfaced, not a file to accept
+// silently while quietly dropping the misspelled channel (I5).
+function hasExtraKey(record: Record<string, unknown>): boolean {
+  return Object.keys(record).some((key) => key !== "names" && key !== "emails");
+}
+
+// JSON.parse keeps only the last value of a repeated key, so a duplicate is invisible once
+// parsed; this checks the raw text instead, before parsing throws that information away (I5).
+function hasDuplicateKey(raw: string): boolean {
+  const namesKeyRe = /"names"\s*:/g;
+  const emailsKeyRe = /"emails"\s*:/g;
+  return (raw.match(namesKeyRe) ?? []).length > 1 || (raw.match(emailsKeyRe) ?? []).length > 1;
+}
+
 // CLAUDE_CONFIG_DIR mirrors the child claude CLI's own lookup rather than adding a new seam of its
 // own: the reviewer's claude child resolves .claude.json the same way, so this has to agree with
 // that resolution. An explicit home (test-only; cli.ts never passes it) wins over everything else.
@@ -81,9 +96,11 @@ export function loadIdentity(
   if (!identityFileExists(path)) {
     return { ok: true, declared: false, accountEmail, decl: { names: [], emails: accountEmails, username, hostname: host } };
   }
+  let raw: string;
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(path, "utf8"));
+    raw = readFileSync(path, "utf8");
+    parsed = JSON.parse(raw);
   } catch {
     return { ok: false, reason: "the identity file exists but could not be read as JSON" };
   }
@@ -91,6 +108,12 @@ export function loadIdentity(
     return { ok: false, reason: "the identity file is not a JSON object" };
   }
   const record = parsed as Record<string, unknown>;
+  if (hasExtraKey(record)) {
+    return { ok: false, reason: "the identity file has a key other than names and emails" };
+  }
+  if (hasDuplicateKey(raw)) {
+    return { ok: false, reason: "the identity file repeats the names or emails key" };
+  }
   const names = stringList(record.names);
   const emails = stringList(record.emails);
   if (names === null || emails === null) {
@@ -107,22 +130,23 @@ export function loadIdentity(
   };
 }
 
-// existsSync follows symlinks, so a dangling symlink at this path used to read as absent and a
-// declared identity dropped silently to the undeclared state. lstat classifies without following:
-// ENOENT means truly absent; anything else it finds, a dangling link included, goes on to
-// readFileSync, whose own failure refuses.
+// lstat classifies without following a symlink: ENOENT means truly absent. Any other error
+// (EACCES on a parent directory, EPERM, EIO from a cloud-placeholder or network-backed profile,
+// EBUSY, ENOTDIR) means something is there that could not be inspected, and that is not the same
+// as absent (C1): it goes on to readFileSync, whose own failure refuses.
 function identityFileExists(path: string): boolean {
   try {
     lstatSync(path);
     return true;
-  } catch {
-    return false;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code !== "ENOENT";
   }
 }
 
-// Absent account state, or state without an email (an API-key login, say), adds nothing, and a
-// posting run then needs an email from the identity file (pipeline.ts). State that exists but is
-// not JSON refuses, because the address the model sees cannot be known.
+// Absent account state, or state without an email (an API-key login, say), adds nothing and
+// leaves accountEmail false, and review --post refuses on that (Task 8, F3). An email in the
+// identity file does not substitute. State that exists but is not JSON refuses, because the
+// address the model sees cannot be known.
 function readAccountEmail(dir: string): { ok: true; email: string | null } | { ok: false; reason: string } {
   const path = join(dir, ".claude.json");
   if (!existsSync(path)) return { ok: true, email: null };
@@ -140,22 +164,38 @@ function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-// Strips code points GitHub renders invisibly (soft hyphen, several other format and ignorable
-// marks, tag characters, C1 controls) so a term hidden by one of them inside an otherwise-visible
-// string still matches. Applied to both the haystack and each term below; a hit in either the raw
-// text or its stripped form counts once.
+// Strips code points and whitespace variation that GitHub's markdown renderer treats as
+// equivalent or invisible, so a term hidden or reshaped that way inside an otherwise-visible
+// fenced field still matches (A4.3, widened by I2 and I3). NFKC folds compatibility forms (the
+// Kelvin sign, full-width letters, the fi ligature) and composes combining marks, so a
+// declaration typed in one normalization form matches text typed in the other. Every run of
+// space-like or line-breaking whitespace collapses to one ASCII space before the
+// invisible-character strip runs, because a fenced field always opens with a newline (render.ts)
+// and stripping that newline outright, instead of turning it into a space first, would glue a
+// term to whatever sits on the far side of the line break. Order matters: whitespace maps to a
+// space first, invisible marks strip second (a BOM is Cf rather than Zs, so it is removed rather
+// than turned into a space), then runs of the resulting spaces collapse to one.
 function canon(text: string): string {
-  return text.replace(/[\p{Default_Ignorable_Code_Point}\p{Cc}\p{Cf}]/gu, "");
+  return text
+    .normalize("NFKC")
+    .replace(/[\p{Zs}\t\n\v\f\r\u0085\u2028\u2029]+/gu, " ")
+    .replace(/[\p{Default_Ignorable_Code_Point}\p{Cc}\p{Cf}]/gu, "")
+    .replace(/ +/g, " ");
 }
 
 function matches(text: string, canonText: string, term: string): boolean {
-  if (term.trim() === "") return false;
+  const trimmedTerm = term.trim();
+  if (trimmedTerm === "") return false;
   // Word-character lookarounds rather than \b, so a term that starts or ends with punctuation
-  const raw = new RegExp(`(?<![A-Za-z0-9_])${escapeRegExp(term)}(?![A-Za-z0-9_])`, "i");
+  // still anchors on its letters. The class excludes underscore too (I4): "fixtureuser_old" and
+  // "_fixture@example.test_" need to anchor on the letters despite the underscore beside them,
+  // which a plain word-boundary treats as a letter. Both patterns carry "u" (I3) so unicode
+  // property escapes and full case folding apply, alongside "i" for plain case-insensitivity.
+  const raw = new RegExp(`(?<![A-Za-z0-9])${escapeRegExp(trimmedTerm)}(?![A-Za-z0-9])`, "iu");
   if (raw.test(text)) return true;
-  const canonTerm = canon(term);
-  if (canonTerm.trim() === "") return false;
-  const stripped = new RegExp(`(?<![A-Za-z0-9_])${escapeRegExp(canonTerm)}(?![A-Za-z0-9_])`, "i");
+  const canonTerm = canon(trimmedTerm).trim();
+  if (canonTerm === "") return false;
+  const stripped = new RegExp(`(?<![A-Za-z0-9])${escapeRegExp(canonTerm)}(?![A-Za-z0-9])`, "iu");
   return stripped.test(canonText);
 }
 
