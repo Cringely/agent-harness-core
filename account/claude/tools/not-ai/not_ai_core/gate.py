@@ -198,7 +198,13 @@ def _prose_blocks(text: str) -> tuple[list[str], bool]:
         ):
             flush()
             index += 2
-            while index < total and lines[index].strip() and "|" in lines[index]:
+            # Body rows only, matched the same way the header row above is:
+            # by starting with "|". The old condition instead checked "|"
+            # anywhere in the line, so a prose paragraph immediately after
+            # the table -- no blank line, just a plain sentence that happens
+            # to mention a shell pipe -- was swallowed as more table and
+            # dropped (issue #123b).
+            while index < total and TABLE_ROW_RE.match(lines[index]):
                 index += 1
             continue
 

@@ -171,6 +171,32 @@ describe("not-ai gate — markdown-aware sentence segmentation", () => {
     expect(json.counts.sentences).toBe(2);
   });
 
+  test.skipIf(!PYTHON)(
+    "prose right after a table that happens to contain a pipe is not swallowed as more table",
+    () => {
+      // Issue #123b. The table-body continuation loop used to keep consuming lines as long as
+      // they were non-blank and contained "|" ANYWHERE in the line, rather than matching
+      // TABLE_ROW_RE the same way the header row itself is matched (a line that STARTS with
+      // "|"). So a real sentence sitting directly under a table, with no blank line between
+      // them, that merely mentions a shell pipe got classified as another table row and
+      // dropped whole -- measured before this fix: this exact fixture read sentences=0, i.e.
+      // every real sentence in the document vanished. Fixed: the continuation loop now stops
+      // the moment a line does not itself start with "|", so this prose line correctly starts
+      // its own block right after the table's last real row.
+      const { json } = runGate(
+        "pipe-after-table.md",
+        [
+          "| Name | Role |",
+          "| --- | --- |",
+          "| Alice | Engineer |",
+          "Use a pipe character here | inside this real sentence about piping commands together.",
+          "",
+        ].join("\n"),
+      );
+      expect(json.counts.sentences).toBe(1);
+    },
+  );
+
   test.skipIf(!PYTHON)("ordinary prose with abbreviations and decimals does not over-split", () => {
     // Not a markdown-structure case: this guards that per-block splitting still runs the
     // original punctuation regex correctly on a plain paragraph. "3.14" has no space around
