@@ -11,17 +11,19 @@ and the second runs regardless of the first. Put the merge upstream instead, wit
 chained after it, and a merge that fails on conflicts can still be followed by the deletion, which
 closes the pull request unmerged.
 
-Each of those is a state change whose precondition the caller never saw. The command that should
-have stopped the chain did exit nonzero. Something between it and the state-changer replaced the
-exit code, or the operator never consulted it. And nothing in the transcript looks wrong afterwards:
-one Bash call, one result line, a merged pull request.
+Each of those is a state change whose precondition the caller never saw. In two of the three
+recorded recurrences the command that should have stopped the chain exited nonzero and the chain ran
+on anyway, the code replaced before it reached anything that would have acted on it. The third is
+recorded with two candidate mechanisms and no verdict between them. Nothing in the transcript looks
+wrong afterwards in any of the three: one Bash call, one result line, and the state change already
+made.
 
 A prose rule against this exists and does not hold. "Never chain a state-changing `gh` command
 behind another command; check each step's result before the next" is short and clear, and in the
-project that produced this doc it was re-injected at the top of every session. It was slid past three
-times, each at a different shell construct. That is the point where a rule stops being a sentence
-and becomes a gate. [`forcing-functions.md`](forcing-functions.md) lays out the hierarchy; this doc
-is one worked instance of its second tier.
+project that built the gate it was re-injected at the top of every session. It was slid past three
+times, in three different shapes. [`forcing-functions.md`](forcing-functions.md) lays out the
+hierarchy of what to do when a written rule keeps failing; this doc is one worked instance of its
+second tier, the gate on the trigger.
 
 This shape comes from one project so far, and the record of the three recurrences, with dates and
 pull request numbers, lives in that project's guardrails catalog and in the hook's own header rather
@@ -49,24 +51,26 @@ because its own exit code is the next thing the caller sees and nothing upstream
 What gets denied is a state change sitting downstream of an operator, the one shape where an earlier
 failure can be swallowed before the state change runs. So the fix in the deny message is always the
 same sentence: run the state-changing command as its own Bash call, after reading the result of the
-step before it. The gate never decides whether the chain would have been safe. It notices
-that the caller gave up the ability to know.
+step before it. Whether the chain would have been safe is never evaluated; the check is only
+whether the caller kept sight of the exit code.
 
 A caller who wants the chain anyway writes `GH-CHAIN-OVERRIDE: <reason>` in an unquoted `#`
 comment on the command, and the reason text is required. That check runs against the quote-masked
 string too, so a token inside a `--body` string is inert and only a real shell comment counts.
 Without an in-band override the only way past the gate is to mute it in settings, and a muted gate
-protects nothing. The token makes the override written, reasoned, and visible in the transcript.
+protects nothing, so the token exists to put the override and its reason in the transcript instead.
 
 ## It fails open, and the reason is where it sits
 
-A hook matched on `Bash` runs before every Bash call the agent makes. A copy that throws, on
+A hook matched on `Bash` runs before every Bash call the agent makes. A copy that breaks, on
 malformed stdin or a missing field or a bug of its own, cannot be allowed to block the tool, or every
-command in the session dies with it and the hook is deleted within the hour. So every error path
-logs to stderr and exits zero with nothing on stdout, which the platform reads as no opinion. Only a
-well-formed deny emits JSON. It reads stdin and writes stdout, and that is its whole footprint. The
-decision is an exported pure function, so a test suite exercises it offline against fixture strings, and a
-few spawn tests pin the stdin-to-stdout contract, including the fail-open exit.
+command in the session dies with it and the hook is deleted within the day. So a payload that fails
+to parse logs the error to stderr and exits zero, and a payload that parses but lacks the fields the
+hook expects exits zero without a word. Neither writes stdout, which the platform reads as no
+opinion; only a well-formed deny emits JSON. The hook reads stdin and writes stdout, and that is its
+whole footprint. The decision is an exported pure function, so a test suite exercises it offline
+against fixture strings, and a few spawn tests pin the stdin-to-stdout contract, including the
+fail-open exit.
 
 [`fail-contract.md`](fail-contract.md) argues for writing the floor sentence before choosing either
 branch. Here the floor is short: this gate must never be the reason a Bash call cannot run. Every
@@ -78,24 +82,33 @@ anything.
 
 ## The ceiling
 
-This is a string matcher over shell operators. It is not a shell parser and should not be read as
-one. It catches the class it was built for, a state-changer that ended up downstream of an operator
-in a one-liner nobody meant to chain past a failure. It does not catch command substitution,
-`$(gh pr merge 42)` or the backtick form. It does not catch obfuscation: `$(echo gh) pr merge`, case
-variation, `g''h pr merge`. Those take a real parser or a caller trying to get past the gate, and a
-gate built for a slip has no business claiming to stop intent.
+This is a string matcher over shell operators rather than a shell parser, and it catches the class
+it was built for: a state-changer that ended up downstream of an operator in a one-liner nobody
+meant to chain past a failure. Its blind spot is the quoted span. The masking that keeps a `--body`
+string inert blanks every quoted region before the split, so
+`echo "$(gh pr checks 42 | tail -3 && gh pr merge 42)"` passes, with the whole chain inside the
+quotes. An unquoted substitution after an operator is caught, since the split still sees the
+operator and the verb: `gh pr checks 42 && echo $(gh pr merge 42)` is denied, and so is the backtick
+form. A substitution in the first segment, `echo $(gh pr merge 42)`, passes on the sole-or-first
+rule even though `echo` has replaced the merge's exit code, so that rule's promise holds only for a
+state-changer that is a command in its own right. Obfuscation is out of scope: `$(echo gh) pr merge`
+and an upper-case verb both pass, because the gate was built to catch a slip and makes no claim
+against intent. One evasion the hook's own header lists, `g''h pr merge`, is closed by the same
+masking, which reassembles it to `gh pr merge` before the verb check runs. Each of those verdicts
+was run against the hook's exported `decide()`.
 
 The verb list is a second ceiling. Only `gh` state-changers are gated. A `git` branch deletion
 chained after a `gh pr merge` that failed is a destructive follow-up the gate never examines, and it
 is one of the three recorded shapes. Widening to arbitrary destructive commands after any operator
 would need a denylist, and a denylist wide enough to matter produces false denies until someone
-mutes it. The accepted trade is a narrow gate that stays switched on.
+mutes it, so the gate stays narrow.
 
 ## What a project weighs before installing it
 
-The cost is not the code. Registered as a `PreToolUse` hook on `Bash`, the gate starts a process
-before every Bash call in every session of the project that carries it, whether or not the call
-mentions `gh`. Bash is the hottest tool an agent has. A hook on it is a tax on every command, paid to
+Registered as a `PreToolUse` hook on `Bash`, the gate starts a process before every Bash call in
+every session of the project that carries it, whether or not the call mentions `gh`. With a warm
+runtime that is roughly tens of milliseconds per call, from one measurement on one workstation, and
+Bash is the hottest tool an agent has. A hook on it is a tax on every command, paid to
 close a gap that opens only on the few commands that merge, close, or delete. This repo made the
 opposite call for its own prose linter, which could have been a Bash-matched hook and went to a git
 `pre-commit` hook instead, where it runs once per commit rather than once per command. The same
@@ -106,26 +119,23 @@ close, or delete through it rather than leaving those to a person? If not, the g
 with a process start attached. Is there a cheaper control that closes the same gap? A required status
 check on the target branch refuses a merge on red server-side and costs nothing per call, so it is
 the first thing to try; it says nothing about a close that follows a failed merge, and an admin
-bypass walks straight through it. Has the prose rule already failed? One slip is a note. The project
-that built this gate installed it after the third, against a rule re-injected every session, and
-that is the order the hierarchy asks for. The gate earns its per-call cost once the sentence has
-demonstrably stopped working, and it does not earn it before.
+bypass walks straight through it. Has the prose rule already failed? One slip is a note, and the
+hierarchy in [`forcing-functions.md`](forcing-functions.md) puts the gate at the second. The project
+that built this one installed it after a third, against a rule re-injected every session.
 
 ## The reference copy
 
-<!-- vale Cringely.Vocabulary = NO -->
-The gate lives in the project that built it, spacemolt-harness, at
-`.claude/hooks/gh-chain-merge-gate.ts`, registered in that project's `.claude/settings.json` as a
-`PreToolUse` hook matched on `Bash` and invoked through bun. Its test file,
-`test/gh-chain-merge-gate.test.ts`, keeps the recorded chain strings as regression fixtures and pins
-the deny payload, the silent allow, and the fail-open exit. The hook depends on bun and nothing
-else; a project without bun on `PATH` gets the missing-runtime case above instead of a gate.
-<!-- vale Cringely.Vocabulary = YES -->
+The gate lives in the project that built it, `spacemolt-harness`, at
+<https://github.com/Cringely/spacemolt-harness> under `.claude/hooks/gh-chain-merge-gate.ts`,
+registered in that project's `.claude/settings.json` as a `PreToolUse` hook matched on `Bash` and
+invoked through bun. Its test file, `test/gh-chain-merge-gate.test.ts`, keeps the recorded chain
+strings as regression fixtures and pins the deny payload, the silent allow, and the fail-open exit.
+The hook depends on bun and nothing else; a project without bun on `PATH` gets the missing-runtime
+case above instead of a gate.
 
 The file's comments carry that project's issue numbers and review-round notes, and its deny
 message cites two of that project's pull requests by number. A copy taken into another project
-should replace those with the mechanism, keeping the pipe-through-`tail` example, since that is
-the part that teaches.
+should replace those with the mechanism and keep the pipe-through-`tail` example.
 
 ## Related
 
