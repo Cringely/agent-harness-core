@@ -25,10 +25,13 @@ const GATE = join(import.meta.dir, "..", "account", "claude", "tools", "not-ai",
 // ubuntu-24.04 (the bun-test CI runner) ships python3 but not necessarily a bare `python`;
 // this workstation has both. Prefer python3 to match the Linux runner and the skill's own
 // invocation convention, fall back to python for a Windows-only PATH.
+//
+// A missing interpreter used to `throw` here, failing the whole run instead of skipping it --
+// inconsistent with every sibling test file that drives a real external process (lint-doc-
+// prose.test.ts, memory-transition-log.test.ts, session-start-drift-check.test.ts), which all
+// resolve the binary once at module scope and gate each case with `test.skipIf(!found)` (issue
+// #123e). PYTHON is nullable now; every case below is skipIf-gated on it instead.
 const PYTHON = Bun.which("python3") ?? Bun.which("python");
-if (!PYTHON) {
-  throw new Error("neither python3 nor python found on PATH; required to run gate.py");
-}
 
 const fixturesDir = mkdtempSync(join(tmpdir(), "not-ai-gate-"));
 
@@ -53,7 +56,7 @@ function runGate(name: string, content: string) {
 }
 
 describe("not-ai gate — markdown-aware sentence segmentation", () => {
-  test("fenced code contributes no sentences", () => {
+  test.skipIf(!PYTHON)("fenced code contributes no sentences", () => {
     // Old behaviour: no `.!?` + capital/quote break exists anywhere (the fence markers and
     // the periods inside the shell string never satisfy the lookahead), so the whole file
     // glues into one 34-word "sentence", flagged long_over_30. Fixed: the fence is dropped
@@ -75,7 +78,7 @@ describe("not-ai gate — markdown-aware sentence segmentation", () => {
     expect(json.counts.long_over_30).toBe(0);
   });
 
-  test("headings are excluded entirely, not counted as their own sentence", () => {
+  test.skipIf(!PYTHON)("headings are excluded entirely, not counted as their own sentence", () => {
     // Decision: a heading is a label, not a sentence -- it carries no subject-verb rhythm
     // for sentence_length_sd/opening_types/etc. to measure, and keeping it as a one-line
     // "sentence" would still misrepresent those stats, just in the opposite direction (many
@@ -98,7 +101,7 @@ describe("not-ai gate — markdown-aware sentence segmentation", () => {
     expect(json.counts.long_over_30).toBe(0);
   });
 
-  test("list items segment separately from each other and from surrounding prose", () => {
+  test.skipIf(!PYTHON)("list items segment separately from each other and from surrounding prose", () => {
     // Old behaviour: none of the three bullets end in a period-space-capital sequence
     // before the next bullet, so all three glue into one 32-word "sentence". Fixed: each
     // bullet is its own unit, so the short third item (4 words) counts toward
@@ -125,7 +128,7 @@ describe("not-ai gate — markdown-aware sentence segmentation", () => {
     expect(json.counts.short_under_8).toBe(1);
   });
 
-  test("a continuation line joins the open list item; a de-indented line starts a new one", () => {
+  test.skipIf(!PYTHON)("a continuation line joins the open list item; a de-indented line starts a new one", () => {
     // The wrapped second line is indented to the item's own content column (2 spaces, past
     // "- "), so it is part of the same bullet: one sentence, not two. The unindented line
     // after it is not a continuation, so it starts its own unit.
@@ -145,7 +148,7 @@ describe("not-ai gate — markdown-aware sentence segmentation", () => {
     expect(json.counts.sentences).toBe(2);
   });
 
-  test("a table contributes no prose sentences", () => {
+  test.skipIf(!PYTHON)("a table contributes no prose sentences", () => {
     // Old behaviour: the header row, separator row, and two body rows never terminate in
     // `.!?`, so they glue onto the closing sentence, producing one 30-word "sentence" (not
     // >30, so long_over_30 stayed 0 even though the count was wrong). Fixed: the table is
@@ -168,7 +171,7 @@ describe("not-ai gate — markdown-aware sentence segmentation", () => {
     expect(json.counts.sentences).toBe(2);
   });
 
-  test("ordinary prose with abbreviations and decimals does not over-split", () => {
+  test.skipIf(!PYTHON)("ordinary prose with abbreviations and decimals does not over-split", () => {
     // Not a markdown-structure case: this guards that per-block splitting still runs the
     // original punctuation regex correctly on a plain paragraph. "3.14" has no space around
     // its period so SENTENCE_RE never sees a candidate break there, and "e.g." is followed
@@ -180,7 +183,7 @@ describe("not-ai gate — markdown-aware sentence segmentation", () => {
     expect(json.counts.sentences).toBe(1);
   });
 
-  test("whitespace-only input does not divide by zero", () => {
+  test.skipIf(!PYTHON)("whitespace-only input does not divide by zero", () => {
     const { json, exitCode } = runGate("whitespace-only.md", "   \n\n\t\n   ");
     expect(json.word_count).toBe(0);
     expect(json.counts.sentences).toBe(0);
@@ -189,7 +192,7 @@ describe("not-ai gate — markdown-aware sentence segmentation", () => {
     expect(exitCode).toBe(1);
   });
 
-  test("a document that is all code has zero sentences without crashing", () => {
+  test.skipIf(!PYTHON)("a document that is all code has zero sentences without crashing", () => {
     // Distinct from the whitespace case: this text is non-blank (evaluate()'s early
     // "Text is empty" guard does not fire), but every line lives inside a fence, so
     // sentences() legitimately returns []. Before this fix no document could ever produce
@@ -205,7 +208,7 @@ describe("not-ai gate — markdown-aware sentence segmentation", () => {
     expect(exitCode).toBe(0); // no error-severity finding: non-empty text, no protected terms
   });
 
-  test("an unterminated fence does not silently discard the prose below it", () => {
+  test.skipIf(!PYTHON)("an unterminated fence does not silently discard the prose below it", () => {
     // Review finding 2: a fence with no closing marker used to stay "in_fence" for the
     // rest of _prose_blocks' scan, so every line after it -- including real prose two
     // paragraphs deep -- was dropped with no trace. Measured before this fix: this exact
