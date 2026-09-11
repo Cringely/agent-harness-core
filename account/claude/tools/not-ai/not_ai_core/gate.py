@@ -43,8 +43,18 @@ LIST_MARKER_RE = re.compile(r"^(?:\s*)(?:[-*+]|\d+[.)])\s+(?P<content>\S.*)$")
 TABLE_ROW_RE = re.compile(r"^\s*\|")
 TABLE_SEPARATOR_RE = re.compile(r"^[\s|:-]+$")
 
+# 's is ambiguous between a contraction ("it's" = it is) and a possessive
+# ("the company's"). Every other suffix here (n't, 're, 've, ll, d, m) has
+# no possessive reading, so a word carrying one is unambiguous. 's alone is
+# scoped to the closed set of pronoun/function-word forms below; any other
+# "<word>'s" is a possessive and must not inflate the contraction count.
+# Issue #122 defect 3, measured on the treatment corpus: 446 reported
+# contractions against 53 actual n't forms and 577 possessives -- the count
+# was mostly possessive density wearing a contraction label.
+CONTRACTION_PRONOUN_S = r"(?:it|he|she|that|there|here|what|who|let)'s"
 CONTRACTION_RE = re.compile(
-    r"\b(?:[A-Za-z]+n't|[A-Za-z]+'(?:re|ve|ll|d|m|s))\b", re.IGNORECASE
+    rf"\b(?:[A-Za-z]+n't|[A-Za-z]+'(?:re|ve|ll|d|m)|{CONTRACTION_PRONOUN_S})\b",
+    re.IGNORECASE,
 )
 PARTICIPIAL_OPENER_RE = re.compile(r"^(?:[A-Za-z]+ing)\b[^.!?]{0,100},")
 TIER_ONE = {
@@ -113,9 +123,16 @@ def _prose_blocks(text: str) -> tuple[list[str], bool]:
     (many short "sentences" instead of one long one). A list item is its own
     unit even with no terminal punctuation, so one bullet no longer glues onto
     the next or onto the paragraph after the list; a line continues the open
-    item only while indented at least to the item's own content column,
-    matching how the list reads. A line indented less than that column ends
-    the item and starts a new paragraph block instead.
+    item only while indented at least to the item's own content column. A
+    line indented less than that column ends the item and starts a new
+    paragraph block instead -- even in the case where CommonMark's lazy
+    continuation would keep reading it as the same paragraph (a non-blank
+    line that does not itself open a new block continues the paragraph
+    regardless of indent). This reader takes the stricter rule everywhere on
+    purpose: lazy continuation is exactly the glue between an item and
+    unrelated prose after it that this rewrite exists to stop (issue #123f;
+    see also the rejected reduced variant recorded on issue #123's "de-indent
+    machinery" item, which reopens that same glue case).
 
     This is a deliberately narrow reading of markdown, not a CommonMark
     implementation: 4-space indented code blocks and setext (underline-style)
@@ -188,7 +205,13 @@ def _prose_blocks(text: str) -> tuple[list[str], bool]:
         ):
             flush()
             index += 2
-            while index < total and lines[index].strip() and "|" in lines[index]:
+            # Body rows only, matched the same way the header row above is:
+            # by starting with "|". The old condition instead checked "|"
+            # anywhere in the line, so a prose paragraph immediately after
+            # the table -- no blank line, just a plain sentence that happens
+            # to mention a shell pipe -- was swallowed as more table and
+            # dropped (issue #123b).
+            while index < total and TABLE_ROW_RE.match(lines[index]):
                 index += 1
             continue
 
@@ -279,7 +302,12 @@ def evaluate(
         "long_over_30": sum(length > 30 for length in lengths),
         "sentence_length_sd": round(pstdev(lengths), 1) if len(lengths) > 1 else 0.0,
         "opening_types": distinct_openings,
-        "max_same_opening": max_opening,
+        # A proportion of sentences, not the raw count `_opening_count` returns:
+        # issue #122 defect 2 measured this being compared across corpora of
+        # different sizes while still an unnormalized count, which is not a
+        # comparison a raw count can support. The finding threshold below still
+        # reads the raw `max_opening` -- only the reported figure changes.
+        "max_same_opening": round(max_opening / len(items), 3) if items else 0.0,
     }
     findings: list[Finding] = []
     if not text.strip():
