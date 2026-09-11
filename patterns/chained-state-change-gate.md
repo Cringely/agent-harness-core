@@ -113,12 +113,14 @@ demonstrably stopped working, and it does not earn it before.
 
 ## The reference copy
 
+<!-- vale Cringely.Vocabulary = NO -->
 The gate lives in the project that built it, spacemolt-harness, at
 `.claude/hooks/gh-chain-merge-gate.ts`, registered in that project's `.claude/settings.json` as a
 `PreToolUse` hook matched on `Bash` and invoked through bun. Its test file,
 `test/gh-chain-merge-gate.test.ts`, keeps the recorded chain strings as regression fixtures and pins
 the deny payload, the silent allow, and the fail-open exit. The hook depends on bun and nothing
 else; a project without bun on `PATH` gets the missing-runtime case above instead of a gate.
+<!-- vale Cringely.Vocabulary = YES -->
 
 The file's comments carry that project's issue numbers and review-round notes, and its deny
 message cites two of that project's pull requests by number. A copy taken into another project
