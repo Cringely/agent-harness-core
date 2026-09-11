@@ -82,8 +82,125 @@ identity_regex_escape() {
     printf '%s' "$1" | sed 's/[].^$(){}?+*|\\[]/\\&/g'
 }
 
+# Converts one hex digit character ($1, already validated by the caller as
+# [0-9A-Fa-f]) to its decimal value 0-15. Used by identity_json_unescape,
+# below, to turn a \uXXXX escape's four hex digits into a code point using
+# only plain `+`/`*` arithmetic: POSIX sh's `$(( ))` is not guaranteed to
+# support the `16#XX` base-N literal ksh/bash add as an extension, and this
+# file already avoids anything outside plain POSIX for the identical
+# reason `grep -P` is avoided elsewhere in this header.
+identity_hex_digit_value() {
+    case $1 in
+        [0-9]) printf '%d' "$1" ;;
+        [Aa]) printf '10' ;;
+        [Bb]) printf '11' ;;
+        [Cc]) printf '12' ;;
+        [Dd]) printf '13' ;;
+        [Ee]) printf '14' ;;
+        [Ff]) printf '15' ;;
+        *) return 1 ;;
+    esac
+}
+
+# Decodes JSON string escapes in $1 (the text strictly between a token's
+# own quotes -- the caller strips those first). Prints the decoded text
+# and returns 0. Returns 1, printing nothing, on an escape this function
+# will not decode; the caller (identity_json_array) turns that into a load
+# failure naming the identity file rather than silently emitting the
+# literal, undecoded escape text the way this file did before issue #91d:
+# a name declared as "F\u0069ctional Persona" never matched the plain
+# "Fictional Persona" text it was meant to catch, because the \u0069 sat in
+# the built grep pattern unchanged -- load succeeded, the per-arm canary
+# passed (it is built from this same parse), and the plain text went
+# straight through, a silent false negative rather than a loud one.
+#
+# \" \\ \/ decode always. \b \f \t decode to their real control bytes.
+# \n and \r do NOT decode, on purpose: identity_load represents the whole
+# parsed pattern set as one newline-delimited list (the `entries` variable
+# a `while IFS= read -r entry` loop consumes, and the per-arm canaries
+# built the same way), and a decoded \n or \r would inject a raw line
+# break into that list, silently splitting one declared entry into two or
+# merging it with its neighbour -- a new fail-open path in exchange for
+# closing this one. No legitimate name or email plausibly needs an
+# embedded line break; a JSON writer's actual reason to escape something
+# in a declared identity string is a quote, a backslash, a slash, or (a
+# \uXXXX run) something it will not write raw -- PowerShell's
+# ConvertTo-Json escapes `'` `<` `>` `&` as \u0027 \u003c \u003e \u0026
+# even for otherwise pure-ASCII input, which is the concrete case this
+# fix targets, not a hypothetical one.
+#
+# \uXXXX decodes only for the printable-ASCII range \u0020-\u007e. Outside
+# it (a JSON control character, a UTF-16 surrogate half, or a genuine
+# non-ASCII code point) this refuses rather than guessing: emitting the
+# right bytes needs a multi-byte UTF-8 encoder this POSIX sh + sed + grep
+# + cut toolchain does not have, and this file's header already accepts
+# an ASCII-only limit for `grep -i` case folding for the identical reason.
+# A wrong guess here would build a dead or mismatched pattern arm exactly
+# as silently as the undecoded escape did; refusing is loud instead.
+#
+# Byte-oriented throughout (cut -c, ${#var}), which only means what it
+# looks like it means because LANG and LC_ALL are unset (this file's own
+# header, "WHY grep -E's \b"): under the C locale, every shell and every
+# coreutils tool used here treats one byte as one character, so a token's
+# byte length and its character-offset cut are the same number.
+identity_json_unescape() {
+    in=$1
+    out=
+    while [ -n "$in" ]; do
+        case $in in
+            '\'*)
+                # A single-quoted shell literal is not escape-processed:
+                # '\\' between single quotes is the two-character string
+                # \\, not one backslash. '\'* -- a lone backslash closing
+                # the quote, then an unquoted wildcard -- is what matches
+                # "starts with one backslash". Same fix needed on $c2
+                # below, which holds one raw escape-type character.
+                c2=$(printf '%s' "$in" | cut -c2)
+                case $c2 in
+                    '"') out="${out}\"" ; off=2 ;;
+                    '\') out="${out}\\" ; off=2 ;;
+                    /) out="${out}/" ; off=2 ;;
+                    b) out="${out}$(printf '\010')" ; off=2 ;;
+                    f) out="${out}$(printf '\014')" ; off=2 ;;
+                    t) out="${out}$(printf '\011')" ; off=2 ;;
+                    u)
+                        hex=$(printf '%s' "$in" | cut -c3-6)
+                        case $hex in
+                            [0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]) : ;;
+                            *) return 1 ;;
+                        esac
+                        d1=$(identity_hex_digit_value "$(printf '%s' "$hex" | cut -c1)") || return 1
+                        d2=$(identity_hex_digit_value "$(printf '%s' "$hex" | cut -c2)") || return 1
+                        d3=$(identity_hex_digit_value "$(printf '%s' "$hex" | cut -c3)") || return 1
+                        d4=$(identity_hex_digit_value "$(printf '%s' "$hex" | cut -c4)") || return 1
+                        cp=$((d1 * 4096 + d2 * 256 + d3 * 16 + d4))
+                        [ "$cp" -ge 32 ] && [ "$cp" -le 126 ] || return 1
+                        octal=$(printf '%03o' "$cp")
+                        out="${out}$(printf "\\${octal}")"
+                        off=6
+                        ;;
+                    *) return 1 ;;
+                esac
+                in=$(printf '%s' "$in" | cut -c"$((off + 1))-")
+                ;;
+            *)
+                # One literal run up to (not including) the next backslash,
+                # rather than one byte at a time -- most of a declared
+                # entry's text has no escapes in it at all.
+                lit=$(printf '%s' "$in" | sed 's/\\.*$//')
+                [ -n "$lit" ] || return 1
+                out="${out}${lit}"
+                litlen=${#lit}
+                in=$(printf '%s' "$in" | cut -c"$((litlen + 1))-")
+                ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
 # Pulls every double-quoted string out of a JSON array value for $2 ("names"
-# or "emails") in the raw text $1, one per output line. No jq dependency,
+# or "emails") in the raw text $1, one per output line, with JSON string
+# escapes decoded (identity_json_unescape, above). No jq dependency,
 # matching session-start-drift-check.sh's precedent (jq ships with neither
 # this repo nor Git for Windows). Handles the array spanning multiple lines
 # by flattening newlines to spaces first; does not attempt general JSON
@@ -91,13 +208,63 @@ identity_regex_escape() {
 # install/Export-Account.ps1's -IdentityFile doc declares. An absent key or
 # an empty array both produce no output, which the caller treats as "zero
 # declared entries in this category", not as a malformed file.
+#
+# Peels one complete string token off the front of the array's contents at
+# a time, rather than the single regex this used before that captured
+# "everything up to the FIRST `]`" in one shot. Issue #91c: a `]` inside a
+# declared entry's own text (a bracketed aside, redacted text, anything)
+# is not a delimiter, and that regex stopped there -- the truncated,
+# unterminated fragment left over then matched no quoted-string pattern at
+# all, so the whole array read as empty rather than merely short one
+# entry, silently losing that entry AND every entry declared after it.
+# Consuming a whole token at a time (the same quote-and-backslash-aware
+# shape the old code used for extraction, applied per-token instead of to
+# an already-truncated segment) means a `]` inside a token's own text is
+# already inside the token by the time anything looks at it; only a real
+# `]`, seen after skipping the comma/whitespace between elements, ends the
+# loop.
+#
+# Returns non-zero, printing nothing further, when a token cannot be
+# decoded (identity_json_unescape's fail-closed cases, above) or the
+# array's contents are malformed enough that no further complete token can
+# be found before running out of input without ever seeing the closing
+# `]`. identity_load treats that as a load failure and refuses -- a
+# `]`-in-an-entry defect and a \uXXXX-in-an-entry defect are both a case of
+# this parser checking less than it claims to, and this file's answer to
+# "checks less than it claims" is to refuse, never to guess.
 identity_json_array() {
     raw=$1
     key=$2
     flat=$(printf '%s' "$raw" | tr '\n' ' ')
-    seg=$(printf '%s' "$flat" | sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p")
-    [ -n "$seg" ] || return 0
-    printf '%s' "$seg" | grep -o '"\([^"\\]\|\\.\)*"' | sed 's/^"//; s/"$//; s/\\"/"/g'
+    tail=$(printf '%s' "$flat" | sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\[//p")
+    [ -n "$tail" ] || return 0
+
+    while :; do
+        rest=$(printf '%s' "$tail" | sed 's/^[[:space:]]*//; s/^,[[:space:]]*//')
+        case $rest in
+            ']'*) break ;;
+            '"'*)
+                token=$(printf '%s' "$rest" | sed -n 's/^\("\([^"\\]\|\\.\)*"\).*/\1/p')
+                if [ -z "$token" ]; then
+                    echo "identity gate: could not parse a declared '$key' entry in '$identity_file' -- an unterminated or malformed quoted string. Refusing rather than silently dropping it and whatever follows it." >&2
+                    return 1
+                fi
+                inner=$(printf '%s' "$token" | sed 's/^"//; s/"$//')
+                decoded=$(identity_json_unescape "$inner") || {
+                    echo "identity gate: a declared '$key' entry in '$identity_file' uses a JSON escape this parser will not decode (a \\uXXXX outside printable ASCII, or \\n/\\r, which would inject a line break into this file's own newline-delimited entry list). Refusing rather than silently building a pattern arm that would never match the entry's plain form. Rewrite the entry using the literal character instead of the escape." >&2
+                    return 1
+                }
+                printf '%s\n' "$decoded"
+                tokenlen=${#token}
+                tail=$(printf '%s' "$rest" | cut -c"$((tokenlen + 1))-")
+                ;;
+            *)
+                echo "identity gate: could not find the closing ']' for '$key' in '$identity_file' -- the declared array is malformed. Refusing rather than silently returning a truncated list." >&2
+                return 1
+                ;;
+        esac
+    done
+    return 0
 }
 
 # Resolves the identity file, derives the workstation username and machine
@@ -205,8 +372,12 @@ identity_load() {
             ;;
     esac
 
-    names=$(identity_json_array "$raw" names)
-    emails=$(identity_json_array "$raw" emails)
+    # identity_json_array itself already named the file and the specific
+    # defect on stderr before returning non-zero (issue #91c, #91d): an
+    # unparseable entry or an escape it will not decode. Propagate rather
+    # than re-explain -- fail closed either way.
+    names=$(identity_json_array "$raw" names) || return 1
+    emails=$(identity_json_array "$raw" emails) || return 1
 
     # Both empty is fail-closed, and the count check further down does not
     # cover it. That check fires only when the WHOLE pattern set is empty, and

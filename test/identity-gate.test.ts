@@ -320,6 +320,69 @@ describe("identity gate — pre-commit (cheap stage: content, path, pending auth
   });
 });
 
+// Issue #91c and #91d: two parser defects left open after the twelve
+// bypasses closed in #64, both in identity_json_array's JSON-array reader
+// rather than in the matcher these other describe blocks exercise.
+describe("identity gate — identity-patterns.sh: JSON parser residuals (issue #91c, #91d)", () => {
+  // #91c: identity_json_array used to capture "everything up to the FIRST
+  // `]`" with a single regex. A declared entry containing its own `]` (a
+  // bracketed aside, redacted text, anything) ended that capture early,
+  // and the truncated, unterminated fragment then matched no quoted-string
+  // pattern at all -- the entry, and every entry after it in that array,
+  // went silently empty rather than merely losing one character. `emails`
+  // carries an unrelated, always-present entry so the file still declares
+  // SOMETHING and identity_load's own "declares no names and no emails"
+  // refusal cannot fire and mask the result: the only question left is
+  // whether the bracketed name itself gets caught. Pre-fix this is a real
+  // bypass (exit 0, commit proceeds); post-fix it is refused.
+  test("a declared entry containing ']' is matched in full, not truncated at the bracket", () => {
+    const dir = initPreCommitRepo();
+    const bracketHome = makeIdentityHome(
+      JSON.stringify({ names: ["Persona [REDACTED] Segment"], emails: [EMAIL] }),
+    );
+    writeFileSync(join(dir, "notes.txt"), "the changelog credits Persona [REDACTED] Segment for this release\n");
+    git(["add", "notes.txt"], dir);
+    const result = runPreCommit(dir, envWith({ USERPROFILE: bracketHome, HOME: bracketHome }));
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("identifying string");
+  });
+
+  // Same defect, the half that makes it worse than a one-entry loss: the
+  // truncated fragment consumes everything sed can see past the `]`, so a
+  // SECOND declared entry, later in the same array, went missing too. This
+  // pins that a name after the bracketed one still matches on its own.
+  test("a bracketed entry earlier in the array does not drop a later declared entry", () => {
+    const dir = initPreCommitRepo();
+    const bracketHome = makeIdentityHome(
+      JSON.stringify({ names: ["Persona [REDACTED] Segment", "Second Fictional Persona"], emails: [EMAIL] }),
+    );
+    writeFileSync(join(dir, "notes.txt"), "credit also goes to Second Fictional Persona\n");
+    git(["add", "notes.txt"], dir);
+    const result = runPreCommit(dir, envWith({ USERPROFILE: bracketHome, HOME: bracketHome }));
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("identifying string");
+  });
+
+  // #91d: identity_json_array only ever unescaped `\"`. A name written with
+  // a `\uXXXX` escape elsewhere in the string (PowerShell's ConvertTo-Json
+  // does this to plain ASCII punctuation too, not only non-ASCII text) kept
+  // the literal backslash-u-hex text in the built pattern, so it could only
+  // ever match that literal escape sequence appearing in scanned content --
+  // never the plain word the escape decodes to. Load still succeeds (the
+  // escape sits mid-string, not at either edge, so identity_edge_ok has
+  // nothing to catch), which is exactly the silent-false-negative shape:
+  // the gate reports healthy and lets the plain form straight through.
+  test("a declared name written with a \\uXXXX escape matches its plain-text form in content", () => {
+    const dir = initPreCommitRepo();
+    const escapedHome = makeIdentityHome(`{"names": ["F\\u0069ctional Persona"], "emails": []}`);
+    writeFileSync(join(dir, "notes.txt"), "this document mentions Fictional Persona by name\n");
+    git(["add", "notes.txt"], dir);
+    const result = runPreCommit(dir, envWith({ USERPROFILE: escapedHome, HOME: escapedHome }));
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("identifying string");
+  });
+});
+
 /** Test double for `grep`: always reports "no match", exit 1, no matter
  * what it was asked to find — the shape of 2026-09-05's crashed-scan
  * incident, generalised to any matcher failure rather than the specific
