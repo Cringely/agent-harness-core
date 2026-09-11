@@ -1080,7 +1080,7 @@ Describe "Install-Harness" {
         # install carries two permanent attention rows that no command clears. A re-run skips
         # those files by design and -Accept refuses a file that does not exist, so the count
         # would never reach zero and the SessionStart hook would print at every session start
-        # forever. That is the "rows map to no response" failure CONTRIBUTING.md:49 names.
+        # forever. That is the "rows map to no response" failure CONTRIBUTING.md:51 names.
         $audit | Should -Match 'All managed files in sync with core\.'
         $audit | Should -Not -Match 'file\(s\) need attention'
         # Out of the count, still in the table: absent-and-available is worth seeing, and an
