@@ -446,6 +446,59 @@ describe("identity gate — identity-patterns.sh: locale and truncation residual
   });
 });
 
+// #135's round-2 adversarial review of the round-1 fix (still PR #135) found
+// one more load-bearing gap: identity_json_array's key-extraction sed was
+// never status-checked. N1 in that review.
+describe("identity gate — identity-patterns.sh: key-extraction sed residual (issue #91, review #135 round 2)", () => {
+  // N1: a crashed `sed` on the "names" key-extraction call reads exactly
+  // like an absent key -- rc 0, empty output -- because `[ -n "$tail" ] ||
+  // return 0` cannot distinguish "sed found nothing" from "sed did not run".
+  // The names channel goes silently empty while emails stays populated, so
+  // the "declares no names and no emails" refusal (which WOULD catch a
+  // fully-empty file) never fires and a declared name lands at both
+  // pre-commit and pre-push. This is the file's own named threat model
+  // (2026-09-05: one tool call in a batch crashing, read as clean) landing
+  // on the one sed call in this function that round 1's fix never added a
+  // status check to. The stub below crashes ONLY the sed invocation whose
+  // script text contains the literal `"names"` (the exact call
+  // identity_json_array makes when key="names"), execing the real sed for
+  // every other call -- token extraction, the emails key, identity_regex_
+  // escape -- so a healthy hook around one crashed call is exactly what
+  // gets exercised, not a wholesale broken sed.
+  test("a crashed key-extraction sed for 'names' refuses rather than silently emptying that channel", () => {
+    const dir = initPreCommitRepo();
+    writeFileSync(join(dir, "notes.txt"), `this document mentions ${NAME} by name\n`);
+    git(["add", "notes.txt"], dir);
+    const realSed = Bun.which("sed");
+    if (!realSed) throw new Error("no real sed on PATH to build the N1 shim against");
+    const stubDir = installNamesKeyCrashingSedStub();
+    const result = runPreCommit(
+      dir,
+      envWith({ PATH: pathWithStubFirst(stubDir), REAL_SED: realSed }),
+    );
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("did not run cleanly");
+  });
+});
+
+/** Test double for `sed`: crashes (exit 1, no output) only when invoked with
+ * the literal substring `"names"` in its arguments -- the shape of
+ * identity_json_array's key-extraction sed call when key="names" -- and
+ * execs the real sed (passed in via $REAL_SED, never embedded as a literal
+ * path here to avoid escaping a Windows path inside a written shell script)
+ * for every other invocation. */
+function installNamesKeyCrashingSedStub(): string {
+  const stubDir = mkdtempSync(join(tmpdir(), "identity-sedshim-"));
+  tempDirs.push(stubDir);
+  const stubPath = join(stubDir, "sed");
+  writeFileSync(
+    stubPath,
+    ["#!/bin/sh", 'case "$*" in', '    *\'"names"\'*) exit 1 ;;', "esac", 'exec "$REAL_SED" "$@"', ""].join("\n"),
+  );
+  chmodSync(stubPath, 0o755);
+  return stubDir;
+}
+
 /** Test double for `grep`: always reports "no match", exit 1, no matter
  * what it was asked to find — the shape of 2026-09-05's crashed-scan
  * incident, generalised to any matcher failure rather than the specific

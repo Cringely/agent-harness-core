@@ -25,10 +25,17 @@
 # workstation with LANG and LC_ALL both unset -- the default a git hook
 # inherits -- `grep -P` exits 2 with "supports only unibyte and UTF-8
 # locales" before it reads a single line, and setting LC_ALL=en_US.UTF-8 or
-# LC_ALL=C.UTF-8 first makes it work. A check whose engine can refuse to run
-# depending on the caller's locale is exactly the failure this file exists
-# to close, so -P is not used anywhere here. GNU grep -E's `\b` extension
-# needs no locale. Measured against the exact collision the exporter's own
+# LC_ALL=C.UTF-8 first makes it work. Unset is not the same claim as no
+# locale variable at all being set: #135's review measured, through a
+# real git commit, that Git for Windows launches hooks with
+# LC_CTYPE=C.UTF-8 regardless of LANG/LC_ALL. `grep -P`'s crash above
+# does not depend on LC_CTYPE, so that finding still holds; LC_CTYPE is
+# what matters for the byte-vs-character counting elsewhere in this file
+# (identity_json_array's own LOCALE note covers where and why). A check
+# whose engine can refuse to run depending on the caller's locale is
+# exactly the failure this file exists to close, so -P is not used
+# anywhere here. GNU grep -E's `\b` extension needs no locale. Measured
+# against the exact collision the exporter's own
 # comment and its Export-Account.Tests.ps1 fixture record
 # (Export-Account.Tests.ps1's "does not read a declared name out of an
 # ordinary word that contains it"):
@@ -52,9 +59,14 @@
 # whatever causes it this time.
 #
 # KNOWN LIMIT: NON-ASCII CASE FOLDING
-# `grep -i` folds ASCII case only under the locale this file runs with (LANG
-# and LC_ALL both unset, by design, above). A declared name containing a
-# non-ASCII letter -- "Zoë Farbleworth" -- is matched exactly as declared and
+# `grep -i` folds ASCII case only under the locale this file runs with
+# (LANG and LC_ALL both unset, by design, above -- though #135's review
+# measured Git for Windows setting LC_CTYPE=C.UTF-8 regardless of that,
+# a fact this paragraph does not depend on since it is about what grep
+# folds, not about byte-vs-character counting; identity_json_array's own
+# LOCALE note is where LC_CTYPE actually matters in this file). A
+# declared name containing a non-ASCII letter -- "Zoë Farbleworth" -- is
+# matched exactly as declared and
 # in any all-lowercase or all-uppercase rendering of its ASCII letters, but
 # a rendering that also case-folds the non-ASCII letter itself ("ZOË") does
 # not fold to match, because grep -i never touches that byte. Measured
@@ -166,23 +178,20 @@ identity_ltrim() {
 # A wrong guess here would build a dead or mismatched pattern arm exactly
 # as silently as the undecoded escape did; refusing is loud instead.
 #
-# Byte-oriented throughout (cut -c, ${#var}), which only means what it
-# looks like it means because LANG and LC_ALL are unset (this file's own
-# header, "WHY grep -E's \b"): under the C locale, every shell and every
-# coreutils tool used here treats one byte as one character, so a token's
-# byte length and its character-offset cut are the same number.
-# #135's review found two more problems in the version of this function
-# that shipped for #91c/#91d, both fixed below.
+# Byte-oriented throughout (cut -c, ${#var}, the `?` glob wildcard),
+# which needs LC_ALL forced to C to be true, not merely LANG/LC_ALL being
+# unset. #135's round-1 review measured, through a real git commit, that
+# Git for Windows launches hooks with LC_CTYPE=C.UTF-8 set -- this file's
+# header ("WHY grep -E's \b") is correct that a git hook inherits LANG
+# and LC_ALL unset, but that is not the same claim as no locale variable
+# being set, and LC_CTYPE alone is enough: under C.UTF-8, `cut -c` still
+# counts bytes but ${#var} and `?` both count characters, and those
+# disagree on any non-ASCII declared entry. identity_json_array, this
+# function's only caller, forces LC_ALL=C in its own $(...) subshell
+# before ever calling this (see that function's own LOCALE note), which
+# is what actually makes "one byte is one character" true here.
 #
-# LOCALE: the "under the C locale" claim two paragraphs up is false for a
-# git-launched hook. Git for Windows sets LC_CTYPE=C.UTF-8 (measured in
-# review), and under it `cut -c` still counts bytes but a string's
-# character length and the `?` glob wildcard both count characters --
-# they desync on any non-ASCII declared entry. identity_json_array, the
-# only caller, now forces LC_ALL=C in its own $(...) subshell before
-# calling this, which this function relies on rather than repeating.
-#
-# COST: the review measured about 12 process spawns per escape in this
+# COST: #135's round-1 review measured about 12 process spawns per escape in this
 # function's previous shape (6 cut, 4 digit subshells, 2 printf) -- one
 # declared entry with 150 escapes took 973s at pre-commit, still 973s
 # after #91c/#91d landed since this cost predates both. Below, escape
@@ -345,7 +354,18 @@ identity_json_array() {
     raw=$1
     key=$2
     flat=$(printf '%s' "$raw" | tr '\n' ' ') || return 1
-    tail=$(printf '%s' "$flat" | sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\[/[/p")
+    # #135's round-2 review (N1): unchecked, a crashed sed here (the exact
+    # 2026-09-05 incident shape this file's header exists to catch, one
+    # tool call in a batch failing silently) reads identically to "the
+    # key was never declared" at the line below -- rc 0, empty $tail --
+    # so this one channel goes silently empty while the other stays
+    # populated and the both-empty refusal never fires. `sed -n` itself
+    # exits 0 on a clean no-match, so checking the exit status here does
+    # not turn an absent key into a false refusal.
+    tail=$(printf '%s' "$flat" | sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\[/[/p") || {
+        echo "identity gate: the '$key' key lookup in '$identity_file' did not run cleanly. Refusing rather than reading a crashed extraction as an absent key." >&2
+        return 1
+    }
     [ -n "$tail" ] || return 0
 
     # #135's review (F2): the sed above used to discard the array's own
@@ -628,9 +648,13 @@ EOF
 }
 
 # True (0) when $1's first and last characters are both a "word" character
-# ([A-Za-z0-9_], the exact byte class \b tests a transition against in the C
-# locale this file already runs under -- LANG and LC_ALL both unset). \b
-# requires a word/non-word transition at that position; a non-word
+# ([A-Za-z0-9_], the exact byte class \b tests a transition against in the
+# locale this file already runs under -- LANG and LC_ALL both unset,
+# though #135's review measured Git for Windows setting LC_CTYPE=C.UTF-8
+# regardless of that; grep -E's \b needs no locale either way, per this
+# file's own "WHY grep -E's \b" header section, so that does not change
+# the byte class \b tests here). \b requires a word/non-word transition
+# at that position; a non-word
 # character AT either edge of the literal text makes that transition
 # impossible for any real content the entry could appear in, so the arm
 # this entry builds can never fire. A non-ASCII character at an edge is
