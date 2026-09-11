@@ -13,10 +13,11 @@ closes the pull request unmerged.
 
 Each of those is a state change whose precondition the caller never saw. In two of the three
 recorded recurrences the command that should have stopped the chain exited nonzero and the chain ran
-on anyway, the code replaced before it reached anything that would have acted on it. The third is
-recorded with two candidate mechanisms and no verdict between them. Nothing in the transcript looks
-wrong afterwards in any of the three: one Bash call, one result line, and the state change already
-made.
+on anyway: once because a pipe replaced that code with `tail`'s zero before the merge ran, and once
+because a merge failed on conflicts and the branch deletion chained after it ignored the failure.
+The third is recorded with two candidate mechanisms and no verdict between them. Nothing in the
+transcript looks wrong afterwards in any of the three: one Bash call, one result line, and the state
+change already made.
 
 A prose rule against this exists and does not hold. "Never chain a state-changing `gh` command
 behind another command; check each step's result before the next" is short and clear, and in the
