@@ -110,11 +110,35 @@ describe("loadIdentity()", () => {
     expect(load(dir).ok).toBe(false);
   });
 
-  // C1: lstat can fail for reasons other than "nothing is there" (a parent directory search
-  // permission denies access to its metadata). That must not read as absent either; skipped on
-  // win32 (chmod on a directory does not restrict lstat inside it the same way) and as root
-  // (root bypasses the permission being tested).
-  test("a valid identity file whose containing directory denies search permission (EACCES on lstat): refused, not undeclared", () => {
+  // C1: lstat can fail for reasons other than "nothing is there". A parent directory that denies
+  // search permission makes every syscall touching a path inside it fail the same way, so lstat
+  // and the readFileSync that follows it both throw the same code; that must not read as absent,
+  // it must refuse. The injectable fs option runs this identically on every platform, one row per
+  // error code, rather than depending on an OS permission model that behaves differently per
+  // platform (chmod on Windows does not restrict lstat the way it does elsewhere).
+  test.each(["EACCES", "EPERM", "EIO", "EBUSY", "ENOTDIR"])(
+    "a present identity file whose lstat and read both throw %s: refused, not undeclared",
+    (code) => {
+      const dir = home(JSON.stringify({ names: ["Fixture Person"] }));
+      const failing = () => {
+        throw Object.assign(new Error(code), { code });
+      };
+      const result = loadIdentity({
+        home: dir,
+        username: "fixtureuser",
+        host: "fixture-host",
+        env: {},
+        fs: { lstatSync: failing, readFileSync: failing },
+      });
+      expect(result.ok).toBe(false);
+    },
+  );
+
+  // Same fault, kept as an extra: a real OS permission error rather than an injected one. Skipped
+  // on win32 (chmod on a directory does not restrict lstat inside it the same way) and as root
+  // (root bypasses the permission being tested); the injectable rows above are what runs on every
+  // platform, including this one.
+  test("extra: a valid identity file whose containing directory denies search permission (EACCES on lstat): refused, not undeclared", () => {
     if (process.platform === "win32" || process.getuid?.() === 0) return;
     const dir = home(JSON.stringify({ names: ["Fixture Person"] }));
     chmodSync(dir, 0o600);
@@ -303,8 +327,13 @@ describe("findIdentityHits()", () => {
       expect(findIdentityHits(text, decl())).toEqual(["email #1"]);
     });
 
-    test("an observed_instructions-shaped field: a path line then a soft-hyphenated email", () => {
-      const text = fenced("path: README.md" + String.fromCharCode(10) + "contact fixture" + String.fromCharCode(0xad) + "@example.test");
+    // The term sits directly after the newline, with nothing else between them: under the old
+    // canon (which deleted the newline outright instead of turning it into a separator) this
+    // glued "README.md" straight onto "fixture..." with no boundary at all, so the term would
+    // miss. A "contact " prefix here would give the term its own leading space regardless of the
+    // newline bug, which is exactly what made an earlier version of this test pass by accident.
+    test("an observed_instructions-shaped field: a path line then a soft-hyphenated email, no space between them", () => {
+      const text = fenced("path: README.md" + String.fromCharCode(10) + "fixture" + String.fromCharCode(0xad) + "@example.test");
       expect(findIdentityHits(text, decl())).toEqual(["email #1"]);
     });
 

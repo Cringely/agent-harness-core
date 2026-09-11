@@ -30,6 +30,18 @@ export interface IdentityDecl {
   hostname: string;
 }
 
+// A tests-only seam (like `env`): every real filesystem call this module makes goes through this
+// bag, defaulting to the real node:fs functions, so a test can inject a specific error code on a
+// specific call without depending on an OS permission model that behaves differently per
+// platform (C1). cli.ts never passes it.
+export interface IdentityFsOps {
+  existsSync: (path: string) => boolean;
+  lstatSync: (path: string) => unknown;
+  readFileSync: (path: string, encoding: "utf8") => string;
+}
+
+const REAL_FS: IdentityFsOps = { existsSync, lstatSync, readFileSync };
+
 export type IdentityLoad =
   | { ok: true; decl: IdentityDecl; declared: boolean; accountEmail: boolean }
   | { ok: false; reason: string };
@@ -80,26 +92,33 @@ export function accountStateDir(
 }
 
 export function loadIdentity(
-  options: { home?: string; username?: string; host?: string; env?: Record<string, string | undefined> } = {},
+  options: {
+    home?: string;
+    username?: string;
+    host?: string;
+    env?: Record<string, string | undefined>;
+    fs?: Partial<IdentityFsOps>;
+  } = {},
 ): IdentityLoad {
+  const fs: IdentityFsOps = { ...REAL_FS, ...options.fs };
   const path = join(options.home ?? homedir(), ".claude-account-identity.json");
   const username = options.username ?? userInfo().username;
   const host = options.host ?? hostname();
 
   const dir = accountStateDir(options.home, options.env ?? process.env);
   if (!dir.ok) return dir;
-  const account = readAccountEmail(dir.dir);
+  const account = readAccountEmail(dir.dir, fs);
   if (!account.ok) return account;
   const accountEmail = account.email !== null;
   const accountEmails = account.email === null ? [] : [account.email];
 
-  if (!identityFileExists(path)) {
+  if (!identityFileExists(path, fs)) {
     return { ok: true, declared: false, accountEmail, decl: { names: [], emails: accountEmails, username, hostname: host } };
   }
   let raw: string;
   let parsed: unknown;
   try {
-    raw = readFileSync(path, "utf8");
+    raw = fs.readFileSync(path, "utf8");
     parsed = JSON.parse(raw);
   } catch {
     return { ok: false, reason: "the identity file exists but could not be read as JSON" };
@@ -134,9 +153,9 @@ export function loadIdentity(
 // (EACCES on a parent directory, EPERM, EIO from a cloud-placeholder or network-backed profile,
 // EBUSY, ENOTDIR) means something is there that could not be inspected, and that is not the same
 // as absent (C1): it goes on to readFileSync, whose own failure refuses.
-function identityFileExists(path: string): boolean {
+function identityFileExists(path: string, fs: IdentityFsOps): boolean {
   try {
-    lstatSync(path);
+    fs.lstatSync(path);
     return true;
   } catch (err) {
     return (err as NodeJS.ErrnoException).code !== "ENOENT";
@@ -147,12 +166,12 @@ function identityFileExists(path: string): boolean {
 // leaves accountEmail false, and review --post refuses on that (Task 8, F3). An email in the
 // identity file does not substitute. State that exists but is not JSON refuses, because the
 // address the model sees cannot be known.
-function readAccountEmail(dir: string): { ok: true; email: string | null } | { ok: false; reason: string } {
+function readAccountEmail(dir: string, fs: IdentityFsOps): { ok: true; email: string | null } | { ok: false; reason: string } {
   const path = join(dir, ".claude.json");
-  if (!existsSync(path)) return { ok: true, email: null };
+  if (!fs.existsSync(path)) return { ok: true, email: null };
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(path, "utf8"));
+    parsed = JSON.parse(fs.readFileSync(path, "utf8"));
   } catch {
     return { ok: false, reason: "the claude CLI's account state (.claude.json) exists but could not be read as JSON" };
   }
