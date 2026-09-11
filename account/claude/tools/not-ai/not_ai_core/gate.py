@@ -123,9 +123,16 @@ def _prose_blocks(text: str) -> tuple[list[str], bool]:
     (many short "sentences" instead of one long one). A list item is its own
     unit even with no terminal punctuation, so one bullet no longer glues onto
     the next or onto the paragraph after the list; a line continues the open
-    item only while indented at least to the item's own content column,
-    matching how the list reads. A line indented less than that column ends
-    the item and starts a new paragraph block instead.
+    item only while indented at least to the item's own content column. A
+    line indented less than that column ends the item and starts a new
+    paragraph block instead -- even in the case where CommonMark's lazy
+    continuation would keep reading it as the same paragraph (a non-blank
+    line that does not itself open a new block continues the paragraph
+    regardless of indent). This reader takes the stricter rule everywhere on
+    purpose: lazy continuation is exactly the glue between an item and
+    unrelated prose after it that this rewrite exists to stop (issue #123f;
+    see also the rejected reduced variant recorded on issue #123's "de-indent
+    machinery" item, which reopens that same glue case).
 
     This is a deliberately narrow reading of markdown, not a CommonMark
     implementation: 4-space indented code blocks and setext (underline-style)
