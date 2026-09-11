@@ -244,3 +244,29 @@ describe("not-ai gate — markdown-aware sentence segmentation", () => {
     expect(exitCode).toBe(1);
   });
 });
+
+describe("not-ai gate — issue #122, normalized counts", () => {
+  test.skipIf(!PYTHON)(
+    "max_same_opening reports a proportion of sentences, not a raw count",
+    () => {
+      // Issue #122 defect 2: max_same_opening was the bare repeated-opening count, which
+      // cannot be compared across documents with different sentence totals -- and it was
+      // compared that way. Fixture: 5 sentences, 3 of them opening on "This". Measured
+      // before this fix: max_same_opening read 3 (the raw count). Fixed: it reads 0.6
+      // (3 / 5, the fraction of sentences sharing the most-repeated opening).
+      const { json } = runGate(
+        "same-opening.md",
+        [
+          "This report covers three items in some detail today.",
+          "This report also covers a fourth item briefly today.",
+          "This summary wraps the whole section up quickly today.",
+          "That approach differs from the plan outlined earlier today.",
+          "Another approach was tried before this one today.",
+        ].join(" ") + "\n",
+      );
+      expect(json.counts.sentences).toBe(5);
+      expect(json.counts.opening_types).toBe(3);
+      expect(json.counts.max_same_opening).toBe(0.6);
+    },
+  );
+});

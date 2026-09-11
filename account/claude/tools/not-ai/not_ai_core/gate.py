@@ -279,7 +279,12 @@ def evaluate(
         "long_over_30": sum(length > 30 for length in lengths),
         "sentence_length_sd": round(pstdev(lengths), 1) if len(lengths) > 1 else 0.0,
         "opening_types": distinct_openings,
-        "max_same_opening": max_opening,
+        # A proportion of sentences, not the raw count `_opening_count` returns:
+        # issue #122 defect 2 measured this being compared across corpora of
+        # different sizes while still an unnormalized count, which is not a
+        # comparison a raw count can support. The finding threshold below still
+        # reads the raw `max_opening` -- only the reported figure changes.
+        "max_same_opening": round(max_opening / len(items), 3) if items else 0.0,
     }
     findings: list[Finding] = []
     if not text.strip():
