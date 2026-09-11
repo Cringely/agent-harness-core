@@ -124,6 +124,57 @@ Describe "Install-Harness" {
         $second | Should -Be $first
     }
 
+    It "does not inject a null hook entry when an existing group has a matcher but no hooks property" {
+        # An existing group can carry `matcher` with nothing under `hooks` at all. Merging into
+        # it must not concatenate that missing property's $null straight into the array: that
+        # serializes a literal `null` entry ahead of the real hooks, which Claude Code can't load.
+        New-Item -ItemType Directory -Path "$script:target/.claude" | Out-Null
+        @'
+{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Write|Edit|NotebookEdit" }
+    ]
+  }
+}
+'@ | Set-Content "$script:target/.claude/settings.json"
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $raw = Get-Content "$script:target/.claude/settings.json" -Raw
+        $raw | Should -Not -Match '"hooks":\s*\[\s*null'
+        $s = $raw | ConvertFrom-Json
+        $matched = @($s.hooks.PreToolUse | Where-Object { $_.matcher -eq 'Write|Edit|NotebookEdit' })
+        $matched.Count | Should -Be 1
+        (@($matched[0].hooks) | Where-Object { $null -eq $_ }) | Should -BeNullOrEmpty
+        (@($matched[0].hooks | ForEach-Object { $_.command }) | Where-Object { $_ -match 'agent-write-scope\.ts' }) | Should -Not -BeNullOrEmpty
+    }
+
+    It "treats matcher comparison as case-sensitive, since Claude Code matchers are case-sensitive regexes" {
+        # Template uses "Agent|Task" for this event. A target group differing only by case
+        # ("agent|task") is a different matcher to Claude Code and must not absorb the
+        # template's hooks into a matcher that will never actually fire.
+        New-Item -ItemType Directory -Path "$script:target/.claude" | Out-Null
+        @'
+{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "agent|task", "hooks": [ { "type": "command", "command": "echo lowercase-agent-task-hook" } ] }
+    ]
+  }
+}
+'@ | Set-Content "$script:target/.claude/settings.json"
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $s = Get-Content "$script:target/.claude/settings.json" -Raw | ConvertFrom-Json
+        $lowerGroups = @($s.hooks.PreToolUse | Where-Object { $_.matcher -ceq 'agent|task' })
+        $properGroups = @($s.hooks.PreToolUse | Where-Object { $_.matcher -ceq 'Agent|Task' })
+        # The pre-existing lowercase group must survive untouched, on its own.
+        $lowerGroups.Count | Should -Be 1
+        @($lowerGroups[0].hooks | ForEach-Object { $_.command }) | Should -Be @('echo lowercase-agent-task-hook')
+        # The template's correctly-cased matcher gets its own group rather than being folded
+        # into the lowercase one.
+        $properGroups.Count | Should -Be 1
+        (@($properGroups[0].hooks | ForEach-Object { $_.command }) | Where-Object { $_ -match 'agent-worktree-gate\.ts' }) | Should -Not -BeNullOrEmpty
+    }
+
     It "serializes each matcher group's hooks as a JSON array, even with a single hook" {
         & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
         $raw = Get-Content "$script:target/.claude/settings.json" -Raw

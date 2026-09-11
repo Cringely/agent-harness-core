@@ -1050,17 +1050,34 @@ foreach ($eventType in $hooksTemplate.PSObject.Properties.Name) {
         # over from the target, or added earlier in this same loop) whose matcher already
         # equals this one's. "No matcher property" and an explicit null matcher are the same
         # case on both sides, so a $null-vs-$null comparison must not fall through to -eq
-        # (which is unreliable with $null on the right-hand side).
+        # (which is unreliable with $null on the right-hand side). The non-null comparison is
+        # -ceq: Claude Code matchers are case-sensitive regexes ("Bash" and "bash" are
+        # different matchers), and the command dedup above (List[string].Contains) is already
+        # ordinal, so a case-insensitive matcher match here would silently fold a target's
+        # differently-cased matcher into the template's group.
         $groupMatcher = if ($group.PSObject.Properties['matcher']) { $group.matcher } else { $null }
         $existingMatch = $null
         foreach ($eg in $existingGroups) {
             $egMatcher = if ($eg.PSObject.Properties['matcher']) { $eg.matcher } else { $null }
-            $sameMatcher = if ($null -eq $groupMatcher) { $null -eq $egMatcher } else { $groupMatcher -eq $egMatcher }
+            $sameMatcher = if ($null -eq $groupMatcher) { $null -eq $egMatcher } else { $groupMatcher -ceq $egMatcher }
             if ($sameMatcher) { $existingMatch = $eg; break }
         }
 
         if ($null -ne $existingMatch) {
-            $existingMatch.hooks = @(@($existingMatch.hooks) + $newHooks)
+            # An existing group can carry `matcher` with no `hooks` property at all (or an
+            # explicit null), so filter nulls out before concatenating rather than trusting
+            # @($existingMatch.hooks) to already be a clean array. And when `hooks` is absent
+            # rather than merely null, dot-assignment throws ("property cannot be found") since
+            # PSCustomObject doesn't auto-vivify a missing property on set — only Add-Member
+            # creates one.
+            $existingHooks = @(@($existingMatch.hooks) | Where-Object { $_ })
+            $mergedHooks = @($existingHooks + $newHooks)
+            if ($existingMatch.PSObject.Properties['hooks']) {
+                $existingMatch.hooks = $mergedHooks
+            }
+            else {
+                $existingMatch | Add-Member -NotePropertyName hooks -NotePropertyValue $mergedHooks
+            }
         }
         else {
             $newGroup = [pscustomobject]@{}
