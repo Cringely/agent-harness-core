@@ -183,14 +183,18 @@ describe("not-ai gate — markdown-aware sentence segmentation", () => {
     expect(json.counts.sentences).toBe(1);
   });
 
-  test.skipIf(!PYTHON)("whitespace-only input does not divide by zero", () => {
-    const { json, exitCode } = runGate("whitespace-only.md", "   \n\n\t\n   ");
-    expect(json.word_count).toBe(0);
-    expect(json.counts.sentences).toBe(0);
-    expect(json.counts.sentence_length_sd).toBe(0.0);
-    expect(json.passed).toBe(false); // the pre-existing empty-text finding, unrelated to this fix
-    expect(exitCode).toBe(1);
-  });
+  // A whitespace-only fixture used to live here ("does not divide by zero"). Removed per
+  // issue #123d: the reviewer found it passed under every mutation tried, and an independent
+  // ablation for this fix confirms it -- disabling the blank-line short-circuit in
+  // _prose_blocks (the exact branch a whitespace-only document exercises) left every one of
+  // its assertions (word_count, sentences, sentence_length_sd, passed, exitCode) unchanged,
+  // because evaluate()'s pre-existing "Text is empty" early return, and sentences()'s own
+  // `if not normalized: continue` guard, both fire before that mutation could ever surface.
+  // Neither guard belongs to the segmentation fix this describe block exists to protect, so
+  // the test measured a pre-existing, unrelated code path under a segmentation-fix name. The
+  // "all code, zero sentences" case below already covers the real "zero sentences, no crash"
+  // path that DOES go through the segmenter, so nothing here needed a replacement rather than
+  // a deletion.
 
   test.skipIf(!PYTHON)("a document that is all code has zero sentences without crashing", () => {
     // Distinct from the whitespace case: this text is non-blank (evaluate()'s early
