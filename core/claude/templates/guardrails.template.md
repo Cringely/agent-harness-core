@@ -25,7 +25,7 @@ setup, not a willpower failure.
 Everything project-specific lives in this repo, not at the account level, so it stays versioned,
 portable, and reviewable alongside the code it governs.
 
-The plugin/skill stack this project assumes (documented below) is recorded per-machine in `.claude/.harness-manifest.json` under `stackDetected`, and a skill you expect may simply be absent here.
+The plugin/skill stack this project assumes (documented below) is recorded per-machine in `.claude/.harness-manifest.local.json` under `stackDetected`, and a skill you expect may simply be absent here.
 
 <!-- guardrails:session-start-end — the SessionStart hook prints everything ABOVE this line. Keep the key just-in-time rules above it, and keep that block short: it lands in every fresh context. See agent-harness-core's patterns/always-on-context-budget.md for why this and the other unconditionally-loaded surfaces (rules files, skill descriptions) are the real budget, not agent count. -->
 
@@ -76,7 +76,7 @@ This project's process assumes a specific set of Claude Code plugins and persona
 active. None of that is installed by this project. Plugins live at
 `~/.claude/plugins/cache/<marketplace>/<plugin>/`, account scope, and this installer has no way
 to put one there or take one away. What it can do is record what it actually found on the local
-machine, in `.claude/.harness-manifest.json` under `stackDetected` (`scannedAt` plus `plugins`,
+machine, in `.claude/.harness-manifest.local.json` under `stackDetected` (`scannedAt` plus `plugins`,
 `outputStyles`, and `mcpServers` lists). Treat that field as the source of truth for this machine,
 and this section as the aspiration everyone is building against. A skill named here that isn't in
 `stackDetected` is missing, not broken; work around its absence rather than assuming a step

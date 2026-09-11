@@ -11,13 +11,23 @@
     re-installs never silently clobber a project-modified file.
 
     The manifest is v2: installed-file hashes live under `files`, deliberate project
-    forks pinned with -Accept live under `accepted`, and `coreRepo`/`coreCommit`
-    record where this layer came from. A v1 manifest (a flat path-to-hash map) is
-    migrated on load, preserving every hash under `files`. Migration also carries any
+    forks pinned with -Accept live under `accepted`, and `coreCommit` records which
+    core commit this layer was installed from. A v1 manifest (a flat path-to-hash map)
+    is migrated on load, preserving every hash under `files`. Migration also carries any
     `accepted` pins through unchanged, since only -Accept can write one and nothing on
     disk can recompute it. The record keys stay at top level either way: they are not
     tracked files, and one folded in under `files` becomes an audit row for a file
     that does not exist.
+
+    `coreRepo` (an absolute filesystem path) and `stackDetected` (the per-machine plugin,
+    output-style, and MCP-server inventory, plus the timestamp of the scan that found
+    them) never go in the committed manifest: neither travels between clones, and a
+    public target repo has no business publishing an operator's local directory layout
+    or installed toolset (issue #137). Both live in a second file the installer writes
+    alongside it and gitignores in the target: `.harness-manifest.local.json`. A manifest
+    written before this fix still carries them embedded at top level; the next run of
+    any installer command splits them out into the sidecar and drops them from the
+    committed file.
 
     Ceremony components (wave-close-handoff.sh hook, soc-monitor.md agent,
     ceremony-ledger.json and their hook registrations) assume wave/standup ceremony
@@ -288,6 +298,7 @@ function Get-CoreFilesMap {
     foreach ($f in $hookFiles) { $map["hooks/$($f.Name)"] = $f.FullName }
     $map['guardrails.md'] = Join-Path $templatesSrc 'guardrails.template.md'
     $map['scratch/.gitignore'] = Join-Path $templatesSrc 'scratch.gitignore'
+    $map['.gitignore'] = Join-Path $templatesSrc 'manifest-local.gitignore'
     return $map
 }
 
@@ -405,10 +416,18 @@ function Get-CoreCommit {
 }
 
 # Manifest v2. v1 was a flat map of relative path to SHA256 (plus the stackDetected record).
-# v2 moves that map under `files` and adds three siblings: `accepted`, which pins deliberate
-# project forks at their own hash, plus `coreRepo` and `coreCommit`. Every load migrates, so
-# the rest of the script only ever sees v2; the migrated shape reaches disk only where the
-# script already writes the manifest, which is why -Audit still writes nothing.
+# v2 moves that map under `files` and adds two siblings: `accepted`, which pins deliberate
+# project forks at their own hash, and `coreCommit`. Every load migrates, so the rest of the
+# script only ever sees v2; the migrated shape reaches disk only where the script already
+# writes the manifest, which is why -Audit still writes nothing.
+#
+# coreRepo and stackDetected never appear in the value this function returns, regardless of
+# input shape. Both are machine-specific (an absolute path; a per-machine plugin/MCP inventory)
+# and belong in the gitignored sidecar the caller loads separately, never in the file a target
+# repo commits (issue #137). A manifest reaching here still carrying either -- v1's shape, or a
+# v2 manifest written before this fix -- has them stripped below rather than folded into
+# `files`, and the caller is responsible for carrying a legacy value forward into the sidecar
+# before calling this function, since this function's return value cannot carry it any more.
 #
 # Hand-edited manifests in the wild are the reason this is a function with a shape check
 # rather than three inline assignments. Four cases it has to survive without losing data:
@@ -434,37 +453,35 @@ function ConvertTo-ManifestV2 {
     $isV2 = $m.Contains('files') -and $m['files'] -is [System.Collections.IDictionary]
 
     if (-not $isV2) {
-        # The four skipped keys are manifest records rather than tracked files. Folding any of
-        # them into `files` buys it a row in the audit table for a file that does not exist,
-        # which is the same false alarm the pin mechanism exists to remove. Only two need
-        # carrying: coreRepo and coreCommit are rewritten from the current checkout at the
-        # bottom of this block, so their stale values are meant to be dropped here.
+        # The four skipped keys are manifest records rather than tracked files (coreRepo and
+        # stackDetected are dropped outright below; folding either into `files` buys it a row
+        # in the audit table for a file that does not exist, the same false alarm the pin
+        # mechanism exists to remove). Only coreCommit needs carrying here: it is rewritten
+        # from the current checkout at the bottom of this block, so its stale value is meant
+        # to be dropped.
         $files = @{}
         foreach ($key in @($m.Keys)) {
             if ($key -in @('stackDetected', 'accepted', 'coreRepo', 'coreCommit')) { continue }
             $files[$key] = $m[$key]
         }
 
-        # stackDetected stays a top-level sibling of files/accepted/coreRepo/coreCommit.
-        # It is a record of the machine's plugin and MCP stack, not a tracked file, and
-        # folding it into `files` would put it through the hash audit as an orphan.
-        $stack = $null
-        $hadStack = $m.Contains('stackDetected')
-        if ($hadStack) { $stack = $m['stackDetected'] }
-
-        # accepted rides through for the same reason and a stronger one: a pin is an operator
-        # decision that nothing on disk can recompute, so a manifest reaching here with pins but
-        # no usable `files` must not have them rebuilt away. Carried unconditionally rather than
-        # behind its own shape test like $hadStack, because the degrade below already replaces a
-        # non-map with an empty one, exactly as it does for a manifest that was already v2.
+        # accepted rides through for a stronger reason than the dropped keys: a pin is an
+        # operator decision that nothing on disk can recompute, so a manifest reaching here
+        # with pins but no usable `files` must not have them rebuilt away. Carried
+        # unconditionally, because the degrade below already replaces a non-map with an empty
+        # one, exactly as it does for a manifest that was already v2.
         $accepted = $m['accepted']
 
         $m = @{ files = $files }
-        if ($hadStack) { $m['stackDetected'] = $stack }
         $m['accepted'] = $accepted
-        $m['coreRepo'] = $script:repoRoot
         $m['coreCommit'] = Get-CoreCommit
     }
+
+    # coreRepo and stackDetected belong in the sidecar, never here, whether this manifest just
+    # migrated from v1 (which never set them above) or was already v2-shaped and carried them
+    # in from disk as top-level siblings of `files` (the pre-fix committed shape).
+    $null = $m.Remove('coreRepo')
+    $null = $m.Remove('stackDetected')
 
     # Degrade a missing or wrong-typed map to an empty one rather than throwing, matching how
     # the audit already treats a hand-edited stackDetected. A non-map `accepted` holds no pin
@@ -476,6 +493,7 @@ function ConvertTo-ManifestV2 {
 }
 
 $manifestPath = Join-Path $claudeDir '.harness-manifest.json'
+$sidecarPath = Join-Path $claudeDir '.harness-manifest.local.json'
 $manifest = @{}
 if (Test-Path -LiteralPath $manifestPath) {
     $raw = Get-Content -LiteralPath $manifestPath -Raw
@@ -484,7 +502,34 @@ if (Test-Path -LiteralPath $manifestPath) {
         foreach ($key in $loaded.Keys) { $manifest[$key] = $loaded[$key] }
     }
 }
+
+# Captured before migration, which strips both from the returned manifest unconditionally: a
+# manifest written before this fix carries them embedded at top level, and this is the one
+# chance to carry that value forward into the sidecar instead of losing it outright.
+$legacyCoreRepo = $manifest['coreRepo']
+$legacyStackDetected = $manifest['stackDetected']
+
 $manifest = ConvertTo-ManifestV2 -Loaded $manifest
+
+# Sidecar: coreRepo (absolute path to the core checkout) and stackDetected (the per-machine
+# plugin/output-style/MCP-server inventory). Neither travels between clones, so neither goes in
+# the manifest a target repo commits -- this file is gitignored by the .gitignore installed
+# alongside it. Loaded the same permissive way as the manifest: a missing or empty file degrades
+# to nothing recorded rather than throwing.
+$sidecar = @{}
+if (Test-Path -LiteralPath $sidecarPath) {
+    $rawSidecar = Get-Content -LiteralPath $sidecarPath -Raw
+    if ($rawSidecar.Trim()) {
+        $loadedSidecar = $rawSidecar | ConvertFrom-Json -AsHashtable
+        foreach ($key in $loadedSidecar.Keys) { $sidecar[$key] = $loadedSidecar[$key] }
+    }
+}
+# One-time carry-forward for a manifest written before this fix: adopt the legacy embedded
+# values only where the sidecar does not already have its own, so a real scan on this run (the
+# refresh at the bottom of the script, reached only by a plain install) is never overwritten by
+# a stale value read out of the old manifest.
+if (-not $sidecar.Contains('coreRepo') -and $legacyCoreRepo) { $sidecar['coreRepo'] = $legacyCoreRepo }
+if (-not $sidecar.Contains('stackDetected') -and $legacyStackDetected) { $sidecar['stackDetected'] = $legacyStackDetected }
 
 # The target's other piece of pre-existing state, read here beside the manifest because every mode
 # has to know what is already on disk before it decides anything. Invariant: the target's
@@ -526,6 +571,10 @@ if ($Accept) {
 
     $manifest['accepted'][$acceptKey] = Get-FileHashHex -Path $acceptPath
     $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
+    # -Accept touches the manifest, not the sidecar's own values -- but a legacy carry-forward
+    # above may have populated $sidecar in memory only, and this is the write that gives a
+    # target upgrading via -Accept (rather than a plain re-install) a persisted sidecar too.
+    $sidecar | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $sidecarPath
     Write-Host "Accepted overlay '$acceptKey' pinned at $($manifest['accepted'][$acceptKey])."
     return
 }
@@ -555,6 +604,9 @@ if ($Unaccept) {
 
     $manifest['accepted'].Remove($unacceptKey)
     $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
+    # See the matching comment in the -Accept block: persists a legacy carry-forward the
+    # in-memory $sidecar may hold even though -Unaccept itself never changes it.
+    $sidecar | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $sidecarPath
     Write-Host "Dropped the accepted-overlay pin on '$unacceptKey'. The file itself was left alone; the audit now judges it against core again."
     return
 }
@@ -618,6 +670,9 @@ if ($Prune) {
 
     $manifest['files'].Remove($pruneKey)
     $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
+    # See the matching comment in the -Accept block: persists a legacy carry-forward the
+    # in-memory $sidecar may hold even though -Prune itself never changes it.
+    $sidecar | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $sidecarPath
 
     if (-not (Test-Path -LiteralPath $prunePath -PathType Leaf)) {
         Write-Host "Pruned manifest record '$pruneKey': already gone from disk."
@@ -774,8 +829,8 @@ if ($Audit) {
         Write-Host "$($attention.Count) file(s) need attention. project-modified/untracked-differs = candidates to promote into core; core-updated/not-installed = re-run installer to pull down; overlay-changed = re-review the fork, then re-pin with -Accept; missing = re-run the installer if the row is a tracked file, but a missing pinned overlay exists only in the project's own history, so restore it from there or drop the pin with -Unaccept; orphaned (already removed/unmodified/modified) = -Prune the key to drop the stale manifest record -- the file, if any is still there, is left on disk for you to delete by hand or -Accept to pin as an overlay."
     }
 
-    # Stack drift: report-only, same as the file audit above — never writes the manifest.
-    # Covers all three stackDetected categories, not just plugins.
+    # Stack drift: report-only, same as the file audit above — never writes the manifest or
+    # the sidecar. Covers all three stackDetected categories, not just plugins.
     function Show-StackDrift {
         param([string]$Label, [string[]]$Detected, [string[]]$Recorded)
         $added = @($Detected | Where-Object { $Recorded -notcontains $_ })
@@ -793,13 +848,16 @@ if ($Audit) {
     # Not `$x = if (...) { @(...) } else { @() }`: an if/else used as an expression
     # collapses an empty (or single-element) array result the same way a pipeline
     # capture does. Initialize, then conditionally overwrite, as elsewhere in this file.
+    # stackDetected lives in the sidecar, not the manifest — see the ConvertTo-ManifestV2
+    # comment above for why.
     $recordedStack = @{}
-    if ($manifest.Contains('stackDetected')) { $recordedStack = $manifest['stackDetected'] }
+    if ($sidecar.Contains('stackDetected')) { $recordedStack = $sidecar['stackDetected'] }
 
-    # A hand-edited manifest can set stackDetected to null or to a non-object value
+    # A hand-edited sidecar can set stackDetected to null or to a non-object value
     # (string, number, array) — ConvertFrom-Json -AsHashtable passes those through as-is.
     # .Contains() below assumes a hashtable, so treat anything else as "nothing recorded"
-    # rather than throw. -Audit is report-only and must never abort or rewrite the manifest.
+    # rather than throw. -Audit is report-only and must never abort or rewrite the manifest
+    # or the sidecar.
     if ($recordedStack -isnot [hashtable]) { $recordedStack = @{} }
 
     $recordedPlugins = @()
@@ -982,6 +1040,13 @@ Install-ManagedFile -SourcePath (Join-Path $templatesSrc 'scratch.gitignore') `
     -DestPath (Join-Path $scratchDst '.gitignore') `
     -ManifestKey 'scratch/.gitignore'
 
+# .claude/.gitignore: keeps the coreRepo/stackDetected sidecar (.harness-manifest.local.json)
+# out of every commit, the same way scratch/.gitignore above keeps the drop box untracked.
+# A project's own .gitignore at its root is never touched by this.
+Install-ManagedFile -SourcePath (Join-Path $templatesSrc 'manifest-local.gitignore') `
+    -DestPath (Join-Path $claudeDir '.gitignore') `
+    -ManifestKey '.gitignore'
+
 # Ceremony ledger: never overwritten once it exists (it holds live state), and only
 # installed at all under -IncludeCeremonies.
 if ($IncludeCeremonies) {
@@ -1094,12 +1159,15 @@ foreach ($eventType in $hooksTemplate.PSObject.Properties.Name) {
 }
 
 # Install-time provenance, refreshed on every install. A project that re-installs from a
-# newer core should record the commit it actually got, not the one it first got, and hooks
-# reading coreRepo to locate core need a path that survives the core repo being moved.
-$manifest['coreRepo'] = $repoRoot
+# newer core should record the commit it actually got, not the one it first got. coreCommit
+# travels (it names a commit, not a place) and stays in the committed manifest; coreRepo and
+# stackDetected do not travel and go in the gitignored sidecar instead (issue #137). Hooks
+# reading coreRepo to locate core need a path that survives the core repo being moved, which
+# is exactly the sidecar's job.
 $manifest['coreCommit'] = Get-CoreCommit
 
-$manifest['stackDetected'] = [ordered]@{
+$sidecar['coreRepo'] = $repoRoot
+$sidecar['stackDetected'] = [ordered]@{
     scannedAt     = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     plugins       = $detectedPlugins
     outputStyles  = $detectedOutputStyles
@@ -1109,6 +1177,7 @@ Write-Host "Plugins detected: $($detectedPlugins.Count); output styles: $($detec
 
 $settings | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $settingsPath
 $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
+$sidecar | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $sidecarPath
 
 # Git hooksPath wiring. The Claude Code PostToolUse hooks above only see this
 # session's direct Write/Edit tool calls — a script-applied OLD/NEW patch

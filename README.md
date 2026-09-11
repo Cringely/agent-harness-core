@@ -44,7 +44,8 @@ and ranking questions that file tools cannot express. It indexes locally, with l
 This installer does not install it; add it as a Claude Code plugin with
 `/plugin marketplace add infino-ai/code-context` then `/plugin install code-context@infino-ai`.
 Nothing here requires it. No hook calls it, `research-scout` reaches for it only when it is
-present, and the installer records whether it found one under `stackDetected` in the manifest.
+present, and the installer records whether it found one under `stackDetected` in the per-machine
+sidecar (`.claude/.harness-manifest.local.json`), not the manifest a project commits.
 Its absence costs search quality, nothing more.
 
 ```
@@ -80,10 +81,18 @@ anything.
 The `.harness-manifest.json` behind that is a record of two different things, not one. `files` maps
 each installed path to the SHA256 it had at install time, which is what makes a project edit
 detectable. `accepted` maps a path to the hash of the project's own fork, pinned deliberately, and
-says the divergence is the intended state. Alongside them sit `coreRepo` and `coreCommit`, recording
-where the layer came from so a hook can find core without an environment variable. A manifest
-written before this shape existed, a flat path-to-hash map, is migrated on the next run with every
-hash preserved under `files`.
+says the divergence is the intended state. `coreCommit` is the third field, recording which core
+commit the layer was installed from. A manifest written before this shape existed, a flat
+path-to-hash map, is migrated on the next run with every hash preserved under `files`.
+
+None of that travels between clones, which is exactly why two other fields never reach this file:
+`coreRepo` (an absolute path to the core checkout) and `stackDetected` (the per-machine plugin,
+output-style, and MCP-server inventory, plus the timestamp of the scan that found it). Both live in
+a second file instead, `.claude/.harness-manifest.local.json`, gitignored by the installer's own
+`.claude/.gitignore` and never committed. `session-start-drift-check.sh` reads `coreRepo` from
+there to find core without an environment variable. A project that installed an earlier version of
+this layer has both fields embedded directly in `.harness-manifest.json`; the next run of any
+installer command splits them into the sidecar and drops them from the committed file.
 
 `-Accept <relpath>` writes the second kind of entry. Point it at a path relative to the project's
 `.claude` and it pins that file's current hash, which turns a permanent audit warning into a silent

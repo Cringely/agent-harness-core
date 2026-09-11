@@ -7,11 +7,21 @@
 # pins output shape instead of a denial and says so at the top. Issue #87 asked for exactly
 # that scoping.
 #
-# What it does: read .claude/.harness-manifest.json, resolve the core checkout the layer
-# was installed from, run that checkout's audit against this project, and print one
+# What it does: read .claude/.harness-manifest.local.json, resolve the core checkout the
+# layer was installed from, run that checkout's audit against this project, and print one
 # summary line when files need attention. Silent when nothing does.
 #
-# Every failure degrades to silence and exit 0 — no manifest, no coreRepo, a coreRepo that
+# coreRepo lives in the sidecar (.harness-manifest.local.json), not the committed manifest
+# (.harness-manifest.json): it is an absolute path, which is machine-specific and does not
+# belong in a file a target repo commits (issue #137). A project that installed an earlier
+# version of this layer has coreRepo embedded in the committed manifest instead; this hook
+# does not fall back to reading it from there, so the drift check goes quiet until the next
+# install/-Accept/-Unaccept/-Prune run splits it out into the sidecar. That one-time gap is
+# the same shape as every other migration in this repo (Install-Harness.ps1's own doc
+# comment on ConvertTo-ManifestV2): the installer repairs the shape on its next touch rather
+# than every reader carrying a permanent fallback for a shape only the installer produces.
+#
+# Every failure degrades to silence and exit 0 — no sidecar, no coreRepo, a coreRepo that
 # is not a core checkout (an unmounted NAS is the ordinary case here), no pwsh, an audit
 # that throws. A drift check that breaks a session start is worse than no drift check, so
 # there is no path here that reports its own failure.
@@ -46,9 +56,9 @@ if (set -o pipefail) 2>/dev/null; then set -o pipefail; fi
 # failing). One general mechanism beats two overlapping ones.
 
 root="${CLAUDE_PROJECT_DIR:-.}"
-manifest="$root/.claude/.harness-manifest.json"
+sidecar="$root/.claude/.harness-manifest.local.json"
 
-[ -f "$manifest" ] || exit 0
+[ -f "$sidecar" ] || exit 0
 
 # coreRepo by sed rather than by a JSON parser: jq is not a dependency of this repo and is
 # not bundled with Git for Windows (checked: `command -v jq` misses in its shell), and pwsh,
@@ -56,12 +66,12 @@ manifest="$root/.claude/.harness-manifest.json"
 # validated. Anchored on the key, first match wins, `q` stops the stream there. The value
 # pattern walks escape pairs (\" \\ \/) so it cannot end early on an escaped quote. A
 # malformed or absent key yields the empty string and exits silent below. A trailing CR from
-# a CRLF manifest falls outside the capture: it sits after the closing quote, which the
+# a CRLF sidecar falls outside the capture: it sits after the closing quote, which the
 # trailing `.*` consumes.
-# The `2>/dev/null || exit 0` is not belt-and-braces over the [ -f ] above: a manifest that
+# The `2>/dev/null || exit 0` is not belt-and-braces over the [ -f ] above: a sidecar that
 # exists and cannot be read (mode, ACL, a dangling symlink) makes sed write to stderr and exit
 # non-zero, and under `set -e` that aborts the hook with its complaint in the session start.
-core_repo=$(sed -n '/"coreRepo"[[:space:]]*:/{s/.*"coreRepo"[[:space:]]*:[[:space:]]*"\([^"\\]*\(\\.[^"\\]*\)*\)".*/\1/p;q;}' "$manifest" 2>/dev/null) || exit 0
+core_repo=$(sed -n '/"coreRepo"[[:space:]]*:/{s/.*"coreRepo"[[:space:]]*:[[:space:]]*"\([^"\\]*\(\\.[^"\\]*\)*\)".*/\1/p;q;}' "$sidecar" 2>/dev/null) || exit 0
 [ -n "$core_repo" ] || exit 0
 
 # JSON escapes back to a real path. A Windows coreRepo is written with doubled separators
@@ -73,12 +83,13 @@ core_repo=$(printf '%s\n' "$core_repo" | sed 's|\\\\|\\|g; s|\\/|/|g' 2>/dev/nul
 
 # coreRepo must not name a directory inside the project being audited. Without this the check
 # below is only a name-shape test: any directory holding install/Install-Harness.ps1 gets run,
-# so a PR touching one JSON string value in .harness-manifest.json plus an
-# install/Install-Harness.ps1 anywhere in the tree buys arbitrary PowerShell at every session
-# start on every equipped machine. That is a real escalation over editing the hook, which is
-# visible in review and prompted by Claude Code. A core checkout is by definition not part of
-# a consumer project, so nothing legitimate is refused.
-#   cd+pwd rather than a string compare on the raw values: the manifest holds a native path
+# so a PR carrying a force-added .harness-manifest.local.json (.gitignore keeps it out of a
+# normal add, not out of one that overrides it) plus an install/Install-Harness.ps1 anywhere
+# in the tree buys arbitrary PowerShell at every session start on every equipped machine. That
+# is a real escalation over editing the hook, which is visible in review and prompted by
+# Claude Code. A core checkout is by definition not part of a consumer project, so nothing
+# legitimate is refused.
+#   cd+pwd rather than a string compare on the raw values: the sidecar holds a native path
 # written by PowerShell and $root arrives in whatever form the harness set it, so the two are
 # only comparable once both have been through the same normalization. CDPATH= because a
 # relative coreRepo would otherwise resolve against it, and `--` because one starting with a

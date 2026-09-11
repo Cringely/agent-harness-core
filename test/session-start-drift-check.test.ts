@@ -30,6 +30,9 @@ const INSTALLER = join(REPO_ROOT, "install", "Install-Harness.ps1");
 const HOOK_SRC = join(REPO_ROOT, "core", "claude", "hooks", "session-start-drift-check.sh");
 const HOOK_REL = join(".claude", "hooks", "session-start-drift-check.sh");
 const MANIFEST_REL = join(".claude", ".harness-manifest.json");
+// coreRepo lives here, not in MANIFEST_REL: it is machine-specific (an absolute path) and
+// does not belong in the file a target repo commits (issue #137).
+const SIDECAR_REL = join(".claude", ".harness-manifest.local.json");
 
 // An install runs pwsh twice over the whole layer (install, then audit), which is well
 // past bun's 5s default on a cold PowerShell start.
@@ -86,12 +89,17 @@ function bareProject(): string {
   return dir;
 }
 
-/** Rewrite the installed manifest's coreRepo to an arbitrary string, JSON-escaped. */
+/** Rewrite the sidecar's coreRepo to an arbitrary string, JSON-escaped. Creates the sidecar
+ * if a case has not run a real install first. */
 function setCoreRepo(dir: string, value: string) {
-  const path = join(dir, MANIFEST_REL);
-  const manifest = JSON.parse(readFileSync(path, "utf8"));
-  manifest.coreRepo = value;
-  writeFileSync(path, JSON.stringify(manifest, null, 2));
+  const path = join(dir, SIDECAR_REL);
+  const sidecar = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {};
+  sidecar.coreRepo = value;
+  writeFileSync(path, JSON.stringify(sidecar, null, 2));
+}
+
+function git(args: string[], cwd: string) {
+  return Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
 }
 
 function runHook(dir: string) {
@@ -231,8 +239,46 @@ describe("session-start drift-check hook — output shape", () => {
   );
 });
 
+describe("session-start drift-check hook — the committed manifest carries no machine-specific fields", () => {
+  // This is the invariant issue #137 exists for: coreRepo (an absolute path), scannedAt (a
+  // per-run timestamp), and stackDetected (a per-machine plugin/MCP inventory) must never
+  // reach the file a target repo commits. Pinned here, not only in the Pester suite, because
+  // this file runs under CI's `bun test` job; Install-Harness.Tests.ps1 does not run in CI at
+  // all (test.yml: "Install-Harness.Tests.ps1 is excluded ... it reads a real ~/.claude-shaped
+  // tree").
+  test.skipIf(!pwshPath)(
+    "a fresh install's committed manifest has none of them, and the sidecar is gitignored",
+    () => {
+      const dir = installedProject();
+      git(["init", "-q"], dir);
+
+      const manifestRaw = readFileSync(join(dir, MANIFEST_REL), "utf8");
+      expect(manifestRaw).not.toMatch(/coreRepo/);
+      expect(manifestRaw).not.toMatch(/scannedAt/);
+      expect(manifestRaw).not.toMatch(/stackDetected/);
+      const manifest = JSON.parse(manifestRaw);
+      // Provenance that travels stays: which core commit, and the accepted-overlay list.
+      expect(manifest.coreCommit).toBeTruthy();
+      expect(manifest.accepted).toBeDefined();
+
+      const sidecarRaw = readFileSync(join(dir, SIDECAR_REL), "utf8");
+      const sidecar = JSON.parse(sidecarRaw);
+      expect(sidecar.coreRepo).toBeTruthy();
+      expect(sidecar.stackDetected).toBeTruthy();
+
+      // .claude/.gitignore is installed alongside it and git actually honors it: not merely
+      // present on disk, but the sidecar never shows up as an untracked file to commit.
+      const ignoreCheck = git(["check-ignore", "-q", ".claude/.harness-manifest.local.json"], dir);
+      expect(ignoreCheck.exitCode).toBe(0);
+      const status = git(["status", "--porcelain", ".claude/.harness-manifest.local.json"], dir);
+      expect(status.stdout.toString().trim()).toBe("");
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+});
+
 describe("session-start drift-check hook — every degradation exits silent and zero", () => {
-  test("no manifest: silent", () => {
+  test("no sidecar: silent", () => {
     const dir = bareProject();
     const result = runHook(dir);
     expect(result.stdout.length).toBe(0);
@@ -240,9 +286,9 @@ describe("session-start drift-check hook — every degradation exits silent and 
     expect(result.exitCode).toBe(0);
   });
 
-  test("manifest with no coreRepo key: silent", () => {
+  test("sidecar with no coreRepo key: silent", () => {
     const dir = bareProject();
-    writeFileSync(join(dir, MANIFEST_REL), JSON.stringify({ files: {} }, null, 2));
+    writeFileSync(join(dir, SIDECAR_REL), JSON.stringify({}, null, 2));
     const result = runHook(dir);
     expect(result.stdout.length).toBe(0);
     expect(result.stderr.length).toBe(0);
@@ -252,8 +298,8 @@ describe("session-start drift-check hook — every degradation exits silent and 
   test("coreRepo that does not resolve (NAS unmounted): silent", () => {
     const dir = bareProject();
     writeFileSync(
-      join(dir, MANIFEST_REL),
-      JSON.stringify({ coreRepo: join(dir, "no-such-core"), files: {} }, null, 2),
+      join(dir, SIDECAR_REL),
+      JSON.stringify({ coreRepo: join(dir, "no-such-core") }, null, 2),
     );
     const result = runHook(dir);
     expect(result.stdout.length).toBe(0);
@@ -270,7 +316,7 @@ describe("session-start drift-check hook — every degradation exits silent and 
     mkdirSync(join(fakeCore, "install"), { recursive: true });
     const marker = join(dir, "RAN-THE-WRONG-SCRIPT");
     writeFileSync(join(fakeCore, "install", "Install-Harness.sh"), `#!/bin/sh\ntouch "${marker}"\n`);
-    writeFileSync(join(dir, MANIFEST_REL), JSON.stringify({ coreRepo: fakeCore, files: {} }, null, 2));
+    writeFileSync(join(dir, SIDECAR_REL), JSON.stringify({ coreRepo: fakeCore }, null, 2));
 
     const result = runHook(dir);
     expect(existsSync(marker)).toBe(false);
@@ -281,10 +327,12 @@ describe("session-start drift-check hook — every degradation exits silent and 
 
   test("malformed manifest JSON: silent", () => {
     const dir = bareProject();
-    // coreRepo intact and pointing at the real core, so the audit is genuinely reached
-    // and throws on the truncated JSON. Cutting coreRepo too would exercise the earlier
-    // guard instead and prove nothing about this path.
-    writeFileSync(join(dir, MANIFEST_REL), `{"coreRepo": ${JSON.stringify(REPO_ROOT)}, "files": {`);
+    // coreRepo intact and pointing at the real core (valid sidecar, read by sed), so the
+    // audit is genuinely reached and throws on the truncated main manifest, which pwsh
+    // parses. Cutting coreRepo too would exercise the earlier guard instead and prove
+    // nothing about this path.
+    writeFileSync(join(dir, SIDECAR_REL), JSON.stringify({ coreRepo: REPO_ROOT }, null, 2));
+    writeFileSync(join(dir, MANIFEST_REL), `{"files": {`);
     const result = runHook(dir);
     expect(result.stdout.length).toBe(0);
     expect(result.stderr.length).toBe(0);
@@ -298,7 +346,7 @@ describe("session-start drift-check hook — every degradation exits silent and 
     // session start is the one failure mode this file exists to rule out.
     // coreRepo names the real core, so nothing earlier can account for the silence.
     const dir = bareProject();
-    writeFileSync(join(dir, MANIFEST_REL), JSON.stringify({ coreRepo: REPO_ROOT, files: {} }, null, 2));
+    writeFileSync(join(dir, SIDECAR_REL), JSON.stringify({ coreRepo: REPO_ROOT }, null, 2));
     const emptyPathDir = mkdtempSync(join(tmpdir(), "driftcheck-nopath-"));
     tempDirs.push(emptyPathDir);
 
@@ -315,9 +363,9 @@ describe("session-start drift-check hook — every degradation exits silent and 
     expect(result.exitCode).toBe(0);
   });
 
-  test("manifest that is not JSON at all: silent", () => {
+  test("sidecar that is not JSON at all: silent", () => {
     const dir = bareProject();
-    writeFileSync(join(dir, MANIFEST_REL), "not json, not even close\n");
+    writeFileSync(join(dir, SIDECAR_REL), "not json, not even close\n");
     const result = runHook(dir);
     expect(result.stdout.length).toBe(0);
     expect(result.stderr.length).toBe(0);
@@ -356,7 +404,7 @@ describe("session-start drift-check hook — coreRepo is untrusted input", () =>
   for (const [name, payload] of payloads) {
     test(`coreRepo carrying a ${name} payload runs nothing and prints nothing`, () => {
       const dir = bareProject();
-      writeFileSync(join(dir, MANIFEST_REL), JSON.stringify({ coreRepo: payload, files: {} }, null, 2));
+      writeFileSync(join(dir, SIDECAR_REL), JSON.stringify({ coreRepo: payload }, null, 2));
 
       const result = runHook(dir);
       expect(existsSync(join(dir, "PWNED"))).toBe(false);
@@ -377,7 +425,7 @@ describe("session-start drift-check hook — coreRepo is untrusted input", () =>
       const dir = bareProject();
       const marker = join(dir, "PWNED-BY-IN-PROJECT-CORE");
       const fakeCore = plantFakeCore(dir, marker);
-      writeFileSync(join(dir, MANIFEST_REL), JSON.stringify({ coreRepo: fakeCore, files: {} }, null, 2));
+      writeFileSync(join(dir, SIDECAR_REL), JSON.stringify({ coreRepo: fakeCore }, null, 2));
 
       const result = runHook(dir);
       // Marker first: it is the assertion this case exists for, and a runner that stops at
@@ -401,7 +449,7 @@ describe("session-start drift-check hook — coreRepo is untrusted input", () =>
       // Flip the case of the drive/leading segment as well as the planted directory, which
       // is what defeats a compare that only folds one side.
       const variant = fakeCore.toUpperCase();
-      writeFileSync(join(dir, MANIFEST_REL), JSON.stringify({ coreRepo: variant, files: {} }, null, 2));
+      writeFileSync(join(dir, SIDECAR_REL), JSON.stringify({ coreRepo: variant }, null, 2));
 
       const result = runHook(dir);
       expect(existsSync(marker)).toBe(false);
@@ -413,10 +461,10 @@ describe("session-start drift-check hook — coreRepo is untrusted input", () =>
 
   test.skipIf(!pwshPath)("a coreRepo naming the real core still works when it arrives Windows-escaped", () => {
     const dir = bareProject();
-    // The installer writes native separators, so a Windows manifest holds "E:\\projects\\core".
+    // The installer writes native separators, so a Windows sidecar holds "E:\\projects\\core".
     // JSON.stringify produces the same doubling, which is what the hook's unescape undoes;
     // this asserts the unescape does not mangle a path that was correct to begin with.
-    writeFileSync(join(dir, MANIFEST_REL), JSON.stringify({ coreRepo: REPO_ROOT, files: {} }, null, 2));
+    writeFileSync(join(dir, SIDECAR_REL), JSON.stringify({ coreRepo: REPO_ROOT }, null, 2));
     const result = runHook(dir);
     // No install ever ran here, so every managed file reads as untracked or not-installed:
     // the point is that the audit was reached at all, which silence would not distinguish
