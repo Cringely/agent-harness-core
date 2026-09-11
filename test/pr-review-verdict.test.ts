@@ -29,6 +29,17 @@ const green = (): CheckRun[] =>
 const withRun = (index: number, patch: Partial<CheckRun>): CheckRun[] =>
   green().map((run, i) => (i === index ? { ...run, ...patch } : run));
 
+// Gives the required check at `index` one run per entry in `patches`, each defaulting to a
+// completed success unless the patch overrides it, while every other required check stays a
+// single green run. Used to test that a check with more than one run on the head commit is
+// judged on all of them, not on whichever run the API happens to return first (I5).
+const manyRuns = (index: number, patches: ReadonlyArray<Partial<CheckRun>>): CheckRun[] => {
+  const check = REQUIRED_CHECKS[index]!;
+  const others = green().filter((_, i) => i !== index);
+  const duplicates = patches.map((patch) => ({ name: check.name, appSlug: check.appSlug, status: "completed", conclusion: "success", ...patch }));
+  return [...others, ...duplicates];
+};
+
 // Same shape as .github/workflows/test.yml: one suite on a run line, two named only in comments.
 // Synthetic, so this file does not break the day CI starts running more suites (#90). CRLF on
 // purpose, which is what a Windows checkout hands the parser.
@@ -123,6 +134,9 @@ describe("computeVerification()", () => {
     "install/Install-Harness.Tests.ps1",
     "install/AccountShared.ps1",
     "account/claude/hooks/Scan-MemorySecrets.PS1",
+    // Lowercase "tests": a case-insensitive rewrite would collide with the real, differently-cased
+    // covered suite name and read this as covered. It is not the suite CI actually runs (m1).
+    "install/Restore-ClaudeProject.tests.ps1",
   ])("%s has no suite on a run line: incomplete, naming the file", (path) => {
     const result = verify(green(), [path]);
     expect(result.state).toBe("incomplete");
@@ -146,34 +160,71 @@ describe("computeVerification()", () => {
     expect(result.state).toBe("failed");
     expect(result.reasons.length).toBe(2);
   });
+
+  // Strict on purpose (I4): a non-boolean must not be read for its truthiness. "true" is a
+  // non-empty string, and a truthiness read would treat it as a complete listing.
+  test("a non-boolean changedFilesComplete is incomplete", () => {
+    const result = verify(green(), ["README.md"], WORKFLOW, "true" as unknown as boolean);
+    expect(result.state).toBe("incomplete");
+  });
+
+  describe("a required check with more than one run on the head commit (I5)", () => {
+    test.each([
+      ["success", "failure"],
+      ["failure", "success"],
+    ] as const)("conclusions [%s, %s]: failed regardless of order", (first, second) => {
+      const result = verify(manyRuns(0, [{ conclusion: first }, { conclusion: second }]));
+      expect(result.state).toBe("failed");
+    });
+
+    test("conclusions [success, in_progress]: incomplete", () => {
+      const result = verify(manyRuns(0, [{ conclusion: "success" }, { status: "in_progress", conclusion: null }]));
+      expect(result.state).toBe("incomplete");
+    });
+  });
 });
 
 describe("verificationOf() reads exactly the four fields from a PrSnapshot", () => {
-  // isOpen and diff sit beside changedFilesComplete and workflowText in PrSnapshot and share their
-  // types (boolean, and string | null). omittedFiles shares changedFiles' type. Each decoy below
-  // is set to a value that would change the result if verificationOf read the decoy instead of the
-  // field it is supposed to read, so a mixed-up wire shows up as a wrong Verification, not a pass.
-  test("wires checkRuns, changedFiles, workflowText and changedFilesComplete, not their same-typed neighbors", () => {
-    const snapshot: PrSnapshot = {
-      repo: "fixture/fixture",
-      number: 1,
-      title: "Fixture title",
-      body: "Fixture body",
-      baseSha: "a".repeat(40),
-      headSha: "b".repeat(40),
-      isOpen: true, // decoy for changedFilesComplete (false): must not be read in its place
-      diff: null, // decoy for workflowText (WORKFLOW): must not be read in its place
-      changedFiles: ["install/Install-Harness.ps1"],
-      changedFilesComplete: false,
-      commitMessages: [],
-      headFiles: [],
-      omittedFiles: [], // decoy for changedFiles: must not be read in its place
-      linkedIssues: [],
-      trustedContext: [],
-      workflowText: WORKFLOW,
-      checkRuns: green(),
-    };
-    expect(verificationOf(snapshot)).toEqual({
+  // body, title and headSha are decoys for workflowText: none of the three contains a `run:` line,
+  // so reading any of them instead changes which files count as uncovered. diff is a decoy for
+  // workflowText too, for the same reason. isOpen is a decoy for changedFilesComplete (both
+  // boolean) and omittedFiles a decoy for changedFiles (both string[]); commitMessages is a decoy
+  // for checkRuns, of the wrong element type entirely. bun does not type-check (global-
+  // constraints.md), so nothing but this test stops verificationOf from reading any of them.
+  //
+  // Two changed files, one WORKFLOW covers and one it does not, so the ps1-coverage reason is
+  // present in both variants and a miswired workflowText/changedFiles still changes it. The two
+  // variants invert changedFilesComplete against isOpen, so a miswire that reads one for the other
+  // (or ignores changedFilesComplete entirely) changes which variant's expected result comes back.
+  const buildSnapshot = (changedFilesComplete: boolean, isOpen: boolean): PrSnapshot => ({
+    repo: "fixture/fixture",
+    number: 1,
+    title: "Fixture title, no run lines here",
+    body: "Fixture body, no run lines here",
+    baseSha: "a".repeat(40),
+    headSha: "b".repeat(40),
+    isOpen,
+    diff: "Fixture diff text, no run lines here",
+    changedFiles: ["install/Install-Harness.ps1", "install/Restore-ClaudeProject.ps1"],
+    changedFilesComplete,
+    commitMessages: ["Fixture commit message"],
+    headFiles: [],
+    omittedFiles: [],
+    linkedIssues: [],
+    trustedContext: [],
+    workflowText: WORKFLOW,
+    checkRuns: green(),
+  });
+
+  test("changedFilesComplete true, isOpen false", () => {
+    expect(verificationOf(buildSnapshot(true, false))).toEqual({
+      state: "incomplete",
+      reasons: ["CI runs no Pester suite for: install/Install-Harness.ps1"],
+    });
+  });
+
+  test("changedFilesComplete false, isOpen true", () => {
+    expect(verificationOf(buildSnapshot(false, true))).toEqual({
       state: "incomplete",
       reasons: [
         "the changed-file listing is incomplete, so files this review never saw could decide it",
@@ -195,8 +246,19 @@ describe("computeEvent() implements option A", () => {
     [true, ["coverage-gap"], INCOMPLETE, "COMMENT"],
     [true, [], PASSED, "APPROVE"],
     [true, ["naming", "stale-citation", "other"], PASSED, "APPROVE"],
+    // I2: a severity outside SEVERITY_SET lands on the same row as invalid reviewer output.
+    [true, ["CORRECTNESS"], PASSED, "COMMENT"],
+    [true, ["critical"], PASSED, "COMMENT"],
+    // I3: APPROVE requires the literal state "passed". Any other state, known or not, is COMMENT.
+    [true, [], { state: "pending", reasons: [] } as unknown as Verification, "COMMENT"],
+    [true, [], {} as unknown as Verification, "COMMENT"],
   ] as const)("reviewerOk=%p severities=%p verification=%p gives %s", (reviewerOk, severities, verification, event) => {
     expect(computeEvent({ reviewerOk, severities, verification }).event).toBe(event);
+  });
+
+  // I4: reviewerOk is read for exact equality with `true`, not for truthiness.
+  test("a non-boolean reviewerOk does not approve", () => {
+    expect(computeEvent({ reviewerOk: "false" as unknown as boolean, severities: [], verification: PASSED }).event).toBe("COMMENT");
   });
 
   test.each([...LOAD_BEARING_SEVERITIES])("a single %s finding withholds approval", (severity) => {
