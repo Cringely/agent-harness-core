@@ -45,6 +45,136 @@ Describe "Install-Harness" {
         $s.hooks | Should -Not -BeNullOrEmpty
     }
 
+    It "builds matcher groups from scratch, one per template matcher, when the target has no hooks key at all" {
+        # Collection edge case: no "hooks" property on settings.json at all, so the merge
+        # loop's Add-Member scaffolding (line 1004-1006) runs, not the merge path.
+        New-Item -ItemType Directory -Path "$script:target/.claude" | Out-Null
+        '{"permissions":{"allow":["Bash(ls:*)"]}}' | Set-Content "$script:target/.claude/settings.json"
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $s = Get-Content "$script:target/.claude/settings.json" -Raw | ConvertFrom-Json
+        # core/claude/templates/settings.hooks.json has 3 PreToolUse matcher groups (Agent|Task,
+        # Write|Edit|NotebookEdit, Agent|Task|Workflow) and no sibling-merge opportunity exists
+        # yet, so each becomes its own group with no duplicates.
+        @($s.hooks.PreToolUse).Count | Should -Be 3
+        $matchers = @($s.hooks.PreToolUse | ForEach-Object { $_.matcher })
+        ($matchers | Sort-Object -Unique).Count | Should -Be 3
+    }
+
+    It "merges a template hook into an existing group sharing its matcher instead of appending a duplicate sibling" {
+        # Direct regression test for the bug: seed a PreToolUse group under the same matcher
+        # the real template also uses (Write|Edit|NotebookEdit), carrying a hook the template
+        # does not know about. This is what a prior install (under an older template, or a
+        # hand-edited settings.json) leaves behind. On 5d00a41 the loop at lines 1044-1057
+        # never checks $existingGroups for a matching .matcher before appending, so this
+        # produces two "Write|Edit|NotebookEdit" groups instead of one merged group.
+        New-Item -ItemType Directory -Path "$script:target/.claude" | Out-Null
+        @'
+{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Write|Edit|NotebookEdit", "hooks": [ { "type": "command", "command": "echo project-pretooluse-hook" } ] }
+    ]
+  }
+}
+'@ | Set-Content "$script:target/.claude/settings.json"
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $s = Get-Content "$script:target/.claude/settings.json" -Raw | ConvertFrom-Json
+        $sameMatcher = @($s.hooks.PreToolUse | Where-Object { $_.matcher -eq 'Write|Edit|NotebookEdit' })
+        # The core assertion: exactly one group carries this matcher, not two siblings.
+        $sameMatcher.Count | Should -Be 1
+        $commands = @($sameMatcher[0].hooks | ForEach-Object { $_.command })
+        $commands | Should -Contain 'echo project-pretooluse-hook'
+        ($commands | Where-Object { $_ -match 'agent-write-scope\.ts' }) | Should -Not -BeNullOrEmpty
+        # Total PreToolUse groups: the merged one plus the template's other two matchers
+        # (Agent|Task and Agent|Task|Workflow) that had nothing to merge into.
+        @($s.hooks.PreToolUse).Count | Should -Be 3
+    }
+
+    It "leaves the target's own group under an unrelated matcher untouched, in its original position" {
+        # Collection edge case: an existing matcher-group on the same event whose matcher the
+        # template never uses. It must survive unmerged, unmoved, and unduplicated, while the
+        # template's own groups are appended alongside it.
+        New-Item -ItemType Directory -Path "$script:target/.claude" | Out-Null
+        @'
+{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "SomeOtherTool", "hooks": [ { "type": "command", "command": "echo unrelated-hook" } ] }
+    ]
+  }
+}
+'@ | Set-Content "$script:target/.claude/settings.json"
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $s = Get-Content "$script:target/.claude/settings.json" -Raw | ConvertFrom-Json
+        $groups = @($s.hooks.PreToolUse)
+        $groups.Count | Should -Be 4
+        $groups[0].matcher | Should -Be 'SomeOtherTool'
+        @($groups[0].hooks | ForEach-Object { $_.command }) | Should -Be @('echo unrelated-hook')
+        $unrelated = @($groups | Where-Object { $_.matcher -eq 'SomeOtherTool' })
+        $unrelated.Count | Should -Be 1
+    }
+
+    It "produces byte-identical settings.json on a second install with no target or template changes" {
+        # "Installing twice must equal installing once", checked literally: run the installer
+        # twice back-to-back against the same target and diff the raw file text.
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $first = Get-Content "$script:target/.claude/settings.json" -Raw
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $second = Get-Content "$script:target/.claude/settings.json" -Raw
+        $second | Should -Be $first
+    }
+
+    It "does not inject a null hook entry when an existing group has a matcher but no hooks property" {
+        # An existing group can carry `matcher` with nothing under `hooks` at all. Merging into
+        # it must not concatenate that missing property's $null straight into the array: that
+        # serializes a literal `null` entry ahead of the real hooks, which Claude Code can't load.
+        New-Item -ItemType Directory -Path "$script:target/.claude" | Out-Null
+        @'
+{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Write|Edit|NotebookEdit" }
+    ]
+  }
+}
+'@ | Set-Content "$script:target/.claude/settings.json"
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $raw = Get-Content "$script:target/.claude/settings.json" -Raw
+        $raw | Should -Not -Match '"hooks":\s*\[\s*null'
+        $s = $raw | ConvertFrom-Json
+        $matched = @($s.hooks.PreToolUse | Where-Object { $_.matcher -eq 'Write|Edit|NotebookEdit' })
+        $matched.Count | Should -Be 1
+        (@($matched[0].hooks) | Where-Object { $null -eq $_ }) | Should -BeNullOrEmpty
+        (@($matched[0].hooks | ForEach-Object { $_.command }) | Where-Object { $_ -match 'agent-write-scope\.ts' }) | Should -Not -BeNullOrEmpty
+    }
+
+    It "treats matcher comparison as case-sensitive, since Claude Code matchers are case-sensitive regexes" {
+        # Template uses "Agent|Task" for this event. A target group differing only by case
+        # ("agent|task") is a different matcher to Claude Code and must not absorb the
+        # template's hooks into a matcher that will never actually fire.
+        New-Item -ItemType Directory -Path "$script:target/.claude" | Out-Null
+        @'
+{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "agent|task", "hooks": [ { "type": "command", "command": "echo lowercase-agent-task-hook" } ] }
+    ]
+  }
+}
+'@ | Set-Content "$script:target/.claude/settings.json"
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $s = Get-Content "$script:target/.claude/settings.json" -Raw | ConvertFrom-Json
+        $lowerGroups = @($s.hooks.PreToolUse | Where-Object { $_.matcher -ceq 'agent|task' })
+        $properGroups = @($s.hooks.PreToolUse | Where-Object { $_.matcher -ceq 'Agent|Task' })
+        # The pre-existing lowercase group must survive untouched, on its own.
+        $lowerGroups.Count | Should -Be 1
+        @($lowerGroups[0].hooks | ForEach-Object { $_.command }) | Should -Be @('echo lowercase-agent-task-hook')
+        # The template's correctly-cased matcher gets its own group rather than being folded
+        # into the lowercase one.
+        $properGroups.Count | Should -Be 1
+        (@($properGroups[0].hooks | ForEach-Object { $_.command }) | Where-Object { $_ -match 'agent-worktree-gate\.ts' }) | Should -Not -BeNullOrEmpty
+    }
+
     It "serializes each matcher group's hooks as a JSON array, even with a single hook" {
         & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
         $raw = Get-Content "$script:target/.claude/settings.json" -Raw
