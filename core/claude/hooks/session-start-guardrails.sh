@@ -12,7 +12,7 @@
 # unmodified in any project it's installed into — no repo name hardcoded here.
 
 set -eu
-# No pipeline here yet, but see session-start-drift-check.sh:30-34, "Guarded rather than bare",
+# No pipeline here yet, but see session-start-drift-check.sh:41-45, "Guarded rather than bare",
 # for why this stays guarded.
 if (set -o pipefail) 2>/dev/null; then set -o pipefail; fi
 

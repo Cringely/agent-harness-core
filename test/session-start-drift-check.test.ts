@@ -41,7 +41,7 @@ const INSTALL_TIMEOUT_MS = 120_000;
 const pwshPath = Bun.which("pwsh");
 
 // Every case here drives the real hook, and the hook exits 0 before printing anything when
-// pwsh is absent (session-start-drift-check.sh:108); the cases that install a project need
+// pwsh is absent (session-start-drift-check.sh:120); the cases that install a project need
 // it a second time. So a host without PowerShell runs a fraction of this file. Bun prints
 // the skip count, but a total read off the last line of a run does not carry that caveat
 // with it, and a raw pass count from one host has already been quoted more than once as
@@ -90,10 +90,17 @@ function bareProject(): string {
 }
 
 /** Rewrite the sidecar's coreRepo to an arbitrary string, JSON-escaped. Creates the sidecar
- * if a case has not run a real install first. */
+ * if a case has not run a real install first. Reads by attempting the read and catching a
+ * missing file, rather than an existsSync check followed by a separate read -- the two-step
+ * form is exactly the check-then-act race CodeQL flags on this path (js/file-system-race). */
 function setCoreRepo(dir: string, value: string) {
   const path = join(dir, SIDECAR_REL);
-  const sidecar = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {};
+  let sidecar: Record<string, unknown> = {};
+  try {
+    sidecar = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    sidecar = {};
+  }
   sidecar.coreRepo = value;
   writeFileSync(path, JSON.stringify(sidecar, null, 2));
 }
