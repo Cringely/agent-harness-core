@@ -83,23 +83,51 @@ identity_regex_escape() {
 }
 
 # Converts one hex digit character ($1, already validated by the caller as
-# [0-9A-Fa-f]) to its decimal value 0-15. Used by identity_json_unescape,
-# below, to turn a \uXXXX escape's four hex digits into a code point using
-# only plain `+`/`*` arithmetic: POSIX sh's `$(( ))` is not guaranteed to
-# support the `16#XX` base-N literal ksh/bash add as an extension, and this
-# file already avoids anything outside plain POSIX for the identical
-# reason `grep -P` is avoided elsewhere in this header.
+# [0-9A-Fa-f]) to its decimal value 0-15, using plain `+`/`*` arithmetic:
+# POSIX sh's `$(( ))` is not guaranteed to support the `16#XX` base-N
+# literal ksh/bash add as an extension, and this file already avoids
+# anything outside plain POSIX for the identical reason `grep -P` is
+# avoided elsewhere in this header.
+#
+# Sets the global $identity_hexval rather than printing a value for the
+# caller to capture with $(...). #135's review measured about 12 process
+# spawns per \uXXXX escape in the printf-and-capture shape this used to
+# have (6 cut, 4 of them this function's own command substitution, 2
+# printf), enough that one declared entry with 150 escapes took 973s at
+# pre-commit -- identity_json_unescape below calls this up to four times
+# per escape, and a command substitution forks a subshell to capture
+# output even when the command is a shell function, so the fork was the
+# same cost regardless of how little work ran inside it. Called as a
+# plain function call instead, this costs nothing beyond the case
+# dispatch itself.
 identity_hex_digit_value() {
     case $1 in
-        [0-9]) printf '%d' "$1" ;;
-        [Aa]) printf '10' ;;
-        [Bb]) printf '11' ;;
-        [Cc]) printf '12' ;;
-        [Dd]) printf '13' ;;
-        [Ee]) printf '14' ;;
-        [Ff]) printf '15' ;;
+        [0-9]) identity_hexval=$1 ;;
+        [Aa]) identity_hexval=10 ;;
+        [Bb]) identity_hexval=11 ;;
+        [Cc]) identity_hexval=12 ;;
+        [Dd]) identity_hexval=13 ;;
+        [Ee]) identity_hexval=14 ;;
+        [Ff]) identity_hexval=15 ;;
         *) return 1 ;;
     esac
+}
+
+# Strips leading whitespace from $1 into the global $identity_trimmed, by
+# repeated one-character parameter expansion rather than a sed fork.
+# Used where identity_json_array needs this more than once per token
+# (comma-and-whitespace between array elements, and whitespace after a
+# closing ']') and the amount stripped is always small -- a handful of
+# loop iterations beats one process spawn on the cost this file is
+# written against (#135's review, same incident as above).
+identity_ltrim() {
+    identity_trimmed=$1
+    while :; do
+        case $identity_trimmed in
+            [[:space:]]*) identity_trimmed=${identity_trimmed#?} ;;
+            *) break ;;
+        esac
+    done
 }
 
 # Decodes JSON string escapes in $1 (the text strictly between a token's
@@ -143,6 +171,31 @@ identity_hex_digit_value() {
 # header, "WHY grep -E's \b"): under the C locale, every shell and every
 # coreutils tool used here treats one byte as one character, so a token's
 # byte length and its character-offset cut are the same number.
+# #135's review found two more problems in the version of this function
+# that shipped for #91c/#91d, both fixed below.
+#
+# LOCALE: the "under the C locale" claim two paragraphs up is false for a
+# git-launched hook. Git for Windows sets LC_CTYPE=C.UTF-8 (measured in
+# review), and under it `cut -c` still counts bytes but a string's
+# character length and the `?` glob wildcard both count characters --
+# they desync on any non-ASCII declared entry. identity_json_array, the
+# only caller, now forces LC_ALL=C in its own $(...) subshell before
+# calling this, which this function relies on rather than repeating.
+#
+# COST: the review measured about 12 process spawns per escape in this
+# function's previous shape (6 cut, 4 digit subshells, 2 printf) -- one
+# declared entry with 150 escapes took 973s at pre-commit, still 973s
+# after #91c/#91d landed since this cost predates both. Below, escape
+# detection, hex-digit extraction, and the advance past a decoded escape
+# or a literal run all use `${var#pattern}`/`${var%%pattern}` parameter
+# expansion instead of a `cut`/`sed` subprocess per character: no fork,
+# run in the shell that is already running. \uXXXX's byte value is
+# likewise computed with plain `/` and `%` arithmetic rather than
+# `printf '%03o'`. What is left, one `printf` per escape to turn that
+# numeric byte value into an actual character, has no POSIX parameter-
+# expansion or arithmetic form -- emitting a byte from a number is not
+# string manipulation, and `printf` is the smallest thing in this
+# toolchain that can do it.
 identity_json_unescape() {
     in=$1
     out=
@@ -153,45 +206,86 @@ identity_json_unescape() {
                 # '\\' between single quotes is the two-character string
                 # \\, not one backslash. '\'* -- a lone backslash closing
                 # the quote, then an unquoted wildcard -- is what matches
-                # "starts with one backslash". Same fix needed on $c2
-                # below, which holds one raw escape-type character.
-                c2=$(printf '%s' "$in" | cut -c2)
-                case $c2 in
-                    '"') out="${out}\"" ; off=2 ;;
-                    '\') out="${out}\\" ; off=2 ;;
-                    /) out="${out}/" ; off=2 ;;
-                    b) out="${out}$(printf '\010')" ; off=2 ;;
-                    f) out="${out}$(printf '\014')" ; off=2 ;;
-                    t) out="${out}$(printf '\011')" ; off=2 ;;
-                    u)
-                        hex=$(printf '%s' "$in" | cut -c3-6)
-                        case $hex in
+                # "starts with one backslash". $rest, below, is everything
+                # after that one backslash; matching on ITS first
+                # character with a wildcard case pattern reads the escape
+                # type without a `cut` fork to extract it into its own
+                # variable first.
+                rest=${in#\\}
+                case $rest in
+                    '"'*) out="${out}\"" ; in=${rest#?} ;;
+                    '\'*) out="${out}\\" ; in=${rest#?} ;;
+                    /*)   out="${out}/"  ; in=${rest#?} ;;
+                    b*)
+                        byte=$(printf '\010') || return 1
+                        out="${out}${byte}" ; in=${rest#?}
+                        ;;
+                    f*)
+                        byte=$(printf '\014') || return 1
+                        out="${out}${byte}" ; in=${rest#?}
+                        ;;
+                    t*)
+                        byte=$(printf '\011') || return 1
+                        out="${out}${byte}" ; in=${rest#?}
+                        ;;
+                    u????*)
+                        # Peels the four hex digits straight off $rest (no
+                        # `cut`, and no separate $hex variable to strip
+                        # back off again for the tail advance): each
+                        # ${work%"${work#?}"} isolates $work's own first
+                        # character the same way identity_hex_digit_value's
+                        # caller used to isolate one out of a four-
+                        # character $hex, just run four times in place, and
+                        # $work IS the correctly-advanced remainder once
+                        # all four are gone -- one fewer thing to
+                        # reconstruct, not just one fewer fork. #135's
+                        # review (cost, F5 in the original #91 review):
+                        # this and the arithmetic below in place of
+                        # `printf '%03o'` are what took this escape from
+                        # about 3 process spawns down to the one left --
+                        # actually emitting a byte from a numeric value has
+                        # no POSIX parameter-expansion or arithmetic form,
+                        # only `printf`.
+                        work=${rest#u}
+                        h1=${work%"${work#?}"}
+                        work=${work#?}
+                        h2=${work%"${work#?}"}
+                        work=${work#?}
+                        h3=${work%"${work#?}"}
+                        work=${work#?}
+                        h4=${work%"${work#?}"}
+                        work=${work#?}
+                        case $h1$h2$h3$h4 in
                             [0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]) : ;;
                             *) return 1 ;;
                         esac
-                        d1=$(identity_hex_digit_value "$(printf '%s' "$hex" | cut -c1)") || return 1
-                        d2=$(identity_hex_digit_value "$(printf '%s' "$hex" | cut -c2)") || return 1
-                        d3=$(identity_hex_digit_value "$(printf '%s' "$hex" | cut -c3)") || return 1
-                        d4=$(identity_hex_digit_value "$(printf '%s' "$hex" | cut -c4)") || return 1
+                        identity_hex_digit_value "$h1" || return 1 ; d1=$identity_hexval
+                        identity_hex_digit_value "$h2" || return 1 ; d2=$identity_hexval
+                        identity_hex_digit_value "$h3" || return 1 ; d3=$identity_hexval
+                        identity_hex_digit_value "$h4" || return 1 ; d4=$identity_hexval
                         cp=$((d1 * 4096 + d2 * 256 + d3 * 16 + d4))
                         [ "$cp" -ge 32 ] && [ "$cp" -le 126 ] || return 1
-                        octal=$(printf '%03o' "$cp")
-                        out="${out}$(printf "\\${octal}")"
-                        off=6
+                        o1=$((cp / 64))
+                        o2=$(((cp / 8) % 8))
+                        o3=$((cp % 8))
+                        byte=$(printf "\\${o1}${o2}${o3}") || return 1
+                        out="${out}${byte}"
+                        in=$work
                         ;;
                     *) return 1 ;;
                 esac
-                in=$(printf '%s' "$in" | cut -c"$((off + 1))-")
                 ;;
             *)
                 # One literal run up to (not including) the next backslash,
                 # rather than one byte at a time -- most of a declared
-                # entry's text has no escapes in it at all.
-                lit=$(printf '%s' "$in" | sed 's/\\.*$//')
+                # entry's text has no escapes in it at all. `${in%%\\*}`
+                # is the parameter-expansion form of `sed 's/\\.*$//'`:
+                # strip the longest suffix starting at a backslash, i.e.
+                # keep everything before the FIRST one.
+                lit=${in%%\\*}
                 [ -n "$lit" ] || return 1
                 out="${out}${lit}"
-                litlen=${#lit}
-                in=$(printf '%s' "$in" | cut -c"$((litlen + 1))-")
+                in=${in#"$lit"}
                 ;;
         esac
     done
@@ -232,31 +326,99 @@ identity_json_unescape() {
 # `]`-in-an-entry defect and a \uXXXX-in-an-entry defect are both a case of
 # this parser checking less than it claims to, and this file's answer to
 # "checks less than it claims" is to refuse, never to guess.
+#
+# LOCALE (#135's review): forced to C for the whole function, in this
+# function's own $(...) subshell only. See identity_json_unescape's own
+# LOCALE note for what breaks without it and why here, not there, is
+# where forcing it is enough: this is the only caller of that function,
+# and both use `cut -c`/`${#var}`/the `?` glob wildcard for length and
+# offset work that must agree on bytes vs. characters to be correct.
+# Scoped to this $(...) subshell rather than identity_load's own
+# environment, so neither identity_load's rest nor the final `grep -iE`
+# match sees a changed locale -- that match must keep whatever locale the
+# top-level hook actually runs under (this file's header, "WHY grep -E's
+# \b").
 identity_json_array() {
+    LC_ALL=C
+    export LC_ALL
+
     raw=$1
     key=$2
-    flat=$(printf '%s' "$raw" | tr '\n' ' ')
-    tail=$(printf '%s' "$flat" | sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\[//p")
+    flat=$(printf '%s' "$raw" | tr '\n' ' ') || return 1
+    tail=$(printf '%s' "$flat" | sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\[/[/p")
     [ -n "$tail" ] || return 0
 
+    # #135's review (F2): the sed above used to discard the array's own
+    # '[' along with everything before it, so a key that IS declared but
+    # whose array is truncated right after '[' -- a partial write, an
+    # editor that died mid-save -- produced the same empty $tail as a key
+    # that was never declared at all, and the `return 0` above then
+    # reported it as "zero entries", not as the malformed file it is.
+    # Keeping the '[' in the sed's replacement and stripping it here,
+    # after the presence check, means "found but truncated" still reaches
+    # the loop below as an empty $tail -- which then finds no closing ']'
+    # and refuses -- while "key not declared" still returns 0 above,
+    # because a key sed never matched leaves $tail genuinely empty before
+    # this line ever runs.
+    tail=${tail#\[}
+
     while :; do
-        rest=$(printf '%s' "$tail" | sed 's/^[[:space:]]*//; s/^,[[:space:]]*//')
+        identity_ltrim "$tail"
+        rest=$identity_trimmed
         case $rest in
-            ']'*) break ;;
+            ,*)
+                identity_ltrim "${rest#,}"
+                rest=$identity_trimmed
+                ;;
+        esac
+        case $rest in
+            ']'*)
+                # #135's review (F7): breaking here on the first bare ']'
+                # without checking what follows accepts a document where
+                # this array's real content ends earlier than the ']'
+                # just matched, with a stray value sitting between them --
+                # e.g. ["Bob Example"] "Alice Example"], which is not
+                # valid JSON. A well-formed object continues with ','
+                # (another key) or '}' (the object ends); anything else
+                # means this ']' is not trustworthy as this array's close.
+                identity_ltrim "${rest#\]}"
+                case $identity_trimmed in
+                    ''|','*|'}'*) break ;;
+                    *)
+                        echo "identity gate: the '$key' array in '$identity_file' closes with ']' but is followed by something other than ',' or '}' -- not well-formed JSON here. Refusing rather than silently accepting it." >&2
+                        return 1
+                        ;;
+                esac
+                ;;
             '"'*)
                 token=$(printf '%s' "$rest" | sed -n 's/^\("\([^"\\]\|\\.\)*"\).*/\1/p')
                 if [ -z "$token" ]; then
                     echo "identity gate: could not parse a declared '$key' entry in '$identity_file' -- an unterminated or malformed quoted string. Refusing rather than silently dropping it and whatever follows it." >&2
                     return 1
                 fi
-                inner=$(printf '%s' "$token" | sed 's/^"//; s/"$//')
-                decoded=$(identity_json_unescape "$inner") || {
-                    echo "identity gate: a declared '$key' entry in '$identity_file' uses a JSON escape this parser will not decode (a \\uXXXX outside printable ASCII, or \\n/\\r, which would inject a line break into this file's own newline-delimited entry list). Refusing rather than silently building a pattern arm that would never match the entry's plain form. Rewrite the entry using the literal character instead of the escape." >&2
-                    return 1
-                }
+                inner=${token#\"}
+                inner=${inner%\"}
+                case $inner in
+                    *'\'*)
+                        decoded=$(identity_json_unescape "$inner") || {
+                            echo "identity gate: a declared '$key' entry in '$identity_file' uses a JSON escape this parser will not decode (a \\uXXXX outside printable ASCII, or \\n/\\r, which would inject a line break into this file's own newline-delimited entry list). Refusing rather than silently building a pattern arm that would never match the entry's plain form. Rewrite the entry using the literal character instead of the escape." >&2
+                            return 1
+                        }
+                        ;;
+                    *)
+                        # No backslash at all -- the common case for a
+                        # plain declared name or email. Skip
+                        # identity_json_unescape entirely rather than
+                        # forking a subshell to run a loop that would
+                        # just copy the string through unchanged: #135's
+                        # review found this is most of the branch's added
+                        # cost on an ordinary identity file (no escapes
+                        # anywhere), separate from the \uXXXX cost above.
+                        decoded=$inner
+                        ;;
+                esac
                 printf '%s\n' "$decoded"
-                tokenlen=${#token}
-                tail=$(printf '%s' "$rest" | cut -c"$((tokenlen + 1))-")
+                tail=${rest#"$token"}
                 ;;
             *)
                 echo "identity gate: could not find the closing ']' for '$key' in '$identity_file' -- the declared array is malformed. Refusing rather than silently returning a truncated list." >&2

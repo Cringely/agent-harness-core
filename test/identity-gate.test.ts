@@ -383,6 +383,69 @@ describe("identity gate — identity-patterns.sh: JSON parser residuals (issue #
   });
 });
 
+// #135's adversarial review of the #91c/#91d fix (PR #135) found the fix
+// itself reopened one of those two bugs on a different path, plus a third,
+// separate defect. All three are in identity_json_array/identity_json_unescape.
+describe("identity gate — identity-patterns.sh: locale and truncation residuals (issue #91, review #135)", () => {
+  // F1 (review #135), regression: identity_json_array uses `cut -c` (counts
+  // bytes) alongside ${#var} and the `?` glob wildcard (both count
+  // characters under a UTF-8 locale) to track position inside a declared
+  // entry. Git for Windows launches hooks with LC_CTYPE=C.UTF-8, not the
+  // unset LANG/LC_ALL this file's header assumed -- under it, a non-ASCII
+  // declared entry desynced the two counts and the array reader lost track
+  // of where it was, refusing to load ("could not find the closing ']'")
+  // even though nothing in the STAGED CONTENT is identifying. That is a
+  // false refusal on a clean commit, not merely a slow one. Reproduced
+  // through the same `sh <hook>` runPreCommit path every other test in this
+  // file uses, with LC_CTYPE forced to C.UTF-8 to stand in for git's real
+  // launch environment (the alternative the review names: a real `git
+  // commit`/`git push`, or `sh <hook>` with this one variable set).
+  test("a non-ASCII declared name does not refuse a clean commit under git's real hook locale", () => {
+    const dir = initPreCommitRepo();
+    const nonAsciiHome = makeIdentityHome(JSON.stringify({ names: ["Zoë Example"], emails: [EMAIL] }));
+    stageClean(dir);
+    const result = runPreCommit(dir, envWith({ USERPROFILE: nonAsciiHome, HOME: nonAsciiHome, LC_CTYPE: "C.UTF-8" }));
+    expect(result.exitCode).toBe(0);
+  });
+
+  // F1 (review #135), bypass: the same byte/character desync can also make
+  // the array reader stop at the WRONG `]` -- one inside a non-ASCII
+  // entry's own text rather than the array's real closing bracket -- which
+  // drops every entry declared after it. "Aééé]y" carries three non-ASCII
+  // characters before its own `]`, enough to desync the count; "Alice
+  // Example" right after it in the same array is the one that must still
+  // be caught.
+  test("a bracket inside a non-ASCII entry does not drop a later declared entry under git's real hook locale", () => {
+    const dir = initPreCommitRepo();
+    const nonAsciiHome = makeIdentityHome(
+      JSON.stringify({ names: ["Aééé]y", "Alice Example"], emails: [EMAIL] }),
+    );
+    writeFileSync(join(dir, "notes.txt"), "credit also goes to Alice Example\n");
+    git(["add", "notes.txt"], dir);
+    const result = runPreCommit(dir, envWith({ USERPROFILE: nonAsciiHome, HOME: nonAsciiHome, LC_CTYPE: "C.UTF-8" }));
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("identifying string");
+  });
+
+  // F2 (review #135): identity_json_array used to discard the array's own
+  // '[' along with everything before it, so a key that IS declared but
+  // whose array is truncated right after '[' -- a partial write, an editor
+  // that died mid-save -- produced the same empty $tail as a key that was
+  // never declared, and `[ -n "$tail" ] || return 0` reported it as "zero
+  // entries" rather than the malformed file it is. `emails` carries a real
+  // entry so the "declares no names and no emails" refusal (which WOULD
+  // catch a fully-empty file) cannot fire and mask this: the names channel
+  // silently disables itself while the file otherwise loads clean.
+  test("a names array truncated right after '[' refuses to load rather than silently reporting zero entries", () => {
+    const dir = initPreCommitRepo();
+    const truncatedHome = makeIdentityHome(`{"emails": ["${EMAIL}"], "meta": {}, "names": [`);
+    stageClean(dir);
+    const result = runPreCommit(dir, envWith({ USERPROFILE: truncatedHome, HOME: truncatedHome }));
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("could not find the closing ']'");
+  });
+});
+
 /** Test double for `grep`: always reports "no match", exit 1, no matter
  * what it was asked to find — the shape of 2026-09-05's crashed-scan
  * incident, generalised to any matcher failure rather than the specific
