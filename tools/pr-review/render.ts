@@ -11,11 +11,23 @@ export const MAX_RENDERED_FINDINGS = 25;
 // GitHub caps a review body at 65,536 characters; the margin absorbs template text.
 export const MAX_BODY_CHARS = 60_000;
 
-// C0 controls other than tab and newline, DEL, the Arabic letter mark, zero-width and directional
-// marks, line and paragraph separators, the bidirectional overrides and isolates, invisible
-// operators, and the byte-order mark: everything that makes displayed text differ from its bytes.
+// #120's plan D5 list (docs/superpowers/plans/2026-09-11-pr-review-app.md) exactly: C0 controls
+// other than tab and newline, DEL, the Arabic letter mark, zero-width and directional marks, line
+// and paragraph separators, the bidirectional overrides and isolates, invisible operators, and the
+// byte-order mark. Not every character that can make displayed text differ from its bytes: other
+// confusables (soft hyphen, Mongolian vowel separator, variation selectors, tag characters) are a
+// known gap the plan does not close here, tracked outside this task rather than widened on sight.
 const UNSAFE_CHARS = /[\u0000-\u0008\u000B-\u001F\u007F\u061C\u200B-\u200F\u2028-\u202E\u2060-\u2069\uFEFF]/g;
 const IDENTIFIER_RE = /^[A-Za-z0-9._\-\[\]]+$/;
+// The three literals ReviewEvent allows (types.ts:34) and the three Verification.state allows
+// (types.ts:37), restated at runtime because a type annotation enforces nothing once bun skips
+// type-checking (global constraints: "A type annotation enforces nothing").
+const REVIEW_EVENTS: ReadonlySet<string> = new Set(["APPROVE", "REQUEST_CHANGES", "COMMENT"]);
+const VERIFICATION_STATES: ReadonlySet<string> = new Set(["passed", "failed", "incomplete"]);
+// Every character a basis string from computeEvent (verdict.ts) actually uses: lowercase letters,
+// digits, space, comma, apostrophe, and the parentheses around "finding(s)". Excludes backtick,
+// @, #, <, [ and newline, so basis stays safe to render outside a fence unescaped.
+const BASIS_RE = /^[a-z0-9 (),']*$/;
 
 export interface RenderInput {
   event: ReviewEvent;
@@ -75,10 +87,34 @@ function findingsSection(heading: string, findings: readonly Finding[], changed:
 }
 
 export function renderReviewBody(input: RenderInput): string {
-  if (!SHA_RE.test(input.headSha)) throw new Error("headSha must be a 40-character lowercase hex SHA");
-  if (!SHA_RE.test(input.toolRevision)) throw new Error("toolRevision must be a 40-character lowercase hex SHA");
-  if (!IDENTIFIER_RE.test(input.reviewerModel) || !input.reviewerTools.every((tool) => IDENTIFIER_RE.test(tool))) {
+  if (typeof input.headSha !== "string" || !SHA_RE.test(input.headSha)) {
+    throw new Error("headSha must be a 40-character lowercase hex SHA");
+  }
+  if (typeof input.toolRevision !== "string" || !SHA_RE.test(input.toolRevision)) {
+    throw new Error("toolRevision must be a 40-character lowercase hex SHA");
+  }
+  if (
+    typeof input.reviewerModel !== "string" ||
+    !IDENTIFIER_RE.test(input.reviewerModel) ||
+    !Array.isArray(input.reviewerTools) ||
+    !input.reviewerTools.every((tool) => typeof tool === "string" && IDENTIFIER_RE.test(tool))
+  ) {
     throw new Error("the reviewer model id and tool names must be plain identifiers");
+  }
+  if (!REVIEW_EVENTS.has(input.event)) throw new Error("event must be one of APPROVE, REQUEST_CHANGES, COMMENT");
+  if (!REVIEW_EVENTS.has(input.computedEvent)) {
+    throw new Error("computedEvent must be one of APPROVE, REQUEST_CHANGES, COMMENT");
+  }
+  if (!VERIFICATION_STATES.has(input.verification.state)) {
+    throw new Error("verification.state must be one of passed, failed, incomplete");
+  }
+  if (!BASIS_RE.test(input.basis)) throw new Error("basis contains a character outside computeEvent's output set");
+  if (input.output !== null) {
+    for (const finding of input.output.findings) {
+      if (!SEVERITY_SET.has(finding.severity) || !CONFIDENCE_SET.has(finding.confidence)) {
+        throw new Error("a finding reached the renderer without passing validation");
+      }
+    }
   }
   const changed = new Set(input.changedFiles);
 

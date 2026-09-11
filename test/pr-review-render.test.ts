@@ -4,8 +4,9 @@
 // code fence, and no fence can be closed early by its own content.
 
 import { describe, expect, test } from "bun:test";
-import { MAX_BODY_CHARS, MAX_FIELD_CHARS, fenced, renderReviewBody, sanitize, type RenderInput } from "../tools/pr-review/render";
+import { MAX_BODY_CHARS, MAX_FIELD_CHARS, MAX_RENDERED_FINDINGS, fenced, renderReviewBody, sanitize, type RenderInput } from "../tools/pr-review/render";
 import type { Finding } from "../tools/pr-review/types";
+import { computeEvent } from "../tools/pr-review/verdict";
 
 const SHA = "a".repeat(40);
 const TOOL_SHA = "b".repeat(40);
@@ -26,6 +27,20 @@ const hostileFinding = (severity: Finding["severity"]): Finding => ({
   title: HOSTILE,
   detail: HOSTILE,
 });
+
+// Returns an object whose toString() gives a value that passes IDENTIFIER_RE on the first call
+// (the one validation makes) and hostile markup on every later call (the one interpolation would
+// make, once the value is embedded unfenced). Without a typeof guard in front of the identifier
+// regex, RegExp#test coerces its argument through this exact path.
+function mutatingToString(): { toString(): string } {
+  let calls = 0;
+  return {
+    toString() {
+      calls += 1;
+      return calls === 1 ? "claude-opus-5" : "@octocat <img src=x>";
+    },
+  };
+}
 
 const input = (overrides: Partial<RenderInput> = {}): RenderInput => ({
   event: "REQUEST_CHANGES",
@@ -92,6 +107,17 @@ describe("fenced()", () => {
     const longest = Math.max(0, ...(inner.match(/`+/g) ?? []).map((run) => run.length));
     expect(opener.length).toBeGreaterThan(longest);
     expect(opener.length).toBeGreaterThanOrEqual(3);
+  });
+
+  // Two 2-backtick runs joined by a zero-width space. Stripped first, they merge into one 4-run,
+  // which needs a 5-backtick opener. Counted first, they stay two separate 2-runs and a 3-backtick
+  // opener would look sufficient while actually sitting on the post-strip 4-run. Built from
+  // character codes, not a typed escape, per the tool-arg decoding note.
+  test("counts backtick runs after stripping invisible characters, not before", () => {
+    const probe = String.fromCharCode(96, 96, 0x200b, 96, 96);
+    const block = fenced(probe);
+    const opener = /^(`+)text\n/.exec(block)![1]!;
+    expect(opener.length).toBe(5);
   });
 });
 
@@ -164,6 +190,18 @@ describe("renderReviewBody(): refuses malformed code-side values", () => {
     ["an uppercase tool revision", { toolRevision: "B".repeat(40) }],
     ["a model id with a space", { reviewerModel: "claude opus" }],
     ["a tool name with markup", { reviewerTools: ["<b>Bash</b>"] }],
+    // Important 1: event, computedEvent, verification.state and basis render outside a fence and
+    // must be checked in render.ts itself, not merely produced correctly by today's only caller.
+    ["an event outside the known set", { event: "@octocat" }],
+    ["a computedEvent outside the known set", { computedEvent: "@octocat" }],
+    ["a verification state outside the known set", { verification: { state: "@octocat", reasons: [] } }],
+    ["a basis with markup", { basis: "@octocat #1" }],
+    ["a basis with a newline", { basis: "line one\nline two" }],
+    // Important 2: a non-string identifier must not reach RegExp#test, which would coerce it.
+    ["a null model id", { reviewerModel: null }],
+    ["an undefined model id", { reviewerModel: undefined }],
+    ["a tool list containing null", { reviewerTools: [null] }],
+    ["a model id object whose toString mutates after validation", { reviewerModel: mutatingToString() }],
   ] as const)("%s", (_label, overrides) => {
     expect(() => renderReviewBody(input(overrides as Partial<RenderInput>))).toThrow();
   });
@@ -173,5 +211,43 @@ describe("renderReviewBody(): refuses malformed code-side values", () => {
   test("a severity that never passed validation", () => {
     const bad = { ...hostileFinding("naming"), severity: "@octocat" } as unknown as Finding;
     expect(() => renderReviewBody(input({ output: { summary: "s", findings: [bad], observed_instructions: [] } }))).toThrow();
+  });
+
+  // Minor 2: the only confidence values elsewhere in this file are "high" and "low", so nothing
+  // else in the suite would notice the confidence half of findingBlock's check going missing.
+  test("a confidence that never passed validation", () => {
+    const bad = { ...hostileFinding("naming"), confidence: "@octocat" } as unknown as Finding;
+    expect(() => renderReviewBody(input({ output: { summary: "s", findings: [bad], observed_instructions: [] } }))).toThrow();
+  });
+
+  // Minor 1: findingBlock's check only runs for the findings a section actually renders (the first
+  // MAX_RENDERED_FINDINGS). A malformed finding past that cutoff must still throw, so validation
+  // has to run over the full list before any slicing happens.
+  test("a finding past the rendered cutoff still gets validated", () => {
+    const valid = Array.from({ length: MAX_RENDERED_FINDINGS }, () => hostileFinding("naming"));
+    const bad = { ...hostileFinding("naming"), severity: "Correctness" } as unknown as Finding;
+    const body = { summary: "s", findings: [...valid, bad], observed_instructions: [] };
+    expect(() => renderReviewBody(input({ output: body }))).toThrow();
+  });
+});
+
+// D5 (plan) names computeEvent's basis as one of the values render.ts may render outside a fence.
+// This pins the other side of that contract: every basis string verdict.ts's computeEvent can
+// actually produce must pass BASIS_RE, for every row of the D4 event table plus the two inputs
+// that fall through to computeEvent's own fallback branches.
+describe("renderReviewBody(): stays compatible with every basis computeEvent can produce", () => {
+  test.each([
+    ["no valid findings", { reviewerOk: false, severities: [], verification: { state: "passed", reasons: [] } }],
+    ["a load-bearing finding", { reviewerOk: true, severities: ["correctness"], verification: { state: "passed", reasons: [] } }],
+    ["verification failed", { reviewerOk: true, severities: [], verification: { state: "failed", reasons: [] } }],
+    ["verification incomplete", { reviewerOk: true, severities: [], verification: { state: "incomplete", reasons: [] } }],
+    ["verification passed, nothing load-bearing", { reviewerOk: true, severities: [], verification: { state: "passed", reasons: [] } }],
+    ["an unrecognised severity", { reviewerOk: true, severities: ["@octocat"], verification: { state: "passed", reasons: [] } }],
+    ["an unrecognised verification state", { reviewerOk: true, severities: [], verification: { state: "@octocat", reasons: [] } }],
+  ] as const)("%s", (_label, row) => {
+    const { event, basis } = computeEvent(row as unknown as Parameters<typeof computeEvent>[0]);
+    expect(() =>
+      renderReviewBody(input({ event, computedEvent: event, basis, verification: { state: "passed", reasons: [] } })),
+    ).not.toThrow();
   });
 });
