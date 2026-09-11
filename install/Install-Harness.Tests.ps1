@@ -14,6 +14,8 @@ Describe "Install-Harness" {
         # Scratch drop box: the directory must exist and carry the self-ignoring rule, or agent
         # working files land in the project's commits.
         Test-Path "$script:target/.claude/scratch" -PathType Container | Should -BeTrue
+        # Keeps the coreRepo/stackDetected sidecar out of every commit (issue #137).
+        Test-Path "$script:target/.claude/.gitignore" -PathType Leaf | Should -BeTrue
         # \r? before the anchor: the template is LF in the index and core.autocrlf=true
         # checks it out as CRLF, so in -Raw text `$` sits behind a carriage return and a
         # bare `^\*$` never matches on Windows.
@@ -279,14 +281,14 @@ Describe "Install-Harness" {
         $m['files']['agents/task-reviewer.md'] | Should -Be $src
     }
 
-    It "records an empty stackDetected.plugins array when the plugin cache dir is missing, without throwing" {
+    It "records an empty stackDetected.plugins array in the sidecar when the plugin cache dir is missing, without throwing" {
         $fakeHome = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-fakehome-" + [guid]::NewGuid())
         New-Item -ItemType Directory -Path $fakeHome | Out-Null
         $prevUserProfile = $env:USERPROFILE
         try {
             $env:USERPROFILE = $fakeHome
             { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target } | Should -Not -Throw
-            $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+            $m = Get-Content "$script:target/.claude/.harness-manifest.local.json" -Raw | ConvertFrom-Json -AsHashtable
             $m.Contains('stackDetected') | Should -BeTrue
             @($m['stackDetected']['plugins']).Count | Should -Be 0
         }
@@ -305,7 +307,7 @@ Describe "Install-Harness" {
         try {
             $env:USERPROFILE = $fakeHome
             & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
-            $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+            $m = Get-Content "$script:target/.claude/.harness-manifest.local.json" -Raw | ConvertFrom-Json -AsHashtable
             @($m['stackDetected']['plugins']) | Should -Be @('alpha-market/alpha-plugin', 'zeta-market/zeta-plugin')
         }
         finally {
@@ -321,7 +323,7 @@ Describe "Install-Harness" {
         try {
             $env:USERPROFILE = $fakeHome
             { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target } | Should -Not -Throw
-            $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+            $m = Get-Content "$script:target/.claude/.harness-manifest.local.json" -Raw | ConvertFrom-Json -AsHashtable
             @($m['stackDetected']['outputStyles']).Count | Should -Be 0
         }
         finally {
@@ -342,7 +344,7 @@ Describe "Install-Harness" {
             # Same collapse hazard as the settings.json hooks array: a single-match result
             # captured into a variable can serialize as a bare string instead of a
             # 1-element array. Assert the raw JSON shape, not just the deserialized value.
-            $raw = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw
+            $raw = Get-Content "$script:target/.claude/.harness-manifest.local.json" -Raw
             $raw | Should -Match '"outputStyles":\s*\['
             $m = $raw | ConvertFrom-Json -AsHashtable
             @($m['stackDetected']['outputStyles']) | Should -Be @('learning')
@@ -361,7 +363,7 @@ Describe "Install-Harness" {
         try {
             $env:USERPROFILE = $fakeHome
             & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
-            $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+            $m = Get-Content "$script:target/.claude/.harness-manifest.local.json" -Raw | ConvertFrom-Json -AsHashtable
             @($m['stackDetected']['mcpServers']) | Should -Be @('code-context')
         }
         finally {
@@ -373,7 +375,7 @@ Describe "Install-Harness" {
     It "does not throw and returns an empty mcpServers array when the target's .mcp.json is malformed" {
         '{ this is not valid json' | Set-Content "$script:target/.mcp.json"
         { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target } | Should -Not -Throw
-        $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+        $m = Get-Content "$script:target/.claude/.harness-manifest.local.json" -Raw | ConvertFrom-Json -AsHashtable
         @($m['stackDetected']['mcpServers']).Count | Should -Be 0
     }
 
@@ -400,20 +402,38 @@ Describe "Install-Harness" {
         }
     }
 
-    It "gains stackDetected without losing existing manifest keys, and drops the old pluginsDetected key" {
+    It "keeps stackDetected and coreRepo out of the committed manifest, recording them in the sidecar instead, and drops the old pluginsDetected key" {
         & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
         $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
         $m['files'].Contains('guardrails.md') | Should -BeTrue
         $m['files'].Contains('agents/task-reviewer.md') | Should -BeTrue
         $m.Contains('pluginsDetected') | Should -BeFalse
-        $m.Contains('stackDetected') | Should -BeTrue
-        $m['stackDetected'].Contains('scannedAt') | Should -BeTrue
-        $m['stackDetected'].Contains('plugins') | Should -BeTrue
-        $m['stackDetected'].Contains('outputStyles') | Should -BeTrue
-        $m['stackDetected'].Contains('mcpServers') | Should -BeTrue
+        # No absolute path, no per-run timestamp, no per-machine plugin inventory in the file a
+        # target repo commits (issue #137). coreCommit is the provenance that travels.
+        $m.Contains('stackDetected') | Should -BeFalse
+        $m.Contains('coreRepo') | Should -BeFalse
+        $m.Contains('coreCommit') | Should -BeTrue
+
+        $sidecar = Get-Content "$script:target/.claude/.harness-manifest.local.json" -Raw | ConvertFrom-Json -AsHashtable
+        $sidecar.Contains('coreRepo') | Should -BeTrue
+        $sidecar.Contains('stackDetected') | Should -BeTrue
+        $sidecar['stackDetected'].Contains('scannedAt') | Should -BeTrue
+        $sidecar['stackDetected'].Contains('plugins') | Should -BeTrue
+        $sidecar['stackDetected'].Contains('outputStyles') | Should -BeTrue
+        $sidecar['stackDetected'].Contains('mcpServers') | Should -BeTrue
     }
 
-    It "audit reports plugin drift against the manifest without writing it" {
+    It "the sidecar is gitignored and never reaches git status in a real repo" {
+        & git -C $script:target init -q *>&1 | Out-Null
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        Test-Path "$script:target/.claude/.gitignore" -PathType Leaf | Should -BeTrue
+        & git -C $script:target check-ignore -q '.claude/.harness-manifest.local.json'
+        $LASTEXITCODE | Should -Be 0
+        $status = & git -C $script:target status --porcelain '.claude/.harness-manifest.local.json'
+        $status | Should -BeNullOrEmpty
+    }
+
+    It "audit reports plugin drift against the sidecar without writing the manifest or the sidecar" {
         $fakeHome = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-fakehome-" + [guid]::NewGuid())
         $cacheDir = Join-Path $fakeHome '.claude/plugins/cache'
         New-Item -ItemType Directory -Path (Join-Path $cacheDir 'mp/plugin-one') -Force | Out-Null
@@ -423,10 +443,12 @@ Describe "Install-Harness" {
             & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
             New-Item -ItemType Directory -Path (Join-Path $cacheDir 'mp/plugin-two') -Force | Out-Null
             $manifestBefore = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw
+            $sidecarBefore = Get-Content "$script:target/.claude/.harness-manifest.local.json" -Raw
             $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String
             $pattern = [regex]::Escape('+ mp/plugin-two')
             $out | Should -Match $pattern
             (Get-Content "$script:target/.claude/.harness-manifest.json" -Raw) | Should -Be $manifestBefore
+            (Get-Content "$script:target/.claude/.harness-manifest.local.json" -Raw) | Should -Be $sidecarBefore
         }
         finally {
             $env:USERPROFILE = $prevUserProfile
@@ -454,18 +476,18 @@ Describe "Install-Harness" {
         try {
             $env:USERPROFILE = $fakeHome
             & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
-            $manifestPath = "$script:target/.claude/.harness-manifest.json"
-            $m = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
-            $m['stackDetected'] = $null
-            ($m | ConvertTo-Json -Depth 20) | Set-Content $manifestPath
-            $manifestBefore = Get-Content $manifestPath -Raw
+            $sidecarPath = "$script:target/.claude/.harness-manifest.local.json"
+            $s = Get-Content $sidecarPath -Raw | ConvertFrom-Json -AsHashtable
+            $s['stackDetected'] = $null
+            ($s | ConvertTo-Json -Depth 20) | Set-Content $sidecarPath
+            $sidecarBefore = Get-Content $sidecarPath -Raw
 
             { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit } | Should -Not -Throw
             $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String
             $out | Should -Match "Plugins detected: 1 \(manifest last recorded: 0\)"
             $pattern = [regex]::Escape('+ mp/plugin-one (newly detected)')
             $out | Should -Match $pattern
-            (Get-Content $manifestPath -Raw) | Should -Be $manifestBefore
+            (Get-Content $sidecarPath -Raw) | Should -Be $sidecarBefore
         }
         finally {
             $env:USERPROFILE = $prevUserProfile
@@ -486,18 +508,18 @@ Describe "Install-Harness" {
         try {
             $env:USERPROFILE = $fakeHome
             & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
-            $manifestPath = "$script:target/.claude/.harness-manifest.json"
-            $m = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
-            $m['stackDetected'] = 42
-            ($m | ConvertTo-Json -Depth 20) | Set-Content $manifestPath
-            $manifestBefore = Get-Content $manifestPath -Raw
+            $sidecarPath = "$script:target/.claude/.harness-manifest.local.json"
+            $s = Get-Content $sidecarPath -Raw | ConvertFrom-Json -AsHashtable
+            $s['stackDetected'] = 42
+            ($s | ConvertTo-Json -Depth 20) | Set-Content $sidecarPath
+            $sidecarBefore = Get-Content $sidecarPath -Raw
 
             { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit } | Should -Not -Throw
             $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String
             $out | Should -Match "Plugins detected: 1 \(manifest last recorded: 0\)"
             $pattern = [regex]::Escape('+ mp/plugin-one (newly detected)')
             $out | Should -Match $pattern
-            (Get-Content $manifestPath -Raw) | Should -Be $manifestBefore
+            (Get-Content $sidecarPath -Raw) | Should -Be $sidecarBefore
         }
         finally {
             $env:USERPROFILE = $prevUserProfile
@@ -642,7 +664,8 @@ Describe "Install-Harness" {
         $trackedHash | Should -Not -BeNullOrEmpty
 
         # Rewrite the manifest into the v1 shape an already-installed project carries: a flat
-        # path-to-hash map plus stackDetected, with none of the v2 siblings.
+        # path-to-hash map plus stackDetected and coreRepo embedded directly, the shape written
+        # before this fix moved both into the gitignored sidecar (issue #137).
         $v1 = [ordered]@{}
         foreach ($k in $v2['files'].Keys) { $v1[$k] = $v2['files'][$k] }
         # An entry core no longer ships is what makes this test ablation-proof. Every other
@@ -650,7 +673,8 @@ Describe "Install-Harness" {
         # the whole v1 map would still leave them looking correct. This one cannot be
         # recomputed from anything on disk; it survives only if the migration carried it.
         $v1['agents/retired-agent.md'] = 'DEADBEEF'
-        $v1['stackDetected'] = $v2['stackDetected']
+        $v1['stackDetected'] = @{ scannedAt = '2020-01-01T00:00:00Z'; plugins = @(); outputStyles = @(); mcpServers = @() }
+        $v1['coreRepo'] = 'C:\an\old\absolute\path'
         $v1 | ConvertTo-Json -Depth 20 | Set-Content $manifestPath
 
         & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
@@ -665,10 +689,15 @@ Describe "Install-Harness" {
         $m['files']['agents/retired-agent.md'] | Should -Be 'DEADBEEF'
         $m['files']['agents/task-reviewer.md'] | Should -Be $trackedHash
         $m.Contains('agents/task-reviewer.md') | Should -BeFalse
-        # stackDetected stays a sibling of files, never a tracked file inside it.
-        $m.Contains('stackDetected') | Should -BeTrue
+        # Neither field ever reaches the committed manifest: no per-machine plugin inventory,
+        # no absolute path (issue #137). A plain install always refreshes both in the sidecar
+        # from a live scan, which this run is, so the fabricated legacy values above are not
+        # expected to survive into it -- this test's job is only to prove they do not leak into
+        # $manifestPath.
+        $m.Contains('stackDetected') | Should -BeFalse
+        $m.Contains('coreRepo') | Should -BeFalse
         $m['files'].Contains('stackDetected') | Should -BeFalse
-        $m.Contains('coreRepo') | Should -BeTrue
+        $m['files'].Contains('coreRepo') | Should -BeFalse
         $m.Contains('coreCommit') | Should -BeTrue
     }
 
@@ -747,15 +776,17 @@ Describe "Install-Harness" {
         $audit | Should -Match 'agents/project-only\.md\s+overlay \(accepted\)'
     }
 
-    It "keeps coreRepo and coreCommit out of files when migrating a manifest whose files map is missing" {
-        # Same fold-in as the pin case, different damage. Neither value is lost, both are
-        # rewritten from the current checkout, but folded under `files` they become tracked
-        # keys for paths that were never files, and the audit then carries a permanent
-        # orphaned row for each. Two junk rows train the operator to skim the table.
+    It "keeps coreCommit out of files when migrating a manifest whose files map is missing, and leaves the sidecar's coreRepo alone" {
+        # Same fold-in risk as the pin case, different damage. coreCommit is rewritten from the
+        # current checkout, but folded under `files` it becomes a tracked key for a path that
+        # was never a file, and the audit then carries a permanent orphaned row for it.
         & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
         $manifestPath = "$script:target/.claude/.harness-manifest.json"
+        $sidecarPath = "$script:target/.claude/.harness-manifest.local.json"
         $before = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
-        $before['coreRepo'] | Should -Not -BeNullOrEmpty
+        $before['coreCommit'] | Should -Not -BeNullOrEmpty
+        $sidecarBefore = Get-Content $sidecarPath -Raw | ConvertFrom-Json -AsHashtable
+        $sidecarBefore['coreRepo'] | Should -Not -BeNullOrEmpty
 
         $before.Remove('files')
         $before | ConvertTo-Json -Depth 20 | Set-Content $manifestPath
@@ -763,17 +794,19 @@ Describe "Install-Harness" {
         & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
 
         $after = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
-        $after['files'].Contains('coreRepo') | Should -BeFalse
         $after['files'].Contains('coreCommit') | Should -BeFalse
-        # Skipped in the fold, still recorded: the keys belong at top level, not nowhere.
-        $after['coreRepo'] | Should -Be $before['coreRepo']
+        # Skipped in the fold, still recorded: the key belongs at top level, not nowhere.
         $after.Contains('coreCommit') | Should -BeTrue
         $after['coreCommit'] | Should -Be $before['coreCommit']
+        # coreRepo never sat in this manifest to begin with (post-fix), so migrating it is not
+        # this test's concern; the sidecar the migration never touches is.
+        $after.Contains('coreRepo') | Should -BeFalse
+        $sidecarAfter = Get-Content $sidecarPath -Raw | ConvertFrom-Json -AsHashtable
+        $sidecarAfter['coreRepo'] | Should -Be $sidecarBefore['coreRepo']
 
         # A tracked key with no core source and no file on disk is reported orphaned, so that
         # is the row shape this guards against.
         $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String -Width 500
-        $audit | Should -Not -Match 'coreRepo\s+orphaned'
         $audit | Should -Not -Match 'coreCommit\s+orphaned'
     }
 
@@ -840,13 +873,17 @@ Describe "Install-Harness" {
         # their manifest silently rewritten into a new shape.
         & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
         $manifestPath = "$script:target/.claude/.harness-manifest.json"
+        $sidecarPath = "$script:target/.claude/.harness-manifest.local.json"
         $v2 = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
 
         $v1 = [ordered]@{}
         foreach ($k in $v2['files'].Keys) { $v1[$k] = $v2['files'][$k] }
-        $v1['stackDetected'] = $v2['stackDetected']
+        # A synthetic legacy value: stackDetected no longer sits on $v2, since it moved to the
+        # sidecar, so this simulates the shape a manifest written before that fix still carries.
+        $v1['stackDetected'] = @{ scannedAt = '2020-01-01T00:00:00Z'; plugins = @(); outputStyles = @(); mcpServers = @() }
         $v1 | ConvertTo-Json -Depth 20 | Set-Content $manifestPath
         $manifestBefore = Get-Content $manifestPath -Raw
+        $sidecarBefore = Get-Content $sidecarPath -Raw
 
         $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String -Width 500
         # The migration still has to have happened in memory, or the audit reads every tracked
@@ -859,6 +896,8 @@ Describe "Install-Harness" {
         # would carry a files map, and this one must still be the flat map that went in.
         $raw | Should -Not -Match '"files":\s*\{'
         $raw | Should -Not -Match '"accepted":'
+        # -Audit never persists the sidecar either, migration or not.
+        (Get-Content $sidecarPath -Raw) | Should -Be $sidecarBefore
     }
 
     It "audit reports overlay (changed) once an accepted overlay is edited again" {
@@ -982,14 +1021,18 @@ Describe "Install-Harness" {
         # a deleted overlay is one of the two reasons a pin stops being wanted.
         Remove-Item -LiteralPath $overlay
         $manifestPath = "$script:target/.claude/.harness-manifest.json"
+        $sidecarPath = "$script:target/.claude/.harness-manifest.local.json"
         $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Unaccept 'agents/project-only.md' *>&1 | Out-String -Width 500
 
         $m = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
         $m['accepted'].Contains('agents/project-only.md') | Should -BeFalse
         # The rest of the manifest survives the rewrite: a drop that rebuilt the file would take
-        # the tracked hashes and the stack record with it.
+        # the tracked hashes with it. stackDetected never sits here in the first place.
         $m['files'].Contains('agents/task-reviewer.md') | Should -BeTrue
-        $m.Contains('stackDetected') | Should -BeTrue
+        $m.Contains('stackDetected') | Should -BeFalse
+        # The sidecar's own record survives -Unaccept untouched.
+        $sidecar = Get-Content $sidecarPath -Raw | ConvertFrom-Json -AsHashtable
+        $sidecar.Contains('stackDetected') | Should -BeTrue
         $out | Should -Match "Dropped the accepted-overlay pin on 'agents/project-only\.md'"
 
         { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Unaccept 'agents/project-only.md' } |
