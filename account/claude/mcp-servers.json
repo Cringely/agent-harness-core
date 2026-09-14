@@ -14,20 +14,6 @@
         "{{WSL_HOME}}/code-context-mcp.sh"
       ],
       "env": {}
-    },
-    "acme": {
-      "type": "stdio",
-      "command": "uvx",
-      "args": [
-        "--python",
-        "3.12",
-        "--with",
-        "mcp<2.0",
-        "--from",
-        "git+https://example.invalid/acme_mcp",
-        "acme-mcp"
-      ],
-      "env": {}
     }
   }
 }
