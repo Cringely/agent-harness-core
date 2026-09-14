@@ -737,7 +737,10 @@ function Get-SidecarPlan {
     # .gitignore or a global excludes file could only add an ignore that .claude/.gitignore does
     # not provide; both are excluded, which errs toward not ignored. --template= keeps a user
     # init.templateDir's info/exclude out, and -c core.excludesFile= keeps the global one out;
-    # without either, the probe can say ignored where the future repository would not. Any
+    # without either, the probe can say ignored where the future repository would not. The bare
+    # init in the temp directory sets core.ignorecase=true, which a repository later created on a
+    # case-sensitive target does not, so -c core.ignorecase=false keeps a case-variant line from
+    # reading as ignored; on a case-insensitive target that errs toward not ignored. Any
     # failure, git missing from PATH included, reads as not ignored. Asked here, not in the facts:
     # the plain install's second call follows a copy loop that may have just installed that file.
     $ignored = $false
@@ -753,7 +756,7 @@ function Get-SidecarPlan {
                 $probeCreated = $true
                 & git init -q --bare --template= -- $probeGitDir 1>$null 2>$null
                 if ($LASTEXITCODE -eq 0) {
-                    & git -C $claudeAbs "--git-dir=$probeGitDir" "--work-tree=$claudeAbs" -c core.excludesFile= check-ignore -q -- .harness-manifest.local.json 1>$null 2>$null
+                    & git -C $claudeAbs "--git-dir=$probeGitDir" "--work-tree=$claudeAbs" -c core.excludesFile= -c core.ignorecase=false check-ignore -q -- .harness-manifest.local.json 1>$null 2>$null
                     $ignored = ($LASTEXITCODE -eq 0)
                 }
             }
