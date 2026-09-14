@@ -27,10 +27,10 @@ import { REPO_ROOT, toolState } from "../tool-state";
 import type { Finding, IssueText } from "../types";
 import { computeEvent } from "../verdict";
 
-export const ROUND_ONE_BASE = "78cfbc55b666069eb0f1e146da0da49c2d2a83be";
-export const ROUND_ONE_HEAD = "b78f1d6b64f05e3d1b4805ee1dd7633a73de0094";
-export const CONTROL_BASE = "3ccd2e52c5a14b7b055942ea8cdd0aafb730d93c";
-export const CONTROL_HEAD = "ab49b08e096a2e7ccd4f3cf533fd825a11014986";
+export const ROUND_ONE_BASE = "29fffa3593cb34f28ffd055ae0c5a9921f4cb3fe";
+export const ROUND_ONE_HEAD = "043ef878dd75f1ac8dc846cf9e7182ead0074b6d";
+export const CONTROL_BASE = "ddc67a1450d9776ec5a08f05d3f0d236340da3fd";
+export const CONTROL_HEAD = "a9da9f904532aeb349f49766d01c308a6b71b38f";
 export const DEFECT_PATH = "test/citation-drift.ts";
 
 export const INJECTION_ANCHOR = "    return { ok: true, tokenChecked: false };";
