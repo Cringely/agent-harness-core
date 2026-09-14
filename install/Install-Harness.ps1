@@ -11,13 +11,23 @@
     re-installs never silently clobber a project-modified file.
 
     The manifest is v2: installed-file hashes live under `files`, deliberate project
-    forks pinned with -Accept live under `accepted`, and `coreRepo`/`coreCommit`
-    record where this layer came from. A v1 manifest (a flat path-to-hash map) is
-    migrated on load, preserving every hash under `files`. Migration also carries any
+    forks pinned with -Accept live under `accepted`, and `coreCommit` records which
+    core commit this layer was installed from. A v1 manifest (a flat path-to-hash map)
+    is migrated on load, preserving every hash under `files`. Migration also carries any
     `accepted` pins through unchanged, since only -Accept can write one and nothing on
     disk can recompute it. The record keys stay at top level either way: they are not
     tracked files, and one folded in under `files` becomes an audit row for a file
     that does not exist.
+
+    `coreRepo` (an absolute filesystem path) and `stackDetected` (the per-machine plugin,
+    output-style, and MCP-server inventory, plus the timestamp of the scan that found
+    them) never go in the committed manifest: neither travels between clones, and a
+    public target repo has no business publishing an operator's local directory layout
+    or installed toolset (issue #137). Both live in a second file the installer writes
+    alongside it and gitignores in the target: `.harness-manifest.local.json`. A manifest
+    written before this fix still carries them embedded at top level; the next run of
+    any installer command splits them out into the sidecar and drops them from the
+    committed file.
 
     Ceremony components (wave-close-handoff.sh hook, soc-monitor.md agent,
     ceremony-ledger.json and their hook registrations) assume wave/standup ceremony
@@ -51,14 +61,17 @@
     manifest's `accepted` map. The audit then reports it as `overlay (accepted)` and
     leaves it out of the attention count until the fork moves again. Takes a path
     relative to the project's .claude directory; a path resolving outside that directory
-    is rejected, as is one already tracked in `files`. Writes the manifest and nothing else.
+    is rejected, as is one already tracked in `files`. Writes the manifest, plus the sidecar step
+    every command shares (see -Prune below), which is decided before the manifest is written: when
+    it refuses, neither file changes.
 
 .PARAMETER Unaccept
     Drop an accepted-overlay pin, removing the key from the manifest's `accepted` map. Takes
     the manifest key, or a path relative to the project's .claude directory that resolves to
     one; the file itself need not still exist, since a pin outliving its file is one of the
-    reasons to drop one. Throws when the key is not pinned. Writes the manifest and nothing
-    else, and never restores or deletes a file.
+    reasons to drop one. Throws when the key is not pinned. Writes the manifest, plus the same
+    shared sidecar step as -Accept, decided before the manifest is written, and never restores or
+    deletes the pinned file.
 
 .PARAMETER Prune
     Retire a manifest key for a file core no longer ships. A standalone action, matching -Accept
@@ -72,18 +85,26 @@
     pin means the project owns the file; drop the pin first with -Unaccept). ceremony-ledger.json
     is refused too: it is live state core never shipped a source for, not an orphan of one it
     dropped. These are coherence checks now, not a safety boundary — nothing below them can
-    destroy anything.
+    destroy the pruned file.
 
-    Otherwise, drops the manifest record and nothing else. -Prune never deletes a file. Two
-    earlier designs did, and adversarial review executed a real file deletion against each one:
-    an automatic loop with an untrusted manifest key driving Remove-Item with no containment
-    check, then a standalone -Prune whose containment check was textual and never saw a
-    directory symlink placed inside .claude. A manifest key is untrusted, PR-modifiable input —
-    core/claude/hooks/session-start-drift-check.sh's own SECURITY block says so — and this
-    command no longer trusts it with anything sharper than a hashtable key removal. If the file
-    still exists on disk it is left exactly where it is, now untracked, which is what then lets
-    -Accept pin it as an overlay without a hand-edited manifest. Delete it yourself if it is
-    unwanted.
+    Otherwise, drops the manifest record and nothing else about the pruned file itself. -Prune's
+    own logic never deletes it. Two earlier designs did, and adversarial review executed a real
+    file deletion against each one: an automatic loop with an untrusted manifest key driving
+    Remove-Item with no containment check, then a standalone -Prune whose containment check was
+    textual and never saw a directory symlink placed inside .claude. A manifest key is untrusted,
+    PR-modifiable input — core/claude/hooks/session-start-drift-check.sh's own SECURITY block
+    says so — and this command no longer trusts it with anything sharper than a hashtable key
+    removal. If the file still exists on disk it is left exactly where it is, now untracked,
+    which is what then lets -Accept pin it as an overlay without a hand-edited manifest. Delete
+    it yourself if it is unwanted.
+
+    Every -Prune call, like -Accept and -Unaccept, still persists a legacy carry-forward through
+    the shared sidecar step (Get-SidecarPlan decides, Invoke-SidecarPlan acts), which is a
+    separate mechanism from the pruned-file logic above and never touches the pruned file. It can
+    remove `.harness-manifest.local.json` itself when that sidecar is stale, not ignored, and
+    confirmed untracked — never an unconditional delete. When a sidecar is on disk and git cannot
+    say whether it is tracked, the step refuses before the manifest is written, so nothing
+    changes and a retry once git answers still has its record to drop.
 
 .PARAMETER Audit
     Report-only drift check; writes nothing. Three-way compare (core source vs
@@ -175,18 +196,6 @@ $claudeDir = Join-Path $Target '.claude'
 $agentsDst = Join-Path $claudeDir 'agents'
 $hooksDst = Join-Path $claudeDir 'hooks'
 $scratchDst = Join-Path $claudeDir 'scratch'
-
-# -Accept and -Unaccept are standalone actions on an existing layer, not installs: neither may
-# conjure a .claude tree. A missing directory there is the "file does not exist" / "nothing is
-# pinned" case each one's own guard reports, and reporting that beats silently creating an empty
-# layout.
-if (-not $Audit -and -not $Accept -and -not $Unaccept -and -not $Prune) {
-    foreach ($dir in @($claudeDir, $agentsDst, $hooksDst, $scratchDst)) {
-        if (-not (Test-Path -LiteralPath $dir)) {
-            New-Item -ItemType Directory -Path $dir -Force | Out-Null
-        }
-    }
-}
 
 # Components that require -IncludeCeremonies (wave/standup ceremony infrastructure
 # most projects lack).
@@ -288,6 +297,7 @@ function Get-CoreFilesMap {
     foreach ($f in $hookFiles) { $map["hooks/$($f.Name)"] = $f.FullName }
     $map['guardrails.md'] = Join-Path $templatesSrc 'guardrails.template.md'
     $map['scratch/.gitignore'] = Join-Path $templatesSrc 'scratch.gitignore'
+    $map['.gitignore'] = Join-Path $templatesSrc 'manifest-local.gitignore'
     return $map
 }
 
@@ -405,10 +415,18 @@ function Get-CoreCommit {
 }
 
 # Manifest v2. v1 was a flat map of relative path to SHA256 (plus the stackDetected record).
-# v2 moves that map under `files` and adds three siblings: `accepted`, which pins deliberate
-# project forks at their own hash, plus `coreRepo` and `coreCommit`. Every load migrates, so
-# the rest of the script only ever sees v2; the migrated shape reaches disk only where the
-# script already writes the manifest, which is why -Audit still writes nothing.
+# v2 moves that map under `files` and adds two siblings: `accepted`, which pins deliberate
+# project forks at their own hash, and `coreCommit`. Every load migrates, so the rest of the
+# script only ever sees v2; the migrated shape reaches disk only where the script already
+# writes the manifest, which is why -Audit still writes nothing.
+#
+# coreRepo and stackDetected never appear in the value this function returns, regardless of
+# input shape. Both are machine-specific (an absolute path; a per-machine plugin/MCP inventory)
+# and belong in the gitignored sidecar the caller loads separately, never in the file a target
+# repo commits (issue #137). A manifest reaching here still carrying either -- v1's shape, or a
+# v2 manifest written before this fix -- has them stripped below rather than folded into
+# `files`, and the caller is responsible for carrying a legacy value forward into the sidecar
+# before calling this function, since this function's return value cannot carry it any more.
 #
 # Hand-edited manifests in the wild are the reason this is a function with a shape check
 # rather than three inline assignments. Four cases it has to survive without losing data:
@@ -434,37 +452,35 @@ function ConvertTo-ManifestV2 {
     $isV2 = $m.Contains('files') -and $m['files'] -is [System.Collections.IDictionary]
 
     if (-not $isV2) {
-        # The four skipped keys are manifest records rather than tracked files. Folding any of
-        # them into `files` buys it a row in the audit table for a file that does not exist,
-        # which is the same false alarm the pin mechanism exists to remove. Only two need
-        # carrying: coreRepo and coreCommit are rewritten from the current checkout at the
-        # bottom of this block, so their stale values are meant to be dropped here.
+        # The four skipped keys are manifest records rather than tracked files (coreRepo and
+        # stackDetected are dropped outright below; folding either into `files` buys it a row
+        # in the audit table for a file that does not exist, the same false alarm the pin
+        # mechanism exists to remove). Only coreCommit needs carrying here: it is rewritten
+        # from the current checkout at the bottom of this block, so its stale value is meant
+        # to be dropped.
         $files = @{}
         foreach ($key in @($m.Keys)) {
             if ($key -in @('stackDetected', 'accepted', 'coreRepo', 'coreCommit')) { continue }
             $files[$key] = $m[$key]
         }
 
-        # stackDetected stays a top-level sibling of files/accepted/coreRepo/coreCommit.
-        # It is a record of the machine's plugin and MCP stack, not a tracked file, and
-        # folding it into `files` would put it through the hash audit as an orphan.
-        $stack = $null
-        $hadStack = $m.Contains('stackDetected')
-        if ($hadStack) { $stack = $m['stackDetected'] }
-
-        # accepted rides through for the same reason and a stronger one: a pin is an operator
-        # decision that nothing on disk can recompute, so a manifest reaching here with pins but
-        # no usable `files` must not have them rebuilt away. Carried unconditionally rather than
-        # behind its own shape test like $hadStack, because the degrade below already replaces a
-        # non-map with an empty one, exactly as it does for a manifest that was already v2.
+        # accepted rides through for a stronger reason than the dropped keys: a pin is an
+        # operator decision that nothing on disk can recompute, so a manifest reaching here
+        # with pins but no usable `files` must not have them rebuilt away. Carried
+        # unconditionally, because the degrade below already replaces a non-map with an empty
+        # one, exactly as it does for a manifest that was already v2.
         $accepted = $m['accepted']
 
         $m = @{ files = $files }
-        if ($hadStack) { $m['stackDetected'] = $stack }
         $m['accepted'] = $accepted
-        $m['coreRepo'] = $script:repoRoot
         $m['coreCommit'] = Get-CoreCommit
     }
+
+    # coreRepo and stackDetected belong in the sidecar, never here, whether this manifest just
+    # migrated from v1 (which never set them above) or was already v2-shaped and carried them
+    # in from disk as top-level siblings of `files` (the pre-fix committed shape).
+    $null = $m.Remove('coreRepo')
+    $null = $m.Remove('stackDetected')
 
     # Degrade a missing or wrong-typed map to an empty one rather than throwing, matching how
     # the audit already treats a hand-edited stackDetected. A non-map `accepted` holds no pin
@@ -476,6 +492,7 @@ function ConvertTo-ManifestV2 {
 }
 
 $manifestPath = Join-Path $claudeDir '.harness-manifest.json'
+$sidecarPath = Join-Path $claudeDir '.harness-manifest.local.json'
 $manifest = @{}
 if (Test-Path -LiteralPath $manifestPath) {
     $raw = Get-Content -LiteralPath $manifestPath -Raw
@@ -484,7 +501,357 @@ if (Test-Path -LiteralPath $manifestPath) {
         foreach ($key in $loaded.Keys) { $manifest[$key] = $loaded[$key] }
     }
 }
+
+# Captured before migration, which strips both from the returned manifest unconditionally: a
+# manifest written before this fix carries them embedded at top level, and this is the one
+# chance to carry that value forward into the sidecar instead of losing it outright.
+$legacyCoreRepo = $manifest['coreRepo']
+$legacyStackDetected = $manifest['stackDetected']
+
 $manifest = ConvertTo-ManifestV2 -Loaded $manifest
+
+# Sidecar: coreRepo (absolute path to the core checkout) and stackDetected (the per-machine
+# plugin/output-style/MCP-server inventory). Neither travels between clones, so neither goes in
+# the manifest a target repo commits -- this file is gitignored by the .gitignore installed
+# alongside it. Loaded the same permissive way as the manifest: a missing or empty file degrades
+# to nothing recorded rather than throwing.
+$sidecar = @{}
+if (Test-Path -LiteralPath $sidecarPath) {
+    $rawSidecar = Get-Content -LiteralPath $sidecarPath -Raw
+    if ($rawSidecar.Trim()) {
+        $loadedSidecar = $rawSidecar | ConvertFrom-Json -AsHashtable
+        foreach ($key in $loadedSidecar.Keys) { $sidecar[$key] = $loadedSidecar[$key] }
+    }
+}
+# One-time carry-forward for a manifest written before this fix: adopt the legacy embedded
+# values only where the sidecar does not already have its own, so a real scan on this run (the
+# refresh at the bottom of the script, reached only by a plain install) is never overwritten by
+# a stale value read out of the old manifest.
+if (-not $sidecar.Contains('coreRepo') -and $legacyCoreRepo) { $sidecar['coreRepo'] = $legacyCoreRepo }
+if (-not $sidecar.Contains('stackDetected') -and $legacyStackDetected) { $sidecar['stackDetected'] = $legacyStackDetected }
+
+# Shared gate for every place below that writes the sidecar (the plain-install refresh, and the
+# legacy carry-forward persisted by -Accept/-Unaccept/-Prune): an absolute host path and a
+# per-machine inventory must never land in a working tree git cannot be shown to ignore.
+# Install-ManagedFile can leave a pre-existing, differing .claude/.gitignore untouched
+# ('skipped-untracked' / 'skipped-modified') rather than overwriting an operator's fork, so
+# having attempted to install the ignore file earlier in this run is not proof the sidecar is
+# actually covered. `git check-ignore` is the mechanism `git add` itself consults, so it is the
+# source of truth here instead of re-parsing a file this script may have just declined to touch
+# -- it also credits an ignore rule declared elsewhere (a root .gitignore, .git/info/exclude)
+# without this needing to know either exists (issue #137's live-probe follow-up, round 2).
+#
+# Split in two since round 4: Get-SidecarPlan decides and Invoke-SidecarPlan acts. Round 3 had
+# one function that decided and wrote together, called after -Accept/-Unaccept/-Prune had already
+# written the manifest and after a plain install had already run its copy loop, so a refusal
+# thrown from inside it left those writes behind while its message said nothing was written.
+# Every caller now runs Get-SidecarPlan before its first write, which is the only place a refusal
+# can be thrown, and Invoke-SidecarPlan after, which never throws a refusal.
+
+# Where git says the target's repository lives: toplevel, git dir, common dir, and index, each
+# made absolute and normalised. $null when git cannot run or does not answer cleanly.
+function Get-GitLocation {
+    param([string]$AbsTarget)
+    $out = $null
+    try {
+        $out = @(& git -C $AbsTarget rev-parse --show-toplevel --absolute-git-dir --git-common-dir --git-path index 2>$null)
+    }
+    catch {
+        return $null
+    }
+    if ($LASTEXITCODE -ne 0 -or $out.Count -ne 4) { return $null }
+    $normalised = New-Object System.Collections.Generic.List[string]
+    foreach ($line in $out) {
+        $p = [string]$line
+        if ($IsWindows) { $p = $p.Replace('/', '\') }
+        # --git-common-dir and --git-path print relative to the -C directory when the repository
+        # was discovered rather than named, and absolute when an environment variable named it.
+        if (-not [System.IO.Path]::IsPathRooted($p)) { $p = Join-Path $AbsTarget $p }
+        $normalised.Add([System.IO.Path]::GetFullPath($p).TrimEnd([char[]]@('\', '/')))
+    }
+    return , $normalised.ToArray()
+}
+
+# round-4 A: whether git's answers about the sidecar come from the target's OWN repository.
+# GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE and GIT_COMMON_DIR override discovery, and git exports
+# GIT_DIR into every hook it runs, so an installer launched from a hook in another repository
+# asked `ls-files --error-unmatch` a question the foreign index answered: exit 1, read as
+# "untracked", and a committed or staged sidecar was deleted. check-ignore had the same exposure.
+#
+# The reference is git's own discovery from the target with those four variables absent, asked in
+# a second probe; the answers actually used come from the environment as the operator set it, and
+# the variables are restored before this function returns. Nothing is cleared for the real calls,
+# since an operator may set them on purpose, and GIT_DIR naming the target's own .git (a hook in
+# the target itself) compares equal and passes. Any difference in the four locations is "git cannot
+# answer". Two simpler checks were measured and rejected (2026-09-14): comparing --show-toplevel
+# alone misses the hook case, because a foreign GIT_DIR with no GIT_WORK_TREE makes the -C
+# directory the toplevel, so it still names the target; and comparing against the `.git` walk
+# below misreports a junction target, because git resolves the junction and the walk does not.
+function Test-GitAnswersForTarget {
+    param([string]$AbsTarget)
+
+    $asRun = Get-GitLocation -AbsTarget $AbsTarget
+    if ($null -eq $asRun) { return $false }
+
+    # Removed and restored through the Env: provider, not [Environment]::SetEnvironmentVariable:
+    # PowerShell binds $null to that method's [string] parameter as "", which leaves the variable
+    # SET to an empty value, so the reference probe ran with an empty GIT_DIR and every later git
+    # call in the run inherited all four empty variables (measured 2026-09-14).
+    $names = @('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR')
+    $saved = @{}
+    foreach ($name in $names) {
+        $item = Get-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+        if ($item) { $saved[$name] = $item.Value }
+    }
+    $own = $null
+    try {
+        foreach ($name in $names) { Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue }
+        $own = Get-GitLocation -AbsTarget $AbsTarget
+    }
+    finally {
+        foreach ($name in $names) {
+            if ($saved.Contains($name)) { Set-Item -LiteralPath "Env:$name" -Value $saved[$name] }
+            else { Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue }
+        }
+    }
+    if ($null -eq $own) { return $false }
+
+    for ($i = 0; $i -lt $asRun.Count; $i++) {
+        $same = if ($IsWindows) { $asRun[$i] -ieq $own[$i] } else { $asRun[$i] -ceq $own[$i] }
+        if (-not $same) { return $false }
+    }
+    return $true
+}
+
+# Decision step. Reads on-disk presence, the tracked answer and the ignored answer, applies the
+# round-3 rulings, and returns what Invoke-SidecarPlan should do. Throws the R2-2 refusal, and is
+# the only sidecar function that can. Writes nothing.
+#
+# -Facts: the plain install calls this twice, once before its copy loop so a refusal lands ahead
+# of every write, and once after it, because the loop may install .claude/.gitignore and change
+# the ignored answer (a first install into a fresh repository is exactly that case). The second
+# call passes the first call's facts and re-reads only the ignored answer. Presence, the tracked
+# answer and whether git answers for the target at all are the refusal's inputs, and the copy loop
+# changes none of them, so the second call cannot throw after the loop has written.
+function Get-SidecarPlan {
+    param($TargetDir, $Facts)
+
+    if ($null -eq $Facts) {
+        # Recomputed here from a resolved absolute target rather than trusting a caller-supplied
+        # path: a relative -Target made an earlier version's own $sidecarPath relative too, and
+        # handing that to `git -C $TargetDir check-ignore` doubled it onto $TargetDir a second
+        # time (round-2 F3). Built from two hardcoded literal segments, never from anything the
+        # manifest or sidecar content could influence -- this repo's -Prune history (see the
+        # comment above the -Prune block) is two earlier designs that trusted a computed path for
+        # a delete and got executed against an attacker-chosen one; the removal in
+        # Invoke-SidecarPlan holds itself to the same rule.
+        # -Target already passed the top-of-script guard ("Target path does not exist or is not a directory"), so this resolves.
+        $absTarget = (Resolve-Path -LiteralPath $TargetDir).Path
+        $sidecarAbs = Join-Path (Join-Path $absTarget '.claude') '.harness-manifest.local.json'
+
+        # In a repository if a `.git` entry (a directory for a normal clone, a file for a linked
+        # worktree or submodule) exists at or above the target -- read straight off disk rather
+        # than asking git, so a git process that CAN'T answer for a reason other than "no
+        # repository here" (dubious ownership, a foreign filesystem, a uid mismatch) is never
+        # misread as "nothing to protect" (round-2 F1). `git rev-parse --git-dir`'s exit code used
+        # to be that signal, and it conflates "not a repo" with "a repo git refuses to touch,"
+        # which is exactly backwards: the second case is the one this function exists to fail
+        # closed on.
+        $inRepo = $false
+        $probe = $absTarget
+        while ($probe) {
+            if (Test-Path -LiteralPath (Join-Path $probe '.git')) { $inRepo = $true; break }
+            $parent = Split-Path -Parent $probe
+            if (-not $parent -or $parent -eq $probe) { break }
+            $probe = $parent
+        }
+        # round-5: a location variable can define a repository no `.git` walk sees (GIT_DIR and
+        # GIT_WORK_TREE naming one elsewhere stage the sidecar with no .git near the target). Any
+        # of the four set counts as in a repository, so Test-GitAnswersForTarget decides whether
+        # git's answers count, and the cannot-answer rulings apply when they do not.
+        foreach ($name in @('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR')) {
+            if (Test-Path -LiteralPath "Env:$name") { $inRepo = $true }
+        }
+
+        # round-3 R2-1: ask git whether the path is TRACKED -- staged or committed -- not merely
+        # whether it is currently ignored. A sidecar force-added before this gate existed, or
+        # staged by hand, still has an index entry after the working-tree copy is removed, and
+        # that entry reaches the next plain `git commit` untouched. `git ls-files --error-unmatch`
+        # is the same primitive `git status` itself uses to answer tracked-vs-untracked.
+        #
+        # Measured live against a real repo (2026-09-14): a staged-only file and a committed file
+        # both exit 0; an untracked file, and a path that never existed, both exit 1 with "did not
+        # match any file(s) known to git" on stderr; GIT_TEST_ASSUME_DIFFERENT_OWNER=1 (round-2
+        # F1's dubious-ownership reproduction) exits 128 with "fatal: detected dubious ownership."
+        # 0 and 1 are the only answers, and only from a git answering for the target's own
+        # repository (round-4 A, Test-GitAnswersForTarget); everything else -- 128, any other
+        # fatal exit, a missing git binary, or a location variable naming another repository --
+        # leaves $tracked $null, "cannot tell."
+        $tracked = $false
+        if ($inRepo) {
+            $tracked = $null
+            if (Test-GitAnswersForTarget -AbsTarget $absTarget) {
+                try {
+                    & git -C $absTarget ls-files --error-unmatch -- $sidecarAbs 1>$null 2>$null
+                    if ($LASTEXITCODE -eq 0) { $tracked = $true }
+                    elseif ($LASTEXITCODE -eq 1) { $tracked = $false }
+                }
+                catch {
+                    # git vanished between the two probes: same "cannot tell."
+                }
+            }
+        }
+
+        $Facts = [pscustomobject]@{
+            SidecarAbs = $sidecarAbs
+            AbsTarget  = $absTarget
+            InRepo     = $inRepo
+            OnDisk     = (Test-Path -LiteralPath $sidecarAbs)
+            Tracked    = $tracked
+        }
+
+        if ($Facts.OnDisk -and $null -eq $Facts.Tracked) {
+            # round-3 R2-2 (owner ruling, 2026-09-14): git cannot say whether the sidecar on disk
+            # is tracked. Guessing either way is wrong -- deleting risks exactly the leak R2-1
+            # exists to close if the untold answer was actually "tracked"; silently leaving it
+            # risks an unprotected copy nobody was told about. Refuse the whole command instead.
+            # Every caller reaches this before its first write (round 4), so the message can say
+            # nothing was written and be true. Scoped to a sidecar that exists (owner ruling,
+            # 2026-09-14): with nothing on disk there is nothing to delete or keep, and the plan
+            # below warns and continues.
+            throw "Refusing to touch the machine-specific sidecar ('.claude/.harness-manifest.local.json') at ${sidecarAbs}: git could not confirm whether it is already tracked (dubious ownership, git missing from PATH, GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE or GIT_COMMON_DIR naming a repository other than this target's own, or another unexpected result). Deleting it on an unknown answer risks leaving a tracked copy's index entry to reach a commit, so this command stopped before writing anything: no managed file, settings.json, manifest or sidecar was changed, and the sidecar is exactly as it was. Resolve the git error (for dubious ownership: git config --global --add safe.directory <path>; for an exported location variable: unset it, or point it at this target's repository) and re-run the command."
+        }
+    }
+
+    # The ignored answer is trusted only from a git that has already answered the tracked question
+    # cleanly for this target. Tracked files are never reported ignored, so a tracked sidecar
+    # falls through to the tracked branches below.
+    #
+    # round-5: with no repository there is no repository git can answer for, and "nothing to
+    # protect" was the wrong reading, since a later `git init` stages whatever is on disk.
+    #
+    # round-6: an exact-line read of .claude/.gitignore said ignored where git does not (a later
+    # negation, a UTF-16/32 BOM, CR CR LF, a symlinked file, an oversized file), so git answers
+    # instead: a throwaway bare repository whose work tree is the target's own .claude, reading
+    # .claude/.gitignore in place. The deepest ignore file's last match wins, so a parent
+    # .gitignore or a global excludes file could only add an ignore that .claude/.gitignore does
+    # not provide; both are excluded, which errs toward not ignored. --template= keeps a user
+    # init.templateDir's info/exclude out, and -c core.excludesFile= keeps the global one out;
+    # without either, the probe can say ignored where the future repository would not. The bare
+    # init in the temp directory sets core.ignorecase=true, which a repository later created on a
+    # case-sensitive target does not, so -c core.ignorecase=false keeps a case-variant line from
+    # reading as ignored; on a case-insensitive target that errs toward not ignored. Any
+    # failure, git missing from PATH included, reads as not ignored. Asked here, not in the facts:
+    # the plain install's second call follows a copy loop that may have just installed that file.
+    $ignored = $false
+    if (-not $Facts.InRepo) {
+        $claudeAbs = Join-Path $Facts.AbsTarget '.claude'
+        if (Test-Path -LiteralPath $claudeAbs -PathType Container) {
+            # The only path the finally block may remove: a fresh GUID-named child of the temp
+            # directory, removed only once New-Item has created it in this call.
+            $probeGitDir = Join-Path ([IO.Path]::GetTempPath()) ('harness-sidecar-probe-' + [guid]::NewGuid().ToString('N'))
+            $probeCreated = $false
+            try {
+                $null = New-Item -ItemType Directory -Path $probeGitDir -ErrorAction Stop
+                $probeCreated = $true
+                & git init -q --bare --template= -- $probeGitDir 1>$null 2>$null
+                if ($LASTEXITCODE -eq 0) {
+                    & git -C $claudeAbs "--git-dir=$probeGitDir" "--work-tree=$claudeAbs" -c core.excludesFile= -c core.ignorecase=false check-ignore -q -- .harness-manifest.local.json 1>$null 2>$null
+                    $ignored = ($LASTEXITCODE -eq 0)
+                }
+            }
+            catch {
+                $ignored = $false
+            }
+            finally {
+                if ($probeCreated) {
+                    Remove-Item -LiteralPath $probeGitDir -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    }
+    if ($Facts.InRepo -and $null -ne $Facts.Tracked) {
+        try {
+            & git -C $Facts.AbsTarget check-ignore -q -- $Facts.SidecarAbs 2>$null
+            $ignored = ($LASTEXITCODE -eq 0)
+        }
+        catch {
+            # git missing from PATH, or otherwise unable to run at all (the native-command
+            # invocation throws rather than setting $LASTEXITCODE): cannot verify, so this write
+            # fails closed exactly like a git that runs and answers "not ignored" (round-2 F4).
+            $ignored = $false
+        }
+    }
+
+    $skipWarning = "Skipping the machine-specific sidecar ('.claude/.harness-manifest.local.json'): git does not confirm it is ignored, so writing it here risks a future 'git add' committing an absolute host path. Fix '.claude/.gitignore' so it covers '.harness-manifest.local.json' (-Accept '.gitignore' pins the CURRENT fork as-is -- it does not add the missing line for you -- and -Force overwrites EVERY differing managed file with core's version, not only this one, discarding any of your own lines in them), or add an equivalent ignore rule elsewhere (a root .gitignore, .git/info/exclude), then re-run the installer. If this file is already tracked in git (for example, force-added before this check existed), untrack it first: git rm --cached .claude/.harness-manifest.local.json"
+
+    if ($ignored) {
+        return [pscustomobject]@{ Facts = $Facts; Action = 'write'; Warning = $null }
+    }
+
+    if ($null -eq $Facts.Tracked) {
+        # Reached only with no sidecar on disk; the on-disk case threw above.
+        return [pscustomobject]@{
+            Facts   = $Facts
+            Action  = 'skip'
+            Warning = "Skipping the machine-specific sidecar ('.claude/.harness-manifest.local.json'): git could not answer for this target's own repository (dubious ownership, git missing from PATH, or GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE or GIT_COMMON_DIR naming another repository), so whether it is ignored is not confirmed and its tracked state is unknown. No sidecar is on disk, so there was nothing to keep or delete, and the rest of this command continues without writing one. Resolve the git error and re-run the installer to record it. If an earlier commit already tracks this file, untrack it once git answers: git rm --cached .claude/.harness-manifest.local.json"
+        }
+    }
+
+    if ($Facts.Tracked) {
+        if ($Facts.OnDisk) {
+            return [pscustomobject]@{
+                Facts   = $Facts
+                Action  = 'skip'
+                Warning = "Not removing the machine-specific sidecar ('.claude/.harness-manifest.local.json') at $($Facts.SidecarAbs): git does not confirm it is ignored, and the file is already tracked (staged or committed), so deleting only the working-tree copy would leave the index entry -- and whatever it holds -- to reach the next commit untouched. It was left exactly as it was, not removed. Untrack it first: git rm --cached .claude/.harness-manifest.local.json -- then fix '.claude/.gitignore' so it covers '.harness-manifest.local.json' and re-run the installer."
+            }
+        }
+        # round-4 scope ruling (owner, 2026-09-14): git answers, and its index holds a sidecar
+        # absent from disk. Nothing to delete; writing a fresh one would put this machine's values
+        # into a tracked file. Warn with the command that clears the entry, and continue.
+        return [pscustomobject]@{
+            Facts   = $Facts
+            Action  = 'skip'
+            Warning = "Skipping the machine-specific sidecar ('.claude/.harness-manifest.local.json'): no copy is on disk, but git's index still tracks it (staged or committed), so the next commit carries whatever that entry holds, and writing a fresh copy here would put this machine's values into a tracked file. Untrack it: git rm --cached .claude/.harness-manifest.local.json -- then make sure '.claude/.gitignore' covers '.harness-manifest.local.json' and re-run the installer."
+        }
+    }
+
+    if ($Facts.OnDisk) {
+        # round-2 F2: a sidecar that WAS covered and no longer is (the ignore line got dropped, or
+        # a fork never had it) must not sit on disk still holding an absolute host path just
+        # because this run declined to refresh it. Confirmed untracked by a git answering for this
+        # target, so removing it is safe.
+        return [pscustomobject]@{
+            Facts   = $Facts
+            Action  = 'remove'
+            Warning = $skipWarning.Replace(" Fix '.claude/.gitignore'", " An existing sidecar was removed: it was not confirmed ignored and still held an absolute host path. Fix '.claude/.gitignore'")
+        }
+    }
+
+    return [pscustomobject]@{ Facts = $Facts; Action = 'skip'; Warning = $skipWarning }
+}
+
+# Write step. Carries out a plan from Get-SidecarPlan: writes the sidecar, or removes a stale
+# untracked copy, or neither, and prints the plan's warning. Returns $true only when it wrote. The
+# path it writes or removes is the fixed literal Get-SidecarPlan built, never anything computed
+# from $Sidecar's content.
+function Invoke-SidecarPlan {
+    param($Plan, $Sidecar)
+
+    if ($Plan.Action -eq 'write') {
+        # round-6: with neither field there is nothing to persist. A `{}` file passes the drift
+        # hook's missing-sidecar check and silences its "sidecar unavailable" advisory, so an
+        # -Accept, -Unaccept or -Prune with no sidecar and no legacy fields leaves the file absent.
+        if (-not ($Sidecar.Contains('coreRepo') -or $Sidecar.Contains('stackDetected'))) { return $false }
+        $Sidecar | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $Plan.Facts.SidecarAbs
+        return $true
+    }
+    if ($Plan.Action -eq 'remove') {
+        Remove-Item -LiteralPath $Plan.Facts.SidecarAbs -Force
+    }
+    if ($Plan.Warning) { Write-Warning $Plan.Warning }
+    return $false
+}
 
 # The target's other piece of pre-existing state, read here beside the manifest because every mode
 # has to know what is already on disk before it decides anything. Invariant: the target's
@@ -524,8 +891,15 @@ if ($Accept) {
         throw "-Accept '$acceptKey': already tracked in the manifest's files map, so it is an installed file rather than an overlay. Accepting it would drop the record of which core version it came from. Promote the change into core, or drop it from files first."
     }
 
+    # -Accept touches the manifest, not the sidecar's own values -- but a legacy carry-forward
+    # above may have populated $sidecar in memory only, and this is the write that gives a
+    # target upgrading via -Accept (rather than a plain re-install) a persisted sidecar too.
+    # Decided before the manifest write, so an R2-2 refusal leaves the manifest untouched and a
+    # retry once git answers still has its pin to make (round-4 B). See Get-SidecarPlan.
+    $sidecarPlan = Get-SidecarPlan -TargetDir $Target
     $manifest['accepted'][$acceptKey] = Get-FileHashHex -Path $acceptPath
     $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
+    $null = Invoke-SidecarPlan -Plan $sidecarPlan -Sidecar $sidecar
     Write-Host "Accepted overlay '$acceptKey' pinned at $($manifest['accepted'][$acceptKey])."
     return
 }
@@ -553,8 +927,13 @@ if ($Unaccept) {
         throw "-Unaccept '$unacceptKey': not pinned as an accepted overlay, so there is nothing to drop. Run -Audit to see which files are pinned."
     }
 
+    # See the matching comment in the -Accept block: persists a legacy carry-forward the
+    # in-memory $sidecar may hold even though -Unaccept itself never changes it, and is decided
+    # before the manifest write for the same reason.
+    $sidecarPlan = Get-SidecarPlan -TargetDir $Target
     $manifest['accepted'].Remove($unacceptKey)
     $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
+    $null = Invoke-SidecarPlan -Plan $sidecarPlan -Sidecar $sidecar
     Write-Host "Dropped the accepted-overlay pin on '$unacceptKey'. The file itself was left alone; the audit now judges it against core again."
     return
 }
@@ -568,11 +947,13 @@ if ($Unaccept) {
 # check before deleting, where the check turned out to be textual
 # (GetUnresolvedProviderPathFromPSPath plus GetRelativePath on unresolved strings, so it never
 # resolves a reparse point) and a directory symlink placed inside .claude walked Remove-Item
-# straight past it to a target the check never saw. -Prune now contains no delete primitive: it
-# only ever removes a key from $manifest['files'], which cannot destroy anything no matter what
-# the key resolves to. That closes the whole class rather than the instances -- a traversal or
-# symlink key can still slip the checks below, but the worst it now does is drop a manifest
-# record that was already sitting in the manifest, which harms nothing.
+# straight past it to a target the check never saw. The pruned-file logic below now contains no
+# delete primitive of its own: it only ever removes a key from $manifest['files'], which cannot
+# destroy anything no matter what the key resolves to. That closes the whole class rather than
+# the instances -- a traversal or symlink key can still slip the checks below, but the worst it
+# now does is drop a manifest record that was already sitting in the manifest, which harms
+# nothing. (The Get-SidecarPlan and Invoke-SidecarPlan calls further down are a separate
+# mechanism, gated on their own tracked-check, and never act on $pruneKey or $prunePath.)
 if ($Prune) {
     # Literal key first, canonicalized second -- exactly -Unaccept's lookup at the branch above.
     # A manifest key can outlive the path resolving that way at all (hand-edited, carried in from
@@ -616,8 +997,13 @@ if ($Prune) {
         throw "-Prune '$pruneKey': not tracked in the manifest's files map, so there is nothing to prune. Run -Audit to see which keys are orphaned."
     }
 
+    # See the matching comment in the -Accept block: persists a legacy carry-forward the
+    # in-memory $sidecar may hold even though -Prune itself never changes it, and is decided
+    # before the manifest write for the same reason.
+    $sidecarPlan = Get-SidecarPlan -TargetDir $Target
     $manifest['files'].Remove($pruneKey)
     $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
+    $null = Invoke-SidecarPlan -Plan $sidecarPlan -Sidecar $sidecar
 
     if (-not (Test-Path -LiteralPath $prunePath -PathType Leaf)) {
         Write-Host "Pruned manifest record '$pruneKey': already gone from disk."
@@ -774,8 +1160,8 @@ if ($Audit) {
         Write-Host "$($attention.Count) file(s) need attention. project-modified/untracked-differs = candidates to promote into core; core-updated/not-installed = re-run installer to pull down; overlay-changed = re-review the fork, then re-pin with -Accept; missing = re-run the installer if the row is a tracked file, but a missing pinned overlay exists only in the project's own history, so restore it from there or drop the pin with -Unaccept; orphaned (already removed/unmodified/modified) = -Prune the key to drop the stale manifest record -- the file, if any is still there, is left on disk for you to delete by hand or -Accept to pin as an overlay."
     }
 
-    # Stack drift: report-only, same as the file audit above — never writes the manifest.
-    # Covers all three stackDetected categories, not just plugins.
+    # Stack drift: report-only, same as the file audit above — never writes the manifest or
+    # the sidecar. Covers all three stackDetected categories, not just plugins.
     function Show-StackDrift {
         param([string]$Label, [string[]]$Detected, [string[]]$Recorded)
         $added = @($Detected | Where-Object { $Recorded -notcontains $_ })
@@ -793,13 +1179,16 @@ if ($Audit) {
     # Not `$x = if (...) { @(...) } else { @() }`: an if/else used as an expression
     # collapses an empty (or single-element) array result the same way a pipeline
     # capture does. Initialize, then conditionally overwrite, as elsewhere in this file.
+    # stackDetected lives in the sidecar, not the manifest — see the ConvertTo-ManifestV2
+    # comment above for why.
     $recordedStack = @{}
-    if ($manifest.Contains('stackDetected')) { $recordedStack = $manifest['stackDetected'] }
+    if ($sidecar.Contains('stackDetected')) { $recordedStack = $sidecar['stackDetected'] }
 
-    # A hand-edited manifest can set stackDetected to null or to a non-object value
+    # A hand-edited sidecar can set stackDetected to null or to a non-object value
     # (string, number, array) — ConvertFrom-Json -AsHashtable passes those through as-is.
     # .Contains() below assumes a hashtable, so treat anything else as "nothing recorded"
-    # rather than throw. -Audit is report-only and must never abort or rewrite the manifest.
+    # rather than throw. -Audit is report-only and must never abort or rewrite the manifest
+    # or the sidecar.
     if ($recordedStack -isnot [hashtable]) { $recordedStack = @{} }
 
     $recordedPlugins = @()
@@ -810,6 +1199,17 @@ if ($Audit) {
 
     $recordedMcpServers = @()
     if ($recordedStack.Contains('mcpServers')) { $recordedMcpServers = @($recordedStack['mcpServers']) }
+
+    # round-2 F9: "0 recorded" and "never recorded" are different facts, and comparing against
+    # zero when it is really "unknown" reports every currently-detected plugin/output-style/MCP
+    # server as newly added, which is wrong on any project whose sidecar the installer refused
+    # to write (issue #137's live-probe follow-up) -- not merely on one that has genuinely never
+    # seen this feature. One line saying the comparison did not run beats a wall of false
+    # "newly detected" rows.
+    if (-not $sidecar.Contains('stackDetected')) {
+        Write-Host "`nStack drift: not recorded (no sidecar, or the last install could not confirm it is git-ignored) -- plugin/output-style/MCP-server drift cannot be compared this run."
+        return
+    }
 
     Show-StackDrift -Label 'Plugins' -Detected $detectedPlugins -Recorded $recordedPlugins
     Show-StackDrift -Label 'Output styles' -Detected $detectedOutputStyles -Recorded $recordedOutputStyles
@@ -920,6 +1320,24 @@ if (-not (Get-Command bun -ErrorAction SilentlyContinue)) {
     Write-Warning "bun is not on PATH. The TypeScript hooks installed below are registered as bare 'bun' commands, so the gates stop enforcing and Claude Code surfaces an error notice on stderr per dispatch. Install bun to make them enforce; the registrations this run writes are already correct, so no re-install is needed."
 }
 
+# Sidecar decision, ahead of every write this install makes (round-4 C). Round 3 threw the R2-2
+# refusal from the sidecar write at the bottom of the script, after the copy loops below had
+# already updated agents, hooks and guardrails, so a refused run left a half-updated layer while
+# its message said nothing was written. The refusal can only be thrown here now; the second
+# Get-SidecarPlan call after the loops re-reads only the ignored answer (see that function).
+$sidecarPlan = Get-SidecarPlan -TargetDir $Target
+
+# Created here, after the decision above, not at the top of the script: a refused run must not
+# leave new directories behind either. Only a plain install reaches this point. -Accept, -Unaccept,
+# -Prune and -Audit all return earlier, and none of them may conjure a .claude tree: a missing
+# directory there is the "file does not exist" / "nothing is pinned" case each one's own guard
+# reports, and reporting that beats silently creating an empty layout.
+foreach ($dir in @($claudeDir, $agentsDst, $hooksDst, $scratchDst)) {
+    if (-not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+}
+
 # Agents
 Get-ChildItem -LiteralPath $agentsSrc -Filter '*.md' -File | ForEach-Object {
     if (-not $IncludeCeremonies -and $ceremonyAgentNames -contains $_.Name) { return }
@@ -981,6 +1399,13 @@ Install-ManagedFile -SourcePath (Join-Path $templatesSrc 'guardrails.template.md
 Install-ManagedFile -SourcePath (Join-Path $templatesSrc 'scratch.gitignore') `
     -DestPath (Join-Path $scratchDst '.gitignore') `
     -ManifestKey 'scratch/.gitignore'
+
+# .claude/.gitignore: keeps the coreRepo/stackDetected sidecar (.harness-manifest.local.json)
+# out of every commit, the same way scratch/.gitignore above keeps the drop box untracked.
+# A project's own .gitignore at its root is never touched by this.
+Install-ManagedFile -SourcePath (Join-Path $templatesSrc 'manifest-local.gitignore') `
+    -DestPath (Join-Path $claudeDir '.gitignore') `
+    -ManifestKey '.gitignore'
 
 # Ceremony ledger: never overwritten once it exists (it holds live state), and only
 # installed at all under -IncludeCeremonies.
@@ -1094,18 +1519,35 @@ foreach ($eventType in $hooksTemplate.PSObject.Properties.Name) {
 }
 
 # Install-time provenance, refreshed on every install. A project that re-installs from a
-# newer core should record the commit it actually got, not the one it first got, and hooks
-# reading coreRepo to locate core need a path that survives the core repo being moved.
-$manifest['coreRepo'] = $repoRoot
+# newer core should record the commit it actually got, not the one it first got. coreCommit
+# travels (it names a commit, not a place) and stays in the committed manifest; coreRepo and
+# stackDetected do not travel and go in the gitignored sidecar instead (issue #137). Hooks
+# reading coreRepo to locate core need a path that survives the core repo being moved, which
+# is exactly the sidecar's job.
 $manifest['coreCommit'] = Get-CoreCommit
 
-$manifest['stackDetected'] = [ordered]@{
+$sidecar['coreRepo'] = $repoRoot
+$sidecar['stackDetected'] = [ordered]@{
     scannedAt     = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     plugins       = $detectedPlugins
     outputStyles  = $detectedOutputStyles
     mcpServers    = $detectedMcpServers
 }
 Write-Host "Plugins detected: $($detectedPlugins.Count); output styles: $($detectedOutputStyles.Count); MCP servers: $($detectedMcpServers.Count)"
+
+# Installing manifest-local.gitignore above is not proof the sidecar just populated is actually
+# covered, so the ignored answer is asked again here, after the copy loops. The refusal was already
+# decided above the loops, before any write, so this call passes those facts through and cannot
+# refuse. It fails closed rather than persisting these two fields into a file git cannot be shown
+# to ignore: it warns, leaves a tracked copy in place, and removes a stale copy only once a git
+# answering for this target confirms it is untracked.
+$sidecarPlan = Get-SidecarPlan -TargetDir $Target -Facts $sidecarPlan.Facts
+if (Invoke-SidecarPlan -Plan $sidecarPlan -Sidecar $sidecar) {
+    $results.Add([pscustomobject]@{ File = '.harness-manifest.local.json'; Action = 'written' })
+}
+else {
+    $results.Add([pscustomobject]@{ File = '.harness-manifest.local.json'; Action = 'skipped-unprotected' })
+}
 
 $settings | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $settingsPath
 $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath

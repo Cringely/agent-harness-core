@@ -45,7 +45,8 @@ and ranking questions that file tools cannot express. It indexes locally, with l
 This installer does not install it; add it as a Claude Code plugin with
 `/plugin marketplace add infino-ai/code-context` then `/plugin install code-context@infino-ai`.
 Nothing here requires it. No hook calls it, `research-scout` reaches for it only when it is
-present, and the installer records whether it found one under `stackDetected` in the manifest.
+present, and the installer records whether it found one under `stackDetected` in the per-machine
+sidecar (`.claude/.harness-manifest.local.json`), not the manifest a project commits.
 Its absence costs search quality, nothing more.
 
 ```
@@ -81,14 +82,41 @@ anything.
 The `.harness-manifest.json` behind that is a record of two different things, not one. `files` maps
 each installed path to the SHA256 it had at install time, which is what makes a project edit
 detectable. `accepted` maps a path to the hash of the project's own fork, pinned deliberately, and
-says the divergence is the intended state. Alongside them sit `coreRepo` and `coreCommit`, recording
-where the layer came from so a hook can find core without an environment variable. A manifest
-written before this shape existed, a flat path-to-hash map, is migrated on the next run with every
-hash preserved under `files`.
+says the divergence is the intended state. `coreCommit` is the third field, recording which core
+commit the layer was installed from. A manifest written before this shape existed, a flat
+path-to-hash map, is migrated on the next run with every hash preserved under `files`.
+
+None of that travels between clones, which is exactly why two other fields never reach this file:
+`coreRepo` (an absolute path to the core checkout) and `stackDetected` (the per-machine plugin,
+output-style, and MCP-server inventory, plus the timestamp of the scan that found it). Both live in
+a second file instead, `.claude/.harness-manifest.local.json`. The installer keeps that file out of
+a commit by checking, with `git check-ignore`, that the target's own `.claude/.gitignore` actually
+covers it before every write, rather than assuming that installing its `.gitignore` template
+already took care of it. A target whose `.claude/.gitignore` predates this file, or forked it
+without the ignore line, gets a warning instead of a silently unprotected sidecar. Any stale copy
+already on disk is removed too, but only once git confirms it is not tracked; a copy already
+staged or committed is left exactly where it is, with a warning naming `git rm --cached`. Git's
+answer counts only when it comes from the target's own repository, so `GIT_DIR`, `GIT_WORK_TREE`,
+`GIT_INDEX_FILE` or `GIT_COMMON_DIR` naming another one (git exports `GIT_DIR` inside every hook)
+is treated the same as dubious ownership or a missing git: git cannot answer. What happens then
+depends on whether a sidecar is on disk. If one is, the installer refuses rather than guess, and it
+decides that before writing anything, so a refused install, `-Accept`, `-Unaccept` or `-Prune`
+exits non-zero with every managed file, `settings.json`, the manifest and the sidecar unchanged.
+If none is, it warns that the tracked state is unknown and carries on without writing one. An index
+entry for a sidecar that is no longer on disk gets the `git rm --cached` warning as well, and the
+run continues. `session-start-drift-check.sh` reads `coreRepo` from the sidecar
+to find core without an environment variable; when the sidecar is missing but the committed
+manifest exists (an install ran, but the write was refused), the hook and `-Audit` each print one
+line saying so instead of going quiet. A project that installed an earlier version of this layer
+has both fields embedded directly in `.harness-manifest.json`; the next run of any installer
+command splits them into the sidecar and drops them from the committed file, as long as that run's
+ignore check passes. When it does not, the legacy values are dropped rather than migrated, same as
+a fresh scan's would be, until the ignore rule is fixed and the installer runs again.
 
 `-Accept <relpath>` writes the second kind of entry. Point it at a path relative to the project's
 `.claude` and it pins that file's current hash, which turns a permanent audit warning into a silent
-`overlay (accepted)` row. It touches the manifest and nothing else. Run it again after reviewing a
+`overlay (accepted)` row. It touches the manifest and the shared sidecar step described above, and
+nothing else. Run it again after reviewing a
 change to the fork to re-pin at the new hash. A path resolving outside `.claude` is refused rather
 than pinned, and so is one already tracked in `files`, which is an installed file rather than an
 overlay.
@@ -102,16 +130,22 @@ touches the file itself.
 `-Prune <relpath>` retires a manifest key for a file core no longer ships. It refuses a key core
 still ships (that is not an orphan), a key pinned in `accepted` (drop the pin with `-Unaccept`
 first, since a pin means the project owns the file), and `ceremony-ledger.json` (live state core
-never shipped a source for). Otherwise it drops the manifest record and nothing else: the file, if
-one is still there, is left exactly where it is, now untracked, which is what then lets `-Accept`
-pin it as an overlay. `-Prune` carries no delete primitive at all. Two earlier designs deleted a
-file, and adversarial review executed a real deletion against both: an automatic loop that pruned
-every orphaned key on every install, where an untrusted manifest key like `../../victim.txt`
-carrying that file's real hash drove `Remove-Item` with no containment check; and a standalone
-`-Prune` that resolved its argument through a containment check before deleting, where the check
-turned out to be textual and never resolved a reparse point, so a directory symlink placed inside
-`.claude` walked `Remove-Item` straight past it. A manifest key is untrusted, PR-modifiable input,
-and this command no longer trusts it with anything sharper than a hashtable key removal.
+never shipped a source for). Otherwise it drops the manifest record and nothing else about the
+pruned file: that file, if one is still there, is left exactly where it is, now untracked, which
+is what then lets `-Accept` pin it as an overlay. The pruned-file logic carries no delete
+primitive at all. Two earlier designs deleted a file, and adversarial review executed a real
+deletion against both: an automatic loop that pruned every orphaned key on every install, where an
+untrusted manifest key like `../../victim.txt` carrying that file's real hash drove `Remove-Item`
+with no containment check; and a standalone `-Prune` that resolved its argument through a
+containment check before deleting, where the check turned out to be textual and never resolved a
+reparse point, so a directory symlink placed inside `.claude` walked `Remove-Item` straight past
+it. A manifest key is untrusted, PR-modifiable input, and this command no longer trusts it with
+anything sharper than a hashtable key removal. (Every `-Prune` call still persists a legacy
+carry-forward through the same sidecar write a plain install makes; that write can remove
+`.harness-manifest.local.json` itself when it is stale and confirmed untracked, and when a sidecar
+is on disk and git cannot confirm either way it refuses before the manifest is written, so a retry
+still has its record to drop (see the sidecar paragraph above). It is a separate mechanism from the
+pruned-file logic and never touches the pruned file.)
 
 `-Audit` writes nothing and reports drift in both directions, using a three-way compare of core
 source, the manifest hash, and the installed file: `project-modified` and `untracked (differs from
