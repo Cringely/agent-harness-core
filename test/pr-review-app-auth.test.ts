@@ -7,6 +7,7 @@ import {
   APP_PERMISSION_ALLOWLIST,
   AppTokenMinter,
   TOKEN_PERMISSIONS,
+  TOKEN_PERMISSION_ALLOWLIST,
   checkPermissions,
   createAppJwt,
   parsePrivateKey,
@@ -119,8 +120,23 @@ describe("checkPermissions()", () => {
   });
 
   test("the allowlist is exactly #120's three permissions", () => {
-    expect(APP_PERMISSION_ALLOWLIST).toEqual({ pull_requests: "write", contents: "read", metadata: "read" });
+    // 2026-09-14: contents is write on the App (approval counting needs installation push access)
+    // and stays read on every token.
+    expect(APP_PERMISSION_ALLOWLIST).toEqual({ pull_requests: "write", contents: "write", metadata: "read" });
+    expect(TOKEN_PERMISSION_ALLOWLIST).toEqual({ pull_requests: "write", contents: "read", metadata: "read" });
     expect(TOKEN_PERMISSIONS).toEqual({ pull_requests: "write", contents: "read" });
+  });
+
+  test("the App holding contents: write is accepted", () => {
+    expect(checkPermissions({ pull_requests: "write", contents: "write", metadata: "read" })).toBeNull();
+  });
+
+  test.each([
+    ["contents write", { pull_requests: "write", contents: "write", metadata: "read" }],
+    ["metadata write", { pull_requests: "write", contents: "read", metadata: "write" }],
+    ["an unlisted write", { ...TOKEN_PERMISSION_ALLOWLIST, workflows: "write" }],
+  ])("the token allowlist refuses %s", (_label, permissions) => {
+    expect(checkPermissions(permissions, TOKEN_PERMISSION_ALLOWLIST, "the token")).not.toBeNull();
   });
 
   test.each([
@@ -128,7 +144,9 @@ describe("checkPermissions()", () => {
     ["issues", { ...APP_PERMISSION_ALLOWLIST, issues: "read" }],
     ["administration", { ...APP_PERMISSION_ALLOWLIST, administration: "read" }],
     ["workflows", { ...APP_PERMISSION_ALLOWLIST, workflows: "write" }],
-    ["contents write", { ...APP_PERMISSION_ALLOWLIST, contents: "write" }],
+    // The App-side write outside the allowlist that is not an unlisted name: metadata stays read.
+    ["metadata write", { ...APP_PERMISSION_ALLOWLIST, metadata: "write" }],
+    ["issues write", { ...APP_PERMISSION_ALLOWLIST, issues: "write" }],
     ["no pull_requests write", { contents: "read", metadata: "read" }],
     ["an unknown level", { ...APP_PERMISSION_ALLOWLIST, contents: "admin" }],
     ["no permission set", null],
@@ -170,7 +188,7 @@ describe("AppTokenMinter", () => {
 
   const happyRoutes = (overrides: Record<string, (init: RequestInit) => Response> = {}) => ({
     "GET /app": () => json({ permissions: GRANTED }),
-    "GET /repos/owner/name/installation": () => json({ id: 42 }),
+    "GET /repos/owner/name/installation": () => json({ id: 42, repository_selection: "selected" }),
     "POST /app/installations/42/access_tokens": () =>
       json({
         token: "ghs_fixture",
@@ -212,9 +230,34 @@ describe("AppTokenMinter", () => {
     expect(calls.length).toBe(1);
   });
 
+  test("an App holding contents: write mints, and still requests a contents: read token", async () => {
+    const { impl, calls } = fakeFetch(happyRoutes({ "GET /app": () => json({ permissions: { ...GRANTED, contents: "write" } }) }));
+    expect(await minter(impl).mint()).toEqual({ token: "ghs_fixture", expiresAt: "2026-09-11T00:00:00Z" });
+    expect(JSON.parse(String(calls[2]!.init.body)).permissions.contents).toBe("read");
+  });
+
+  test.each([
+    ["\"all\"", { id: 42, repository_selection: "all" }],
+    ["missing", { id: 42 }],
+    ["a non-string", { id: 42, repository_selection: ["selected"] }],
+  ])("an installation whose repository_selection is %s is refused before any token request", async (_label, installation) => {
+    const { impl, calls } = fakeFetch(
+      happyRoutes({
+        "GET /app": () => json({ permissions: { ...GRANTED, contents: "write" } }),
+        "GET /repos/owner/name/installation": () => json(installation),
+      }),
+    );
+    const error = await minter(impl).mint().catch((e: Error) => e);
+    expect(error).toBeInstanceOf(RefusalError);
+    expect(calls.map((c) => c.key)).toEqual(["GET /app", "GET /repos/owner/name/installation"]);
+  });
+
   test("a minted token wider than requested is refused, and the error does not carry it", async () => {
+    // The App holding contents: write is the live configuration, and the token check must still
+    // refuse a token carrying it.
     const { impl } = fakeFetch(
       happyRoutes({
+        "GET /app": () => json({ permissions: { ...GRANTED, contents: "write" } }),
         "POST /app/installations/42/access_tokens": () =>
           json({
             token: "ghs_fixture",

@@ -26,7 +26,20 @@ import { RefusalError, parseRepo, type InstallationToken, type TokenMinter } fro
 
 export const GITHUB_API = "https://api.github.com";
 
+// contents: write is allowed on the App but never on a token (measured live, 2026-09-14). GitHub
+// counts an App's APPROVED review toward the ruleset only when the App's installation holds contents:
+// write, and it evaluates that live from the installation, not from the token that signed the review:
+// a review posted with a contents: read token counted once the installation had write. So the App
+// needs write for its approval to count, while every token stays read-scoped and is checked against
+// TOKEN_PERMISSION_ALLOWLIST below. An installation holding write is refused unless it covers selected
+// repositories only (see mint()).
 export const APP_PERMISSION_ALLOWLIST: Readonly<Record<string, "read" | "write">> = {
+  pull_requests: "write",
+  contents: "write",
+  metadata: "read",
+};
+
+export const TOKEN_PERMISSION_ALLOWLIST: Readonly<Record<string, "read" | "write">> = {
   pull_requests: "write",
   contents: "read",
   metadata: "read",
@@ -91,21 +104,25 @@ export async function readPrivateKey(
   }
 }
 
-export function checkPermissions(permissions: unknown): string | null {
+export function checkPermissions(
+  permissions: unknown,
+  allowlist: Readonly<Record<string, "read" | "write">> = APP_PERMISSION_ALLOWLIST,
+  subject = "the App",
+): string | null {
   if (typeof permissions !== "object" || permissions === null || Array.isArray(permissions)) return "GitHub returned no permission set";
   const granted = permissions as Record<string, unknown>;
   for (const [name, level] of Object.entries(granted)) {
-    // Object.hasOwn, not a bracket lookup: APP_PERMISSION_ALLOWLIST is a plain object, so
-    // APP_PERMISSION_ALLOWLIST["constructor"] resolves through Object.prototype instead of coming
+    // Object.hasOwn, not a bracket lookup: the allowlist is a plain object, so
+    // allowlist["constructor"] resolves through Object.prototype instead of coming
     // back undefined, and JSON.parse gives "__proto__" as a real own key rather than routing through
     // the accessor. Either name would pass the old `=== undefined` check and then dodge the level
     // check too, since the resolved "allowed" value is a function or Object.prototype, not "read".
-    if (!Object.hasOwn(APP_PERMISSION_ALLOWLIST, name)) return `the App holds a permission outside the allowlist: ${name}`;
-    const allowed = APP_PERMISSION_ALLOWLIST[name] as "read" | "write";
-    if (level !== "read" && level !== "write") return `the App's ${name} permission has an unrecognised level`;
-    if (level === "write" && allowed === "read") return `the App holds ${name}: write where the allowlist grants read`;
+    if (!Object.hasOwn(allowlist, name)) return `${subject} holds a permission outside the allowlist: ${name}`;
+    const allowed = allowlist[name] as "read" | "write";
+    if (level !== "read" && level !== "write") return `${subject}'s ${name} permission has an unrecognised level`;
+    if (level === "write" && allowed === "read") return `${subject} holds ${name}: write where the allowlist grants read`;
   }
-  if (granted.pull_requests !== "write") return "the App lacks pull_requests: write";
+  if (granted.pull_requests !== "write") return `${subject} lacks pull_requests: write`;
   return null;
 }
 
@@ -133,12 +150,20 @@ export class AppTokenMinter implements TokenMinter {
 
     const installation = await this.call("GET", `/repos/${owner}/${name}/installation`, headers);
     if (!Number.isInteger(installation.id)) throw new Error("GitHub returned no installation id for this repository");
+    // The App may hold contents: write, so an installation covering all repositories would lend that
+    // push access to every one of them. Only an exact "selected" passes; missing or any other value
+    // refuses before a token is requested.
+    if (installation.repository_selection !== "selected") {
+      throw new RefusalError(
+        `refusing to mint a token: the installation's repository_selection is ${JSON.stringify(installation.repository_selection) ?? "missing"}, not "selected"`,
+      );
+    }
 
     const minted = await this.call("POST", `/app/installations/${installation.id}/access_tokens`, headers, {
       repositories: [name],
       permissions: TOKEN_PERMISSIONS,
     });
-    const tokenProblem = checkPermissions(minted.permissions);
+    const tokenProblem = checkPermissions(minted.permissions, TOKEN_PERMISSION_ALLOWLIST, "the token");
     if (tokenProblem) throw new RefusalError(`refusing the minted token: ${tokenProblem}`);
     if (minted.repository_selection !== "selected") {
       throw new RefusalError(`refusing the minted token: repository_selection is ${JSON.stringify(minted.repository_selection)}, not "selected"`);
