@@ -43,6 +43,7 @@ const DEFAULT_CHECK_RUN_PAGES: CheckRunEntry[][] = [[{ name: REQUIRED_CHECK_NAME
 interface FakeOptions {
   pull?: Record<string, unknown>;
   pullSecondRead?: Record<string, unknown>;
+  pullThirdRead?: Record<string, unknown>;
   pages?: FileEntry[][];
   defaultBranch?: string;
   diffStatus?: number;
@@ -71,6 +72,10 @@ function fakeGitHub(options: FakeOptions = {}) {
     if (path === `${prefix}/pulls/7` && method === "GET") {
       pullReads++;
       if (pullReads === 2 && options.pullSecondRead) return json(options.pullSecondRead);
+      // R11-2: the third read simulates currentHeadSha() called minutes later, immediately before
+      // posting -- distinct from pullSecondRead, which simulates a push during snapshot()'s own
+      // intra-listing re-check (the second read).
+      if (pullReads === 3 && options.pullThirdRead) return json(options.pullThirdRead);
       return json(pull);
     }
     if (path === `${prefix}/compare/${BASE}...${HEAD}` && method === "GET") {
@@ -339,6 +344,40 @@ describe("GitHubClient as a poster", () => {
     expect(await client(fakeGitHub()).currentHeadSha()).toBe(HEAD);
   });
 
+  // R11-2: currentHeadSha() is called immediately before posting, which can be minutes after
+  // snapshot() ran the model against a particular base. A head-only re-check let a pull request
+  // retargeted to another base during that window post an APPROVE pinned to a commit whose diff
+  // against its actual (new) base the model never saw.
+  describe("R11-2: base retarget between snapshot and post", () => {
+    test("refuses when base.ref changed since the snapshot", async () => {
+      const fake = fakeGitHub({ pullThirdRead: pullWith({ base: { sha: BASE, ref: "release" } }) });
+      const github = client(fake);
+      await github.snapshot();
+      await expect(github.currentHeadSha()).rejects.toBeInstanceOf(RefusalError);
+    });
+
+    test("refuses when base.sha changed since the snapshot (same base branch, force-pushed or fast-forwarded)", async () => {
+      const fake = fakeGitHub({ pullThirdRead: pullWith({ base: { sha: "4".repeat(40), ref: "master" } }) });
+      const github = client(fake);
+      await github.snapshot();
+      await expect(github.currentHeadSha()).rejects.toBeInstanceOf(RefusalError);
+    });
+
+    test("refuses when changed_files disagrees at post time from what the snapshot saw", async () => {
+      const fake = fakeGitHub({ pullThirdRead: pullWith({ changed_files: 5 }) });
+      const github = client(fake);
+      await github.snapshot();
+      await expect(github.currentHeadSha()).rejects.toBeInstanceOf(RefusalError);
+    });
+
+    test("succeeds when nothing about the base changed since the snapshot", async () => {
+      const fake = fakeGitHub();
+      const github = client(fake);
+      await github.snapshot();
+      expect(await github.currentHeadSha()).toBe(HEAD);
+    });
+  });
+
   // A11.4: a 2xx with a missing or mismatched shape read as posted before this check.
   test("refuses a posted-review response missing an integer id or an html_url", async () => {
     const fake = fakeGitHub();
@@ -351,6 +390,40 @@ describe("GitHubClient as a poster", () => {
       return fake.impl(input, init);
     }) as unknown as typeof fetch;
     await expect(client({ impl, calls: fake.calls }).postReview({ commitId: HEAD, event: "APPROVE", body: "b" })).rejects.toThrow(/html_url/);
+  });
+
+  // R11-4: the test above omits only html_url, so deleting the integer-id check alone left every
+  // test green. This one is valid except for id, so only the id check can catch it.
+  test("refuses a posted-review response with a non-integer id even when html_url, commit_id and state are all valid", async () => {
+    const fake = fakeGitHub();
+    const impl = (async (input: string | URL | Request, init: RequestInit = {}) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/repos/owner/name/pulls/7/reviews" && (init.method ?? "GET") === "POST") {
+        return json({ id: "99", html_url: "https://github.com/owner/name/pull/7#pullrequestreview-99", commit_id: HEAD, state: "APPROVED" });
+      }
+      return fake.impl(input, init);
+    }) as unknown as typeof fetch;
+    await expect(client({ impl, calls: fake.calls }).postReview({ commitId: HEAD, event: "APPROVE", body: "b" })).rejects.toThrow(/integer id/);
+  });
+
+  // R11-3: GitHub already accepted the POST by the time any validation check can run, so a
+  // validation failure means a review now exists that this run cannot fully describe -- the message
+  // must let the operator find it rather than only saying something is wrong.
+  test("a post-validation failure names the id and html_url when present, and says a review may already exist", async () => {
+    const fake = fakeGitHub();
+    const impl = (async (input: string | URL | Request, init: RequestInit = {}) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/repos/owner/name/pulls/7/reviews" && (init.method ?? "GET") === "POST") {
+        return json({ id: 12345, html_url: "https://github.com/owner/name/pull/7#pullrequestreview-12345", commit_id: HEAD, state: "PENDING" });
+      }
+      return fake.impl(input, init);
+    }) as unknown as typeof fetch;
+    const error = (await client({ impl, calls: fake.calls })
+      .postReview({ commitId: HEAD, event: "APPROVE", body: "b" })
+      .catch((e: Error) => e)) as Error;
+    expect(error.message).toContain("12345");
+    expect(error.message).toContain("pullrequestreview-12345");
+    expect(error.message.toLowerCase()).toContain("already exist");
   });
 
   test("refuses a posted-review response whose state does not match the posted event", async () => {

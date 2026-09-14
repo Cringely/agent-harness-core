@@ -10,16 +10,20 @@
 // --app-id may come from PR_REVIEW_APP_ID instead.
 //
 // BUN-CWD: Bun auto-loads bunfig.toml and .env from the current working directory rather than the
-// script's own directory (live capture, 2026-09-11). A pull request that added either at the
+// script's own directory (live capture, 2026-09-11), and only from the literal cwd, never an
+// ancestor directory (confirmed live, 2026-09-13). A pull request that added either at the
 // repository root would otherwise run arbitrary code, or redirect where the network goes, inside the
 // very process holding the App key. review and snapshot therefore refuse, before reading the key,
-// when the working directory is the repository checkout or anywhere under it. The command line above
-// invokes this file by its absolute path precisely so the working directory is free to be somewhere
-// else, such as the operator's temp directory.
+// when the working directory is (realpath-resolved) a repository checkout or anywhere under one, or
+// when the working directory itself holds a bunfig.toml or .env* file regardless of where it sits --
+// a worktree's parent clone root, a subst drive, or any other alias the first check does not name.
+// The command line above invokes this file by its absolute path precisely so the working directory
+// is free to be somewhere else, such as the operator's temp directory.
 //
 // Exit codes: 0 reviewed or snapshotted, 2 refused (nothing posted), 1 usage or runtime error,
 // including any HTTP failure from GitHub.
 
+import { readdirSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { AppTokenMinter, readPrivateKey } from "./app-auth";
@@ -127,25 +131,59 @@ function exitCodeForStatus(status: ReviewOutcome["status"]): number {
 
 // GitHub response text (a permission name, repository_selection, an API error body) can reach this
 // file's console output by way of a thrown message; a control character embedded in it could corrupt
-// or spoof what the operator's terminal shows (Task 10 review carry-forward). Tab, LF and CR pass
-// through: ordinary formatting, and not something any of those GitHub fields has a reason to carry.
+// or spoof what the operator's terminal shows (Task 10 review carry-forward). R11-7: C0 and DEL alone
+// left the C1 range (U+0080-U+009F, including U+009B, an alternate CSI introducer) and the bidi
+// override and isolate characters (U+202A-U+202E, U+2066-U+2069) untouched; \u007F-\u009F is DEL and
+// all of C1 as one contiguous range. Tab, LF and CR pass through: ordinary formatting, and not
+// something any of those GitHub fields has a reason to carry.
 export function stripControlChars(text: string): string {
-  return text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
+  return text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/g, "");
 }
 
-// BUN-CWD: exported and parameterised on repoRoot so the check can be pinned without touching the
-// real filesystem. Paths are resolved, `/`-joined and, on win32, case-folded before comparing, since
+// BUN-CWD (R11-1): realpath-resolves both sides before comparing, so a cwd reached through a
+// symlink or an NTFS junction into the checkout still compares as the same physical directory
+// rather than as two different path strings. realpathSync.native, not the JS wrapper, per the
+// fix ruling; an unreadable path (already gone, or a dangling link) falls back to resolve() rather
+// than throwing out of a security check. Paths are then `/`-joined and, on win32, case-folded, since
 // a Windows checkout path and the live process cwd can differ only in case and still name the same
 // directory. The trailing-separator join (`${root}/`) matters the same way parseRepo's exact-segment
 // check does: without it, "E:/repo-other" would read as inside "E:/repo".
+function realOrResolved(path: string): string {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
 export function isCwdInsideRepo(cwd: string, repoRoot: string): boolean {
   const normalize = (path: string) => {
-    const absolute = resolve(path).replace(/\\/g, "/");
+    const absolute = realOrResolved(path).replace(/\\/g, "/");
     return process.platform === "win32" ? absolute.toLowerCase() : absolute;
   };
   const root = normalize(repoRoot);
   const current = normalize(cwd);
   return current === root || current.startsWith(`${root}/`);
+}
+
+// BUN-CWD (R11-1): a worktree's checkout lives under a parent clone (`.claude/worktrees/`), so
+// running from that parent's root is not "inside" this checkout by the path check above, yet Bun
+// still auto-loads whatever bunfig.toml or .env* file sits in that root -- and a subst drive or a
+// drive-root checkout has the same gap the other way, where `${root}/` never matches a subdirectory
+// at all. The real invariant is narrower and simpler than "inside the checkout": Bun reads only the
+// literal cwd, never an ancestor (live capture, 2026-09-11 and reviewer confirmation, 2026-09-13),
+// so refusing whenever the cwd itself holds one of those files closes every one of those cases with
+// one readdir, regardless of how the cwd relates to REPO_ROOT. A cwd that cannot be listed (removed,
+// permission denied) refuses too: this function only ever reports a cwd as safe when it can prove
+// nothing is there.
+export function cwdHasAutoloadFile(cwd: string): boolean {
+  let entries: string[];
+  try {
+    entries = readdirSync(cwd);
+  } catch {
+    return true;
+  }
+  return entries.some((name) => name === "bunfig.toml" || name.startsWith(".env"));
 }
 
 // A11.7: the diagnostic is the claude child's raw stderr (runner.ts) and can quote a profile path or
@@ -207,10 +245,12 @@ export async function main(argv: string[], io: CliIo = REAL_IO): Promise<number>
   }
 
   // BUN-CWD: checked before anything else review or snapshot does, including reading the key --
-  // snapshot mints and uses a real installation token exactly as review does.
-  if (isCwdInsideRepo(io.cwd(), REPO_ROOT)) {
+  // snapshot mints and uses a real installation token exactly as review does. R11-9: the message
+  // names the general policy, not the absolute checkout path (which, under the user's own profile,
+  // would put the workstation username into stderr that later tasks paste into reports).
+  if (isCwdInsideRepo(io.cwd(), REPO_ROOT) || cwdHasAutoloadFile(io.cwd())) {
     throw new RefusalError(
-      `refusing to run: the working directory is inside the repository checkout (${REPO_ROOT}); Bun auto-loads bunfig.toml and .env from the cwd, and this command holds the App key, so invoke it from a neutral directory instead`,
+      "refusing to run: this command holds the App key, and Bun auto-loads bunfig.toml and .env files from the working directory; the working directory is either inside a repository checkout or itself holds one of those files, so invoke it from a directory with neither, outside every checkout",
     );
   }
 

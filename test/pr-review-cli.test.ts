@@ -5,11 +5,14 @@
 // call main() itself only exercise its two refusal paths, both of which return before a
 // GitHubClient is ever constructed.
 
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   DEFAULT_REPO,
   UsageError,
+  cwdHasAutoloadFile,
   exitCodeFor,
   isCwdInsideRepo,
   main,
@@ -25,6 +28,14 @@ import { RefusalError, type PrSnapshot } from "../tools/pr-review/types";
 
 const NO_ENV = {};
 const FIXTURE_IDENTITY = { names: [], emails: [], username: "fixture-user", hostname: "fixture-host" };
+
+// A real, empty, existing directory: cwdHasAutoloadFile refuses (fail closed) on a cwd it cannot
+// list, so the fictional path strings this file used before the R11-1 fix ("/neutral/scratch/dir",
+// never created on disk) now read as unsafe rather than neutral. Removed in afterAll.
+const NEUTRAL_DIR = mkdtempSync(join(tmpdir(), "pr-review-neutral-"));
+afterAll(() => {
+  rmSync(NEUTRAL_DIR, { recursive: true, force: true });
+});
 
 describe("parseCliArgs(): review", () => {
   test("parses a posting run", () => {
@@ -129,9 +140,9 @@ describe("exitCodeFor()", () => {
 });
 
 describe("stripControlChars()", () => {
-  test("removes control characters but keeps tab, newline and carriage return", () => {
-    // ESC-METHOD: the three control characters below are built from their codes at run time
-    // rather than typed as \u escapes, so this source file carries no raw control bytes.
+  test("removes C0 controls and DEL but keeps tab, newline and carriage return", () => {
+    // ESC-METHOD: every control character below is built from its code at run time rather than
+    // typed as a \u escape, so this source file carries no raw control bytes.
     const nul = String.fromCharCode(0);
     const esc = String.fromCharCode(27);
     const del = String.fromCharCode(127);
@@ -139,11 +150,25 @@ describe("stripControlChars()", () => {
     expect(stripControlChars(`a${nul}b${esc}c${del}d`)).toBe("abcd");
     expect(stripControlChars("line1\tline2\nline3\r\n")).toBe("line1\tline2\nline3\r\n");
   });
+
+  // R11-7: the first round's sanitizer covered only C0 and DEL. C1 (U+0080-U+009F, including
+  // U+009B, an alternate CSI introducer some terminals still honour) and the bidi override/isolate
+  // characters (U+202A-U+202E, U+2066-U+2069) reached printed output unchanged.
+  test("removes the C1 control range and bidi override and isolate characters", () => {
+    const csi = String.fromCharCode(0x9b);
+    const nel = String.fromCharCode(0x85);
+    const rlo = String.fromCharCode(0x202e);
+    const lri = String.fromCharCode(0x2066);
+    const input = `left${csi}mid${nel}dle${rlo}right${lri}end`;
+    expect(stripControlChars(input)).toBe("leftmiddlerightend");
+  });
 });
 
 describe("isCwdInsideRepo()", () => {
   // BUN-CWD: exact match, a real subdirectory, and the boundary case a bare prefix check would get
-  // wrong (the same class of bug parseRepo's exact-segment check guards against in types.ts).
+  // wrong (the same class of bug parseRepo's exact-segment check guards against in types.ts). These
+  // four use synthetic, non-existent paths on purpose: realpathSync.native falls back to resolve()
+  // when a path cannot be resolved, so the string-comparison behaviour is still exercised directly.
   test("the repository root itself counts as inside", () => {
     expect(isCwdInsideRepo("/repo", "/repo")).toBe(true);
   });
@@ -158,6 +183,69 @@ describe("isCwdInsideRepo()", () => {
 
   test("an unrelated directory is not inside", () => {
     expect(isCwdInsideRepo("/somewhere/else", "/repo")).toBe(false);
+  });
+
+  // R11-1: a cwd reached through a symlink (POSIX) or an NTFS junction (win32) pointing at the
+  // repository root previously compared unequal to the root's own path string, even though it names
+  // the same physical directory Bun would read bunfig.toml/.env from. realpathSync.native resolves
+  // both sides before comparing, closing that gap.
+  test("a symlink or junction pointing at the repository root resolves to the same directory", () => {
+    const base = mkdtempSync(join(tmpdir(), "pr-review-realpath-"));
+    const target = join(base, "target");
+    mkdirSync(target);
+    mkdirSync(join(target, "sub"));
+    const link = join(base, "link");
+    try {
+      symlinkSync(target, link, process.platform === "win32" ? "junction" : "dir");
+    } catch (err) {
+      rmSync(base, { recursive: true, force: true });
+      throw new Error(`could not create a test symlink/junction (environment lacks the privilege?): ${err instanceof Error ? err.message : String(err)}`);
+    }
+    try {
+      expect(isCwdInsideRepo(link, target)).toBe(true);
+      expect(isCwdInsideRepo(join(link, "sub"), target)).toBe(true);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("cwdHasAutoloadFile()", () => {
+  // R11-1: Bun reads bunfig.toml and .env* only from the literal cwd (confirmed live), so a cwd
+  // holding either is unsafe regardless of how it relates to REPO_ROOT -- a worktree's parent
+  // clone, a subst drive, or any other alias the containment check does not name.
+  function withTempDir(run: (dir: string) => void): void {
+    const dir = mkdtempSync(join(tmpdir(), "pr-review-autoload-"));
+    try {
+      run(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  test("an empty directory has no autoload file", () => {
+    withTempDir((dir) => expect(cwdHasAutoloadFile(dir)).toBe(false));
+  });
+
+  test("a directory holding bunfig.toml is unsafe", () => {
+    withTempDir((dir) => {
+      writeFileSync(join(dir, "bunfig.toml"), "");
+      expect(cwdHasAutoloadFile(dir)).toBe(true);
+    });
+  });
+
+  test.each([".env", ".env.local", ".env.production"])("a directory holding %s is unsafe", (name) => {
+    withTempDir((dir) => {
+      writeFileSync(join(dir, name), "");
+      expect(cwdHasAutoloadFile(dir)).toBe(true);
+    });
+  });
+
+  test("a directory that cannot be listed is treated as unsafe, not as clean", () => {
+    // Fail closed: a cwd already removed, or one this process cannot read, gives no evidence that
+    // Bun would load nothing from it.
+    const dir = join(tmpdir(), "pr-review-autoload-does-not-exist-" + Date.now());
+    expect(cwdHasAutoloadFile(dir)).toBe(true);
   });
 });
 
@@ -318,7 +406,7 @@ describe("main(): BUN-CWD", () => {
     // "Proceeds" means it reaches the key read, which then refuses on its own (empty stdin) and
     // exits via the fake, distinguishably from the RefusalError the cwd check itself throws.
     const stdin = { isTTY: false, read: async () => "" };
-    const attempt = main(ARGV, { cwd: () => "/neutral/scratch/dir", exit: fakeExit, stdin });
+    const attempt = main(ARGV, { cwd: () => NEUTRAL_DIR, exit: fakeExit, stdin });
     await expect(attempt).rejects.toBeInstanceOf(TestExit);
   });
 });
@@ -326,15 +414,100 @@ describe("main(): BUN-CWD", () => {
 describe("main(): stdin-refusal process.exit carry-forward", () => {
   test("exits immediately on a stdin refusal rather than only returning a code", async () => {
     const stdin = { isTTY: false, read: async () => "" };
-    const error = await main(ARGV, { cwd: () => "/neutral/scratch/dir", exit: fakeExit, stdin }).catch((e: unknown) => e);
+    const error = await main(ARGV, { cwd: () => NEUTRAL_DIR, exit: fakeExit, stdin }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(TestExit);
     expect((error as TestExit).code).toBe(2);
   });
 
   test("a console terminal on stdin is also refused through the same immediate exit", async () => {
     const stdin = { isTTY: true, read: async () => "should not be read" };
-    const error = await main(ARGV, { cwd: () => "/neutral/scratch/dir", exit: fakeExit, stdin }).catch((e: unknown) => e);
+    const error = await main(ARGV, { cwd: () => NEUTRAL_DIR, exit: fakeExit, stdin }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(TestExit);
     expect((error as TestExit).code).toBe(2);
+  });
+});
+
+// R11-5: every test above injects a fake io, which proves the refusal LOGIC but nothing about
+// whether production's real entry point (REAL_IO, bound to process.cwd/process.exit/Bun.stdin) or
+// the exitCodeFor wiring in import.meta.main's catch handler is actually connected. These five spawn
+// the real cli.ts as a subprocess, no io injection, and read its real exit code. stdin is always
+// "ignore" (never a TTY, immediately EOF), so a run that gets past the cwd check refuses fast on an
+// empty key instead of hanging on the 60 s stdin timeout.
+const CLI_PATH = join(REPO_ROOT, "tools", "pr-review", "cli.ts");
+
+function runCli(cwd: string): { exitCode: number; stderr: string } {
+  const proc = Bun.spawnSync([process.execPath, CLI_PATH, "review", "--pr", "1", "--app-id", "1", "--key-stdin"], {
+    cwd,
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+    env: process.env,
+  });
+  return { exitCode: proc.exitCode ?? -1, stderr: proc.stderr.toString() };
+}
+
+describe("cli.ts subprocess: BUN-CWD wiring (R11-5)", () => {
+  test("a cwd inside the repository checkout exits 2", () => {
+    const result = runCli(REPO_ROOT);
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain("working directory");
+  });
+
+  test("a neutral cwd holding bunfig.toml exits 2", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pr-review-subprocess-bunfig-"));
+    try {
+      writeFileSync(join(dir, "bunfig.toml"), "");
+      const result = runCli(dir);
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toContain("working directory");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a neutral cwd holding .env.local exits 2", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pr-review-subprocess-env-"));
+    try {
+      writeFileSync(join(dir, ".env.local"), "");
+      const result = runCli(dir);
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toContain("working directory");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a cwd reached through a symlink or junction into the checkout exits 2", () => {
+    const base = mkdtempSync(join(tmpdir(), "pr-review-subprocess-link-"));
+    const link = join(base, "link");
+    let linked = true;
+    try {
+      symlinkSync(REPO_ROOT, link, process.platform === "win32" ? "junction" : "dir");
+    } catch {
+      linked = false;
+    }
+    try {
+      if (!linked) {
+        throw new Error("could not create a test symlink/junction into the checkout (environment lacks the privilege?)");
+      }
+      const result = runCli(link);
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toContain("working directory");
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  test("a genuinely neutral cwd proceeds past the cwd check and refuses on the real empty stdin", () => {
+    // Proves REAL_IO's stdin binding and the io.exit(2) carry-forward end to end, not only via the
+    // fake in the describe blocks above.
+    const dir = mkdtempSync(join(tmpdir(), "pr-review-subprocess-neutral-"));
+    try {
+      const result = runCli(dir);
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toContain("stdin carried no key");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

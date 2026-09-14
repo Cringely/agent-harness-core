@@ -89,6 +89,12 @@ const contentsPath = (repo: string, path: string, ref: string) =>
 export class GitHubClient implements PrSource, ReviewPoster {
   private token: InstallationToken | null = null;
   private readonly fetchImpl: typeof fetch;
+  // R11-2: the base this review was pinned to at snapshot time. currentHeadSha() re-checks these
+  // alongside the head SHA, immediately before posting: minutes can pass between the model run and
+  // the post, and retargeting a pull request to another base needs no new commit, so a head-only
+  // check let an approval computed against the old base's diff post pinned to a commit whose actual
+  // base had already changed.
+  private baseline: { baseRef: string; baseSha: string; changedFiles: number | undefined } | null = null;
 
   constructor(private readonly options: { repo: string; pr: number; minter: TokenMinter; fetchImpl?: typeof fetch }) {
     if (parseRepo(options.repo) === null) throw new Error("the repository must be given as owner/name");
@@ -168,6 +174,9 @@ export class GitHubClient implements PrSource, ReviewPoster {
     if (typeof repository.default_branch !== "string" || pull.base?.ref !== repository.default_branch) {
       throw new RefusalError("the pull request does not target the repository's default branch; this tool reviews pull requests into it only");
     }
+    // R11-2: recorded once the base has passed the default-branch check, so currentHeadSha() has
+    // something to compare a later read against.
+    this.baseline = { baseRef: repository.default_branch, baseSha, changedFiles: pull.changed_files };
 
     // A11.2 (1/2): pinned to these exact commits via compare, not the pull request's own moving
     // diff view.
@@ -271,6 +280,18 @@ export class GitHubClient implements PrSource, ReviewPoster {
 
   async currentHeadSha(): Promise<string> {
     const pull = await this.json<PullData>("GET", `/repos/${this.options.repo}/pulls/${this.options.pr}`);
+    if (this.baseline !== null) {
+      // R11-2: a pull request retargeted to a different base, or whose base moved, between the
+      // snapshot and this call (called immediately before posting) means the diff the model saw is
+      // no longer this pull request's diff against its actual base.
+      if (
+        pull.base?.ref !== this.baseline.baseRef ||
+        pull.base?.sha !== this.baseline.baseSha ||
+        pull.changed_files !== this.baseline.changedFiles
+      ) {
+        throw new RefusalError("the pull request's base changed after it was reviewed; nothing was posted, so run the review again");
+      }
+    }
     return pull.head?.sha ?? "";
   }
 
@@ -283,12 +304,26 @@ export class GitHubClient implements PrSource, ReviewPoster {
     // A11.4: a 2xx with a missing or mismatched shape read as posted before this check (id and
     // html_url undefined, and Task 14 would then read a review with no real id). The response's own
     // commit_id and state are compared against what was requested rather than trusted to match.
-    if (!Number.isInteger(data.id)) throw new Error("GitHub's posted-review response carried no integer id");
-    if (typeof data.html_url !== "string") throw new Error("GitHub's posted-review response carried no html_url");
-    if (data.commit_id !== input.commitId) throw new Error("GitHub's posted-review response names a different commit than the one posted");
-    if (data.state !== EXPECTED_REVIEW_STATE[input.event]) {
-      throw new Error("GitHub's posted-review response names a different state than the event that was posted");
+    const problems: string[] = [];
+    if (!Number.isInteger(data.id)) problems.push("carried no integer id");
+    if (typeof data.html_url !== "string") problems.push("carried no html_url");
+    if (data.commit_id !== input.commitId) problems.push("names a different commit than the one posted");
+    if (data.state !== EXPECTED_REVIEW_STATE[input.event]) problems.push("names a different state than the event that was posted");
+    if (problems.length > 0) {
+      // R11-3: GitHub already accepted this POST (a 2xx) by the time any check above can run, so a
+      // validation failure here means a review now exists that this run cannot fully describe, not
+      // that nothing happened. A blind retry would double-post. The id and html_url are named
+      // whenever the response carried something recognisable as one, so the operator can find and
+      // dismiss the review by hand instead of guessing from a bare validation error; the top-level
+      // handler prints this message through the same control-character strip as every other error
+      // (cli.ts), so nothing further is sanitized here.
+      const id = Number.isInteger(data.id) ? String(data.id) : "unknown";
+      const url = typeof data.html_url === "string" ? data.html_url : "unknown";
+      throw new Error(
+        `GitHub accepted this review post, but its response is invalid (${problems.join("; ")}). ` +
+          `A review may already exist on this pull request (id=${id}, url=${url}); check it before running this again.`,
+      );
     }
-    return { id: data.id as number, htmlUrl: data.html_url };
+    return { id: data.id as number, htmlUrl: data.html_url as string };
   }
 }
