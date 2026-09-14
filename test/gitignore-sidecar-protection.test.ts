@@ -41,10 +41,12 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { posixSh, posixShDir } from "./posix-sh";
@@ -668,6 +670,7 @@ describe("sidecar gitignore protection — round 3 findings (R2-1, R2-2)", () =>
       const out = result.stdout.toString();
       expect(out).toContain("Not removing the machine-specific sidecar");
       expect(out).toContain("git rm --cached .claude/.harness-manifest.local.json");
+      expect(out).not.toContain("was removed");
       expect(sidecarExists(dir)).toBe(true);
       expect(readFileSync(join(dir, SIDECAR_REL))).toEqual(sidecarBefore);
       // The index entry this fix exists to protect must survive the run too.
@@ -704,6 +707,7 @@ describe("sidecar gitignore protection — round 3 findings (R2-1, R2-2)", () =>
       const out = result.stdout.toString();
       expect(out).toContain("Not removing the machine-specific sidecar");
       expect(out).toContain("git rm --cached .claude/.harness-manifest.local.json");
+      expect(out).not.toContain("was removed");
       expect(sidecarExists(dir)).toBe(true);
       expect(readFileSync(join(dir, SIDECAR_REL))).toEqual(sidecarBefore);
     },
@@ -740,6 +744,220 @@ describe("sidecar gitignore protection — round 3 findings (R2-1, R2-2)", () =>
       // of these should have moved either.
       expect(readFileSync(join(dir, MANIFEST_REL))).toEqual(manifestBefore);
       expect(readFileSync(join(dir, ".claude", "settings.json"))).toEqual(settingsBefore);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+});
+
+// Round 4. A: an exported GIT_DIR naming another repository made `ls-files --error-unmatch` answer
+// from the foreign index (exit 1, read as "untracked"), so a staged or committed sidecar was
+// deleted and reported "removed". B: -Accept, -Unaccept and -Prune wrote the manifest before the
+// sidecar step could refuse. C: a plain install refused only after its copy loop had written.
+describe("sidecar gitignore protection — round 4 findings (A, B, C, R2-2 scope)", () => {
+  const DUBIOUS = { GIT_TEST_ASSUME_DIFFERENT_OWNER: "1" };
+  const COMMIT_ID = ["-c", "user.name=Test", "-c", "user.email=test@example.com"];
+
+  /** Every file and directory under .claude, with a SHA-256 per file. */
+  function snapshotClaudeTree(dir: string): Record<string, string> {
+    const out: Record<string, string> = {};
+    const walk = (abs: string, rel: string) => {
+      for (const entry of readdirSync(abs, { withFileTypes: true })) {
+        const childAbs = join(abs, entry.name);
+        const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) {
+          out[`${childRel}/`] = "dir";
+          walk(childAbs, childRel);
+        } else {
+          out[childRel] = createHash("sha256").update(readFileSync(childAbs)).digest("hex");
+        }
+      }
+    };
+    walk(join(dir, ".claude"), "");
+    return out;
+  }
+
+  function indexStage(dir: string): string {
+    return git(["ls-files", "--stage"], dir).stdout.toString();
+  }
+
+  /** Installed normally, then its ignore coverage dropped, so a sidecar on disk is not ignored. */
+  function installedWithCoverageDropped(): string {
+    const dir = freshRepo();
+    expect(runInstall(dir).exitCode).toBe(0);
+    expect(sidecarExists(dir)).toBe(true);
+    return dir;
+  }
+
+  function dropCoverage(dir: string) {
+    writeFileSync(join(dir, GITIGNORE_REL), "# operator trimmed it\nother-line\n");
+    expect(checkIgnored(dir)).toBe(false);
+  }
+
+  function otherRepoWithCommit(): string {
+    const other = freshRepo();
+    writeFileSync(join(other, "y.txt"), "y\n");
+    expect(git(["add", "y.txt"], other).exitCode).toBe(0);
+    expect(git([...COMMIT_ID, "commit", "-q", "-m", "other"], other).exitCode).toBe(0);
+    return other;
+  }
+
+  function expectRefusal(result: ReturnType<typeof runInstall>) {
+    expect(result.exitCode).not.toBe(0);
+    const combined = result.stdout.toString() + result.stderr.toString();
+    expect(combined).toContain("Refusing to touch the machine-specific sidecar");
+    expect(combined).toContain("stopped before writing anything");
+    return combined;
+  }
+
+  for (const variant of ["staged", "committed"] as const) {
+    test.skipIf(!pwshPath)(
+      `(A) exported GIT_DIR naming another repository, sidecar ${variant}: refused, sidecar and both indexes unchanged, nothing reported removed`,
+      () => {
+        const dir = installedWithCoverageDropped();
+        expect(git(["add", "-f", "--", SIDECAR_REL], dir).exitCode).toBe(0);
+        if (variant === "committed") {
+          expect(git([...COMMIT_ID, "commit", "-q", "-m", "force-add the sidecar"], dir).exitCode).toBe(0);
+        }
+        dropCoverage(dir);
+        const other = otherRepoWithCommit();
+
+        const sidecarBefore = readFileSync(join(dir, SIDECAR_REL));
+        const indexBefore = indexStage(dir);
+        const otherIndexBefore = indexStage(other);
+        expect(indexBefore).toContain(".claude/.harness-manifest.local.json");
+
+        const result = runInstall(dir, [], { extraEnv: { GIT_DIR: join(other, ".git") } });
+        const combined = expectRefusal(result);
+        expect(combined).not.toContain("removed");
+        expect(sidecarExists(dir)).toBe(true);
+        expect(readFileSync(join(dir, SIDECAR_REL))).toEqual(sidecarBefore);
+        expect(indexStage(dir)).toBe(indexBefore);
+        expect(indexStage(other)).toBe(otherIndexBefore);
+      },
+      INSTALL_TIMEOUT_MS,
+    );
+  }
+
+  // B: each standalone command under a refusal leaves the manifest byte-identical (legacy machine
+  // fields included, which a premature manifest write used to strip), and a retry with a git that
+  // answers then makes the change the refused run was asked for.
+  test.skipIf(!pwshPath || !dubiousOwnershipSupported)(
+    "(B) -Accept under a refusal: manifest and sidecar byte-identical; retry with a working git pins the file",
+    () => {
+      const dir = installedWithCoverageDropped();
+      writeFileSync(join(dir, ".claude", "agents", "zz-overlay.md"), "project fork\n");
+      seedLegacyManifest(dir, {
+        stackDetected: { scannedAt: "2020-01-01T00:00:00Z", plugins: ["legacy-plugin"], outputStyles: [], mcpServers: [] },
+      });
+      dropCoverage(dir);
+      const manifestBefore = readFileSync(join(dir, MANIFEST_REL));
+      const sidecarBefore = readFileSync(join(dir, SIDECAR_REL));
+
+      expectRefusal(runInstall(dir, ["-Accept", "agents/zz-overlay.md"], { extraEnv: DUBIOUS }));
+      expect(readFileSync(join(dir, MANIFEST_REL))).toEqual(manifestBefore);
+      expect(readFileSync(join(dir, SIDECAR_REL))).toEqual(sidecarBefore);
+
+      const retry = runInstall(dir, ["-Accept", "agents/zz-overlay.md"]);
+      expect(retry.exitCode).toBe(0);
+      expect(JSON.parse(readFileSync(join(dir, MANIFEST_REL), "utf8")).accepted["agents/zz-overlay.md"]).toBeTruthy();
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  test.skipIf(!pwshPath || !dubiousOwnershipSupported)(
+    "(B) -Unaccept under a refusal: manifest and sidecar byte-identical; retry with a working git drops the pin",
+    () => {
+      const dir = installedWithCoverageDropped();
+      writeFileSync(join(dir, ".claude", "agents", "zz-overlay.md"), "project fork\n");
+      expect(runInstall(dir, ["-Accept", "agents/zz-overlay.md"]).exitCode).toBe(0);
+      expect(sidecarExists(dir)).toBe(true);
+      dropCoverage(dir);
+      const manifestBefore = readFileSync(join(dir, MANIFEST_REL));
+      const sidecarBefore = readFileSync(join(dir, SIDECAR_REL));
+
+      expectRefusal(runInstall(dir, ["-Unaccept", "agents/zz-overlay.md"], { extraEnv: DUBIOUS }));
+      expect(readFileSync(join(dir, MANIFEST_REL))).toEqual(manifestBefore);
+      expect(readFileSync(join(dir, SIDECAR_REL))).toEqual(sidecarBefore);
+
+      const retry = runInstall(dir, ["-Unaccept", "agents/zz-overlay.md"]);
+      expect(retry.exitCode).toBe(0);
+      expect(JSON.parse(readFileSync(join(dir, MANIFEST_REL), "utf8")).accepted["agents/zz-overlay.md"]).toBeUndefined();
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  test.skipIf(!pwshPath || !dubiousOwnershipSupported)(
+    "(B) -Prune under a refusal: manifest and sidecar byte-identical; retry with a working git drops the record",
+    () => {
+      const dir = installedWithCoverageDropped();
+      const manifestPath = join(dir, MANIFEST_REL);
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+      manifest.files["zzz-fake-orphan.md"] = "0".repeat(64);
+      writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+      dropCoverage(dir);
+      const manifestBefore = readFileSync(manifestPath);
+      const sidecarBefore = readFileSync(join(dir, SIDECAR_REL));
+
+      expectRefusal(runInstall(dir, ["-Prune", "zzz-fake-orphan.md"], { extraEnv: DUBIOUS }));
+      expect(readFileSync(manifestPath)).toEqual(manifestBefore);
+      expect(readFileSync(join(dir, SIDECAR_REL))).toEqual(sidecarBefore);
+
+      const retry = runInstall(dir, ["-Prune", "zzz-fake-orphan.md"]);
+      expect(retry.exitCode).toBe(0);
+      expect(JSON.parse(readFileSync(manifestPath, "utf8")).files["zzz-fake-orphan.md"]).toBeUndefined();
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  // C: a layer the copy loop would repair (agents directory and guardrails.md gone), refused. Every
+  // file hash and every directory under .claude must match before and after.
+  test.skipIf(!pwshPath || !dubiousOwnershipSupported)(
+    "(C) plain install under a refusal: the whole .claude tree is unchanged",
+    () => {
+      const dir = installedWithCoverageDropped();
+      rmSync(join(dir, ".claude", "agents"), { recursive: true, force: true });
+      rmSync(join(dir, ".claude", "guardrails.md"), { force: true });
+      dropCoverage(dir);
+      const before = snapshotClaudeTree(dir);
+
+      expectRefusal(runInstall(dir, [], { extraEnv: DUBIOUS }));
+      expect(snapshotClaudeTree(dir)).toEqual(before);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  // R2-2 scope ruling (owner, 2026-09-14): the refusal applies only to a sidecar on disk.
+  test.skipIf(!pwshPath || !dubiousOwnershipSupported)(
+    "(R2-2 scope) no sidecar on disk, git cannot answer: tracked state reported unknown, install continues, exit 0",
+    () => {
+      const dir = freshRepo();
+      const result = runInstall(dir, [], { extraEnv: DUBIOUS });
+      expect(result.exitCode).toBe(0);
+      const out = result.stdout.toString();
+      expect(out).toContain("its tracked state is unknown");
+      expect(out).not.toContain("Refusing to touch");
+      expect(sidecarExists(dir)).toBe(false);
+      expect(existsSync(join(dir, MANIFEST_REL))).toBe(true);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  test.skipIf(!pwshPath)(
+    "(R2-2 scope) no sidecar on disk, index still tracks one: warned with git rm --cached, install continues, exit 0",
+    () => {
+      const dir = freshRepo();
+      expect(runInstall(dir).exitCode).toBe(0);
+      expect(git(["add", "-f", "--", SIDECAR_REL], dir).exitCode).toBe(0);
+      expect(git([...COMMIT_ID, "commit", "-q", "-m", "force-add the sidecar"], dir).exitCode).toBe(0);
+      rmSync(join(dir, SIDECAR_REL));
+
+      const result = runInstall(dir);
+      expect(result.exitCode).toBe(0);
+      const out = result.stdout.toString();
+      expect(out).toContain("git's index still tracks it");
+      expect(out).toContain("git rm --cached .claude/.harness-manifest.local.json");
+      expect(sidecarExists(dir)).toBe(false);
+      expect(git(["ls-files", "--error-unmatch", "--", SIDECAR_REL], dir).exitCode).toBe(0);
     },
     INSTALL_TIMEOUT_MS,
   );

@@ -94,9 +94,16 @@ covers it before every write, rather than assuming that installing its `.gitigno
 already took care of it. A target whose `.claude/.gitignore` predates this file, or forked it
 without the ignore line, gets a warning instead of a silently unprotected sidecar. Any stale copy
 already on disk is removed too, but only once git confirms it is not tracked; a copy already
-staged or committed is left exactly where it is, with a warning naming `git rm --cached`, and a
-git that cannot answer at all (dubious ownership, git missing) makes the installer refuse the
-whole run rather than guess. `session-start-drift-check.sh` reads `coreRepo` from the sidecar
+staged or committed is left exactly where it is, with a warning naming `git rm --cached`. Git's
+answer counts only when it comes from the target's own repository, so `GIT_DIR`, `GIT_WORK_TREE`,
+`GIT_INDEX_FILE` or `GIT_COMMON_DIR` naming another one (git exports `GIT_DIR` inside every hook)
+is treated the same as dubious ownership or a missing git: git cannot answer. What happens then
+depends on whether a sidecar is on disk. If one is, the installer refuses rather than guess, and it
+decides that before writing anything, so a refused install, `-Accept`, `-Unaccept` or `-Prune`
+exits non-zero with every managed file, `settings.json`, the manifest and the sidecar unchanged.
+If none is, it warns that the tracked state is unknown and carries on without writing one. An index
+entry for a sidecar that is no longer on disk gets the `git rm --cached` warning as well, and the
+run continues. `session-start-drift-check.sh` reads `coreRepo` from the sidecar
 to find core without an environment variable; when the sidecar is missing but the committed
 manifest exists (an install ran, but the write was refused), the hook and `-Audit` each print one
 line saying so instead of going quiet. A project that installed an earlier version of this layer
@@ -107,7 +114,8 @@ a fresh scan's would be, until the ignore rule is fixed and the installer runs a
 
 `-Accept <relpath>` writes the second kind of entry. Point it at a path relative to the project's
 `.claude` and it pins that file's current hash, which turns a permanent audit warning into a silent
-`overlay (accepted)` row. It touches the manifest and nothing else. Run it again after reviewing a
+`overlay (accepted)` row. It touches the manifest and the shared sidecar step described above, and
+nothing else. Run it again after reviewing a
 change to the fork to re-pin at the new hash. A path resolving outside `.claude` is refused rather
 than pinned, and so is one already tracked in `files`, which is an installed file rather than an
 overlay.
@@ -133,9 +141,10 @@ reparse point, so a directory symlink placed inside `.claude` walked `Remove-Ite
 it. A manifest key is untrusted, PR-modifiable input, and this command no longer trusts it with
 anything sharper than a hashtable key removal. (Every `-Prune` call still persists a legacy
 carry-forward through the same sidecar write a plain install makes; that write can remove
-`.harness-manifest.local.json` itself when it is stale and confirmed untracked, and refuses the
-whole run instead of guessing when git cannot confirm either way (see the sidecar paragraph
-above). It is a separate mechanism from the pruned-file logic and never touches the pruned file.)
+`.harness-manifest.local.json` itself when it is stale and confirmed untracked, and when a sidecar
+is on disk and git cannot confirm either way it refuses before the manifest is written, so a retry
+still has its record to drop (see the sidecar paragraph above). It is a separate mechanism from the
+pruned-file logic and never touches the pruned file.)
 
 `-Audit` writes nothing and reports drift in both directions, using a three-way compare of core
 source, the manifest hash, and the installed file: `project-modified` and `untracked (differs from
