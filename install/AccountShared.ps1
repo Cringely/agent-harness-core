@@ -66,7 +66,11 @@ $script:AccountSkipFiles = @(
 # skill is a policy decision rather than a file-shape rule. A prefix match rather than the two
 # exact files it holds today: a future file added under this skill (a second reference doc, an
 # asset) must not need a second entry here to stay excluded.
-$script:AccountSkipDirs = @('skills/appsec-kpi-deck')
+#
+# skills/wiring-diagram/examples (#147): worked examples drawn from the operator's own builds. The
+# skill itself ships; only its examples stay local. A subdirectory entry, so the skillOverrides
+# scrub in Export-Account.ps1 (which keys on the whole skill name) leaves the skill's entry alone.
+$script:AccountSkipDirs = @('skills/appsec-kpi-deck', 'skills/wiring-diagram/examples')
 
 # Model-read text carrying machine paths. A hook derives its paths at run time and is fixed at
 # source; these cannot be, because a placeholder written into the live file is read literally by

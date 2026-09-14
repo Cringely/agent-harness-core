@@ -83,6 +83,20 @@
     warning -- never "check nothing", since the derived username arm runs either way. Malformed
     JSON throws rather than degrading the gate silently.
 
+.PARAMETER PersonalTermsFile
+    JSON listing strings the operator wants kept out of the public payload that are not
+    identity strings -- project names and similar -- plus MCP servers to leave out entirely:
+
+        { "terms": ["some project"], "excludeMcpServers": ["some-server"] }
+
+    Defaults to $HOME/.claude-personal-terms.json, outside both this repo and ~/.claude for the
+    reason -IdentityFile gives. Required, unlike -IdentityFile: a missing, empty or malformed list
+    refuses the export, because no term can be derived from the environment the way the username
+    can, so an absent list would mean checking nothing. A term anywhere in a payload file's text or
+    path, case-insensitive, refuses the export without printing the term. A server named in
+    excludeMcpServers is dropped before mcp-servers.json is written, and its mcp__<name> permission
+    strings are dropped from settings.account.json.
+
 .PARAMETER SkipSettings
     Skip the settings.account.json rewrite. Test seam.
 
@@ -127,6 +141,7 @@ param(
     [string]$HomeSlug,
     [string]$AccountUser,
     [string]$IdentityFile,
+    [string]$PersonalTermsFile,
     [switch]$SkipSettings,
     [switch]$SkipMcp,
     [switch]$Force
@@ -357,6 +372,57 @@ function New-IdentityCheck {
 $identityChecks = @(New-IdentityCheck -Class 'workstation username' -Value $AccountUser) +
     @(New-IdentityCheck -Class 'declared name' -Value $declaredNames) +
     @(New-IdentityCheck -Class 'declared email' -Value $declaredEmails)
+
+# --- personal terms (#147) ---------------------------------------------------
+# Terms the operator wants kept out of the public payload that are not identity strings, and MCP
+# servers to leave out whole. Loaded before the first copy for the same reason the identity file
+# is, but NOT on its warn-and-continue pattern: the identity gate keeps its derived username arm
+# when its file is absent, and this gate has no such arm, so an absent or empty list would resolve
+# the gate to zero checks. Missing, empty, malformed and "declares no terms" all refuse.
+#
+# No message below prints a term, and none includes ConvertFrom-Json's own error text, which can
+# quote the token it choked on.
+if (-not $PersonalTermsFile) { $PersonalTermsFile = Join-Path $HOME '.claude-personal-terms.json' }
+$termsHelp = 'Its shape is {"terms":["..."],"excludeMcpServers":["..."]}; fix it, or pass -PersonalTermsFile.'
+if (-not (Test-Path -LiteralPath $PersonalTermsFile -PathType Leaf)) {
+    throw "No personal-terms list at '$PersonalTermsFile'. The export refuses without one: no term can be derived from the environment, so a missing list would mean checking nothing. $termsHelp"
+}
+$termsRaw = Get-Content -LiteralPath $PersonalTermsFile -Raw
+if ([string]::IsNullOrWhiteSpace($termsRaw)) {
+    throw "Personal-terms list '$PersonalTermsFile' is empty. $termsHelp"
+}
+try { $termsDoc = $termsRaw | ConvertFrom-Json -ErrorAction Stop }
+catch { throw "Personal-terms list '$PersonalTermsFile' is not valid JSON. $termsHelp" }
+if ($termsDoc -isnot [System.Management.Automation.PSCustomObject]) {
+    throw "Personal-terms list '$PersonalTermsFile' is not a JSON object. $termsHelp"
+}
+function Get-PersonalTermsArray {
+    param($Doc, [string]$Key, [string]$File, [switch]$Required)
+    $prop = $Doc.PSObject.Properties[$Key]
+    if (-not $prop) {
+        if ($Required) { throw "Personal-terms list '$File' has no '$Key' array. $termsHelp" }
+        return
+    }
+    if ($prop.Value -isnot [System.Array]) {
+        throw "Personal-terms list '$File': '$Key' is not an array. $termsHelp"
+    }
+    foreach ($v in $prop.Value) {
+        # A blank term would match every file; a non-string one matches nothing. Both refuse.
+        if ($v -isnot [string] -or [string]::IsNullOrWhiteSpace($v)) {
+            throw "Personal-terms list '$File': '$Key' holds an entry that is not a non-blank string (the entry is not printed). $termsHelp"
+        }
+    }
+    return $prop.Value
+}
+$personalTerms = @(Get-PersonalTermsArray -Doc $termsDoc -Key 'terms' -File $PersonalTermsFile -Required)
+if ($personalTerms.Count -eq 0) {
+    throw "Personal-terms list '$PersonalTermsFile' declares no terms. A list naming nothing protects nothing. $termsHelp"
+}
+$excludedMcpServers = @(Get-PersonalTermsArray -Doc $termsDoc -Key 'excludeMcpServers' -File $PersonalTermsFile)
+# Matches a permission string naming an excluded server: `mcp__<name>` alone or `mcp__<name>__<tool>`.
+$excludedMcpPermission = if ($excludedMcpServers.Count -gt 0) {
+    '^mcp__(?:' + (($excludedMcpServers | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')(?:__|$)'
+} else { $null }
 
 # The redaction is narrower than the gate on purpose, and this lookbehind is the whole of that
 # narrowing: the username only where a path separator puts it in a profile directory position.
@@ -612,6 +678,16 @@ if (-not $SkipSettings) {
                 if ($excludedSkillNames -contains $name) {
                     $settings.skillOverrides.PSObject.Properties.Remove($name)
                 }
+            }
+        }
+
+        # #147: dropping a server from mcp-servers.json below still leaves its name in every
+        # `mcp__<name>...` permission string, the same name-shaped leak skillOverrides had above.
+        # Every array under permissions, not only allow/ask/deny by name, so a new list key is
+        # covered without an edit here.
+        if ($excludedMcpPermission -and $settings.permissions) {
+            foreach ($list in @($settings.permissions.PSObject.Properties | Where-Object { $_.Value -is [System.Array] })) {
+                $list.Value = @(@($list.Value) | Where-Object { -not ($_ -is [string] -and $_ -match $excludedMcpPermission) })
             }
         }
 
@@ -877,6 +953,17 @@ if (-not $SkipMcp) {
             # collection is never $null even when empty -- only the .Name projection off it is.
             $serverNames = @($servers.PSObject.Properties.Name) | Where-Object { $_ }
 
+            # #147: excluded servers leave $servers here, before the gate loop and the write.
+            # Filtered after the write instead, an excluded server whose name is also a listed term
+            # would reach mcp-servers.json and abort the whole export at the whole-payload scan
+            # rather than being dropped. The count is printed; the names are not.
+            $excludedHere = @($serverNames | Where-Object { $_ -and $excludedMcpServers -contains $_ })
+            foreach ($name in $excludedHere) { $servers.PSObject.Properties.Remove($name) }
+            $serverNames = @($serverNames | Where-Object { $_ -and $excludedMcpServers -notcontains $_ })
+            if ($excludedHere.Count -gt 0) {
+                Write-Host "  mcp-servers.json: $($excludedHere.Count) server(s) excluded by the personal-terms list"
+            }
+
             # Fold and gate in one pass. The gate throws before anything is written, so a failed
             # export leaves no half-written file for someone to commit.
             foreach ($name in $serverNames) {
@@ -1019,7 +1106,7 @@ if (-not $WhatIfPreference) {
     # case-insensitive default would widen the gate past the boundary this is here to add.
     #
     # $WslHome is already trimmed of whitespace and of a trailing '/' (`TrimEnd('/')`) by the
-    # validation at :215-221, which also refuses a supplied value that does not name an absolute
+    # validation at :230-236, which also refuses a supplied value that does not name an absolute
     # POSIX directory. So the only thing left to distinguish here is present from absent. A
     # trailing slash would otherwise make the escaped literal end in '/', the boundary would
     # demand a second separator that a real path never has ('/home/user//launcher.sh' does not
@@ -1036,30 +1123,122 @@ if (-not $WhatIfPreference) {
     # here could object to it.
     $wslHomePattern = if ($WslHome) { [regex]::Escape($WslHome) + '(?![^/"''\s)\]`>])' } else { $null }
     $ignoreCase = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
-    # One buffer for the whole scan, not one per file. IndexOf below is bounded by $read, so bytes
-    # left over from a longer previous file are never looked at.
-    $head = [byte[]]::new(8000)
+
+    # #147, review round 1: a NUL byte used to mean "binary, skip", and UTF-16 text carries a NUL in
+    # every ASCII character, so a term written in UTF-16 (with or without a BOM) shipped unscanned.
+    # A file holding a NUL now goes through two steps. First, it is decoded as text if a BOM names
+    # its encoding or, failing a BOM, if it decodes strictly as UTF-16 or UTF-32 with no C0 control
+    # other than whitespace; a PNG fails that on its IHDR length bytes. Text decoded that way runs
+    # every gate below, exactly like a UTF-8 file. Second, whether it decoded or not, its bytes are
+    # searched for each term in every byte form an encoding could give it ($termByteForms).
+    #
+    # The byte search is what makes the gate not depend on the heuristic being right. A UTF-8 file
+    # with one stray NUL can decode "strictly" as UTF-16 garbage that hides an ASCII term, and a
+    # binary file can embed a term at any alignment. Searching the Latin-1 view of the bytes keeps
+    # one character per byte, so a term's UTF-16 form is the same needle at an odd offset as at an
+    # even one, and OrdinalIgnoreCase still folds ASCII case across the interleaved NULs. Rejected
+    # the byte search alone, without decoding: the identity and WSL gates need a decoded body, and
+    # UTF-16 text is text they must read.
+    $latin1 = [System.Text.Encoding]::Latin1
+    $termByteForms = @(foreach ($term in $personalTerms) {
+            foreach ($enc in [System.Text.Encoding]::UTF8, [System.Text.Encoding]::Unicode,
+                [System.Text.Encoding]::BigEndianUnicode, [System.Text.Encoding]::UTF32,
+                [System.Text.UTF32Encoding]::new($true, $false)) {
+                $latin1.GetString($enc.GetBytes($term))
+            }
+        })
+    # BOM rows longest first: FF FE 00 00 is UTF-32LE, not UTF-16LE followed by a NUL character.
+    # Strict decoders (throwOnInvalid) so a byte run that is not text throws instead of turning
+    # into replacement characters that would pass the control check.
+    $textEncodings = @(
+        @{ Bom = [byte[]](0xFF, 0xFE, 0x00, 0x00); Enc = [System.Text.UTF32Encoding]::new($false, $true, $true) }
+        @{ Bom = [byte[]](0x00, 0x00, 0xFE, 0xFF); Enc = [System.Text.UTF32Encoding]::new($true, $true, $true) }
+        @{ Bom = [byte[]](0xEF, 0xBB, 0xBF);       Enc = [System.Text.UTF8Encoding]::new($true, $true) }
+        @{ Bom = [byte[]](0xFF, 0xFE);             Enc = [System.Text.UnicodeEncoding]::new($false, $true, $true) }
+        @{ Bom = [byte[]](0xFE, 0xFF);             Enc = [System.Text.UnicodeEncoding]::new($true, $true, $true) }
+    )
+    function ConvertFrom-NulPayloadBytes {
+        param([byte[]]$Bytes)
+        # A BOM names exactly one candidate. Without one, the four wide encodings are tried in turn.
+        # Each Enc carries its own preamble setting, so a write-back through it keeps the BOM the
+        # file had and adds none where it had none.
+        $candidates = @(foreach ($row in $textEncodings) {
+                $n = $row.Bom.Length
+                if ($Bytes.Length -ge $n -and (($Bytes[0..($n - 1)] -join ',') -eq ($row.Bom -join ','))) {
+                    @{ Enc = $row.Enc; Skip = $n }
+                    break
+                }
+            })
+        if ($candidates.Count -eq 0) {
+            $candidates = @(
+                @{ Enc = [System.Text.UnicodeEncoding]::new($false, $false, $true); Skip = 0 }
+                @{ Enc = [System.Text.UnicodeEncoding]::new($true, $false, $true); Skip = 0 }
+                @{ Enc = [System.Text.UTF32Encoding]::new($false, $false, $true); Skip = 0 }
+                @{ Enc = [System.Text.UTF32Encoding]::new($true, $false, $true); Skip = 0 }
+            )
+        }
+        foreach ($c in $candidates) {
+            # DecoderFallbackException is an ArgumentException: not text in this encoding.
+            try { $text = $c.Enc.GetString($Bytes, $c.Skip, $Bytes.Length - $c.Skip) }
+            catch [System.ArgumentException] { continue }
+            if ($text -notmatch '[\x00-\x08\x0E-\x1F]') { return @{ Body = $text; Encoding = $c.Enc } }
+        }
+        return $null
+    }
+    function Assert-NoPersonalTermBytes {
+        param([byte[]]$Bytes, [string]$Rel)
+        $view = $latin1.GetString($Bytes)
+        foreach ($needle in $termByteForms) {
+            if ($view.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                throw "Refusing to complete the export: '$Rel' carries a term from the personal-terms list '$PersonalTermsFile' in its raw bytes (UTF-8, UTF-16 or UTF-32 form). The matched term is deliberately not printed. Remove it at source under '$ClaudeHome', or exclude the file in AccountShared.ps1, then re-run."
+            }
+        }
+    }
+
     # $outputRootFull, not $OutputRoot: FullName below is absolute, and -OutputRoot may be
     # relative, so the Substring that builds $rel has to be taken against the resolved root.
     foreach ($f in @(Get-ChildItem -LiteralPath $outputRootFull -Recurse -File -Force)) {
-        # Skip binary files instead of text-decoding them. Get-Content -Raw decodes every byte of
-        # skills/wiring-diagram/examples/'s two PNGs on every export, 600 KB between them, and a
-        # decoded byte run that happened to match would abort the export pointing at an image the
-        # operator cannot edit. A NUL byte in the head is git's own binary test.
+        $rel = ($f.FullName.Substring($outputRootFull.Length).TrimStart('\', '/')) -replace '\\', '/'
+
+        # #147, path half: checked before the binary skip, so an image's name is covered too.
+        # The message cannot name the file, because the file's path is what carries the term.
+        foreach ($term in $personalTerms) {
+            if ($rel.IndexOf($term, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                throw "Refusing to complete the export: a payload file's path carries a term from the personal-terms list '$PersonalTermsFile'. Neither the path nor the term is printed. Rename it at source under '$ClaudeHome', or exclude it in AccountShared.ps1, then re-run."
+            }
+        }
+
+        # Do not text-decode binary files for the WSL, redaction and identity steps. Get-Content -Raw
+        # would decode skills/wiring-diagram/examples/'s two PNGs on every export, and a decoded
+        # byte run that happened to match would abort the export pointing at an image the operator
+        # cannot edit. A NUL byte is git's own binary test, but NOT proof of binary: see
+        # ConvertFrom-NulPayloadBytes above for the UTF-16 text it used to wave through.
         #
         # Rejected an extension ALLOWLIST of text types: a new text extension would silently drop
         # OUT of the gate, which is the one failure a gate must not have. Rejected a denylist of
-        # binary extensions: it needs a new entry per format shipped, and this needs none. Head
-        # only, not ReadAllBytes, so the megabyte is never read at all. Measured on the live
-        # 218-file payload: exactly the two PNGs carry a NUL byte, the other 216 files carry none.
-        $stream = [System.IO.File]::OpenRead($f.FullName)
-        try { $read = $stream.Read($head, 0, $head.Length) } finally { $stream.Dispose() }
-        if ($read -gt 0 -and [System.Array]::IndexOf($head, [byte]0, 0, $read) -ge 0) { continue }
-
-        $body = Get-Content -LiteralPath $f.FullName -Raw
-        # -Raw on an empty file yields $null, and there is nothing to redact or scan in one.
+        # binary extensions: it needs a new entry per format shipped, and this needs none. The
+        # whole file is read, not an 8000-byte head as before: a binary still has to be searched
+        # for terms end to end, and a NUL past the head would leave a UTF-16 term decoded as UTF-8.
+        # Measured on the live 218-file payload: exactly the two PNGs carry a NUL byte.
+        $bytes = [System.IO.File]::ReadAllBytes($f.FullName)
+        # An empty file has nothing to redact or scan.
+        if ($bytes.Length -eq 0) { continue }
+        $hasNul = [System.Array]::IndexOf($bytes, [byte]0) -ge 0
+        $writeEncoding = 'utf8NoBOM'
+        if ($hasNul) {
+            $decoded = ConvertFrom-NulPayloadBytes -Bytes $bytes
+            if (-not $decoded) {
+                Assert-NoPersonalTermBytes -Bytes $bytes -Rel $rel
+                continue
+            }
+            $body = $decoded.Body
+            $writeEncoding = $decoded.Encoding
+        }
+        else {
+            $body = Get-Content -LiteralPath $f.FullName -Raw
+        }
+        # Get-Content -Raw on a file of only a BOM, or a decoded body of zero characters.
         if (-not $body) { continue }
-        $rel = ($f.FullName.Substring($outputRootFull.Length).TrimStart('\', '/')) -replace '\\', '/'
 
         if ($wslHomePattern -and $body -cmatch $wslHomePattern) {
             throw "Refusing to complete the export: '$rel' still carries the WSL home literal after folding. No fold pass covers {{WSL_HOME}} there -- Copy-AccountTree copies verbatim, and a templated file is folded only for the tokens its own AccountTemplatedFiles row names, none of which is WSL_HOME. Remove it at source, or add the file to AccountTemplatedFiles with a WSL_HOME row."
@@ -1072,7 +1251,7 @@ if (-not $WhatIfPreference) {
         $redacted = [regex]::Replace($body, $userRedactPattern, $userPlaceholder, $ignoreCase)
         if ($redacted -ne $body) {
             $n = @([regex]::Matches($body, $userRedactPattern, $ignoreCase)).Count
-            Set-Content -LiteralPath $f.FullName -Value $redacted -NoNewline
+            Set-Content -LiteralPath $f.FullName -Value $redacted -NoNewline -Encoding $writeEncoding
             # Reported, not silent, and this line is the mechanism's only audit trail. A redaction
             # inside settings.account.json or mcp-servers.json would mean a machine path the fold
             # table has no rule for, and rewriting it there produces a config that is wrong on the
@@ -1096,6 +1275,20 @@ if (-not $WhatIfPreference) {
                 throw "Refusing to complete the export: '$rel' carries the $($check.Class). Identifying information must never reach a remote repository (security.md), and only a human can waive that -- this script cannot. The matched value is deliberately not printed. Remove it at source under '$ClaudeHome', then re-run."
             }
         }
+
+        # #147, content half. After redaction, like the identity gate, and a plain
+        # case-insensitive substring rather than that gate's word boundary: a listed term is a
+        # project name the operator chose, and `mcp__x_<term>__tool` or `<term>-mcp` must still
+        # fire. Naming $rel is safe here, because the path check above already passed.
+        foreach ($term in $personalTerms) {
+            if ($body.IndexOf($term, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                throw "Refusing to complete the export: '$rel' carries a term from the personal-terms list '$PersonalTermsFile'. The matched term is deliberately not printed. Remove it at source under '$ClaudeHome', or exclude the file in AccountShared.ps1, then re-run."
+            }
+        }
+
+        # A NUL-bearing file that decoded as text still gets the byte search, against the bytes as
+        # written after redaction, so a wrong guess by the decoder cannot hide a term.
+        if ($hasNul) { Assert-NoPersonalTermBytes -Bytes ([System.IO.File]::ReadAllBytes($f.FullName)) -Rel $rel }
     }
 }
 

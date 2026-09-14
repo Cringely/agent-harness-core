@@ -118,6 +118,31 @@ exit 0
         # position. Without an explicit -AccountUser the exporter would redact that out of the
         # fixtures, and the suite's behaviour would then depend on whose machine ran it.
         $script:fixtureUser = 'zzfixtureuser'
+
+        # #147: the exporter requires a personal-terms list and defaults to the operator's real
+        # one. Every test gets a synthetic list through $PSDefaultParameterValues instead of an
+        # edit at each of the ~75 call sites, for the reason New-IdentityFile gives above: a test
+        # falling back to the real list would run against, and could print, the real terms. Tests
+        # of the list itself pass -PersonalTermsFile explicitly, which overrides this default.
+        function New-PersonalTermsFile {
+            param([string[]]$Terms = @('zzsynthetic-term-never-present'), [string[]]$Exclude = @(), [string]$Raw)
+            $p = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-terms-" + [guid]::NewGuid() + ".json")
+            $body = if ($PSBoundParameters.ContainsKey('Raw')) { $Raw }
+            else {
+                $t = (@($Terms) | ForEach-Object { '"' + $_ + '"' }) -join ','
+                $e = (@($Exclude) | ForEach-Object { '"' + $_ + '"' }) -join ','
+                "{`"terms`":[$t],`"excludeMcpServers`":[$e]}"
+            }
+            Set-Content -LiteralPath $p -Value $body -NoNewline
+            return $p
+        }
+        $script:defaultTermsFile = New-PersonalTermsFile
+        $PSDefaultParameterValues['Export-Account.ps1:PersonalTermsFile'] = $script:defaultTermsFile
+    }
+
+    AfterAll {
+        $PSDefaultParameterValues.Remove('Export-Account.ps1:PersonalTermsFile')
+        Remove-Item -LiteralPath $script:defaultTermsFile -Force -ErrorAction SilentlyContinue
     }
 
     It "lifts all three path functions out of Restore-ClaudeProject.ps1" {
@@ -1250,7 +1275,7 @@ exit 0
 
     It "folds a trailing-slash -WslHome to a single separator in mcpServers, not a missing or doubled one" {
         # Issue #81: a prior fix normalised how the fold handles a trailing-slash -WslHome
-        # (`$WslHome.Trim().TrimEnd('/')` at the producer, Export-Account.ps1:215-221), but
+        # (`$WslHome.Trim().TrimEnd('/')` at the producer, Export-Account.ps1:230-236), but
         # nothing pinned the FOLD's own output shape. The trailing-slash rows already in this file
         # (the degenerate-value table above, and "still fails closed on a copied-file literal
         # when -WslHome carries a trailing slash" further down) both exercise the payload-wide
@@ -1643,8 +1668,8 @@ exit 0
         # and ":744-749", was never same-file -- checked against f47563e, the commit that wrote it,
         # both ranges landed on Export-Account.ps1's own boundary comments at those exact line
         # numbers, so the filename prefix was dropped by mistake, not drift. Repointed below.)
-        # Export-Account.ps1:1002-1004 ("a bare `/root` at end of line still fire") and
-        # Export-Account.ps1:1006-1011 ("the negated class now also excludes those") are the two
+        # Export-Account.ps1:1089-1091 ("a bare `/root` at end of line still fire") and
+        # Export-Account.ps1:1093-1098 ("the negated class now also excludes those") are the two
         # comments that assert ablation is caught; this It is what makes that true.
         $stand = New-StandInHome
         $out = New-OutputRoot
@@ -1828,6 +1853,31 @@ exit 0
         finally { Remove-Item -Recurse -Force $stand, $out, $ident -ErrorAction SilentlyContinue }
     }
 
+    It "refuses on a declared name carried by a UTF-16LE file, which the scan once skipped as binary" {
+        # #147 review round 1: a NUL byte meant "binary, skip", so every gate in the scan loop,
+        # this one included, waved UTF-16 text through. The personal-terms byte search would not
+        # have caught a declared name; only decoding the file does.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        $ident = New-IdentityFile -Names @('Zylric Quandsworth')
+        try {
+            $ch = (Join-Path $stand '.claude')
+            [System.IO.File]::WriteAllBytes((Join-Path $ch 'skills/cloned-skill/notes.txt'),
+                [byte[]](@(0xFF, 0xFE) + [System.Text.Encoding]::Unicode.GetBytes('Reviewed by Zylric Quandsworth.')))
+            $msg = $null
+            try {
+                & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp `
+                    -AccountUser $script:fixtureUser -IdentityFile $ident | Out-Null
+            }
+            catch { $msg = $_.Exception.Message }
+            $msg | Should -BeLike '*skills/cloned-skill/notes.txt*'
+            ($msg -like '*Zylric*') | Should -BeFalse
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out, $ident -ErrorAction SilentlyContinue }
+    }
+
     It "refuses on a declared email carried by a file the exporter generated rather than copied" {
         # Coverage claim this It exists to make measurable: the gate reads the WRITTEN PAYLOAD, not
         # the source tree, so it also covers the two files no Copy-AccountTree pass ever touches.
@@ -1931,6 +1981,194 @@ exit 0
                 Should -BeFalse -Because "the identity file is read before the first copy"
         }
         finally { Remove-Item -Recurse -Force $stand, $out, $ident -ErrorAction SilentlyContinue }
+    }
+
+    # --- personal-terms list (#147) ---------------------------------------------------------
+    # Every term below is synthetic. A real term written into this file is what the gate prevents.
+
+    It "refuses the export when the personal-terms list is missing, before writing any payload" {
+        # No derived arm stands behind this list the way the username stands behind the identity
+        # file, so absence must refuse rather than warn. -OutputRoot never being created is what
+        # separates a fail-fast from a warn-and-continue.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        $absent = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-terms-absent-" + [guid]::NewGuid() + ".json")
+        try {
+            { & $script:export -ClaudeHome (Join-Path $stand '.claude') -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp `
+                    -AccountUser $script:fixtureUser -PersonalTermsFile $absent } |
+                Should -Throw -ExpectedMessage '*No personal-terms list*'
+            Test-Path -LiteralPath $out | Should -BeFalse -Because "the list is read before the first copy"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "refuses the export when the personal-terms list is <Case>" -ForEach @(
+        @{ Case = 'an empty file';                 Raw = '';                               Message = '*is empty*' }
+        @{ Case = 'whitespace only';               Raw = "  `r`n ";                        Message = '*is empty*' }
+        @{ Case = 'an object declaring no terms';  Raw = '{"terms":[],"excludeMcpServers":[]}'; Message = '*declares no terms*' }
+        @{ Case = 'missing its terms key';         Raw = '{"excludeMcpServers":["x"]}';    Message = "*no 'terms' array*" }
+        @{ Case = 'malformed JSON';                Raw = '{ "terms": [ ';                  Message = '*not valid JSON*' }
+        @{ Case = 'holding a blank term';          Raw = '{"terms":["zzok"," "]}';         Message = '*not a non-blank string*' }
+    ) {
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        $terms = New-PersonalTermsFile -Raw $Raw
+        try {
+            { & $script:export -ClaudeHome (Join-Path $stand '.claude') -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp `
+                    -AccountUser $script:fixtureUser -PersonalTermsFile $terms } |
+                Should -Throw -ExpectedMessage $Message
+            Test-Path -LiteralPath $out | Should -BeFalse -Because "the list is read before the first copy"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out, $terms -ErrorAction SilentlyContinue }
+    }
+
+    It "refuses a payload file carrying a listed term in any case, naming the file and never the term" {
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        $terms = New-PersonalTermsFile -Terms @('Zorblax Quuxworks')
+        try {
+            $ch = (Join-Path $stand '.claude')
+            'Migration notes for the zorblax QUUXWORKS rollout.' | Set-Content (Join-Path $ch 'rules/security.md')
+            $msg = $null
+            try {
+                & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp `
+                    -AccountUser $script:fixtureUser -PersonalTermsFile $terms | Out-Null
+            }
+            catch { $msg = $_.Exception.Message }
+            $msg | Should -BeLike '*rules/security.md*personal-terms list*'
+            ($msg -like '*zorblax*') | Should -BeFalse -Because "the gate names the file, never the term"
+            Test-Path -LiteralPath (Join-Path $out '.export-account-marker') | Should -BeFalse
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out, $terms -ErrorAction SilentlyContinue }
+    }
+
+    It "refuses a payload file whose path carries a listed term, printing neither the path nor the term" {
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        $terms = New-PersonalTermsFile -Terms @('frobnitzel')
+        try {
+            $ch = (Join-Path $stand '.claude')
+            New-Item -ItemType Directory -Path (Join-Path $ch 'skills/frobnitzel-notes') -Force | Out-Null
+            'a clean skill body' | Set-Content (Join-Path $ch 'skills/frobnitzel-notes/SKILL.md')
+            $msg = $null
+            try {
+                & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp `
+                    -AccountUser $script:fixtureUser -PersonalTermsFile $terms | Out-Null
+            }
+            catch { $msg = $_.Exception.Message }
+            $msg | Should -BeLike '*path carries a term*'
+            ($msg -like '*frobnitzel*') | Should -BeFalse -Because "printing the path would print the term"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out, $terms -ErrorAction SilentlyContinue }
+    }
+
+    It "refuses a listed term in a payload file written as <Case>, never printing the term" -ForEach @(
+        # Review round 1: the scan skipped any file holding a NUL byte as binary, and UTF-16 text
+        # holds one in every ASCII character, so each of the first three shipped the term.
+        @{ Case = 'UTF-16LE with a BOM'; File = 'notes.txt'
+            Bytes = { param($s) [byte[]](@(0xFF, 0xFE) + [System.Text.Encoding]::Unicode.GetBytes($s)) } }
+        @{ Case = 'UTF-16BE with a BOM'; File = 'notes.txt'
+            Bytes = { param($s) [byte[]](@(0xFE, 0xFF) + [System.Text.Encoding]::BigEndianUnicode.GetBytes($s)) } }
+        @{ Case = 'UTF-16LE without a BOM'; File = 'notes.txt'
+            Bytes = { param($s) [System.Text.Encoding]::Unicode.GetBytes($s) } }
+        @{ Case = 'UTF-32LE with a BOM'; File = 'notes.txt'
+            Bytes = { param($s) [byte[]](@(0xFF, 0xFE, 0x00, 0x00) + [System.Text.Encoding]::UTF32.GetBytes($s)) } }
+        @{ Case = 'UTF-8 with a BOM'; File = 'notes.txt'
+            Bytes = { param($s) [byte[]](@(0xEF, 0xBB, 0xBF) + [System.Text.Encoding]::UTF8.GetBytes($s)) } }
+        # 'x', NUL, then an even-length ASCII run: every byte pair decodes strictly as a printable
+        # UTF-16LE character, so the decoder takes this for UTF-16 text and reads CJK noise where
+        # the term is. Only the byte search after the gates catches it.
+        @{ Case = 'UTF-8 carrying one stray NUL'; File = 'notes.txt'
+            Bytes = { param($s) [byte[]](@(0x78, 0x00) + [System.Text.Encoding]::UTF8.GetBytes($s)) } }
+        # PNG signature and IHDR length, then the term as UTF-16LE at an odd offset.
+        @{ Case = 'a PNG with the term embedded in UTF-16LE'; File = 'diagram.png'
+            Bytes = { param($s) [byte[]](@(0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49) +
+                    [System.Text.Encoding]::Unicode.GetBytes($s)) } }
+    ) {
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        $terms = New-PersonalTermsFile -Terms @('Zorblax')
+        try {
+            $ch = (Join-Path $stand '.claude')
+            # Even length, so the stray-NUL case pairs up; lower case, so the match is case-folded.
+            [System.IO.File]::WriteAllBytes((Join-Path $ch "skills/cloned-skill/$File"),
+                (& $Bytes 'notes on the zorblax rollout'))
+            $msg = $null
+            try {
+                & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp `
+                    -AccountUser $script:fixtureUser -PersonalTermsFile $terms | Out-Null
+            }
+            catch { $msg = $_.Exception.Message }
+            $msg | Should -BeLike "*skills/cloned-skill/$File*personal-terms list*"
+            ($msg -like '*zorblax*') | Should -BeFalse -Because "the gate names the file, never the term"
+            Test-Path -LiteralPath (Join-Path $out '.export-account-marker') | Should -BeFalse
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out, $terms -ErrorAction SilentlyContinue }
+    }
+
+    It "drops an excluded MCP server before mcp-servers.json is written and scrubs its permission strings" {
+        # The excluded server's name is also a listed term. Filtering after the write, or skipping
+        # the permission scrub, leaves the name in the payload and the term scan aborts the export,
+        # so this It fails on either defect, not only on the assertions below.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        $terms = New-PersonalTermsFile -Terms @('dropme') -Exclude @('dropme')
+        try {
+            $ch = (Join-Path $stand '.claude')
+            $cj = Join-Path $stand '.claude.json'
+            @{
+                permissions = @{
+                    allow = @('mcp__dropme', 'mcp__dropme__run', 'mcp__keepme__run', 'Bash(ls:*)')
+                    deny  = @('mcp__dropme__wipe')
+                }
+                hooks = @{}
+            } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $ch 'settings.json')
+            @{ mcpServers = @{
+                    dropme = @{ type = 'stdio'; command = 'uvx'; args = @('first-mcp'); env = @{} }
+                    keepme = @{ type = 'stdio'; command = 'uvx'; args = @('second-mcp'); env = @{} }
+                } } | ConvertTo-Json -Depth 20 | Set-Content $cj
+
+            & $script:export -ClaudeHome $ch -ClaudeJson $cj -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -AccountUser $script:fixtureUser -PersonalTermsFile $terms | Out-Null
+
+            $m = Get-Content (Join-Path $out 'mcp-servers.json') -Raw | ConvertFrom-Json
+            @($m.mcpServers.PSObject.Properties.Name) | Should -Be @('keepme')
+            $s = Get-Content (Join-Path $out 'settings.account.json') -Raw | ConvertFrom-Json
+            @($s.permissions.allow) | Should -Be @('mcp__keepme__run', 'Bash(ls:*)')
+            @($s.permissions.deny).Count | Should -Be 0
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out, $terms -ErrorAction SilentlyContinue }
+    }
+
+    It "skips skills/wiring-diagram/examples while still shipping the wiring-diagram skill" {
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            New-Item -ItemType Directory -Path (Join-Path $ch 'skills/wiring-diagram/examples') -Force | Out-Null
+            'wiring skill body' | Set-Content (Join-Path $ch 'skills/wiring-diagram/SKILL.md')
+            'example board'     | Set-Content (Join-Path $ch 'skills/wiring-diagram/examples/board.svg')
+
+            & $script:export -ClaudeHome $ch -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipSettings -SkipMcp -AccountUser $script:fixtureUser | Out-Null
+
+            Test-Path -LiteralPath (Join-Path $out 'skills/wiring-diagram/SKILL.md') | Should -BeTrue
+            Test-Path -LiteralPath (Join-Path $out 'skills/wiring-diagram/examples') | Should -BeFalse `
+                -Because "the examples are drawn from the operator's own builds and stay local"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
     }
 
     It "derives the workstation username from `$HOME when the caller omits -AccountUser" {
