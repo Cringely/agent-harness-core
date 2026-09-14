@@ -1853,6 +1853,31 @@ exit 0
         finally { Remove-Item -Recurse -Force $stand, $out, $ident -ErrorAction SilentlyContinue }
     }
 
+    It "refuses on a declared name carried by a UTF-16LE file, which the scan once skipped as binary" {
+        # #147 review round 1: a NUL byte meant "binary, skip", so every gate in the scan loop,
+        # this one included, waved UTF-16 text through. The personal-terms byte search would not
+        # have caught a declared name; only decoding the file does.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        $ident = New-IdentityFile -Names @('Zylric Quandsworth')
+        try {
+            $ch = (Join-Path $stand '.claude')
+            [System.IO.File]::WriteAllBytes((Join-Path $ch 'skills/cloned-skill/notes.txt'),
+                [byte[]](@(0xFF, 0xFE) + [System.Text.Encoding]::Unicode.GetBytes('Reviewed by Zylric Quandsworth.')))
+            $msg = $null
+            try {
+                & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp `
+                    -AccountUser $script:fixtureUser -IdentityFile $ident | Out-Null
+            }
+            catch { $msg = $_.Exception.Message }
+            $msg | Should -BeLike '*skills/cloned-skill/notes.txt*'
+            ($msg -like '*Zylric*') | Should -BeFalse
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out, $ident -ErrorAction SilentlyContinue }
+    }
+
     It "refuses on a declared email carried by a file the exporter generated rather than copied" {
         # Coverage claim this It exists to make measurable: the gate reads the WRITTEN PAYLOAD, not
         # the source tree, so it also covers the two files no Copy-AccountTree pass ever touches.
@@ -2041,6 +2066,52 @@ exit 0
             catch { $msg = $_.Exception.Message }
             $msg | Should -BeLike '*path carries a term*'
             ($msg -like '*frobnitzel*') | Should -BeFalse -Because "printing the path would print the term"
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out, $terms -ErrorAction SilentlyContinue }
+    }
+
+    It "refuses a listed term in a payload file written as <Case>, never printing the term" -ForEach @(
+        # Review round 1: the scan skipped any file holding a NUL byte as binary, and UTF-16 text
+        # holds one in every ASCII character, so each of the first three shipped the term.
+        @{ Case = 'UTF-16LE with a BOM'; File = 'notes.txt'
+            Bytes = { param($s) [byte[]](@(0xFF, 0xFE) + [System.Text.Encoding]::Unicode.GetBytes($s)) } }
+        @{ Case = 'UTF-16BE with a BOM'; File = 'notes.txt'
+            Bytes = { param($s) [byte[]](@(0xFE, 0xFF) + [System.Text.Encoding]::BigEndianUnicode.GetBytes($s)) } }
+        @{ Case = 'UTF-16LE without a BOM'; File = 'notes.txt'
+            Bytes = { param($s) [System.Text.Encoding]::Unicode.GetBytes($s) } }
+        @{ Case = 'UTF-32LE with a BOM'; File = 'notes.txt'
+            Bytes = { param($s) [byte[]](@(0xFF, 0xFE, 0x00, 0x00) + [System.Text.Encoding]::UTF32.GetBytes($s)) } }
+        @{ Case = 'UTF-8 with a BOM'; File = 'notes.txt'
+            Bytes = { param($s) [byte[]](@(0xEF, 0xBB, 0xBF) + [System.Text.Encoding]::UTF8.GetBytes($s)) } }
+        # 'x', NUL, then an even-length ASCII run: every byte pair decodes strictly as a printable
+        # UTF-16LE character, so the decoder takes this for UTF-16 text and reads CJK noise where
+        # the term is. Only the byte search after the gates catches it.
+        @{ Case = 'UTF-8 carrying one stray NUL'; File = 'notes.txt'
+            Bytes = { param($s) [byte[]](@(0x78, 0x00) + [System.Text.Encoding]::UTF8.GetBytes($s)) } }
+        # PNG signature and IHDR length, then the term as UTF-16LE at an odd offset.
+        @{ Case = 'a PNG with the term embedded in UTF-16LE'; File = 'diagram.png'
+            Bytes = { param($s) [byte[]](@(0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49) +
+                    [System.Text.Encoding]::Unicode.GetBytes($s)) } }
+    ) {
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        $terms = New-PersonalTermsFile -Terms @('Zorblax')
+        try {
+            $ch = (Join-Path $stand '.claude')
+            # Even length, so the stray-NUL case pairs up; lower case, so the match is case-folded.
+            [System.IO.File]::WriteAllBytes((Join-Path $ch "skills/cloned-skill/$File"),
+                (& $Bytes 'notes on the zorblax rollout'))
+            $msg = $null
+            try {
+                & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp `
+                    -AccountUser $script:fixtureUser -PersonalTermsFile $terms | Out-Null
+            }
+            catch { $msg = $_.Exception.Message }
+            $msg | Should -BeLike "*skills/cloned-skill/$File*personal-terms list*"
+            ($msg -like '*zorblax*') | Should -BeFalse -Because "the gate names the file, never the term"
+            Test-Path -LiteralPath (Join-Path $out '.export-account-marker') | Should -BeFalse
         }
         finally { Remove-Item -Recurse -Force $stand, $out, $terms -ErrorAction SilentlyContinue }
     }

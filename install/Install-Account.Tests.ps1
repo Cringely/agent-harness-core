@@ -2274,6 +2274,12 @@ exit 0
             return $canonHome
         }
 
+        # #147: the exporter refuses without a personal-terms list and defaults to the operator's
+        # real one, which a CI runner does not have and a workstation run must never scan the
+        # fixture against. A synthetic list naming a term no fixture carries.
+        $script:termsFile = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-rt-terms-" + [guid]::NewGuid() + ".json")
+        Set-Content -LiteralPath $script:termsFile -Value '{"terms":["zzsynthetic-term-never-present"],"excludeMcpServers":[]}' -NoNewline
+
         $script:exportArgs = {
             param($canonHome, $out)
             @{
@@ -2284,8 +2290,13 @@ exit 0
                 NpmGlobal = 'C:/npm/node_modules'
                 VaultPath = (Join-Path $canonHome 'Documents\Obsidian Vault\Claude Code')
                 HomeSlug = ($canonHome.TrimEnd('\', '/') -creplace '[^A-Za-z0-9]', '-')
+                PersonalTermsFile = $script:termsFile
             }
         }
+    }
+
+    AfterAll {
+        Remove-Item -LiteralPath $script:termsFile -Force -ErrorAction SilentlyContinue
     }
 
     It "install then export reproduces the payload byte for byte" {

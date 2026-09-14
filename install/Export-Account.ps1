@@ -1123,9 +1123,78 @@ if (-not $WhatIfPreference) {
     # here could object to it.
     $wslHomePattern = if ($WslHome) { [regex]::Escape($WslHome) + '(?![^/"''\s)\]`>])' } else { $null }
     $ignoreCase = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
-    # One buffer for the whole scan, not one per file. IndexOf below is bounded by $read, so bytes
-    # left over from a longer previous file are never looked at.
-    $head = [byte[]]::new(8000)
+
+    # #147, review round 1: a NUL byte used to mean "binary, skip", and UTF-16 text carries a NUL in
+    # every ASCII character, so a term written in UTF-16 (with or without a BOM) shipped unscanned.
+    # A file holding a NUL now goes through two steps. First, it is decoded as text if a BOM names
+    # its encoding or, failing a BOM, if it decodes strictly as UTF-16 or UTF-32 with no C0 control
+    # other than whitespace; a PNG fails that on its IHDR length bytes. Text decoded that way runs
+    # every gate below, exactly like a UTF-8 file. Second, whether it decoded or not, its bytes are
+    # searched for each term in every byte form an encoding could give it ($termByteForms).
+    #
+    # The byte search is what makes the gate not depend on the heuristic being right. A UTF-8 file
+    # with one stray NUL can decode "strictly" as UTF-16 garbage that hides an ASCII term, and a
+    # binary file can embed a term at any alignment. Searching the Latin-1 view of the bytes keeps
+    # one character per byte, so a term's UTF-16 form is the same needle at an odd offset as at an
+    # even one, and OrdinalIgnoreCase still folds ASCII case across the interleaved NULs. Rejected
+    # the byte search alone, without decoding: the identity and WSL gates need a decoded body, and
+    # UTF-16 text is text they must read.
+    $latin1 = [System.Text.Encoding]::Latin1
+    $termByteForms = @(foreach ($term in $personalTerms) {
+            foreach ($enc in [System.Text.Encoding]::UTF8, [System.Text.Encoding]::Unicode,
+                [System.Text.Encoding]::BigEndianUnicode, [System.Text.Encoding]::UTF32,
+                [System.Text.UTF32Encoding]::new($true, $false)) {
+                $latin1.GetString($enc.GetBytes($term))
+            }
+        })
+    # BOM rows longest first: FF FE 00 00 is UTF-32LE, not UTF-16LE followed by a NUL character.
+    # Strict decoders (throwOnInvalid) so a byte run that is not text throws instead of turning
+    # into replacement characters that would pass the control check.
+    $textEncodings = @(
+        @{ Bom = [byte[]](0xFF, 0xFE, 0x00, 0x00); Enc = [System.Text.UTF32Encoding]::new($false, $true, $true) }
+        @{ Bom = [byte[]](0x00, 0x00, 0xFE, 0xFF); Enc = [System.Text.UTF32Encoding]::new($true, $true, $true) }
+        @{ Bom = [byte[]](0xEF, 0xBB, 0xBF);       Enc = [System.Text.UTF8Encoding]::new($true, $true) }
+        @{ Bom = [byte[]](0xFF, 0xFE);             Enc = [System.Text.UnicodeEncoding]::new($false, $true, $true) }
+        @{ Bom = [byte[]](0xFE, 0xFF);             Enc = [System.Text.UnicodeEncoding]::new($true, $true, $true) }
+    )
+    function ConvertFrom-NulPayloadBytes {
+        param([byte[]]$Bytes)
+        # A BOM names exactly one candidate. Without one, the four wide encodings are tried in turn.
+        # Each Enc carries its own preamble setting, so a write-back through it keeps the BOM the
+        # file had and adds none where it had none.
+        $candidates = @(foreach ($row in $textEncodings) {
+                $n = $row.Bom.Length
+                if ($Bytes.Length -ge $n -and (($Bytes[0..($n - 1)] -join ',') -eq ($row.Bom -join ','))) {
+                    @{ Enc = $row.Enc; Skip = $n }
+                    break
+                }
+            })
+        if ($candidates.Count -eq 0) {
+            $candidates = @(
+                @{ Enc = [System.Text.UnicodeEncoding]::new($false, $false, $true); Skip = 0 }
+                @{ Enc = [System.Text.UnicodeEncoding]::new($true, $false, $true); Skip = 0 }
+                @{ Enc = [System.Text.UTF32Encoding]::new($false, $false, $true); Skip = 0 }
+                @{ Enc = [System.Text.UTF32Encoding]::new($true, $false, $true); Skip = 0 }
+            )
+        }
+        foreach ($c in $candidates) {
+            # DecoderFallbackException is an ArgumentException: not text in this encoding.
+            try { $text = $c.Enc.GetString($Bytes, $c.Skip, $Bytes.Length - $c.Skip) }
+            catch [System.ArgumentException] { continue }
+            if ($text -notmatch '[\x00-\x08\x0E-\x1F]') { return @{ Body = $text; Encoding = $c.Enc } }
+        }
+        return $null
+    }
+    function Assert-NoPersonalTermBytes {
+        param([byte[]]$Bytes, [string]$Rel)
+        $view = $latin1.GetString($Bytes)
+        foreach ($needle in $termByteForms) {
+            if ($view.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                throw "Refusing to complete the export: '$Rel' carries a term from the personal-terms list '$PersonalTermsFile' in its raw bytes (UTF-8, UTF-16 or UTF-32 form). The matched term is deliberately not printed. Remove it at source under '$ClaudeHome', or exclude the file in AccountShared.ps1, then re-run."
+            }
+        }
+    }
+
     # $outputRootFull, not $OutputRoot: FullName below is absolute, and -OutputRoot may be
     # relative, so the Substring that builds $rel has to be taken against the resolved root.
     foreach ($f in @(Get-ChildItem -LiteralPath $outputRootFull -Recurse -File -Force)) {
@@ -1139,22 +1208,36 @@ if (-not $WhatIfPreference) {
             }
         }
 
-        # Skip binary files instead of text-decoding them. Get-Content -Raw decodes every byte of
-        # skills/wiring-diagram/examples/'s two PNGs on every export, 600 KB between them, and a
-        # decoded byte run that happened to match would abort the export pointing at an image the
-        # operator cannot edit. A NUL byte in the head is git's own binary test.
+        # Do not text-decode binary files for the WSL, redaction and identity steps. Get-Content -Raw
+        # would decode skills/wiring-diagram/examples/'s two PNGs on every export, and a decoded
+        # byte run that happened to match would abort the export pointing at an image the operator
+        # cannot edit. A NUL byte is git's own binary test, but NOT proof of binary: see
+        # ConvertFrom-NulPayloadBytes above for the UTF-16 text it used to wave through.
         #
         # Rejected an extension ALLOWLIST of text types: a new text extension would silently drop
         # OUT of the gate, which is the one failure a gate must not have. Rejected a denylist of
-        # binary extensions: it needs a new entry per format shipped, and this needs none. Head
-        # only, not ReadAllBytes, so the megabyte is never read at all. Measured on the live
-        # 218-file payload: exactly the two PNGs carry a NUL byte, the other 216 files carry none.
-        $stream = [System.IO.File]::OpenRead($f.FullName)
-        try { $read = $stream.Read($head, 0, $head.Length) } finally { $stream.Dispose() }
-        if ($read -gt 0 -and [System.Array]::IndexOf($head, [byte]0, 0, $read) -ge 0) { continue }
-
-        $body = Get-Content -LiteralPath $f.FullName -Raw
-        # -Raw on an empty file yields $null, and there is nothing to redact or scan in one.
+        # binary extensions: it needs a new entry per format shipped, and this needs none. The
+        # whole file is read, not an 8000-byte head as before: a binary still has to be searched
+        # for terms end to end, and a NUL past the head would leave a UTF-16 term decoded as UTF-8.
+        # Measured on the live 218-file payload: exactly the two PNGs carry a NUL byte.
+        $bytes = [System.IO.File]::ReadAllBytes($f.FullName)
+        # An empty file has nothing to redact or scan.
+        if ($bytes.Length -eq 0) { continue }
+        $hasNul = [System.Array]::IndexOf($bytes, [byte]0) -ge 0
+        $writeEncoding = 'utf8NoBOM'
+        if ($hasNul) {
+            $decoded = ConvertFrom-NulPayloadBytes -Bytes $bytes
+            if (-not $decoded) {
+                Assert-NoPersonalTermBytes -Bytes $bytes -Rel $rel
+                continue
+            }
+            $body = $decoded.Body
+            $writeEncoding = $decoded.Encoding
+        }
+        else {
+            $body = Get-Content -LiteralPath $f.FullName -Raw
+        }
+        # Get-Content -Raw on a file of only a BOM, or a decoded body of zero characters.
         if (-not $body) { continue }
 
         if ($wslHomePattern -and $body -cmatch $wslHomePattern) {
@@ -1168,7 +1251,7 @@ if (-not $WhatIfPreference) {
         $redacted = [regex]::Replace($body, $userRedactPattern, $userPlaceholder, $ignoreCase)
         if ($redacted -ne $body) {
             $n = @([regex]::Matches($body, $userRedactPattern, $ignoreCase)).Count
-            Set-Content -LiteralPath $f.FullName -Value $redacted -NoNewline
+            Set-Content -LiteralPath $f.FullName -Value $redacted -NoNewline -Encoding $writeEncoding
             # Reported, not silent, and this line is the mechanism's only audit trail. A redaction
             # inside settings.account.json or mcp-servers.json would mean a machine path the fold
             # table has no rule for, and rewriting it there produces a config that is wrong on the
@@ -1202,6 +1285,10 @@ if (-not $WhatIfPreference) {
                 throw "Refusing to complete the export: '$rel' carries a term from the personal-terms list '$PersonalTermsFile'. The matched term is deliberately not printed. Remove it at source under '$ClaudeHome', or exclude the file in AccountShared.ps1, then re-run."
             }
         }
+
+        # A NUL-bearing file that decoded as text still gets the byte search, against the bytes as
+        # written after redaction, so a wrong guess by the decoder cannot hide a term.
+        if ($hasNul) { Assert-NoPersonalTermBytes -Bytes ([System.IO.File]::ReadAllBytes($f.FullName)) -Rel $rel }
     }
 }
 
