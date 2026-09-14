@@ -69,9 +69,15 @@ export async function runReview(deps: ReviewDeps, options: ReviewOptions): Promi
   // see. And a posted review must trace to committed reviewer code, so a checkout carrying
   // uncommitted edits cannot post (coordinator ruling, 2026-09-11). A dry run publishes nothing and
   // is allowed either way.
-  if (deps.poster !== null && deps.accountEmail !== true) {
+  // T8-3: both fields are checked, not accountEmail alone. accountEmail says the CLI's account
+  // state resolved an address; identity.emails is the list the scan actually runs against. The two
+  // agree whenever loadIdentity built both (identity.ts folds the account email into emails), but
+  // ReviewDeps is a plain object a caller can construct by hand, so this stays a real check rather
+  // than trusting that agreement. An identity-file email never substitutes for either (F3): it is
+  // not the address the claude CLI hands the reviewing model, so declaring one does not clear this.
+  if (deps.poster !== null && (deps.accountEmail !== true || deps.identity.emails.length === 0)) {
     throw new RefusalError(
-      "refusing to post: the identity scan knows no email address; log in to claude, or declare one in ~/.claude-account-identity.json",
+      "refusing to post: the identity scan has no account email to scan for; log in to the claude CLI so its account state names an email address",
     );
   }
   if (deps.poster !== null && deps.toolDirty !== false) {
@@ -136,7 +142,14 @@ export async function runReview(deps: ReviewDeps, options: ReviewOptions): Promi
 
   const observedInstructionCount = output?.observed_instructions.length ?? 0;
 
-  const outcome = (status: ReviewOutcome["status"], refusal: string | null, posted: PostedReview | null, outBody: string, outFindings: Finding[]): ReviewOutcome => ({
+  const outcome = (
+    status: ReviewOutcome["status"],
+    refusal: string | null,
+    posted: PostedReview | null,
+    outBody: string,
+    outFindings: Finding[],
+    outDiagnostic: string | null,
+  ): ReviewOutcome => ({
     status,
     refusal,
     event,
@@ -148,41 +161,47 @@ export async function runReview(deps: ReviewDeps, options: ReviewOptions): Promi
     observedInstructionCount,
     reviewerOk: output !== null,
     reviewerFailure,
-    reviewerDiagnostic,
+    reviewerDiagnostic: outDiagnostic,
     headSha: snapshot.headSha,
     body: outBody,
     posted,
   });
 
-  // A8.4: render.ts truncates every field to MAX_FIELD_CHARS, keeps only the first
+  // A8.4/T8-1: render.ts truncates every field to MAX_FIELD_CHARS, keeps only the first
   // MAX_RENDERED_FINDINGS findings, and can omit whole optional sections once the body nears its
   // length cap, so an address past any of those cuts survives in the outcome (findings, --json,
   // results files, later PR text) unscanned if only the rendered body is checked. Every
   // model-written string the outcome can carry, untruncated, is scanned alongside the body; a hit
-  // anywhere takes the refusal path.
+  // anywhere takes the refusal path. reviewerDiagnostic is not model-written, but it is claude CLI
+  // stderr (runner.ts), which can carry a path, and it reaches the same outcome, so it is scanned
+  // and blanked the same way rather than trusted as safe by origin.
   const modelStrings: string[] = [];
   if (output !== null) {
     modelStrings.push(output.summary);
     for (const finding of output.findings) modelStrings.push(finding.path, finding.title, finding.detail);
     for (const instruction of output.observed_instructions) modelStrings.push(instruction.path, instruction.excerpt);
   }
+  if (reviewerDiagnostic !== null) modelStrings.push(reviewerDiagnostic);
   const hits = [...new Set([...findIdentityHits(body, deps.identity), ...modelStrings.flatMap((text) => findIdentityHits(text, deps.identity))])];
   if (hits.length > 0) {
-    // A8.6/F1: nothing a model wrote survives into a refused outcome, so a refused run stays
-    // reportable (--json, a results file, a status message) without republishing what it caught.
-    // Only hit-class labels, severities, counts and event names remain.
+    // A8.6/F1/T8-1: nothing carried into a refused outcome survives, model-written or not, so a
+    // refused run stays reportable (--json, a results file, a status message) without
+    // republishing what it caught. reviewerDiagnostic is blanked on every identity refusal, not
+    // only when it was itself the hit, for the same reason body and findings are: any of them
+    // could be the one that leaked. Only hit-class labels, severities, counts and event names
+    // remain.
     const blanked = findings.map((finding) => ({ ...finding, path: "", title: "", detail: "" }));
-    return outcome("refused", `the review body carries identifying strings (${hits.join(", ")}); nothing was posted`, null, "", blanked);
+    return outcome("refused", `the review body carries identifying strings (${hits.join(", ")}); nothing was posted`, null, "", blanked, null);
   }
-  if (deps.poster === null) return outcome("dry-run", null, null, body, findings);
+  if (deps.poster === null) return outcome("dry-run", null, null, body, findings, reviewerDiagnostic);
   if (snapshot.isOpen !== true && options.commentOnly !== true) {
-    return outcome("refused", "the pull request is not open; only a --comment-only run may post to it", null, body, findings);
+    return outcome("refused", "the pull request is not open; only a --comment-only run may post to it", null, body, findings, reviewerDiagnostic);
   }
   // With dismiss_stale_reviews_on_push an approval on an old commit would not count anyway, but a
   // REQUEST_CHANGES on an old commit would still block. Refusing keeps both honest.
   if ((await deps.poster.currentHeadSha()) !== snapshot.headSha) {
-    return outcome("refused", "the head commit moved while the review ran; nothing was posted, so run the review again", null, body, findings);
+    return outcome("refused", "the head commit moved while the review ran; nothing was posted, so run the review again", null, body, findings, reviewerDiagnostic);
   }
   const posted = await deps.poster.postReview({ commitId: snapshot.headSha, event, body });
-  return outcome("posted", null, posted, body, findings);
+  return outcome("posted", null, posted, body, findings, reviewerDiagnostic);
 }

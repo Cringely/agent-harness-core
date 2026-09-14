@@ -89,4 +89,24 @@ describe("tool-state", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // T8-5: skip-worktree is the other index bit `git status --porcelain` is silent about, tagged
+  // uppercase `S` in `git ls-files -v` rather than lowercase, so it needs its own case: the regex's
+  // lowercase branch alone does not cover it.
+  test("an edit to a skip-worktree tracked file is still dirty", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pr-review-tool-state-"));
+    try {
+      git(dir, "init", "-q");
+      git(dir, "config", "user.name", "Fixture Person");
+      git(dir, "config", "user.email", "fixture@example.test");
+      writeFileSync(join(dir, "README.md"), "fixture");
+      git(dir, "add", "-A");
+      git(dir, "commit", "-q", "-m", "fixture");
+      git(dir, "update-index", "--skip-worktree", "README.md");
+      writeFileSync(join(dir, "README.md"), "edited");
+      expect(toolState(dir).dirty).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

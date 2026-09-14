@@ -195,7 +195,7 @@ describe("runReview(): posting preconditions", () => {
   test("no account email known refuses to post before anything runs, even though the identity file declares one, while a dry run still runs", async () => {
     const poster = new FakePoster();
     const runner = runnerWith([]);
-    await expect(runReview(deps({ poster, runner, accountEmail: false }), OPTIONS)).rejects.toThrow("no email");
+    await expect(runReview(deps({ poster, runner, accountEmail: false }), OPTIONS)).rejects.toThrow("no account email");
     await expect(runReview(deps({ poster, runner, accountEmail: false }), OPTIONS)).rejects.toBeInstanceOf(RefusalError);
     expect(runner.calls).toBe(0);
     expect(poster.posts).toEqual([]);
@@ -209,6 +209,19 @@ describe("runReview(): posting preconditions", () => {
     await expect(runReview(deps({ poster, accountEmail: undefined as unknown as boolean }), OPTIONS)).rejects.toBeInstanceOf(RefusalError);
     expect(poster.posts).toEqual([]);
     expect((await runReview(deps({ poster: null, accountEmail: undefined as unknown as boolean }), OPTIONS)).status).toBe("dry-run");
+  });
+
+  // T8-3: accountEmail alone is not enough. ReviewDeps is a plain object a caller can construct by
+  // hand (Task 9's offline.ts and Task 11's cli.ts wire it separately), so accountEmail true beside
+  // an identity declaration with no emails at all must still refuse rather than trust that the two
+  // fields agree.
+  test("accountEmail true with no email in the identity declaration still refuses to post before anything runs", async () => {
+    const poster = new FakePoster();
+    const runner = runnerWith([]);
+    const identity: IdentityDecl = { ...IDENTITY, emails: [] };
+    await expect(runReview(deps({ poster, runner, identity, accountEmail: true }), OPTIONS)).rejects.toBeInstanceOf(RefusalError);
+    expect(runner.calls).toBe(0);
+    expect(poster.posts).toEqual([]);
   });
 
   test("uncommitted changes in the reviewer's checkout refuse to post before anything runs", async () => {
@@ -296,6 +309,39 @@ describe("runReview(): refusals post nothing", () => {
     expect(outcome.status).toBe("refused");
     expect(outcome.body).toBe("");
     expect(outcome.findings).toEqual([{ severity: "naming", confidence: "high", path: "", title: "", detail: "" }]);
+  });
+
+  // T8-1: reviewerDiagnostic is claude CLI stderr (runner.ts), not model-written, but it can carry
+  // a path and it reaches the outcome on every path, including Task 9's results files and Task 11's
+  // --json output. It is scanned and blanked the same way body and findings are.
+  test("a reviewer diagnostic carrying an identifying path and email refuses to post and is blanked", async () => {
+    const poster = new FakePoster();
+    const runner = new FakeRunner({
+      ok: false,
+      reason: "the reviewer process ended unexpectedly",
+      diagnostic: "stack trace at /home/fixtureuser/app fixture@example.test",
+    });
+    const outcome = await runReview(deps({ runner, poster }), OPTIONS);
+    expect(outcome.status).toBe("refused");
+    expect(poster.posts).toEqual([]);
+    expect(outcome.reviewerDiagnostic).toBeNull();
+    expect(JSON.stringify(outcome)).not.toContain("fixtureuser");
+    expect(JSON.stringify(outcome)).not.toContain("fixture@example.test");
+  });
+
+  // T8-4: verification.reasons (verdict.ts) embeds a raw changed-file path into the rendered body's
+  // Verification section, but that path never touches output.summary, a finding, or an observed
+  // instruction. Deleting the body-only scan term must fail this, since none of the model strings
+  // carry the hit.
+  // Note: verification.reasons is not blanked (T8-2, parked this round; the text is a PR-controlled
+  // file path, already public in the source PR or the local commits Task 9 reviews), so this test
+  // checks only that the refusal fires, not that the outcome is scrubbed of the hit.
+  test("an identity hit that appears only in non-model body text, not in any model-written string", async () => {
+    const poster = new FakePoster();
+    const source = { snapshot: async () => snapshot({ changedFiles: [".github/workflows/fixture-host.yml"] }) };
+    const outcome = await runReview(deps({ source, poster }), OPTIONS);
+    expect(outcome.status).toBe("refused");
+    expect(poster.posts).toEqual([]);
   });
 
   test("the head commit moved during the review", async () => {
