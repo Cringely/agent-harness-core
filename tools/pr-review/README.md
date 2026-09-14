@@ -53,14 +53,14 @@ A refusal exits 2 and posts nothing. The reasons, roughly in the order the tool 
 - A console terminal on stdin, refused before anything is read so a key is never typed or echoed. Under Git Bash's mintty a native program sees stdin as a pipe even when the `op read |` was left off, so that case is caught differently: a missing pipe times out after 60 seconds instead of waiting forever. Empty stdin, or text that is not an RSA private key, refuses the same way.
 - The App holds a permission outside the allowlist, holds a write where the list grants read, or lacks `pull_requests: write`; or the minted token is not scoped to exactly this repository.
 - The pull request comes from a fork or a deleted repository, or targets a branch other than the repository's default.
-- The pull request changed under the tool: its head moved or its changed-file count changed while the tool was reading it; or, on a posting run, its head SHA, base branch, base SHA or changed-file list at post time differs from what was reviewed. Nothing is posted.
+- The pull request changed under the tool: its head moved or its changed-file count changed while the tool was reading it; or, on a posting run, its head SHA, base branch, base SHA or changed-file count at post time differs from what was reviewed. Nothing is posted.
 - The identity scan cannot be built: the identity file exists but cannot be read, `.claude.json` exists but is not JSON, or `CLAUDE_CONFIG_DIR` is set but empty or relative.
 - A posting run with no account email to scan for.
 - A posting run from a checkout with uncommitted changes.
 - The rendered body, or any string the model wrote, carries an identifying string: a declared name or email, the account email, the workstation username or the machine hostname. This applies to dry runs too. The refusal names only the hit's class (`declared name #1`, `email #2`, and so on), and the body and findings are blanked, so nothing caught is republished.
 - A posting run against a pull request that is not open, unless the run is `--comment-only`.
 
-One failure is neither a refusal nor a clean run. If GitHub accepted the post but its response failed the tool's validation, the run exits 1 after printing the review's id and URL when it has them, with a note that a review may already be posted. Check the pull request before running again, or a second review lands beside the first.
+One failure is neither a refusal nor a clean run. If GitHub accepted the post but its response failed the tool's validation, the run exits 1 after printing the review's id and URL, or `unknown` for whichever the response lacked, with a note that a review may already exist. Check the pull request before running again, or a second review lands beside the first.
 
 ## Limits
 
