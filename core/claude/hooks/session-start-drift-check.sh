@@ -57,8 +57,21 @@ if (set -o pipefail) 2>/dev/null; then set -o pipefail; fi
 
 root="${CLAUDE_PROJECT_DIR:-.}"
 sidecar="$root/.claude/.harness-manifest.local.json"
+manifest="$root/.claude/.harness-manifest.json"
 
-[ -f "$sidecar" ] || exit 0
+# Never installed: silent, same as every other "nothing to check" degradation below. Installed
+# (the committed manifest exists) but the sidecar is missing: the installer refused to write it
+# (issue #137's live-probe follow-up -- .claude/.gitignore does not yet confirm-cover it), and
+# every machine-specific comparison this hook and -Audit run against the sidecar is skipped
+# until that is fixed. One line rather than silence, so the skip is visible instead of reading
+# identical to "nothing to report." Still exit 0 either way: advisory only, nothing here can
+# refuse a tool call.
+if [ ! -f "$sidecar" ]; then
+    if [ -f "$manifest" ]; then
+        printf '%s\n' "harness: sidecar unavailable, machine-specific checks skipped (see -Audit)"
+    fi
+    exit 0
+fi
 
 # coreRepo by sed rather than by a JSON parser: jq is not a dependency of this repo and is
 # not bundled with Git for Windows (checked: `command -v jq` misses in its shell), and pwsh,

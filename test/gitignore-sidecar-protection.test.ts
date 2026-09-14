@@ -12,20 +12,53 @@
 // (f) below is the reason: an ignore rule declared elsewhere (.git/info/exclude, a root
 // .gitignore) must count too, and check-ignore already sees it without this file needing to
 // special-case where the rule came from.
+//
+// ROUND 2 (findings F1-F12 against the round-1 fix at 80ab0b6): repo detection could be tricked
+// into "no repository here" by any git failure, not only a genuine non-repo (F1); a sidecar
+// stale from before the ignore rule broke was left on disk instead of removed (F2); a relative
+// -Target doubled onto itself when handed to `git -C` (F3); git missing from PATH threw instead
+// of failing closed, aborting the install before settings.json/the manifest were written (F4);
+// -Unaccept and -Prune's own sidecar writes had no test that could fail (F5); the warning text
+// misdescribed what -Accept and -Force do and did not name the tracked/force-added case (F6,
+// F11); the drift hook and -Audit went silent rather than saying a sidecar was refused (F9);
+// two `checkIgnored(false)` assertions restated a precondition rather than testing this code
+// (F10); and tests were not isolated from a developer's global git config (F12).
+//
+// F10 note: `checkIgnored(dir)` is false in states (c) and (e) purely because those fixtures'
+// .claude/.gitignore genuinely does not cover the sidecar -- a fact about git, not about this
+// code, true before AND after every fix in this file. No assertion phrased against those two
+// fixtures alone can discriminate pre-fix from post-fix. `expectSidecarInvariant` below states
+// the real, code-dependent invariant ("if the sidecar exists, it is ignored") and is applied
+// everywhere for consistency; it is vacuously true in (c)/(e) (nothing to check once existence
+// is already asserted false) and genuinely load-bearing in the F1 and F2 cases below, which is
+// where the round-1 code could make it fail: F1's pre-fix repo-detection wrote an unignored
+// sidecar under a git failure, and F2's pre-fix code left an unignored one on disk uncleaned.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
+import { posixSh, posixShDir } from "./posix-sh";
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const INSTALLER = join(REPO_ROOT, "install", "Install-Harness.ps1");
 const CORE_TEMPLATE = join(REPO_ROOT, "core", "claude", "templates", "manifest-local.gitignore");
+const HOOK_REL = join(".claude", "hooks", "session-start-drift-check.sh");
 const GITIGNORE_REL = join(".claude", ".gitignore");
 const SIDECAR_REL = join(".claude", ".harness-manifest.local.json");
+const MANIFEST_REL = join(".claude", ".harness-manifest.json");
 
-// Same rationale as session-start-drift-check.test.ts: an install runs pwsh and, for -Accept,
-// a second time on top of that.
+// Same rationale as session-start-drift-check.test.ts: an install runs pwsh and, for -Accept /
+// -Unaccept / -Prune / -Audit cases, a second time on top of that.
 const INSTALL_TIMEOUT_MS = 120_000;
 
 const pwshPath = Bun.which("pwsh");
@@ -36,6 +69,20 @@ if (!pwshPath) {
   );
 }
 
+// F12: isolate every git process this file spawns (directly, and indirectly via the installer)
+// from whatever the developer's own machine has configured globally or at the system level --
+// a global core.excludesFile or ~/.config/git/ignore that happens to match `*.local.json`, or
+// any other global setting, would otherwise make (c)/(e)/(F1)/(F2) pass or fail for a reason
+// that has nothing to do with this code. GIT_CONFIG_GLOBAL repoints "the global config" at an
+// empty file this test controls; GIT_CONFIG_NOSYSTEM drops the system config entirely.
+const GIT_ISOLATION_DIR = mkdtempSync(join(tmpdir(), "gitignore-sidecar-isolation-"));
+const EMPTY_GIT_CONFIG = join(GIT_ISOLATION_DIR, "empty-gitconfig");
+writeFileSync(EMPTY_GIT_CONFIG, "");
+const GIT_ISOLATION_ENV: Record<string, string> = {
+  GIT_CONFIG_GLOBAL: EMPTY_GIT_CONFIG,
+  GIT_CONFIG_NOSYSTEM: "1",
+};
+
 const tempDirs: string[] = [];
 
 afterEach(() => {
@@ -45,8 +92,13 @@ afterEach(() => {
   }
 });
 
-function git(args: string[], cwd: string) {
-  return Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+function git(args: string[], cwd: string, extraEnv: Record<string, string> = {}) {
+  return Bun.spawnSync(["git", ...args], {
+    cwd,
+    env: { ...process.env, ...GIT_ISOLATION_ENV, ...extraEnv },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
 }
 
 /** A fresh git repository with nothing installed yet. */
@@ -60,9 +112,18 @@ function freshRepo(): string {
   return dir;
 }
 
-function runInstall(dir: string, extraArgs: string[] = []) {
+function runInstall(
+  dir: string,
+  extraArgs: string[] = [],
+  opts: { extraEnv?: Record<string, string>; cwd?: string } = {},
+) {
   const args = [pwshPath!, "-NoProfile", "-NonInteractive", "-File", INSTALLER, "-Target", dir, ...extraArgs];
-  return Bun.spawnSync(args, { stdout: "pipe", stderr: "pipe" });
+  return Bun.spawnSync(args, {
+    cwd: opts.cwd,
+    env: { ...process.env, ...GIT_ISOLATION_ENV, ...(opts.extraEnv ?? {}) },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
 }
 
 function checkIgnored(dir: string): boolean {
@@ -75,6 +136,92 @@ function sidecarExists(dir: string): boolean {
 
 function readGitignore(dir: string): string {
   return readFileSync(join(dir, GITIGNORE_REL), "utf8");
+}
+
+/** The real, code-dependent invariant: a sidecar that exists is ignored. See the F10 note in
+ * the file header for why this is meaningful in some call sites and vacuous in others. */
+function expectSidecarInvariant(dir: string) {
+  if (sidecarExists(dir)) {
+    expect(checkIgnored(dir)).toBe(true);
+  }
+}
+
+function seedLegacyManifest(dir: string, extra: Record<string, unknown>) {
+  const path = join(dir, MANIFEST_REL);
+  const manifest = JSON.parse(readFileSync(path, "utf8"));
+  Object.assign(manifest, extra);
+  writeFileSync(path, JSON.stringify(manifest, null, 2));
+}
+
+function runHook(dir: string) {
+  const sh = posixSh();
+  const basePath = process.env.PATH ?? "";
+  const childEnv = {
+    ...process.env,
+    PATH: posixShDir() ? `${basePath}${delimiter}${posixShDir()}` : basePath,
+    CLAUDE_PROJECT_DIR: dir,
+  };
+  return Bun.spawnSync([sh, join(dir, HOOK_REL)], { cwd: dir, env: childEnv, stdout: "pipe", stderr: "pipe" });
+}
+
+// F1's ablation-relevant case only reproduces on a git build that honors this test-only escape
+// hatch. Probed once at module load rather than assumed, so a git that ignores it skips the one
+// case that needs it instead of silently asserting nothing (or asserting the wrong thing).
+const dubiousOwnershipSupported = (() => {
+  try {
+    const dir = mkdtempSync(join(tmpdir(), "gitignore-sidecar-dubious-probe-"));
+    const init = git(["init", "-q"], dir);
+    if (init.exitCode !== 0) {
+      rmSync(dir, { recursive: true, force: true });
+      return false;
+    }
+    const probe = git(["rev-parse", "--git-dir"], dir, { GIT_TEST_ASSUME_DIFFERENT_OWNER: "1" });
+    rmSync(dir, { recursive: true, force: true });
+    return probe.exitCode !== 0;
+  } catch {
+    return false;
+  }
+})();
+if (!dubiousOwnershipSupported) {
+  console.warn(
+    "gitignore-sidecar-protection.test.ts: GIT_TEST_ASSUME_DIFFERENT_OWNER did not trigger a " +
+      "dubious-ownership failure on this git; F1's case is skipped on this host.",
+  );
+}
+
+// F4's case needs the SPAWNED PWSH to genuinely be unable to find git, which needs confirming
+// rather than assuming a PATH-strip worked. Filters every PATH entry whose name mentions "git"
+// (not only the single directory `Bun.which` resolves) because this host's ambient PATH and the
+// one Bun itself resolves an executable against can disagree (measured: Bun.which("git") named
+// .../Git/mingw64/bin while Windows' own command resolution used .../Git/cmd, so stripping only
+// the former left git reachable) -- and the self-check itself spawns pwsh, not git directly,
+// because Bun's own child-process executable lookup was measured to ignore the `env.PATH`
+// override and fall back to the calling process's real PATH, while PowerShell's own internal
+// command resolution genuinely honors the environment block of the process it's running in.
+// Probing through git directly would then report "hidden" success or failure that has nothing
+// to do with whether the real F4 case below (which also spawns pwsh) can reproduce it.
+const strippedPath = (process.env.PATH ?? "")
+  .split(delimiter)
+  .filter((p) => p && !/git/i.test(p))
+  .join(delimiter);
+const gitTrulyHidden = (() => {
+  if (!pwshPath) return false;
+  try {
+    const probe = Bun.spawnSync(
+      [pwshPath, "-NoProfile", "-NonInteractive", "-Command", "& git --version"],
+      { env: { ...process.env, PATH: strippedPath }, stdout: "ignore", stderr: "ignore" },
+    );
+    return probe.exitCode !== 0;
+  } catch {
+    return true;
+  }
+})();
+if (!gitTrulyHidden) {
+  console.warn(
+    "gitignore-sidecar-protection.test.ts: could not hide git from a child process's PATH on " +
+      "this host; F4's git-missing case is skipped here (confirmed working on the Windows " +
+      "workstation this fix round was validated on).",
+  );
 }
 
 describe("sidecar gitignore protection", () => {
@@ -94,6 +241,7 @@ describe("sidecar gitignore protection", () => {
       const sidecar = JSON.parse(readFileSync(join(dir, SIDECAR_REL), "utf8"));
       expect(sidecar.coreRepo).toBeTruthy();
       expect(sidecar.stackDetected).toBeTruthy();
+      expectSidecarInvariant(dir);
     },
     INSTALL_TIMEOUT_MS,
   );
@@ -115,6 +263,7 @@ describe("sidecar gitignore protection", () => {
       expect(checkIgnored(dir)).toBe(true);
       const sidecar = JSON.parse(readFileSync(join(dir, SIDECAR_REL), "utf8"));
       expect(sidecar.coreRepo).toBeTruthy();
+      expectSidecarInvariant(dir);
     },
     INSTALL_TIMEOUT_MS,
   );
@@ -142,7 +291,7 @@ describe("sidecar gitignore protection", () => {
         // fixing something else in this same run.
         expect(readGitignore(dir)).toBe("sentinel-keep-me\n");
         expect(sidecarExists(dir)).toBe(false);
-        expect(checkIgnored(dir)).toBe(false);
+        expectSidecarInvariant(dir);
       }
     },
     INSTALL_TIMEOUT_MS,
@@ -167,6 +316,7 @@ describe("sidecar gitignore protection", () => {
       expect(checkIgnored(dir)).toBe(true);
       const sidecar = JSON.parse(readFileSync(join(dir, SIDECAR_REL), "utf8"));
       expect(sidecar.coreRepo).toBeTruthy();
+      expectSidecarInvariant(dir);
     },
     INSTALL_TIMEOUT_MS,
   );
@@ -196,7 +346,7 @@ describe("sidecar gitignore protection", () => {
       expect(second.stdout.toString()).toContain("Skipping the machine-specific sidecar");
       expect(readGitignore(dir)).toBe("sentinel-only\n");
       expect(sidecarExists(dir)).toBe(false);
-      expect(checkIgnored(dir)).toBe(false);
+      expectSidecarInvariant(dir);
     },
     INSTALL_TIMEOUT_MS,
   );
@@ -224,6 +374,228 @@ describe("sidecar gitignore protection", () => {
       expect(checkIgnored(dir)).toBe(true);
       const sidecar = JSON.parse(readFileSync(join(dir, SIDECAR_REL), "utf8"));
       expect(sidecar.coreRepo).toBeTruthy();
+      expectSidecarInvariant(dir);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+});
+
+describe("sidecar gitignore protection — round 2 findings", () => {
+  // F1: a git process that cannot answer FOR A REASON OTHER THAN "no repository here" (dubious
+  // ownership is the reproducible example; a foreign filesystem or a uid mismatch are the same
+  // shape) must not be read as "nothing to protect." Round-1 code asked `git rev-parse
+  // --git-dir`'s exit code that question and got the wrong answer under this condition.
+  test.skipIf(!pwshPath || !dubiousOwnershipSupported)(
+    "(F1) git that refuses ownership of a real repo: sidecar refused, not written unprotected",
+    () => {
+      const dir = freshRepo();
+      mkdirSync(join(dir, ".claude"), { recursive: true });
+      writeFileSync(join(dir, GITIGNORE_REL), "sentinel-keep-me\n");
+
+      const result = runInstall(dir, [], { extraEnv: { GIT_TEST_ASSUME_DIFFERENT_OWNER: "1" } });
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.toString()).toContain("Skipping the machine-specific sidecar");
+      expect(sidecarExists(dir)).toBe(false);
+      // Confirmed with a normal git (no simulated ownership mismatch): the sidecar genuinely
+      // would not have been ignored, so refusing was the correct call and not an artifact of
+      // the simulated failure suppressing everything downstream of it.
+      expect(checkIgnored(dir)).toBe(false);
+      expectSidecarInvariant(dir);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  // F2: a sidecar written while covered, whose cover is later dropped, must not sit on disk
+  // still holding an absolute host path just because this run declined to refresh it.
+  test.skipIf(!pwshPath)(
+    "(F2) a sidecar that WAS ignored and no longer is: removed on the next run, and the warning says so",
+    () => {
+      const dir = freshRepo();
+      const install1 = runInstall(dir);
+      expect(install1.exitCode).toBe(0);
+      expect(sidecarExists(dir)).toBe(true);
+      expect(checkIgnored(dir)).toBe(true);
+
+      // The operator's own edit drops the ignore line. Install-ManagedFile leaves the file
+      // alone (tracked, modified since install), and the sidecar written under the old, good
+      // rule is now stale and unprotected.
+      writeFileSync(join(dir, GITIGNORE_REL), "# operator trimmed it\nother-line\n");
+      expect(checkIgnored(dir)).toBe(false);
+
+      const install2 = runInstall(dir);
+      expect(install2.exitCode).toBe(0);
+      expect(install2.stdout.toString()).toContain("An existing sidecar was removed");
+      expect(sidecarExists(dir)).toBe(false);
+      expectSidecarInvariant(dir);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  // F3: a relative -Target must not have its check-ignore pathspec resolved twice against
+  // itself. Regression introduced by round 1 (5c20650, before any of this file's fix, could not
+  // have this bug: it never called `git -C $Target check-ignore` at all).
+  test.skipIf(!pwshPath)(
+    "(F3) relative -Target resolves check-ignore against the target, not doubled onto it",
+    () => {
+      const parent = mkdtempSync(join(tmpdir(), "gitignore-sidecar-relparent-"));
+      tempDirs.push(parent);
+      const relName = "proj";
+      const full = join(parent, relName);
+      mkdirSync(full, { recursive: true });
+      const init = git(["init", "-q"], full);
+      expect(init.exitCode).toBe(0);
+
+      const result = runInstall(relName, [], { cwd: parent });
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.toString()).not.toContain("Skipping the machine-specific sidecar");
+
+      expect(git(["check-ignore", "-q", SIDECAR_REL], full).exitCode).toBe(0);
+      const sidecar = JSON.parse(readFileSync(join(full, SIDECAR_REL), "utf8"));
+      expect(sidecar.coreRepo).toBeTruthy();
+      expectSidecarInvariant(full);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  // F4: git missing from PATH must fail the sidecar closed without throwing out of Save-Sidecar
+  // -- settings.json and the committed manifest are written by the caller afterward and must
+  // not be lost just because git could not be asked.
+  test.skipIf(!pwshPath || !gitTrulyHidden)(
+    "(F4) git missing from PATH: sidecar refused cleanly, settings.json and the manifest are still written",
+    () => {
+      const dir = freshRepo();
+      mkdirSync(join(dir, ".claude"), { recursive: true });
+      writeFileSync(join(dir, GITIGNORE_REL), "sentinel-keep-me\n");
+
+      const result = runInstall(dir, [], { extraEnv: { PATH: strippedPath! } });
+      // Exit code is deliberately not asserted: a separate, pre-existing, unguarded git call
+      // later in the script (core.hooksPath wiring, outside this fix's scope) also fails when
+      // git is missing and takes the overall exit code nonzero -- but only after settings.json
+      // and the manifest below are already on disk, which is what this case exists to pin.
+      expect(result.stdout.toString()).toContain("Skipping the machine-specific sidecar");
+      expect(sidecarExists(dir)).toBe(false);
+      expect(existsSync(join(dir, ".claude", "settings.json"))).toBe(true);
+      expect(existsSync(join(dir, MANIFEST_REL))).toBe(true);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  // F5: -Unaccept and -Prune each persist the sidecar through the same legacy carry-forward
+  // path -Accept uses, and neither had a test that could fail if their own Save-Sidecar call
+  // were reverted to an unconditional write. Seeded with real legacy coreRepo/stackDetected
+  // content (the pre-#137 embedded shape) so the write each command attempts is non-trivial.
+  test.skipIf(!pwshPath)(
+    "(F5) -Unaccept in a state-c repo: sidecar stays refused even carrying legacy machine fields",
+    () => {
+      const dir = freshRepo();
+      mkdirSync(join(dir, ".claude"), { recursive: true });
+      writeFileSync(join(dir, GITIGNORE_REL), "sentinel-only\n");
+
+      expect(runInstall(dir).exitCode).toBe(0);
+      expect(runInstall(dir, ["-Accept", ".gitignore"]).exitCode).toBe(0);
+
+      seedLegacyManifest(dir, {
+        coreRepo: "C:\\Users\\operator\\legacy\\core",
+        stackDetected: { scannedAt: "2020-01-01T00:00:00Z", plugins: ["legacy-plugin"], outputStyles: [], mcpServers: [] },
+      });
+
+      const unaccept = runInstall(dir, ["-Unaccept", ".gitignore"]);
+      expect(unaccept.exitCode).toBe(0);
+      expect(unaccept.stdout.toString()).toContain("Skipping the machine-specific sidecar");
+      expect(sidecarExists(dir)).toBe(false);
+      expectSidecarInvariant(dir);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  test.skipIf(!pwshPath)(
+    "(F5) -Prune in a state-c repo: sidecar stays refused even carrying legacy machine fields",
+    () => {
+      const dir = freshRepo();
+      mkdirSync(join(dir, ".claude"), { recursive: true });
+      writeFileSync(join(dir, GITIGNORE_REL), "sentinel-only\n");
+
+      expect(runInstall(dir).exitCode).toBe(0);
+
+      seedLegacyManifest(dir, {
+        coreRepo: "C:\\Users\\operator\\legacy\\core",
+        stackDetected: { scannedAt: "2020-01-01T00:00:00Z", plugins: ["legacy-plugin"], outputStyles: [], mcpServers: [] },
+      });
+      const manifestPath = join(dir, MANIFEST_REL);
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+      manifest.files["zzz-fake-orphan.md"] = "0".repeat(64);
+      writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+
+      const prune = runInstall(dir, ["-Prune", "zzz-fake-orphan.md"]);
+      expect(prune.exitCode).toBe(0);
+      expect(prune.stdout.toString()).toContain("Skipping the machine-specific sidecar");
+      expect(sidecarExists(dir)).toBe(false);
+      expectSidecarInvariant(dir);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  // F6 / F11: the refusal warning must describe real remedies. -Accept pins the fork exactly as
+  // it stands (it does not fetch core's version, and does not add the missing line), -Force
+  // overwrites every differing managed file rather than only .gitignore, and a sidecar already
+  // tracked in the index (force-added before this check existed) needs `git rm --cached`, which
+  // fixing .claude/.gitignore alone would not touch.
+  test.skipIf(!pwshPath)(
+    "(F6/F11) refusal warning describes -Accept/-Force accurately and names the tracked case",
+    () => {
+      const dir = freshRepo();
+      mkdirSync(join(dir, ".claude"), { recursive: true });
+      writeFileSync(join(dir, GITIGNORE_REL), "sentinel-only\n");
+
+      const result = runInstall(dir);
+      const out = result.stdout.toString();
+      expect(out).toContain("Skipping the machine-specific sidecar");
+      expect(out).toContain("-Accept '.gitignore' pins the CURRENT fork as-is");
+      expect(out).toContain("-Force overwrites EVERY differing managed file with core's version, not only this one");
+      expect(out).toContain("git rm --cached .claude/.harness-manifest.local.json");
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  // F9: a consumer degrading silently when the sidecar is missing is indistinguishable from
+  // "nothing to report," which is wrong once "the installer refused it" became a possible
+  // reason. Both consumers now print one line instead, and both keep their advisory contract
+  // (exit 0; nothing a caller could read as a deny).
+  test.skipIf(!pwshPath)(
+    "(F9) drift hook: manifest present, sidecar refused -> one advisory line, still exit 0",
+    () => {
+      const dir = freshRepo();
+      mkdirSync(join(dir, ".claude"), { recursive: true });
+      writeFileSync(join(dir, GITIGNORE_REL), "sentinel-keep-me\n");
+      const result = runInstall(dir);
+      expect(result.exitCode).toBe(0);
+      expect(sidecarExists(dir)).toBe(false);
+      expect(existsSync(join(dir, MANIFEST_REL))).toBe(true);
+
+      const hook = runHook(dir);
+      const expected = "harness: sidecar unavailable, machine-specific checks skipped (see -Audit)\n";
+      expect(hook.stdout.toString()).toBe(expected);
+      expect(hook.stdout.length).toBe(Buffer.byteLength(expected));
+      expect(hook.stderr.length).toBe(0);
+      expect(hook.exitCode).toBe(0);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  test.skipIf(!pwshPath)(
+    "(F9) -Audit (non-quiet): stack drift reported as not recorded rather than a false 'newly detected' wall",
+    () => {
+      const dir = freshRepo();
+      mkdirSync(join(dir, ".claude"), { recursive: true });
+      writeFileSync(join(dir, GITIGNORE_REL), "sentinel-keep-me\n");
+      expect(runInstall(dir).exitCode).toBe(0);
+      expect(sidecarExists(dir)).toBe(false);
+
+      const audit = runInstall(dir, ["-Audit"]);
+      expect(audit.exitCode).toBe(0);
+      const out = audit.stdout.toString();
+      expect(out).toContain("Stack drift: not recorded");
+      expect(out).not.toContain("newly detected");
     },
     INSTALL_TIMEOUT_MS,
   );

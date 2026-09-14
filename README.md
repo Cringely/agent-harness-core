@@ -88,11 +88,19 @@ path-to-hash map, is migrated on the next run with every hash preserved under `f
 None of that travels between clones, which is exactly why two other fields never reach this file:
 `coreRepo` (an absolute path to the core checkout) and `stackDetected` (the per-machine plugin,
 output-style, and MCP-server inventory, plus the timestamp of the scan that found it). Both live in
-a second file instead, `.claude/.harness-manifest.local.json`, gitignored by the installer's own
-`.claude/.gitignore` and never committed. `session-start-drift-check.sh` reads `coreRepo` from
-there to find core without an environment variable. A project that installed an earlier version of
-this layer has both fields embedded directly in `.harness-manifest.json`; the next run of any
-installer command splits them into the sidecar and drops them from the committed file.
+a second file instead, `.claude/.harness-manifest.local.json`. The installer keeps that file out of
+a commit by checking, with `git check-ignore`, that the target's own `.claude/.gitignore` actually
+covers it before every write, rather than assuming that installing its `.gitignore` template
+already took care of it. A target whose `.claude/.gitignore` predates this file, or forked it
+without the ignore line, gets a warning instead of a silently unprotected sidecar, and any stale
+copy already on disk is removed. `session-start-drift-check.sh` reads `coreRepo` from the sidecar
+to find core without an environment variable; when the sidecar is missing but the committed
+manifest exists (an install ran, but the write was refused), the hook and `-Audit` each print one
+line saying so instead of going quiet. A project that installed an earlier version of this layer
+has both fields embedded directly in `.harness-manifest.json`; the next run of any installer
+command splits them into the sidecar and drops them from the committed file, as long as that run's
+ignore check passes. When it does not, the legacy values are dropped rather than migrated, same as
+a fresh scan's would be, until the ignore rule is fixed and the installer runs again.
 
 `-Accept <relpath>` writes the second kind of entry. Point it at a path relative to the project's
 `.claude` and it pins that file's current hash, which turns a permanent audit warning into a silent
