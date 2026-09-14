@@ -29,11 +29,11 @@ Two commands. Both take the key on stdin and both mint an installation token.
 
 `review` is a dry run unless `--post` is given: it runs the whole pipeline, prints the review body it would post, writes a `status=... event=... computed=...` line to stderr, and posts nothing. `--post` posts the review under the App's identity and prints the review's URL. `--comment-only`, which applies only with `--post`, posts the same body as a `COMMENT` whatever event was computed; it is the form used when the tool reviews the pull request that lands it, where it must not approve itself. `--json` prints the full outcome as JSON in place of the body. `--repo` defaults to `Cringely/agent-harness-core`.
 
-The working directory matters, and it is why each command names the script by its absolute path. Bun loads `bunfig.toml` and `.env` from the current working directory, not from the script's own directory (measured live on Bun 1.3.14). Run from inside the checkout, a pull request that had merged either file at the repository root would run code in, or redirect the network of, the very process holding the App key. So both commands refuse, before reading the key, when the working directory is the checkout or anywhere under it, and the only invocation that works is the script's absolute path from a directory outside it, such as a scratch directory under your temp folder. Every repository path the tool needs is resolved from the script's own location, never from where you ran it.
+The working directory matters, and it is why each command names the script by its absolute path. Bun loads `bunfig.toml` and any file whose name starts with `.env` from the current working directory before the tool runs, from that directory only and not from its parents or the script's own directory (measured live on Bun 1.3.14). Run from inside a checkout, a pull request that had merged either file at the repository root would run code in, or redirect the network of, the very process holding the App key, and a refusal issued afterwards cannot undo a preload that already ran. So the working directory must be outside every checkout of this repository, the main clone and any worktree alike, and must contain no `bunfig.toml` and no `.env` file of any suffix. An empty directory kept for the purpose is the simple choice. Both commands check this before reading the key and refuse otherwise, comparing paths after symlinks and junctions are resolved, so a checkout reached through a junction does not slip past. Every repository path the tool needs is resolved from the script's own location, never from where you ran it.
 
 Posting runs come from a clean, up-to-date `master` checkout. `--post` refuses when that checkout has any uncommitted change, untracked files included, and it sees through `assume-unchanged` and `skip-worktree` index bits that would hide an edit from `git status`. Every review body's footer records the commit the reviewer ran from, so a posted review traces to committed code.
 
-Exit codes: 0 reviewed or snapshotted, 2 refused with nothing posted, 1 usage or runtime error, including any HTTP failure from GitHub.
+Exit codes: 0 reviewed or snapshotted, 2 refused with nothing posted, 1 usage or runtime error, including any HTTP failure from GitHub. One exit 1 may have posted; see the end of "Refusals".
 
 ## What each event means
 
@@ -49,16 +49,18 @@ Whatever the event, the body lists findings below the floor under their own head
 
 A refusal exits 2 and posts nothing. The reasons, roughly in the order the tool checks them:
 
-- The working directory is the repository checkout or anywhere under it. This is checked before the key is read.
+- The working directory is inside the checkout the script lives in, compared after symlinks and junctions are resolved, or it contains a `bunfig.toml` or a file whose name starts with `.env`. This is checked before the key is read.
 - A console terminal on stdin, refused before anything is read so a key is never typed or echoed. Under Git Bash's mintty a native program sees stdin as a pipe even when the `op read |` was left off, so that case is caught differently: a missing pipe times out after 60 seconds instead of waiting forever. Empty stdin, or text that is not an RSA private key, refuses the same way.
 - The App holds a permission outside the allowlist, holds a write where the list grants read, or lacks `pull_requests: write`; or the minted token is not scoped to exactly this repository.
 - The pull request comes from a fork or a deleted repository, or targets a branch other than the repository's default.
-- The pull request's head moved, or its changed-file count changed, while the tool was reading it; or, on a posting run, the head moved between the review and the post.
+- The pull request changed under the tool: its head moved or its changed-file count changed while the tool was reading it; or, on a posting run, its head SHA, base branch, base SHA or changed-file list at post time differs from what was reviewed. Nothing is posted.
 - The identity scan cannot be built: the identity file exists but cannot be read, `.claude.json` exists but is not JSON, or `CLAUDE_CONFIG_DIR` is set but empty or relative.
 - A posting run with no account email to scan for.
 - A posting run from a checkout with uncommitted changes.
 - The rendered body, or any string the model wrote, carries an identifying string: a declared name or email, the account email, the workstation username or the machine hostname. This applies to dry runs too. The refusal names only the hit's class (`declared name #1`, `email #2`, and so on), and the body and findings are blanked, so nothing caught is republished.
 - A posting run against a pull request that is not open, unless the run is `--comment-only`.
+
+One failure is neither a refusal nor a clean run. If GitHub accepted the post but its response failed the tool's validation, the run exits 1 after printing the review's id and URL when it has them, with a note that a review may already be posted. Check the pull request before running again, or a second review lands beside the first.
 
 ## Limits
 
@@ -78,6 +80,6 @@ Size caps in `tools/pr-review/types.ts` bound the diff, the post-change file con
 
     bun <absolute path>/tools/pr-review/acceptance/offline.ts --repo-dir <checkout with full history> [--runs 3] [--out <dir>]
 
-The header comment in `offline.ts` shows a relative form of that command. Run it as above, by absolute path from a directory outside the checkout, for the same reason the commands carry: it runs the reviewer on pull request data, and `offline.ts` has no working-directory check of its own to catch a misrun. Every run's outcome is written to `--out` (default `tools/pr-review/acceptance/results/<UTC timestamp>/`, gitignored) with a `summary.json` beside them, and the exit code is 0 only when every case passes its gate. The two linked issues are fetched from GitHub without authentication.
+The header comment in `offline.ts` shows a relative form of that command. Run it as above, by absolute path from an empty directory outside every checkout, for the same reason the commands carry: it runs the reviewer on pull request data, and `offline.ts` has no working-directory check of its own to catch a misrun. Every run's outcome is written to `--out` (default `tools/pr-review/acceptance/results/<UTC timestamp>/`, gitignored) with a `summary.json` beside them, and the exit code is 0 only when every case passes its gate. The two linked issues are fetched from GitHub without authentication.
 
 The gates are deterministic; the findings are not. A pass means each defect run carried a floor-level finding on the right file, and whoever ran it still reads those findings to confirm they name the actual defect. Changing the reviewer prompt, the severity list or the thresholds means re-running all three cases, because a result from before the change says nothing about the reviewer after it.
