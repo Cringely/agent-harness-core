@@ -33,3 +33,7 @@ node_modules/
 # A .pyc embeds its compile-time source path, which on this workstation is a username.
 __pycache__/
 *.pyc
+
+# Offline acceptance and retro-review output from tools/pr-review. Each file is one reviewer run's
+# full outcome; the summary that matters goes into the pull request description.
+tools/pr-review/acceptance/results/

@@ -18,9 +18,10 @@ The block below is inlined into the defs rather than referenced from them.
 ## Editing contract
 
 The canonical block is fenced below. It appears verbatim, byte for byte, in all five defs under
-`core/claude/agents/`. Changing the boundary means editing the fenced block here, then replacing
-the block in each def with the new text, in the same pass. A def whose copy has drifted from this
-one is a defect, not a local variant.
+`core/claude/agents/` and in `tools/pr-review/reviewer-prompt.md`, the system prompt of this
+repository's own pull request reviewer, which nothing installs. Changing the boundary means editing
+the fenced block here, then replacing the block in every copy with the new text, in the same pass.
+A copy that has drifted from this one is a defect, not a local variant.
 
 The block is deliberately source-agnostic so it can be inlined unchanged. Per-agent nuance (what
 counts as a prior verdict, how a source's self-description gets handled) goes in a sentence
