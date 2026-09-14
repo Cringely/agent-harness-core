@@ -3,6 +3,8 @@ Describe "Install-Account" {
     BeforeAll {
         $script:install = "$PSScriptRoot/Install-Account.ps1"
         $script:repoRoot = Split-Path $PSScriptRoot -Parent
+        # Literal -CoreRepo values use C: because Join-Path throws DriveNotFoundException for a
+        # drive the host lacks (hosted runners have no E:). The path itself need not exist.
         # Resolve-ContainmentPath lives here now, so Export-Account.ps1 can call the same
         # function. One It below dot-sources this file to call it directly; every other
         # containment test still reaches it through the installer.
@@ -939,15 +941,15 @@ Describe "Install-Account" {
             # anything, since nothing ever asserted the skills/handoff/SKILL.md fixture this It
             # already plants.
             & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:\projects\agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:\projects\agent-harness-core' `
                 -NpmGlobal 'C:\npm\node_modules' -VaultPath 'D:\My Vault\Claude Code' `
                 -HomeSlug 'STUB-SLUG' -SkipPreflight | Out-Null
 
             $expectedHome = $h -replace '\\', '/'
             (Get-Content (Join-Path $h 'rules/harness-core.md') -Raw) |
-                Should -Match ([regex]::Escape('E:/projects/agent-harness-core'))
+                Should -Match ([regex]::Escape('C:/projects/agent-harness-core'))
             (Get-Content (Join-Path $h 'hooks/harness-core-reminder.sh') -Raw) |
-                Should -Match ([regex]::Escape('E:/projects/agent-harness-core'))
+                Should -Match ([regex]::Escape('C:/projects/agent-harness-core'))
             (Get-Content (Join-Path $h 'skills/prose-lint/SKILL.md') -Raw) |
                 Should -Match ([regex]::Escape("$expectedHome/tools/prose-lint/.vale.ini"))
             (Get-Content (Join-Path $h 'skills/council/SKILL.md') -Raw) |
@@ -983,7 +985,7 @@ Describe "Install-Account" {
             } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
             & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -NpmGlobal '/usr/lib/node_modules' -TargetIsWindows:$false -SkipPreflight | Out-Null
 
             $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
@@ -1010,7 +1012,7 @@ Describe "Install-Account" {
             } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
             & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -NpmGlobal 'C:/npm' -TargetIsWindows:$true -SkipPreflight | Out-Null
 
             $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
@@ -1041,7 +1043,7 @@ Describe "Install-Account" {
             } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
             $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -NpmGlobal '' -TargetIsWindows:$true -SkipPreflight *>&1 | Out-String
 
             $raw = Get-Content (Join-Path $h 'settings.json') -Raw
@@ -1073,7 +1075,7 @@ Describe "Install-Account" {
                     command = 'node {{NPM_GLOBAL}}/ccstatusline/dist/ccstatusline.js' } } |
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
             & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -NpmGlobal '' -TargetIsWindows:$false -SkipPreflight | Out-Null
             $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
             $s.statusLine.command | Should -Be "bash '$($h -replace '\\', '/')/statusline-command.sh'"
@@ -1092,7 +1094,7 @@ Describe "Install-Account" {
         try {
             '{"hooks":{"PreToolUse":null}}' | Set-Content (Join-Path $p 'settings.account.json')
             & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight | Out-Null
             $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
             $s.hooks.PSObject.Properties.Name | Should -Not -Contain 'PreToolUse'
@@ -1108,7 +1110,7 @@ Describe "Install-Account" {
                         @{ matcher = 'Edit'; hooks = $null }
                     ) } } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
             & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight | Out-Null
             $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
             $s.hooks.PSObject.Properties.Name | Should -Not -Contain 'PreToolUse'
@@ -1123,7 +1125,7 @@ Describe "Install-Account" {
                                 @{ type = 'command' }) }) } } |
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
             & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight | Out-Null
             $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
             $hook = @(@($s.hooks.PreToolUse)[0].hooks)[0]
@@ -1142,11 +1144,11 @@ Describe "Install-Account" {
         try {
             'core {{CORE_REPO}} mystery {{MYSTERY}}' | Set-Content (Join-Path $p 'rules/harness-core.md')
             $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight *>&1 | Out-String
             $out | Should -Match 'MYSTERY'
             $content = Get-Content (Join-Path $h 'rules/harness-core.md') -Raw
-            $content | Should -Match ([regex]::Escape('E:/projects/agent-harness-core'))
+            $content | Should -Match ([regex]::Escape('C:/projects/agent-harness-core'))
             $content | Should -Match '\{\{MYSTERY\}\}'
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
@@ -1172,7 +1174,7 @@ Describe "Install-Account" {
             } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
             & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -NpmGlobal 'C:/npm' -TargetIsWindows:$true -SkipPreflight | Out-Null
 
             $raw = Get-Content (Join-Path $h 'settings.json') -Raw
@@ -1206,7 +1208,7 @@ Describe "Install-Account" {
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
             $args = @{
                 PayloadRoot = $p; ClaudeHome = $h; ClaudeJson = (Join-Path $h 'claude.json')
-                CoreRepo = 'E:/projects/agent-harness-core'; NpmGlobal = 'C:/npm'
+                CoreRepo = 'C:/projects/agent-harness-core'; NpmGlobal = 'C:/npm'
                 TargetIsWindows = $true
             }
             & $script:install @args -SkipPreflight | Out-Null
@@ -1238,7 +1240,7 @@ Describe "Install-Account" {
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
             & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -NpmGlobal 'C:/npm' -TargetIsWindows:$true -SkipPreflight | Out-Null
 
             $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
@@ -1269,7 +1271,7 @@ Describe "Install-Account" {
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
             & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight | Out-Null
 
             $raw = Get-Content (Join-Path $h 'settings.json') -Raw
@@ -1294,7 +1296,7 @@ Describe "Install-Account" {
                     ) } } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
             & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight | Out-Null
 
             $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
@@ -1317,7 +1319,7 @@ Describe "Install-Account" {
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
             & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight | Out-Null
 
             $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
@@ -1337,7 +1339,7 @@ Describe "Install-Account" {
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
             & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight | Out-Null
 
             $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
@@ -1354,7 +1356,7 @@ Describe "Install-Account" {
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
             & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight | Out-Null
 
             $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
@@ -1378,7 +1380,7 @@ Describe "Install-Account" {
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
             $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight *>&1 | Out-String
 
             $out | Should -Match "permissions\.defaultMode changes from 'default' to 'auto'"
@@ -1394,7 +1396,7 @@ Describe "Install-Account" {
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
             $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight *>&1 | Out-String
 
             $out | Should -Match 'skipDangerousModePermissionPrompt changes from False to True'
@@ -1411,7 +1413,7 @@ Describe "Install-Account" {
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
             $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight *>&1 | Out-String
 
             $out | Should -Not -Match 'defaultMode changes|skipDangerousModePermissionPrompt changes'
@@ -1433,7 +1435,7 @@ Describe "Install-Account" {
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
             & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight | Out-Null
 
             $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
@@ -1451,7 +1453,7 @@ Describe "Install-Account" {
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
             & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight | Out-Null
 
             $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
@@ -1471,7 +1473,7 @@ Describe "Install-Account" {
             @{ effortLevel = 'xhigh' } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
             & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight -WarningAction SilentlyContinue | Out-Null
 
             $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
@@ -1488,7 +1490,7 @@ Describe "Install-Account" {
             @{ effortLevel = 'xhigh' } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
             $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight *>&1 | Out-String
 
             # The defect this pins: the install used to report success and leave the receiver's
@@ -1544,7 +1546,7 @@ Describe "Install-Account" {
             @{ effortLevel = 'xhigh' } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
             { & $script:install -PayloadRoot $p -ClaudeHome $h `
-                    -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                    -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                     -SkipPreflight -WarningAction SilentlyContinue | Out-Null } | Should -Not -Throw
 
             $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
@@ -1563,7 +1565,7 @@ Describe "Install-Account" {
             'not valid { json' | Set-Content (Join-Path $h 'settings.json')
 
             $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight -WhatIf *>&1 | Out-String
 
             $out | Should -Not -Match 'Backed up to'
@@ -1584,7 +1586,7 @@ Describe "Install-Account" {
             @{ effortLevel = 'xhigh' } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
             $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight *>&1 | Out-String
 
             $out | Should -Not -Match 'Unexpanded placeholder'
@@ -1600,7 +1602,7 @@ Describe "Install-Account" {
             @{ env = @{ X = '{{MYSTERY}}' } } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
             $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight *>&1 | Out-String
 
             $out | Should -Match 'Unexpanded placeholder\(s\) in settings\.json: \{\{MYSTERY\}\}'
@@ -1620,7 +1622,7 @@ Describe "Install-Account" {
             @{ env = @{ X = '{{PROJECT}}' } } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
             $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight *>&1 | Out-String
 
             $out | Should -Match 'Unexpanded placeholder\(s\) in settings\.json: \{\{PROJECT\}\}'
@@ -1644,7 +1646,7 @@ Describe "Install-Account" {
                 Set-Content (Join-Path $p 'rules/harness-core.md')
 
             $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight *>&1 | Out-String
 
             $out | Should -Not -Match 'Unexpanded placeholder'
@@ -1662,7 +1664,7 @@ Describe "Install-Account" {
                 Set-Content (Join-Path $p 'rules/harness-core.md')
 
             $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight *>&1 | Out-String
 
             $out | Should -Match 'Unexpanded placeholder\(s\) in rules/harness-core\.md: \{\{RENAMED_TOKEN\}\}'
@@ -1683,7 +1685,7 @@ Describe "Install-Account" {
 
             $warnings = $null
             & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight -WarningVariable warnings -WarningAction SilentlyContinue *>$null
 
             (@($warnings) -join "`n") |
@@ -1774,7 +1776,7 @@ Describe "Install-Account" {
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
 
             & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
-                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight | Out-Null
+                -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight | Out-Null
 
             $j = Get-Content $cj -Raw | ConvertFrom-Json
             $j.mcpServers.acme.command   | Should -Be 'uvx'
@@ -1802,7 +1804,7 @@ Describe "Install-Account" {
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
 
             & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
-                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight | Out-Null
+                -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight | Out-Null
 
             $j = Get-Content $cj -Raw | ConvertFrom-Json
             $homeSlashed = $h -replace '\\', '/'
@@ -1831,7 +1833,7 @@ Describe "Install-Account" {
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
 
             & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
-                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight | Out-Null
+                -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight | Out-Null
 
             $j = Get-Content $cj -Raw | ConvertFrom-Json
             $j.projects.'/home/u/demo'.a.b.c.d.e | Should -Be 'leaf'
@@ -1857,7 +1859,7 @@ Describe "Install-Account" {
             $before = (Get-Item $cj).LastWriteTimeUtc
 
             & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
-                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight | Out-Null
+                -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight | Out-Null
 
             (Get-Item $cj).LastWriteTimeUtc | Should -Be $before
         }
@@ -1885,7 +1887,7 @@ Describe "Install-Account" {
             try {
                 try {
                     & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
-                        -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight `
+                        -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight `
                         -WarningVariable warnings -WarningAction SilentlyContinue *>$null
                 }
                 catch { $threw = $true }
@@ -1911,7 +1913,7 @@ Describe "Install-Account" {
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
 
             $out = & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
-                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight *>&1 | Out-String
+                -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight *>&1 | Out-String
 
             $out | Should -Match 'mcpServers.*not a JSON object'
             $j = Get-Content $cj -Raw | ConvertFrom-Json
@@ -1936,7 +1938,7 @@ Describe "Install-Account" {
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
 
             $out = & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
-                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight *>&1 | Out-String
+                -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight *>&1 | Out-String
 
             $out | Should -Match 'mcpServers.*not a JSON object'
             $j = Get-Content $cj -Raw | ConvertFrom-Json
@@ -1959,7 +1961,7 @@ Describe "Install-Account" {
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
 
             $out = & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
-                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight -WhatIf *>&1 | Out-String
+                -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight -WhatIf *>&1 | Out-String
 
             $out | Should -Match 'mcpServers: 1 added \(acme\) \(dry run\)'
             (Get-Content $cj -Raw | ConvertFrom-Json).mcpServers.PSObject.Properties.Name.Count | Should -Be 0
@@ -1981,7 +1983,7 @@ Describe "Install-Account" {
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
             $args = @{
                 PayloadRoot = $p; ClaudeHome = $h; ClaudeJson = $cj
-                CoreRepo = 'E:/projects/agent-harness-core'; NpmGlobal = 'C:/npm'
+                CoreRepo = 'C:/projects/agent-harness-core'; NpmGlobal = 'C:/npm'
             }
             & $script:install @args -SkipPreflight | Out-Null
 
@@ -2020,7 +2022,7 @@ Describe "Install-Account" {
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
             $out = & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
-                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal '/usr/lib/node_modules' `
+                -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal '/usr/lib/node_modules' `
                 -TargetIsWindows:$false -SkipPreflight *>&1 | Out-String
 
             # Scope every assertion to the report block. The "N added (names)" line above it
@@ -2081,7 +2083,7 @@ Describe "Install-Account" {
                 } } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $script:wlP 'mcp-servers.json')
 
             $script:wlOut = & $script:install -PayloadRoot $script:wlP -ClaudeHome $script:wlH `
-                -ClaudeJson $script:wlCj -CoreRepo 'E:/projects/agent-harness-core' `
+                -ClaudeJson $script:wlCj -CoreRepo 'C:/projects/agent-harness-core' `
                 -NpmGlobal 'C:/npm' -SkipPreflight *>&1 | Out-String
 
             $script:wlServers = (Get-Content $script:wlCj -Raw | ConvertFrom-Json).mcpServers
@@ -2126,7 +2128,7 @@ Describe "Install-Account" {
                         args = @('-e', 'C:\Users\user\x.sh'); env = @{} } } } |
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
             & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
-                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight | Out-Null
+                -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight | Out-Null
             Test-Path -LiteralPath (Join-Path $h 'rules/security.md') | Should -BeTrue
             (Get-Content $cj -Raw | ConvertFrom-Json).mcpServers.wsl.command | Should -Be 'wsl'
         }
@@ -2150,7 +2152,7 @@ Describe "Install-Account" {
 
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
             $out = & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
-                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight *>&1 | Out-String
+                -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight *>&1 | Out-String
             $sw.Stop()
 
             $sw.Elapsed.TotalSeconds | Should -BeLessThan 5 -Because "a UNC-shaped candidate must be skipped, not probed"
@@ -2187,7 +2189,7 @@ Describe "Install-Account" {
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
 
             $out = & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
-                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
                 -SkipPreflight -WhatIf *>&1 | Out-String
 
             Test-Path -LiteralPath $cj |
@@ -2212,6 +2214,8 @@ Describe "Account layer round trip" {
         $script:export = "$PSScriptRoot/Export-Account.ps1"
         $script:install = "$PSScriptRoot/Install-Account.ps1"
         $script:repoRoot = Split-Path $PSScriptRoot -Parent
+        # Literal -CoreRepo values use C: because Join-Path throws DriveNotFoundException for a
+        # drive the host lacks (hosted runners have no E:). The path itself need not exist.
 
         # A stand-in canonical workstation: a ~/.claude carrying one file of each shape that
         # gets folded, plus a settings.json in all three quoting forms.
@@ -2224,7 +2228,7 @@ Describe "Account layer round trip" {
                 New-Item -ItemType Directory -Path (Join-Path $ch $d) -Force | Out-Null
             }
             $chBack = $ch -replace '/', '\'
-            $core = 'E:\projects\agent-harness-core'
+            $core = 'C:\projects\agent-harness-core'
             $vault = Join-Path $canonHome 'Documents\Obsidian Vault\Claude Code'
             $slug = $canonHome.TrimEnd('\', '/') -creplace '[^A-Za-z0-9]', '-'
 
@@ -2276,7 +2280,7 @@ exit 0
                 ClaudeHome = (Join-Path $canonHome '.claude')
                 ClaudeJson = (Join-Path $canonHome '.claude.json')
                 OutputRoot = $out
-                CoreRepo = 'E:\projects\agent-harness-core'
+                CoreRepo = 'C:\projects\agent-harness-core'
                 NpmGlobal = 'C:/npm/node_modules'
                 VaultPath = (Join-Path $canonHome 'Documents\Obsidian Vault\Claude Code')
                 HomeSlug = ($canonHome.TrimEnd('\', '/') -creplace '[^A-Za-z0-9]', '-')
@@ -2303,7 +2307,7 @@ exit 0
             # a reason that has nothing to do with the separator handling under test.
             & $script:install -PayloadRoot $out1 -ClaudeHome (Join-Path $canonHome '.claude') `
                 -ClaudeJson (Join-Path $canonHome '.claude.json') `
-                -CoreRepo 'E:\projects\agent-harness-core' -NpmGlobal 'C:/npm/node_modules' `
+                -CoreRepo 'C:\projects\agent-harness-core' -NpmGlobal 'C:/npm/node_modules' `
                 -VaultPath $a.VaultPath -HomeSlug $a.HomeSlug `
                 -TargetIsWindows:$true -SkipPreflight | Out-Null
 
