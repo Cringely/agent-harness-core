@@ -640,6 +640,97 @@ describe("sidecar gitignore protection — round 2 findings", () => {
     },
     INSTALL_TIMEOUT_MS,
   );
+
+  // round-6 F1: -Accept, -Unaccept and -Prune persisted the in-memory sidecar even when it held
+  // neither coreRepo nor stackDetected, writing `{}`. That file passes the hook's missing-sidecar
+  // check, so the F9 advisory above went silent. Case A pins the advisory; case B pins that
+  // legacy fields carried forward from the manifest are still written.
+  const FIXTURE_COMMIT = ["-c", "core.hooksPath=NUL", "-c", "user.name=Test", "-c", "user.email=test@example.com"];
+  const F9_ADVISORY = "harness: sidecar unavailable, machine-specific checks skipped (see -Audit)" + String.fromCharCode(10);
+
+  /** Plain install, .claude/.gitignore committed and confirmed ignoring, sidecar deleted. */
+  function installedCommittedNoSidecar(): string {
+    const dir = freshRepo();
+    expect(runInstall(dir).exitCode).toBe(0);
+    expect(git(["add", "--", GITIGNORE_REL], dir).exitCode).toBe(0);
+    expect(git([...FIXTURE_COMMIT, "commit", "-q", "-m", "fixture"], dir).exitCode).toBe(0);
+    expect(checkIgnored(dir)).toBe(true);
+    rmSync(join(dir, SIDECAR_REL));
+    return dir;
+  }
+
+  function addFakeOrphan(dir: string) {
+    const manifestPath = join(dir, MANIFEST_REL);
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    manifest.files["zzz-fake-orphan.md"] = "0".repeat(64);
+    writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+  }
+
+  function expectNoSidecarAndAdvisory(dir: string) {
+    expect(sidecarExists(dir)).toBe(false);
+    const hook = runHook(dir);
+    expect(hook.stdout.toString()).toBe(F9_ADVISORY);
+    expect(hook.exitCode).toBe(0);
+  }
+
+  test.skipIf(!pwshPath)(
+    "(R6-F1 A) -Accept, -Unaccept, -Prune with no sidecar and no legacy fields: no empty sidecar, advisory still printed",
+    () => {
+      const dir = installedCommittedNoSidecar();
+      expectNoSidecarAndAdvisory(dir);
+
+      writeFileSync(join(dir, ".claude", "agents", "zz-overlay.md"), "project fork");
+      expect(runInstall(dir, ["-Accept", "agents/zz-overlay.md"]).exitCode).toBe(0);
+      expectNoSidecarAndAdvisory(dir);
+
+      expect(runInstall(dir, ["-Unaccept", "agents/zz-overlay.md"]).exitCode).toBe(0);
+      expectNoSidecarAndAdvisory(dir);
+
+      addFakeOrphan(dir);
+      expect(runInstall(dir, ["-Prune", "zzz-fake-orphan.md"]).exitCode).toBe(0);
+      expectNoSidecarAndAdvisory(dir);
+    },
+    INSTALL_TIMEOUT_MS * 2,
+  );
+
+  test.skipIf(!pwshPath)(
+    "(R6-F1 B) -Accept, -Unaccept, -Prune with legacy fields in the manifest: sidecar written and carries them",
+    () => {
+      const dir = installedCommittedNoSidecar();
+      const legacyCore = join(tmpdir(), "legacy-core");
+      const legacy = {
+        coreRepo: legacyCore,
+        stackDetected: { scannedAt: "2020-01-01T00:00:00Z", plugins: ["legacy-plugin"], outputStyles: [], mcpServers: [] },
+      };
+      // Reads the sidecar each command wrote, then deletes it so the next command starts without one.
+      const takeSidecar = () => {
+        const sidecar = JSON.parse(readFileSync(join(dir, SIDECAR_REL), "utf8"));
+        rmSync(join(dir, SIDECAR_REL));
+        return sidecar;
+      };
+
+      writeFileSync(join(dir, ".claude", "agents", "zz-overlay.md"), "project fork");
+      seedLegacyManifest(dir, legacy);
+      expect(runInstall(dir, ["-Accept", "agents/zz-overlay.md"]).exitCode).toBe(0);
+      let sidecar = takeSidecar();
+      expect(sidecar.coreRepo).toBe(legacyCore);
+      expect(JSON.stringify(sidecar.stackDetected)).toContain("legacy-plugin");
+
+      seedLegacyManifest(dir, legacy);
+      expect(runInstall(dir, ["-Unaccept", "agents/zz-overlay.md"]).exitCode).toBe(0);
+      sidecar = takeSidecar();
+      expect(sidecar.coreRepo).toBe(legacyCore);
+      expect(JSON.stringify(sidecar.stackDetected)).toContain("legacy-plugin");
+
+      seedLegacyManifest(dir, legacy);
+      addFakeOrphan(dir);
+      expect(runInstall(dir, ["-Prune", "zzz-fake-orphan.md"]).exitCode).toBe(0);
+      sidecar = takeSidecar();
+      expect(sidecar.coreRepo).toBe(legacyCore);
+      expect(JSON.stringify(sidecar.stackDetected)).toContain("legacy-plugin");
+    },
+    INSTALL_TIMEOUT_MS * 2,
+  );
 });
 
 describe("sidecar gitignore protection — round 3 findings (R2-1, R2-2)", () => {
@@ -1016,6 +1107,39 @@ describe("sidecar gitignore protection — round 5 (targets with no .git on disk
       expect(sidecarExists(dir)).toBe(true);
       expect(git(["init", "-q"], dir).exitCode).toBe(0);
       expect(checkIgnored(dir)).toBe(true);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  // round-6: the round-5 exact-line read of .claude/.gitignore said ignored where git does not.
+  // These two are cases it got wrong; git now answers in place.
+  test.skipIf(!pwshPath)(
+    "(R5-negation) no repository, .claude/.gitignore ignores the line then negates it: sidecar not written, warned",
+    () => {
+      const dir = nonRepoDir();
+      mkdirSync(join(dir, ".claude"), { recursive: true });
+      writeFileSync(join(dir, GITIGNORE_REL), `.harness-manifest.local.json${LF}!.harness-manifest.local.json${LF}`);
+
+      const result = runInstall(dir);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.toString()).toContain("Skipping the machine-specific sidecar");
+      expect(sidecarExists(dir)).toBe(false);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  test.skipIf(!pwshPath)(
+    "(R5-utf16) no repository, .claude/.gitignore holding the line as UTF-16LE with a BOM: sidecar not written, warned",
+    () => {
+      const dir = nonRepoDir();
+      mkdirSync(join(dir, ".claude"), { recursive: true });
+      const bom = Buffer.from([0xff, 0xfe]);
+      writeFileSync(join(dir, GITIGNORE_REL), Buffer.concat([bom, Buffer.from(`.harness-manifest.local.json${LF}`, "utf16le")]));
+
+      const result = runInstall(dir);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.toString()).toContain("Skipping the machine-specific sidecar");
+      expect(sidecarExists(dir)).toBe(false);
     },
     INSTALL_TIMEOUT_MS,
   );

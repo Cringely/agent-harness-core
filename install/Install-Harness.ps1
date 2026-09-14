@@ -645,6 +645,7 @@ function Get-SidecarPlan {
         # comment above the -Prune block) is two earlier designs that trusted a computed path for
         # a delete and got executed against an attacker-chosen one; the removal in
         # Invoke-SidecarPlan holds itself to the same rule.
+        # -Target already passed the top-of-script guard ("Target path does not exist or is not a directory"), so this resolves.
         $absTarget = (Resolve-Path -LiteralPath $TargetDir).Path
         $sidecarAbs = Join-Path (Join-Path $absTarget '.claude') '.harness-manifest.local.json'
 
@@ -726,17 +727,44 @@ function Get-SidecarPlan {
     # cleanly for this target. Tracked files are never reported ignored, so a tracked sidecar
     # falls through to the tracked branches below.
     #
-    # round-5: with no repository there is no git to ask, and "nothing to protect" was the wrong
-    # reading, since a later `git init` stages whatever is on disk. The sidecar counts as ignored
-    # only when the target's own .claude/.gitignore carries core's exact line, which covers it the
-    # moment a repository appears. Read here, not into the facts: the plain install's second call
-    # follows a copy loop that may have just installed that file.
+    # round-5: with no repository there is no repository git can answer for, and "nothing to
+    # protect" was the wrong reading, since a later `git init` stages whatever is on disk.
+    #
+    # round-6: an exact-line read of .claude/.gitignore said ignored where git does not (a later
+    # negation, a UTF-16/32 BOM, CR CR LF, a symlinked file, an oversized file), so git answers
+    # instead: a throwaway bare repository whose work tree is the target's own .claude, reading
+    # .claude/.gitignore in place. The deepest ignore file's last match wins, so a parent
+    # .gitignore or a global excludes file could only add an ignore that .claude/.gitignore does
+    # not provide; both are excluded, which errs toward not ignored. --template= keeps a user
+    # init.templateDir's info/exclude out, and -c core.excludesFile= keeps the global one out;
+    # without either, the probe can say ignored where the future repository would not. Any
+    # failure, git missing from PATH included, reads as not ignored. Asked here, not in the facts:
+    # the plain install's second call follows a copy loop that may have just installed that file.
     $ignored = $false
     if (-not $Facts.InRepo) {
-        $claudeIgnore = Join-Path (Join-Path $Facts.AbsTarget '.claude') '.gitignore'
-        if (Test-Path -LiteralPath $claudeIgnore -PathType Leaf) {
-            $lines = @([string](Get-Content -LiteralPath $claudeIgnore -Raw) -split "`n" | ForEach-Object { $_.TrimEnd([char]13) })
-            $ignored = $lines -ccontains '.harness-manifest.local.json'
+        $claudeAbs = Join-Path $Facts.AbsTarget '.claude'
+        if (Test-Path -LiteralPath $claudeAbs -PathType Container) {
+            # The only path the finally block may remove: a fresh GUID-named child of the temp
+            # directory, removed only once New-Item has created it in this call.
+            $probeGitDir = Join-Path ([IO.Path]::GetTempPath()) ('harness-sidecar-probe-' + [guid]::NewGuid().ToString('N'))
+            $probeCreated = $false
+            try {
+                $null = New-Item -ItemType Directory -Path $probeGitDir -ErrorAction Stop
+                $probeCreated = $true
+                & git init -q --bare --template= -- $probeGitDir 1>$null 2>$null
+                if ($LASTEXITCODE -eq 0) {
+                    & git -C $claudeAbs "--git-dir=$probeGitDir" "--work-tree=$claudeAbs" -c core.excludesFile= check-ignore -q -- .harness-manifest.local.json 1>$null 2>$null
+                    $ignored = ($LASTEXITCODE -eq 0)
+                }
+            }
+            catch {
+                $ignored = $false
+            }
+            finally {
+                if ($probeCreated) {
+                    Remove-Item -LiteralPath $probeGitDir -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
         }
     }
     if ($Facts.InRepo -and $null -ne $Facts.Tracked) {
@@ -808,6 +836,10 @@ function Invoke-SidecarPlan {
     param($Plan, $Sidecar)
 
     if ($Plan.Action -eq 'write') {
+        # round-6: with neither field there is nothing to persist. A `{}` file passes the drift
+        # hook's missing-sidecar check and silences its "sidecar unavailable" advisory, so an
+        # -Accept, -Unaccept or -Prune with no sidecar and no legacy fields leaves the file absent.
+        if (-not ($Sidecar.Contains('coreRepo') -or $Sidecar.Contains('stackDetected'))) { return $false }
         $Sidecar | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $Plan.Facts.SidecarAbs
         return $true
     }
