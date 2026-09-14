@@ -83,6 +83,20 @@
     warning -- never "check nothing", since the derived username arm runs either way. Malformed
     JSON throws rather than degrading the gate silently.
 
+.PARAMETER PersonalTermsFile
+    JSON listing strings the operator wants kept out of the public payload that are not
+    identity strings -- project names and similar -- plus MCP servers to leave out entirely:
+
+        { "terms": ["some project"], "excludeMcpServers": ["some-server"] }
+
+    Defaults to $HOME/.claude-personal-terms.json, outside both this repo and ~/.claude for the
+    reason -IdentityFile gives. Required, unlike -IdentityFile: a missing, empty or malformed list
+    refuses the export, because no term can be derived from the environment the way the username
+    can, so an absent list would mean checking nothing. A term anywhere in a payload file's text or
+    path, case-insensitive, refuses the export without printing the term. A server named in
+    excludeMcpServers is dropped before mcp-servers.json is written, and its mcp__<name> permission
+    strings are dropped from settings.account.json.
+
 .PARAMETER SkipSettings
     Skip the settings.account.json rewrite. Test seam.
 
@@ -127,6 +141,7 @@ param(
     [string]$HomeSlug,
     [string]$AccountUser,
     [string]$IdentityFile,
+    [string]$PersonalTermsFile,
     [switch]$SkipSettings,
     [switch]$SkipMcp,
     [switch]$Force
@@ -357,6 +372,57 @@ function New-IdentityCheck {
 $identityChecks = @(New-IdentityCheck -Class 'workstation username' -Value $AccountUser) +
     @(New-IdentityCheck -Class 'declared name' -Value $declaredNames) +
     @(New-IdentityCheck -Class 'declared email' -Value $declaredEmails)
+
+# --- personal terms (#147) ---------------------------------------------------
+# Terms the operator wants kept out of the public payload that are not identity strings, and MCP
+# servers to leave out whole. Loaded before the first copy for the same reason the identity file
+# is, but NOT on its warn-and-continue pattern: the identity gate keeps its derived username arm
+# when its file is absent, and this gate has no such arm, so an absent or empty list would resolve
+# the gate to zero checks. Missing, empty, malformed and "declares no terms" all refuse.
+#
+# No message below prints a term, and none includes ConvertFrom-Json's own error text, which can
+# quote the token it choked on.
+if (-not $PersonalTermsFile) { $PersonalTermsFile = Join-Path $HOME '.claude-personal-terms.json' }
+$termsHelp = 'Its shape is {"terms":["..."],"excludeMcpServers":["..."]}; fix it, or pass -PersonalTermsFile.'
+if (-not (Test-Path -LiteralPath $PersonalTermsFile -PathType Leaf)) {
+    throw "No personal-terms list at '$PersonalTermsFile'. The export refuses without one: no term can be derived from the environment, so a missing list would mean checking nothing. $termsHelp"
+}
+$termsRaw = Get-Content -LiteralPath $PersonalTermsFile -Raw
+if ([string]::IsNullOrWhiteSpace($termsRaw)) {
+    throw "Personal-terms list '$PersonalTermsFile' is empty. $termsHelp"
+}
+try { $termsDoc = $termsRaw | ConvertFrom-Json -ErrorAction Stop }
+catch { throw "Personal-terms list '$PersonalTermsFile' is not valid JSON. $termsHelp" }
+if ($termsDoc -isnot [System.Management.Automation.PSCustomObject]) {
+    throw "Personal-terms list '$PersonalTermsFile' is not a JSON object. $termsHelp"
+}
+function Get-PersonalTermsArray {
+    param($Doc, [string]$Key, [string]$File, [switch]$Required)
+    $prop = $Doc.PSObject.Properties[$Key]
+    if (-not $prop) {
+        if ($Required) { throw "Personal-terms list '$File' has no '$Key' array. $termsHelp" }
+        return
+    }
+    if ($prop.Value -isnot [System.Array]) {
+        throw "Personal-terms list '$File': '$Key' is not an array. $termsHelp"
+    }
+    foreach ($v in $prop.Value) {
+        # A blank term would match every file; a non-string one matches nothing. Both refuse.
+        if ($v -isnot [string] -or [string]::IsNullOrWhiteSpace($v)) {
+            throw "Personal-terms list '$File': '$Key' holds an entry that is not a non-blank string (the entry is not printed). $termsHelp"
+        }
+    }
+    return $prop.Value
+}
+$personalTerms = @(Get-PersonalTermsArray -Doc $termsDoc -Key 'terms' -File $PersonalTermsFile -Required)
+if ($personalTerms.Count -eq 0) {
+    throw "Personal-terms list '$PersonalTermsFile' declares no terms. A list naming nothing protects nothing. $termsHelp"
+}
+$excludedMcpServers = @(Get-PersonalTermsArray -Doc $termsDoc -Key 'excludeMcpServers' -File $PersonalTermsFile)
+# Matches a permission string naming an excluded server: `mcp__<name>` alone or `mcp__<name>__<tool>`.
+$excludedMcpPermission = if ($excludedMcpServers.Count -gt 0) {
+    '^mcp__(?:' + (($excludedMcpServers | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')(?:__|$)'
+} else { $null }
 
 # The redaction is narrower than the gate on purpose, and this lookbehind is the whole of that
 # narrowing: the username only where a path separator puts it in a profile directory position.
@@ -612,6 +678,16 @@ if (-not $SkipSettings) {
                 if ($excludedSkillNames -contains $name) {
                     $settings.skillOverrides.PSObject.Properties.Remove($name)
                 }
+            }
+        }
+
+        # #147: dropping a server from mcp-servers.json below still leaves its name in every
+        # `mcp__<name>...` permission string, the same name-shaped leak skillOverrides had above.
+        # Every array under permissions, not only allow/ask/deny by name, so a new list key is
+        # covered without an edit here.
+        if ($excludedMcpPermission -and $settings.permissions) {
+            foreach ($list in @($settings.permissions.PSObject.Properties | Where-Object { $_.Value -is [System.Array] })) {
+                $list.Value = @(@($list.Value) | Where-Object { -not ($_ -is [string] -and $_ -match $excludedMcpPermission) })
             }
         }
 
@@ -877,6 +953,17 @@ if (-not $SkipMcp) {
             # collection is never $null even when empty -- only the .Name projection off it is.
             $serverNames = @($servers.PSObject.Properties.Name) | Where-Object { $_ }
 
+            # #147: excluded servers leave $servers here, before the gate loop and the write.
+            # Filtered after the write instead, an excluded server whose name is also a listed term
+            # would reach mcp-servers.json and abort the whole export at the whole-payload scan
+            # rather than being dropped. The count is printed; the names are not.
+            $excludedHere = @($serverNames | Where-Object { $_ -and $excludedMcpServers -contains $_ })
+            foreach ($name in $excludedHere) { $servers.PSObject.Properties.Remove($name) }
+            $serverNames = @($serverNames | Where-Object { $_ -and $excludedMcpServers -notcontains $_ })
+            if ($excludedHere.Count -gt 0) {
+                Write-Host "  mcp-servers.json: $($excludedHere.Count) server(s) excluded by the personal-terms list"
+            }
+
             # Fold and gate in one pass. The gate throws before anything is written, so a failed
             # export leaves no half-written file for someone to commit.
             foreach ($name in $serverNames) {
@@ -1019,7 +1106,7 @@ if (-not $WhatIfPreference) {
     # case-insensitive default would widen the gate past the boundary this is here to add.
     #
     # $WslHome is already trimmed of whitespace and of a trailing '/' (`TrimEnd('/')`) by the
-    # validation at :215-221, which also refuses a supplied value that does not name an absolute
+    # validation at :230-236, which also refuses a supplied value that does not name an absolute
     # POSIX directory. So the only thing left to distinguish here is present from absent. A
     # trailing slash would otherwise make the escaped literal end in '/', the boundary would
     # demand a second separator that a real path never has ('/home/user//launcher.sh' does not
@@ -1042,6 +1129,16 @@ if (-not $WhatIfPreference) {
     # $outputRootFull, not $OutputRoot: FullName below is absolute, and -OutputRoot may be
     # relative, so the Substring that builds $rel has to be taken against the resolved root.
     foreach ($f in @(Get-ChildItem -LiteralPath $outputRootFull -Recurse -File -Force)) {
+        $rel = ($f.FullName.Substring($outputRootFull.Length).TrimStart('\', '/')) -replace '\\', '/'
+
+        # #147, path half: checked before the binary skip, so an image's name is covered too.
+        # The message cannot name the file, because the file's path is what carries the term.
+        foreach ($term in $personalTerms) {
+            if ($rel.IndexOf($term, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                throw "Refusing to complete the export: a payload file's path carries a term from the personal-terms list '$PersonalTermsFile'. Neither the path nor the term is printed. Rename it at source under '$ClaudeHome', or exclude it in AccountShared.ps1, then re-run."
+            }
+        }
+
         # Skip binary files instead of text-decoding them. Get-Content -Raw decodes every byte of
         # skills/wiring-diagram/examples/'s two PNGs on every export, 600 KB between them, and a
         # decoded byte run that happened to match would abort the export pointing at an image the
@@ -1059,7 +1156,6 @@ if (-not $WhatIfPreference) {
         $body = Get-Content -LiteralPath $f.FullName -Raw
         # -Raw on an empty file yields $null, and there is nothing to redact or scan in one.
         if (-not $body) { continue }
-        $rel = ($f.FullName.Substring($outputRootFull.Length).TrimStart('\', '/')) -replace '\\', '/'
 
         if ($wslHomePattern -and $body -cmatch $wslHomePattern) {
             throw "Refusing to complete the export: '$rel' still carries the WSL home literal after folding. No fold pass covers {{WSL_HOME}} there -- Copy-AccountTree copies verbatim, and a templated file is folded only for the tokens its own AccountTemplatedFiles row names, none of which is WSL_HOME. Remove it at source, or add the file to AccountTemplatedFiles with a WSL_HOME row."
@@ -1094,6 +1190,16 @@ if (-not $WhatIfPreference) {
                 # WSL home is a path the operator must locate and edit, an identity string is one
                 # they already know and must not see copied around.
                 throw "Refusing to complete the export: '$rel' carries the $($check.Class). Identifying information must never reach a remote repository (security.md), and only a human can waive that -- this script cannot. The matched value is deliberately not printed. Remove it at source under '$ClaudeHome', then re-run."
+            }
+        }
+
+        # #147, content half. After redaction, like the identity gate, and a plain
+        # case-insensitive substring rather than that gate's word boundary: a listed term is a
+        # project name the operator chose, and `mcp__x_<term>__tool` or `<term>-mcp` must still
+        # fire. Naming $rel is safe here, because the path check above already passed.
+        foreach ($term in $personalTerms) {
+            if ($body.IndexOf($term, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                throw "Refusing to complete the export: '$rel' carries a term from the personal-terms list '$PersonalTermsFile'. The matched term is deliberately not printed. Remove it at source under '$ClaudeHome', or exclude the file in AccountShared.ps1, then re-run."
             }
         }
     }

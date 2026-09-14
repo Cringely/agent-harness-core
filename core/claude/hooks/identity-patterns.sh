@@ -721,3 +721,259 @@ identity_match() {
     [ -n "${IDENTITY_PATTERN:-}" ] || return 1
     printf '%s\n' "$1" | grep -qiE "$IDENTITY_PATTERN"
 }
+
+# --- personal-term channel (#147) ----------------------------------------
+# Terms the operator wants kept out of a public repo that are not identity
+# strings (project names and similar), read from a local-only JSON list:
+#   {"terms": ["..."], "excludeMcpServers": ["..."]}
+# install/Export-Account.ps1 reads the same file; these hooks use only
+# "terms".
+#
+# OPT-IN PER CLONE, through local git config `harness.personalTermsFile`,
+# not through a fixed path like the identity file. The list names one
+# operator's material, and this library ships to every project that
+# installs the harness and runs in CI; neither has the list, and neither
+# should refuse for lacking it. Unset: this channel is skipped, silently.
+# Set: a missing, empty, unparseable or term-less list refuses, because the
+# clone opted in and a list the gate cannot read would check nothing. Read
+# with --local so an environment or `-c` override cannot opt a clone out.
+#
+# COST (#113): one git config, one awk parse, one canary grep and one match
+# grep per hook invocation, whatever the number of terms. No subprocess per
+# term: the terms travel as one newline-separated -e pattern list, which
+# grep -F treats as one pattern per line.
+#
+# grep -iF, AGAINST THIS FILE'S "NEVER grep -F" HEADER, BUT NEVER BARE. The
+# 2026-09-05 abort that header records is Git Bash grep -iF exiting 134
+# without a UTF-8 locale. Every -F call here sets LC_ALL=C.UTF-8, never
+# tests grep with a bare `if`, and runs only after personal_terms_load's
+# canary proved the same invocation finds every listed term. A regex form
+# would need every term escaped, which is the per-term cost #113 names.
+#
+# No message here prints a term, the list's path, or a matched line.
+
+personal_terms_nl='
+'
+
+# Parses the list at $1 in one awk process. Prints each term on its own
+# line. Exit 0 parsed, 2 malformed, 3 an escape it will not decode, 4 no
+# "terms" array, 5 a blank term. Accepts only the flat shape above: one
+# object whose values are all arrays of strings. \uXXXX decodes only in
+# printable ASCII and \n \r \b \f not at all, for the reasons
+# identity_json_unescape gives. Backslash, quote, tab and CR come from
+# sprintf("%c") so this program carries no escape sequence of its own.
+personal_terms_parse() {
+    LC_ALL=C awk '
+function ws() {
+    while (p <= n) {
+        c = substr(s, p, 1)
+        if (c == " " || c == tab || c == nl || c == cr) p++
+        else break
+    }
+}
+function str(   out, c, e, h, i, d, cp) {
+    out = ""
+    p++
+    while (p <= n) {
+        c = substr(s, p, 1)
+        if (c == dq) { p++; return out }
+        if (c == bs) {
+            e = substr(s, p + 1, 1)
+            if (e == dq || e == bs || e == "/") { out = out e; p += 2; continue }
+            if (e == "t") { out = out tab; p += 2; continue }
+            if (e == "u") {
+                h = tolower(substr(s, p + 2, 4))
+                if (length(h) != 4) { err = 3; return "" }
+                cp = 0
+                for (i = 1; i <= 4; i++) {
+                    d = index(hex, substr(h, i, 1))
+                    if (d == 0) { err = 3; return "" }
+                    cp = cp * 16 + d - 1
+                }
+                if (cp < 32 || cp > 126) { err = 3; return "" }
+                out = out sprintf("%c", cp)
+                p += 6
+                continue
+            }
+            err = 3
+            return ""
+        }
+        if (c < " ") { err = 2; return "" }
+        out = out c
+        p++
+    }
+    err = 2
+    return ""
+}
+BEGIN {
+    bs = sprintf("%c", 92); dq = sprintf("%c", 34); tab = sprintf("%c", 9)
+    nl = sprintf("%c", 10); cr = sprintf("%c", 13); hex = "0123456789abcdef"
+}
+{ doc = doc $0 nl }
+END {
+    s = doc; n = length(s); p = 1; err = 0; nterms = -1
+    ws()
+    if (substr(s, p, 1) != "{") exit 2
+    p++
+    ws()
+    if (substr(s, p, 1) == "}") p++
+    else {
+        for (;;) {
+            ws()
+            if (substr(s, p, 1) != dq) exit 2
+            key = str()
+            if (err) exit err
+            ws()
+            if (substr(s, p, 1) != ":") exit 2
+            p++
+            ws()
+            if (substr(s, p, 1) != "[") exit 2
+            p++
+            count = 0
+            ws()
+            if (substr(s, p, 1) == "]") p++
+            else {
+                for (;;) {
+                    ws()
+                    if (substr(s, p, 1) != dq) exit 2
+                    v = str()
+                    if (err) exit err
+                    count++
+                    vals[count] = v
+                    ws()
+                    c = substr(s, p, 1)
+                    p++
+                    if (c == ",") continue
+                    if (c == "]") break
+                    exit 2
+                }
+            }
+            if (key == "terms") {
+                if (nterms >= 0) exit 2
+                nterms = count
+                for (i = 1; i <= count; i++) terms[i] = vals[i]
+            }
+            ws()
+            c = substr(s, p, 1)
+            p++
+            if (c == ",") continue
+            if (c == "}") break
+            exit 2
+        }
+    }
+    ws()
+    if (p <= n) exit 2
+    if (nterms < 0) exit 4
+    for (i = 1; i <= nterms; i++) {
+        t = terms[i]
+        blank = 1
+        for (j = 1; j <= length(t); j++) {
+            c = substr(t, j, 1)
+            if (c != " " && c != tab) { blank = 0; break }
+        }
+        if (blank) exit 5
+        print t
+    }
+    exit 0
+}' "$1"
+}
+
+# Three states, like identity_load: 0 loaded and proved, 1 opted in and
+# broken (message on stderr, caller refuses), 2 not opted in (silent).
+# Sets PERSONAL_TERMS to the newline-separated term list on 0.
+personal_terms_load() {
+    PERSONAL_TERMS=
+    personal_terms_file=$(git config --local --type=path --get harness.personalTermsFile 2>/dev/null)
+    personal_terms_rc=$?
+    case $personal_terms_rc in
+        0) : ;;
+        1) return 2 ;;
+        *)
+            echo "personal-term gate: could not read git config harness.personalTermsFile (git config exited $personal_terms_rc). Refusing rather than reading a config error as opted out." >&2
+            return 1
+            ;;
+    esac
+    if [ -z "$personal_terms_file" ]; then
+        echo "personal-term gate: git config harness.personalTermsFile is set but empty. Point it at the list, or unset it to opt this clone out." >&2
+        return 1
+    fi
+    if [ ! -f "$personal_terms_file" ] || [ ! -r "$personal_terms_file" ]; then
+        echo "personal-term gate: git config harness.personalTermsFile is set, but the file it names is missing or unreadable. Refusing: this clone opted in, and a list the gate cannot read checks nothing. Restore the file, or unset the key to opt this clone out." >&2
+        return 1
+    fi
+    if [ ! -s "$personal_terms_file" ]; then
+        echo "personal-term gate: the list named by git config harness.personalTermsFile is empty. A list naming nothing protects nothing." >&2
+        return 1
+    fi
+
+    personal_terms_list=$(personal_terms_parse "$personal_terms_file")
+    personal_terms_rc=$?
+    case $personal_terms_rc in
+        0) : ;;
+        3)
+            echo "personal-term gate: the list named by git config harness.personalTermsFile uses a JSON escape this parser will not decode (\\n, \\r, \\b, \\f, or \\uXXXX outside printable ASCII). Write the character itself. The entry is not printed." >&2
+            return 1
+            ;;
+        4)
+            echo "personal-term gate: the list named by git config harness.personalTermsFile has no \"terms\" array." >&2
+            return 1
+            ;;
+        5)
+            echo "personal-term gate: the list named by git config harness.personalTermsFile holds a blank term, which would match every line." >&2
+            return 1
+            ;;
+        *)
+            echo "personal-term gate: the list named by git config harness.personalTermsFile is not the JSON shape {\"terms\": [\"...\"]} (parser exited $personal_terms_rc). Refusing rather than checking less than it claims to." >&2
+            return 1
+            ;;
+    esac
+    if [ -z "$personal_terms_list" ]; then
+        echo "personal-term gate: the list named by git config harness.personalTermsFile declares no terms. A list naming nothing protects nothing." >&2
+        return 1
+    fi
+
+    # One canary line per term, matched in ONE grep -c against the whole
+    # list: the count must equal the number of terms. A grep that aborts
+    # (exit >1, empty count), answers "no match" to everything, or ignores
+    # the locale fails this before any scan is trusted.
+    personal_terms_canaries=
+    personal_terms_count=0
+    while IFS= read -r personal_term; do
+        [ -n "$personal_term" ] || continue
+        personal_terms_canaries="${personal_terms_canaries}${personal_terms_canaries:+$personal_terms_nl}personal-term-canary-${personal_term}-canary"
+        personal_terms_count=$((personal_terms_count + 1))
+    done <<EOF
+$personal_terms_list
+EOF
+    personal_terms_hits=$(printf '%s\n' "$personal_terms_canaries" | LC_ALL=C.UTF-8 grep -ciF -e "$personal_terms_list")
+    personal_terms_rc=$?
+    if [ "$personal_terms_rc" -gt 1 ] || [ "$personal_terms_hits" != "$personal_terms_count" ]; then
+        echo "personal-term gate: the matcher did not find the canary built from every listed term (grep exited $personal_terms_rc). grep is broken, shadowed on PATH, or aborting. Refusing rather than trusting a scan it cannot prove. No term is printed." >&2
+        return 1
+    fi
+
+    PERSONAL_TERMS=$personal_terms_list
+    return 0
+}
+
+# Returns grep's own status: 0 a term matched, 1 none, anything else the
+# scan failed. Callers must treat "anything else" as a refusal; a bare
+# `if personal_term_match` reads an abort as clean.
+personal_term_match() {
+    [ -n "${PERSONAL_TERMS:-}" ] || return 1
+    LC_ALL=C.UTF-8 grep -qiF -e "$PERSONAL_TERMS" <<EOF
+$1
+EOF
+}
+
+# $1 hook name, $2 what carries the term. Never the term itself.
+personal_term_refuse() {
+    echo "$1: refused. $2 carries a term from the personal-terms list (the file git config harness.personalTermsFile names). The matched term is deliberately not printed. Remove it, then retry." >&2
+    exit 1
+}
+
+# $1 hook name, $2 grep's exit status.
+personal_term_scan_failed() {
+    echo "$1: refused. The personal-term scan did not run cleanly (grep exited $2). Refusing rather than reading a failed scan as clean." >&2
+    exit 1
+}

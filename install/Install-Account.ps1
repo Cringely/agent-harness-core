@@ -71,7 +71,7 @@
 # $WhatIfPreference for the whole run. No explicit $PSCmdlet.ShouldProcess call is needed to
 # act on it: every write below (New-Item, Copy-Item) is a built-in cmdlet that already
 # implements ShouldProcess itself and reads $WhatIfPreference from the calling scope, the same
-# way Export-Account.ps1:111-117 already established for its own copy loop, down to the same
+# way Export-Account.ps1:125-131 already established for its own copy loop, down to the same
 # "ablating it left the -WhatIf test green" measurement.
 [CmdletBinding(PositionalBinding = $false, SupportsShouldProcess)]
 param(
@@ -109,7 +109,7 @@ if (-not $ClaudeJson)  { $ClaudeJson = Join-Path $HOME '.claude.json' }
 if (-not $PayloadRoot) { $PayloadRoot = Join-Path (Join-Path $repoRoot 'account') 'claude' }
 
 # GetUnresolvedProviderPathFromPSPath, not [System.IO.Path]::GetFullPath: see
-# Export-Account.ps1:232-240 for the full reasoning (GetFullPath resolves a relative path
+# Export-Account.ps1:247-255 for the full reasoning (GetFullPath resolves a relative path
 # "against the .NET process current directory", which Set-Location does not move, while
 # Copy-Item and New-Item resolve against $PWD instead). Canonicalising both paths here, before
 # anything reads or writes through either, is what makes Copy-PayloadTree's
@@ -135,7 +135,7 @@ $ClaudeJson  = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFrom
 # Review round 2 addendum: -PayloadRoot and -ClaudeHome must not be the same directory, or
 # nested inside each other. Copy-PayloadTree reads recursively from -PayloadRoot while writing
 # into -ClaudeHome, so either direction of nesting means the copy walks a tree it is
-# concurrently writing into. Same failure class Export-Account.ps1:249-252 guards against for its
+# concurrently writing into. Same failure class Export-Account.ps1:264-267 guards against for its
 # own -OutputRoot/-ClaudeHome pair ("the mirror deletes each allowlisted directory"), though the
 # shape of the damage differs there (containment would delete the live account layer; here it
 # would make the copy read from inside its own destination).
@@ -338,7 +338,7 @@ try {
         # Round 3: `& $chmod.Source` is a native executable, not a cmdlet, so it does not read
         # $WhatIfPreference on its own the way New-Item and Copy-Item above do. A dry run used to
         # chmod the real target's hooks anyway, the one write in this script -WhatIf did not
-        # actually prevent. Gated the same way Export-Account.ps1:656-660 gates its own
+        # actually prevent. Gated the same way Export-Account.ps1:732-736 gates its own
         # "not a built-in cmdlet that already honours -WhatIf on its own" plain-script-logic step.
         if ($PSCmdlet.ShouldProcess($ClaudeHome, 'chmod +x .sh hooks')) {
             $chmodFailed = $false
