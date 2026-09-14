@@ -82,18 +82,24 @@
     pin means the project owns the file; drop the pin first with -Unaccept). ceremony-ledger.json
     is refused too: it is live state core never shipped a source for, not an orphan of one it
     dropped. These are coherence checks now, not a safety boundary — nothing below them can
-    destroy anything.
+    destroy the pruned file.
 
-    Otherwise, drops the manifest record and nothing else. -Prune never deletes a file. Two
-    earlier designs did, and adversarial review executed a real file deletion against each one:
-    an automatic loop with an untrusted manifest key driving Remove-Item with no containment
-    check, then a standalone -Prune whose containment check was textual and never saw a
-    directory symlink placed inside .claude. A manifest key is untrusted, PR-modifiable input —
-    core/claude/hooks/session-start-drift-check.sh's own SECURITY block says so — and this
-    command no longer trusts it with anything sharper than a hashtable key removal. If the file
-    still exists on disk it is left exactly where it is, now untracked, which is what then lets
-    -Accept pin it as an overlay without a hand-edited manifest. Delete it yourself if it is
-    unwanted.
+    Otherwise, drops the manifest record and nothing else about the pruned file itself. -Prune's
+    own logic never deletes it. Two earlier designs did, and adversarial review executed a real
+    file deletion against each one: an automatic loop with an untrusted manifest key driving
+    Remove-Item with no containment check, then a standalone -Prune whose containment check was
+    textual and never saw a directory symlink placed inside .claude. A manifest key is untrusted,
+    PR-modifiable input — core/claude/hooks/session-start-drift-check.sh's own SECURITY block
+    says so — and this command no longer trusts it with anything sharper than a hashtable key
+    removal. If the file still exists on disk it is left exactly where it is, now untracked,
+    which is what then lets -Accept pin it as an overlay without a hand-edited manifest. Delete
+    it yourself if it is unwanted.
+
+    Every -Prune call still persists a legacy carry-forward through Save-Sidecar (see that
+    function), which is a separate mechanism from the pruned-file logic above and never touches
+    the pruned file. It can remove `.harness-manifest.local.json` itself when that sidecar is
+    stale and unprotected, gated by the same tracked-check-then-refuse-on-unknown rule described
+    there — never an unconditional delete.
 
 .PARAMETER Audit
     Report-only drift check; writes nothing. Three-way compare (core source vs
@@ -596,9 +602,57 @@ function Save-Sidecar {
     # fork never had it) must not sit on disk still holding an absolute host path just because
     # this run declined to refresh it. Removed, not merely warned about, and the fixed literal
     # path above is what gets removed -- never $Sidecar's content or anything else computed from
-    # untrusted input.
+    # untrusted input. But not unconditionally: see the tracked-check right below, which can
+    # leave it in place or refuse the whole run instead.
     $stalePresent = Test-Path -LiteralPath $sidecarAbs
-    if ($stalePresent) { Remove-Item -LiteralPath $sidecarAbs -Force }
+    if ($stalePresent) {
+        # round-3 R2-1: before deleting an existing sidecar, ask git whether the path is already
+        # TRACKED -- staged or committed -- not merely whether it is currently ignored. A sidecar
+        # force-added before this gate existed, or staged by hand, still has an index entry after
+        # the working-tree copy is removed here, and that entry -- with whatever machine fields
+        # it was staged or committed with -- reaches the next plain `git commit` untouched. `git
+        # ls-files --error-unmatch` is the same primitive `git status` itself uses to answer
+        # tracked-vs-untracked, so it is the source of truth here for the same reason
+        # `check-ignore` is above.
+        #
+        # Measured live against a real repo (2026-09-14): a staged-only file and a committed file
+        # both exit 0; an untracked file, and a path that never existed, both exit 1 with "did not
+        # match any file(s) known to git" on stderr; GIT_TEST_ASSUME_DIFFERENT_OWNER=1 (round-2
+        # F1's dubious-ownership reproduction) exits 128 with "fatal: detected dubious ownership."
+        # 0 and 1 are the only answers; everything else -- 128, any other fatal exit, or the
+        # CommandNotFoundException a missing git binary throws -- is "cannot tell."
+        $tracked = $null
+        try {
+            & git -C $absTarget ls-files --error-unmatch -- $sidecarAbs 1>$null 2>$null
+            if ($LASTEXITCODE -eq 0) { $tracked = $true }
+            elseif ($LASTEXITCODE -eq 1) { $tracked = $false }
+            # Any other exit code (128 dubious-ownership fatal, etc.): $tracked stays $null.
+        }
+        catch {
+            # git missing from PATH: same "cannot tell" as any other answer git could not give.
+        }
+
+        if ($null -eq $tracked) {
+            # round-3 R2-2 (owner ruling, 2026-09-14): git cannot say whether the sidecar is
+            # tracked. Guessing either way is wrong -- deleting risks exactly the leak R2-1 exists
+            # to close if the untold answer was actually "tracked"; silently leaving it risks an
+            # unprotected copy nobody was told about. Refuse the whole run instead: thrown, not
+            # returned, so it reaches every caller as a hard stop strictly before that caller's
+            # own next write -- settings.json and the committed manifest in a plain install, both
+            # still unwritten at this point in the script. (-Accept/-Unaccept/-Prune each write
+            # their own manifest change before calling this function; this cannot undo that, but
+            # it still stops before this function, or its caller, writes anything further.)
+            throw "Refusing to touch the machine-specific sidecar ('.claude/.harness-manifest.local.json') at ${sidecarAbs}: git could not confirm whether it is already tracked (dubious ownership, git missing from PATH, or another unexpected result), and it is not confirmed ignored either. Deleting it on an unknown answer risks publishing a tracked copy's index entry; nothing was deleted or written, and the file is exactly as it was. Resolve the git error (for a dubious-ownership refusal: git config --global --add safe.directory <path>) and re-run the installer."
+        }
+
+        if ($tracked) {
+            Write-Warning "Not removing the machine-specific sidecar ('.claude/.harness-manifest.local.json') at ${sidecarAbs}: git does not confirm it is ignored, and the file is already tracked (staged or committed), so deleting only the working-tree copy would leave the index entry -- and whatever it holds -- to reach the next commit untouched. It was left exactly as it was, not removed. Untrack it first: git rm --cached .claude/.harness-manifest.local.json -- then fix '.claude/.gitignore' so it covers '.harness-manifest.local.json' and re-run the installer."
+            return $false
+        }
+
+        # Confirmed untracked and not ignored: safe to remove. round-2 F2's case.
+        Remove-Item -LiteralPath $sidecarAbs -Force
+    }
     $staleNote = if ($stalePresent) { " An existing sidecar was removed: it was not confirmed ignored and still held an absolute host path." } else { '' }
     Write-Warning "Skipping the machine-specific sidecar ('.claude/.harness-manifest.local.json'): git does not confirm it is ignored, so writing it here risks a future 'git add' committing an absolute host path.$staleNote Fix '.claude/.gitignore' so it covers '.harness-manifest.local.json' (-Accept '.gitignore' pins the CURRENT fork as-is -- it does not add the missing line for you -- and -Force overwrites EVERY differing managed file with core's version, not only this one, discarding any of your own lines in them), or add an equivalent ignore rule elsewhere (a root .gitignore, .git/info/exclude), then re-run the installer. If this file is already tracked in git (for example, force-added before this check existed), untrack it first: git rm --cached .claude/.harness-manifest.local.json"
     return $false
@@ -695,11 +749,13 @@ if ($Unaccept) {
 # check before deleting, where the check turned out to be textual
 # (GetUnresolvedProviderPathFromPSPath plus GetRelativePath on unresolved strings, so it never
 # resolves a reparse point) and a directory symlink placed inside .claude walked Remove-Item
-# straight past it to a target the check never saw. -Prune now contains no delete primitive: it
-# only ever removes a key from $manifest['files'], which cannot destroy anything no matter what
-# the key resolves to. That closes the whole class rather than the instances -- a traversal or
-# symlink key can still slip the checks below, but the worst it now does is drop a manifest
-# record that was already sitting in the manifest, which harms nothing.
+# straight past it to a target the check never saw. The pruned-file logic below now contains no
+# delete primitive of its own: it only ever removes a key from $manifest['files'], which cannot
+# destroy anything no matter what the key resolves to. That closes the whole class rather than
+# the instances -- a traversal or symlink key can still slip the checks below, but the worst it
+# now does is drop a manifest record that was already sitting in the manifest, which harms
+# nothing. (The Save-Sidecar call further down is a separate mechanism, gated on its own
+# tracked-check, and never acts on $pruneKey or $prunePath.)
 if ($Prune) {
     # Literal key first, canonicalized second -- exactly -Unaccept's lookup at the branch above.
     # A manifest key can outlive the path resolving that way at all (hand-edited, carried in from

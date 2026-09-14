@@ -92,8 +92,11 @@ a second file instead, `.claude/.harness-manifest.local.json`. The installer kee
 a commit by checking, with `git check-ignore`, that the target's own `.claude/.gitignore` actually
 covers it before every write, rather than assuming that installing its `.gitignore` template
 already took care of it. A target whose `.claude/.gitignore` predates this file, or forked it
-without the ignore line, gets a warning instead of a silently unprotected sidecar, and any stale
-copy already on disk is removed. `session-start-drift-check.sh` reads `coreRepo` from the sidecar
+without the ignore line, gets a warning instead of a silently unprotected sidecar. Any stale copy
+already on disk is removed too, but only once git confirms it is not tracked; a copy already
+staged or committed is left exactly where it is, with a warning naming `git rm --cached`, and a
+git that cannot answer at all (dubious ownership, git missing) makes the installer refuse the
+whole run rather than guess. `session-start-drift-check.sh` reads `coreRepo` from the sidecar
 to find core without an environment variable; when the sidecar is missing but the committed
 manifest exists (an install ran, but the write was refused), the hook and `-Audit` each print one
 line saying so instead of going quiet. A project that installed an earlier version of this layer
@@ -118,16 +121,21 @@ touches the file itself.
 `-Prune <relpath>` retires a manifest key for a file core no longer ships. It refuses a key core
 still ships (that is not an orphan), a key pinned in `accepted` (drop the pin with `-Unaccept`
 first, since a pin means the project owns the file), and `ceremony-ledger.json` (live state core
-never shipped a source for). Otherwise it drops the manifest record and nothing else: the file, if
-one is still there, is left exactly where it is, now untracked, which is what then lets `-Accept`
-pin it as an overlay. `-Prune` carries no delete primitive at all. Two earlier designs deleted a
-file, and adversarial review executed a real deletion against both: an automatic loop that pruned
-every orphaned key on every install, where an untrusted manifest key like `../../victim.txt`
-carrying that file's real hash drove `Remove-Item` with no containment check; and a standalone
-`-Prune` that resolved its argument through a containment check before deleting, where the check
-turned out to be textual and never resolved a reparse point, so a directory symlink placed inside
-`.claude` walked `Remove-Item` straight past it. A manifest key is untrusted, PR-modifiable input,
-and this command no longer trusts it with anything sharper than a hashtable key removal.
+never shipped a source for). Otherwise it drops the manifest record and nothing else about the
+pruned file: that file, if one is still there, is left exactly where it is, now untracked, which
+is what then lets `-Accept` pin it as an overlay. The pruned-file logic carries no delete
+primitive at all. Two earlier designs deleted a file, and adversarial review executed a real
+deletion against both: an automatic loop that pruned every orphaned key on every install, where an
+untrusted manifest key like `../../victim.txt` carrying that file's real hash drove `Remove-Item`
+with no containment check; and a standalone `-Prune` that resolved its argument through a
+containment check before deleting, where the check turned out to be textual and never resolved a
+reparse point, so a directory symlink placed inside `.claude` walked `Remove-Item` straight past
+it. A manifest key is untrusted, PR-modifiable input, and this command no longer trusts it with
+anything sharper than a hashtable key removal. (Every `-Prune` call still persists a legacy
+carry-forward through the same sidecar write a plain install makes; that write can remove
+`.harness-manifest.local.json` itself when it is stale and confirmed untracked, and refuses the
+whole run instead of guessing when git cannot confirm either way (see the sidecar paragraph
+above). It is a separate mechanism from the pruned-file logic and never touches the pruned file.)
 
 `-Audit` writes nothing and reports drift in both directions, using a three-way compare of core
 source, the manifest hash, and the installed file: `project-modified` and `untracked (differs from

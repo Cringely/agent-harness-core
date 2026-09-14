@@ -396,11 +396,50 @@ describe("sidecar gitignore protection — round 2 findings", () => {
       expect(result.exitCode).toBe(0);
       expect(result.stdout.toString()).toContain("Skipping the machine-specific sidecar");
       expect(sidecarExists(dir)).toBe(false);
-      // Confirmed with a normal git (no simulated ownership mismatch): the sidecar genuinely
-      // would not have been ignored, so refusing was the correct call and not an artifact of
-      // the simulated failure suppressing everything downstream of it.
-      expect(checkIgnored(dir)).toBe(false);
+      // No `checkIgnored(dir) === false` assertion here (round-3 fix): git check-ignore's answer
+      // in this fixture is a fixed property of .claude/.gitignore's content, which nothing in
+      // this run touches, so it reads the same value whether Save-Sidecar's ownership handling
+      // is correct or broken. It cannot fail on a regression this test exists to catch, only
+      // `sidecarExists`/`expectSidecarInvariant` below can. The (F1/R2-2) case right after this
+      // one is where a dubious-ownership run interacts with a sidecar already on disk, and it
+      // asserts byte-identical content instead, which genuinely can fail.
       expectSidecarInvariant(dir);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  // F1, round 3 (R2-2): the same dubious-ownership failure as above, but now with a real sidecar
+  // already on disk from an earlier install and its ignore coverage since dropped -- the state
+  // round-2's F2 fix would otherwise delete unconditionally. Round-3 must refuse the whole run
+  // instead: a git that cannot say "ignored" here cannot say "tracked" either (both calls hit the
+  // same dubious-ownership fatal), and deleting on that unknown answer is the exact leak R2-1
+  // exists to close. Byte-identical content is the assertion able to fail -- unlike
+  // `checkIgnored`, it changes under either regression this reproduces: an unconditional delete
+  // (round-2 F2's original bug) leaves no file to compare, and a misread "not a repo" (round-2
+  // F1's original bug, still reachable here since in-repo detection is call-order-independent)
+  // overwrites it with fresh content instead of refusing.
+  test.skipIf(!pwshPath || !dubiousOwnershipSupported)(
+    "(F1/R2-2) git that refuses ownership, with a real stale sidecar already on disk: whole run refused, file byte-identical",
+    () => {
+      const dir = freshRepo();
+      const install1 = runInstall(dir);
+      expect(install1.exitCode).toBe(0);
+      expect(sidecarExists(dir)).toBe(true);
+      expect(checkIgnored(dir)).toBe(true);
+
+      // Drop the ignore coverage, exactly like (F2), so the next run sees "not confirmed
+      // ignored" and would otherwise reach the stale-sidecar removal branch.
+      writeFileSync(join(dir, GITIGNORE_REL), "# operator trimmed it\nother-line\n");
+      expect(checkIgnored(dir)).toBe(false);
+      const sidecarBefore = readFileSync(join(dir, SIDECAR_REL));
+
+      const result = runInstall(dir, [], { extraEnv: { GIT_TEST_ASSUME_DIFFERENT_OWNER: "1" } });
+      expect(result.exitCode).not.toBe(0);
+      const combined = result.stdout.toString() + result.stderr.toString();
+      expect(combined).toContain("Refusing to touch the machine-specific sidecar");
+      expect(combined).toContain(".harness-manifest.local.json");
+      expect(sidecarExists(dir)).toBe(true);
+      expect(readFileSync(join(dir, SIDECAR_REL))).toEqual(sidecarBefore);
     },
     INSTALL_TIMEOUT_MS,
   );
@@ -596,6 +635,111 @@ describe("sidecar gitignore protection — round 2 findings", () => {
       const out = audit.stdout.toString();
       expect(out).toContain("Stack drift: not recorded");
       expect(out).not.toContain("newly detected");
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+});
+
+describe("sidecar gitignore protection — round 3 findings (R2-1, R2-2)", () => {
+  // R2-1: a sidecar already staged (force-added before this gate existed, or staged by hand)
+  // must never be deleted here -- the working-tree copy going away leaves the index entry, and
+  // whatever it holds, to reach the next plain `git commit` untouched. Round-2's F2 fix deleted
+  // unconditionally once "not confirmed ignored," which is exactly wrong for a file git itself
+  // still considers tracked.
+  test.skipIf(!pwshPath)(
+    "(R2-1) sidecar staged (force-added) before .gitignore lost coverage: left in place, warned, byte-identical",
+    () => {
+      const dir = freshRepo();
+      expect(runInstall(dir).exitCode).toBe(0);
+      expect(sidecarExists(dir)).toBe(true);
+      expect(checkIgnored(dir)).toBe(true);
+
+      const add = git(["add", "-f", "--", SIDECAR_REL], dir);
+      expect(add.exitCode).toBe(0);
+      const stagedBefore = git(["diff", "--cached", "--name-only"], dir).stdout.toString();
+      expect(stagedBefore).toContain(SIDECAR_REL.replace(/\\/g, "/"));
+
+      writeFileSync(join(dir, GITIGNORE_REL), "# operator trimmed it\nother-line\n");
+      expect(checkIgnored(dir)).toBe(false);
+      const sidecarBefore = readFileSync(join(dir, SIDECAR_REL));
+
+      const result = runInstall(dir);
+      expect(result.exitCode).toBe(0);
+      const out = result.stdout.toString();
+      expect(out).toContain("Not removing the machine-specific sidecar");
+      expect(out).toContain("git rm --cached .claude/.harness-manifest.local.json");
+      expect(sidecarExists(dir)).toBe(true);
+      expect(readFileSync(join(dir, SIDECAR_REL))).toEqual(sidecarBefore);
+      // The index entry this fix exists to protect must survive the run too.
+      const stagedAfter = git(["diff", "--cached", "--name-only"], dir).stdout.toString();
+      expect(stagedAfter).toContain(SIDECAR_REL.replace(/\\/g, "/"));
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  // R2-1, committed case: `git ls-files --error-unmatch` answers "tracked" the same way for a
+  // committed file as for a staged one, and the fix must not special-case either.
+  test.skipIf(!pwshPath)(
+    "(R2-1) sidecar committed before .gitignore lost coverage: left in place, warned, byte-identical",
+    () => {
+      const dir = freshRepo();
+      expect(runInstall(dir).exitCode).toBe(0);
+      expect(sidecarExists(dir)).toBe(true);
+
+      expect(git(["add", "-f", "--", SIDECAR_REL], dir).exitCode).toBe(0);
+      // F12 isolates global/system config out entirely, so this repo has no committer identity
+      // configured; supply one inline rather than mutating the isolated global config.
+      const commit = git(
+        ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "force-add the sidecar"],
+        dir,
+      );
+      expect(commit.exitCode).toBe(0);
+
+      writeFileSync(join(dir, GITIGNORE_REL), "# operator trimmed it\nother-line\n");
+      expect(checkIgnored(dir)).toBe(false);
+      const sidecarBefore = readFileSync(join(dir, SIDECAR_REL));
+
+      const result = runInstall(dir);
+      expect(result.exitCode).toBe(0);
+      const out = result.stdout.toString();
+      expect(out).toContain("Not removing the machine-specific sidecar");
+      expect(out).toContain("git rm --cached .claude/.harness-manifest.local.json");
+      expect(sidecarExists(dir)).toBe(true);
+      expect(readFileSync(join(dir, SIDECAR_REL))).toEqual(sidecarBefore);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  // R2-2 (owner ruling, 2026-09-14): git missing from PATH is "cannot tell" at its plainest,
+  // reproduced here with a real stale sidecar on disk -- unlike (F4) above, which never reaches
+  // the tracked-check at all because nothing exists yet to delete on a first install. Every git
+  // call the tracked-check makes throws, so this must refuse the whole run rather than guess:
+  // non-zero exit, the sidecar (and everything else this run would have written) untouched.
+  test.skipIf(!pwshPath || !gitTrulyHidden)(
+    "(R2-2) git missing from PATH, with a real stale sidecar already on disk: whole run refused, file byte-identical",
+    () => {
+      const dir = freshRepo();
+      expect(runInstall(dir).exitCode).toBe(0);
+      expect(sidecarExists(dir)).toBe(true);
+      expect(checkIgnored(dir)).toBe(true);
+
+      writeFileSync(join(dir, GITIGNORE_REL), "# operator trimmed it\nother-line\n");
+      expect(checkIgnored(dir)).toBe(false);
+      const sidecarBefore = readFileSync(join(dir, SIDECAR_REL));
+      const manifestBefore = readFileSync(join(dir, MANIFEST_REL));
+      const settingsBefore = readFileSync(join(dir, ".claude", "settings.json"));
+
+      const result = runInstall(dir, [], { extraEnv: { PATH: strippedPath! } });
+      expect(result.exitCode).not.toBe(0);
+      const combined = result.stdout.toString() + result.stderr.toString();
+      expect(combined).toContain("Refusing to touch the machine-specific sidecar");
+      expect(combined).toContain(".harness-manifest.local.json");
+      expect(sidecarExists(dir)).toBe(true);
+      expect(readFileSync(join(dir, SIDECAR_REL))).toEqual(sidecarBefore);
+      // The refusal is thrown before this run's caller reaches its own next write, so neither
+      // of these should have moved either.
+      expect(readFileSync(join(dir, MANIFEST_REL))).toEqual(manifestBefore);
+      expect(readFileSync(join(dir, ".claude", "settings.json"))).toEqual(settingsBefore);
     },
     INSTALL_TIMEOUT_MS,
   );
