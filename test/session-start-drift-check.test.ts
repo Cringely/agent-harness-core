@@ -3,10 +3,11 @@
 // hook is a POSIX shell script with no exported core to unit test, so every case
 // builds a real project, runs a real install, and runs the hook through `sh`.
 //
-// ADVISORY, NOT A GATE. CONTRIBUTING.md:43 asks anything under core/claude/hooks/ for a
-// case asserting a DENY. This hook has no denial to assert: it runs on SessionStart,
-// where no tool call is pending, and its only output is one line of text on stdout —
-// there is no permissionDecision, no non-zero exit, nothing that can refuse anything.
+// ADVISORY, NOT A GATE. CONTRIBUTING.md:47-49 asks a hook that can refuse for a case
+// asserting a refusal, and lets a hook whose header says it "never blocks" pin that claim
+// instead. This hook has no denial to assert: it runs on SessionStart, where no tool call
+// is pending, and its only output is one line of text on stdout — there is no
+// permissionDecision, no non-zero exit, nothing that can refuse anything.
 // The standing assertion that replaces it is output shape, which is the whole contract:
 // a project in sync produces ZERO BYTES, and a project with drift produces exactly one
 // line. Both are measured in bytes rather than in lines, because a hook that printed a
