@@ -531,6 +531,37 @@ if (Test-Path -LiteralPath $sidecarPath) {
 if (-not $sidecar.Contains('coreRepo') -and $legacyCoreRepo) { $sidecar['coreRepo'] = $legacyCoreRepo }
 if (-not $sidecar.Contains('stackDetected') -and $legacyStackDetected) { $sidecar['stackDetected'] = $legacyStackDetected }
 
+# Shared gate for every place below that writes the sidecar (the plain-install refresh, and the
+# legacy carry-forward persisted by -Accept/-Unaccept/-Prune): an absolute host path and a
+# per-machine inventory must never land in a working tree git cannot be shown to ignore.
+# Install-ManagedFile can leave a pre-existing, differing .claude/.gitignore untouched
+# ('skipped-untracked' / 'skipped-modified') rather than overwriting an operator's fork, so
+# having attempted to install the ignore file earlier in this run is not proof the sidecar is
+# actually covered. `git check-ignore` is the mechanism `git add` itself consults, so it is the
+# source of truth here instead of re-parsing a file this script may have just declined to touch
+# -- it also credits an ignore rule declared elsewhere (a root .gitignore, .git/info/exclude)
+# without this needing to know either exists (issue #137's live-probe follow-up).
+function Save-Sidecar {
+    param($Sidecar, $Path, $TargetDir)
+
+    $ignored = $true
+    $null = & git -C $TargetDir rev-parse --git-dir 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        & git -C $TargetDir check-ignore -q -- $Path 2>$null
+        $ignored = ($LASTEXITCODE -eq 0)
+    }
+    # else: not a git repository (or git missing from PATH) -- nothing here can reach a commit,
+    # so the leak this check exists to prevent cannot occur, and the sidecar writes as before.
+
+    if ($ignored) {
+        $Sidecar | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $Path
+        return $true
+    }
+
+    Write-Warning "Skipping the machine-specific sidecar ('.harness-manifest.local.json'): git does not confirm it is ignored, so writing it here risks a future 'git add' committing an absolute host path. Fix '.claude/.gitignore' so it covers '.harness-manifest.local.json' (-Accept '.gitignore' or -Force will bring in core's version), or add an equivalent rule elsewhere (a root .gitignore, .git/info/exclude), then re-run the installer."
+    return $false
+}
+
 # The target's other piece of pre-existing state, read here beside the manifest because every mode
 # has to know what is already on disk before it decides anything. Invariant: the target's
 # settings.json parses before the first file is copied into the layer. A parse failure is recorded
@@ -574,7 +605,8 @@ if ($Accept) {
     # -Accept touches the manifest, not the sidecar's own values -- but a legacy carry-forward
     # above may have populated $sidecar in memory only, and this is the write that gives a
     # target upgrading via -Accept (rather than a plain re-install) a persisted sidecar too.
-    $sidecar | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $sidecarPath
+    # Gated the same as every other sidecar write: see Save-Sidecar.
+    $null = Save-Sidecar -Sidecar $sidecar -Path $sidecarPath -TargetDir $Target
     Write-Host "Accepted overlay '$acceptKey' pinned at $($manifest['accepted'][$acceptKey])."
     return
 }
@@ -605,8 +637,9 @@ if ($Unaccept) {
     $manifest['accepted'].Remove($unacceptKey)
     $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
     # See the matching comment in the -Accept block: persists a legacy carry-forward the
-    # in-memory $sidecar may hold even though -Unaccept itself never changes it.
-    $sidecar | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $sidecarPath
+    # in-memory $sidecar may hold even though -Unaccept itself never changes it. Gated the same
+    # as every other sidecar write: see Save-Sidecar.
+    $null = Save-Sidecar -Sidecar $sidecar -Path $sidecarPath -TargetDir $Target
     Write-Host "Dropped the accepted-overlay pin on '$unacceptKey'. The file itself was left alone; the audit now judges it against core again."
     return
 }
@@ -671,8 +704,9 @@ if ($Prune) {
     $manifest['files'].Remove($pruneKey)
     $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
     # See the matching comment in the -Accept block: persists a legacy carry-forward the
-    # in-memory $sidecar may hold even though -Prune itself never changes it.
-    $sidecar | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $sidecarPath
+    # in-memory $sidecar may hold even though -Prune itself never changes it. Gated the same as
+    # every other sidecar write: see Save-Sidecar.
+    $null = Save-Sidecar -Sidecar $sidecar -Path $sidecarPath -TargetDir $Target
 
     if (-not (Test-Path -LiteralPath $prunePath -PathType Leaf)) {
         Write-Host "Pruned manifest record '$pruneKey': already gone from disk."
@@ -1175,9 +1209,19 @@ $sidecar['stackDetected'] = [ordered]@{
 }
 Write-Host "Plugins detected: $($detectedPlugins.Count); output styles: $($detectedOutputStyles.Count); MCP servers: $($detectedMcpServers.Count)"
 
+# Installing manifest-local.gitignore above is not proof the sidecar just populated is actually
+# covered: Save-Sidecar re-verifies with git before writing it, and fails closed (warns, leaves
+# whatever was on disk alone) rather than persisting these two fields into a file git cannot be
+# shown to ignore.
+if (Save-Sidecar -Sidecar $sidecar -Path $sidecarPath -TargetDir $Target) {
+    $results.Add([pscustomobject]@{ File = '.harness-manifest.local.json'; Action = 'written' })
+}
+else {
+    $results.Add([pscustomobject]@{ File = '.harness-manifest.local.json'; Action = 'skipped-unprotected' })
+}
+
 $settings | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $settingsPath
 $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
-$sidecar | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $sidecarPath
 
 # Git hooksPath wiring. The Claude Code PostToolUse hooks above only see this
 # session's direct Write/Edit tool calls — a script-applied OLD/NEW patch
