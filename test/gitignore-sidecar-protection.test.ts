@@ -14,7 +14,7 @@
 // special-case where the rule came from.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -210,11 +210,12 @@ describe("sidecar gitignore protection", () => {
       const dir = freshRepo();
       mkdirSync(join(dir, ".claude"), { recursive: true });
       writeFileSync(join(dir, GITIGNORE_REL), "sentinel-keep-me\n");
-      // git init already created .git/info/exclude (empty or template comments); append rather
-      // than assume its prior content.
+      // git init already created .git/info/exclude (empty or template comments); appendFileSync
+      // creates it if that ever isn't true, rather than an existsSync-then-read-then-write
+      // sequence, which is the check-then-act race CodeQL flags on this path
+      // (js/file-system-race, the same reasoning as session-start-drift-check.test.ts:92-95).
       const excludePath = join(dir, ".git", "info", "exclude");
-      const existing = existsSync(excludePath) ? readFileSync(excludePath, "utf8") : "";
-      writeFileSync(excludePath, `${existing}\n.claude/.harness-manifest.local.json\n`);
+      appendFileSync(excludePath, "\n.claude/.harness-manifest.local.json\n");
 
       const result = runInstall(dir);
       expect(result.exitCode).toBe(0);
