@@ -143,7 +143,13 @@ export class AppTokenMinter implements TokenMinter {
     if (minted.repository_selection !== "selected") {
       throw new RefusalError(`refusing the minted token: repository_selection is ${JSON.stringify(minted.repository_selection)}, not "selected"`);
     }
-    if (Array.isArray(minted.repositories)) {
+    if (minted.repositories !== undefined) {
+      // F1: repository_selection alone is not the narrowing check; a present-but-malformed
+      // repositories field (null, a string, an array-like object) must not skip it. Only "absent"
+      // is licensed to skip; every other non-array shape refuses rather than falling through.
+      if (!Array.isArray(minted.repositories)) {
+        throw new RefusalError("refusing the minted token: repositories is present but not an array");
+      }
       const names = (minted.repositories as Array<Record<string, unknown>>).map((repository) => repository.name);
       if (names.length !== 1 || names[0] !== name) {
         throw new RefusalError("refusing the minted token: repositories does not name exactly the requested repository");
