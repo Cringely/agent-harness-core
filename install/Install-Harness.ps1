@@ -664,6 +664,13 @@ function Get-SidecarPlan {
             if (-not $parent -or $parent -eq $probe) { break }
             $probe = $parent
         }
+        # round-5: a location variable can define a repository no `.git` walk sees (GIT_DIR and
+        # GIT_WORK_TREE naming one elsewhere stage the sidecar with no .git near the target). Any
+        # of the four set counts as in a repository, so Test-GitAnswersForTarget decides whether
+        # git's answers count, and the cannot-answer rulings apply when they do not.
+        foreach ($name in @('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR')) {
+            if (Test-Path -LiteralPath "Env:$name") { $inRepo = $true }
+        }
 
         # round-3 R2-1: ask git whether the path is TRACKED -- staged or committed -- not merely
         # whether it is currently ignored. A sidecar force-added before this gate existed, or
@@ -718,7 +725,20 @@ function Get-SidecarPlan {
     # The ignored answer is trusted only from a git that has already answered the tracked question
     # cleanly for this target. Tracked files are never reported ignored, so a tracked sidecar
     # falls through to the tracked branches below.
-    $ignored = -not $Facts.InRepo
+    #
+    # round-5: with no repository there is no git to ask, and "nothing to protect" was the wrong
+    # reading, since a later `git init` stages whatever is on disk. The sidecar counts as ignored
+    # only when the target's own .claude/.gitignore carries core's exact line, which covers it the
+    # moment a repository appears. Read here, not into the facts: the plain install's second call
+    # follows a copy loop that may have just installed that file.
+    $ignored = $false
+    if (-not $Facts.InRepo) {
+        $claudeIgnore = Join-Path (Join-Path $Facts.AbsTarget '.claude') '.gitignore'
+        if (Test-Path -LiteralPath $claudeIgnore -PathType Leaf) {
+            $lines = @([string](Get-Content -LiteralPath $claudeIgnore -Raw) -split "`n" | ForEach-Object { $_.TrimEnd([char]13) })
+            $ignored = $lines -ccontains '.harness-manifest.local.json'
+        }
+    }
     if ($Facts.InRepo -and $null -ne $Facts.Tracked) {
         try {
             & git -C $Facts.AbsTarget check-ignore -q -- $Facts.SidecarAbs 2>$null

@@ -1,5 +1,5 @@
 // Live-process tests for the sidecar's gitignore protection (issue #137's live-probe follow-up).
-// A live probe against branch head 5c20650 found the installer writing
+// A live probe against branch head 1cecc2d found the installer writing
 // .claude/.harness-manifest.local.json (coreRepo, an absolute host path, plus a per-machine
 // plugin/MCP inventory) into a target whose .claude/.gitignore predates this feature and does
 // not cover it: Install-ManagedFile's "differs from core and is not tracked" branch leaves such
@@ -13,7 +13,7 @@
 // .gitignore) must count too, and check-ignore already sees it without this file needing to
 // special-case where the rule came from.
 //
-// ROUND 2 (findings F1-F12 against the round-1 fix at 80ab0b6): repo detection could be tricked
+// ROUND 2 (findings F1-F12 against the round-1 fix at b531e01): repo detection could be tricked
 // into "no repository here" by any git failure, not only a genuine non-repo (F1); a sidecar
 // stale from before the ignore rule broke was left on disk instead of removed (F2); a relative
 // -Target doubled onto itself when handed to `git -C` (F3); git missing from PATH threw instead
@@ -473,7 +473,7 @@ describe("sidecar gitignore protection — round 2 findings", () => {
   );
 
   // F3: a relative -Target must not have its check-ignore pathspec resolved twice against
-  // itself. Regression introduced by round 1 (5c20650, before any of this file's fix, could not
+  // itself. Regression introduced by round 1 (1cecc2d, before any of this file's fix, could not
   // have this bug: it never called `git -C $Target check-ignore` at all).
   test.skipIf(!pwshPath)(
     "(F3) relative -Target resolves check-ignore against the target, not doubled onto it",
@@ -958,6 +958,130 @@ describe("sidecar gitignore protection — round 4 findings (A, B, C, R2-2 scope
       expect(out).toContain("git rm --cached .claude/.harness-manifest.local.json");
       expect(sidecarExists(dir)).toBe(false);
       expect(git(["ls-files", "--error-unmatch", "--", SIDECAR_REL], dir).exitCode).toBe(0);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+});
+
+// Round 5. With no `.git` at or above the target, the plan counted the sidecar as ignored without
+// asking anything, so it was written unprotected in three reproduced cases: a forked
+// .claude/.gitignore in a plain directory, -Accept with no .claude/.gitignore at all, and a
+// repository named only by GIT_DIR/GIT_WORK_TREE. Each case below failed with the round-5
+// Install-Harness.ps1 change reverted.
+describe("sidecar gitignore protection — round 5 (targets with no .git on disk)", () => {
+  const CR = String.fromCharCode(13);
+  const LF = String.fromCharCode(10);
+
+  /** A plain directory that git does not see as a repository. */
+  function nonRepoDir(): string {
+    const dir = mkdtempSync(join(tmpdir(), "gitignore-sidecar-norepo-"));
+    tempDirs.push(dir);
+    expect(git(["rev-parse", "--git-dir"], dir).exitCode).not.toBe(0);
+    return dir;
+  }
+
+  /** A bare repository elsewhere, plus the environment that points git at it from `target`. */
+  function foreignGitEnv(target: string): Record<string, string> {
+    const holder = mkdtempSync(join(tmpdir(), "gitignore-sidecar-gitdir-"));
+    tempDirs.push(holder);
+    const gitDir = join(holder, "sep.git");
+    expect(git(["init", "-q", "--bare", gitDir], holder).exitCode).toBe(0);
+    return { GIT_DIR: gitDir, GIT_WORK_TREE: target };
+  }
+
+  test.skipIf(!pwshPath)(
+    "(R5-happy) no repository, core's .claude/.gitignore: sidecar written, and ignored once a repository appears",
+    () => {
+      const dir = nonRepoDir();
+      const result = runInstall(dir);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.toString()).not.toContain("Skipping the machine-specific sidecar");
+      expect(JSON.parse(readFileSync(join(dir, SIDECAR_REL), "utf8")).coreRepo).toBeTruthy();
+
+      expect(git(["init", "-q"], dir).exitCode).toBe(0);
+      expect(checkIgnored(dir)).toBe(true);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  test.skipIf(!pwshPath)(
+    "(R5-crlf) no repository, forked .claude/.gitignore with the line in CRLF: sidecar written",
+    () => {
+      const dir = nonRepoDir();
+      mkdirSync(join(dir, ".claude"), { recursive: true });
+      writeFileSync(join(dir, GITIGNORE_REL), `# fork${CR}${LF}.harness-manifest.local.json${CR}${LF}`);
+
+      const result = runInstall(dir);
+      expect(result.exitCode).toBe(0);
+      expect(sidecarExists(dir)).toBe(true);
+      expect(git(["init", "-q"], dir).exitCode).toBe(0);
+      expect(checkIgnored(dir)).toBe(true);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  test.skipIf(!pwshPath)(
+    "(R5-1) no repository, forked .claude/.gitignore lacking the line: sidecar not written, warned",
+    () => {
+      const dir = nonRepoDir();
+      mkdirSync(join(dir, ".claude"), { recursive: true });
+      writeFileSync(join(dir, GITIGNORE_REL), `sentinel-keep-me${LF}`);
+
+      const result = runInstall(dir);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.toString()).toContain("Skipping the machine-specific sidecar");
+      expect(readGitignore(dir)).toBe(`sentinel-keep-me${LF}`);
+      expect(sidecarExists(dir)).toBe(false);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  test.skipIf(!pwshPath)(
+    "(R5-2) no repository, -Accept with no .claude/.gitignore carrying a legacy coreRepo: sidecar not written, warned",
+    () => {
+      const dir = nonRepoDir();
+      expect(runInstall(dir).exitCode).toBe(0);
+      rmSync(join(dir, GITIGNORE_REL), { force: true });
+      rmSync(join(dir, SIDECAR_REL), { force: true });
+      writeFileSync(join(dir, ".claude", "agents", "zz-overlay.md"), `project fork${LF}`);
+      seedLegacyManifest(dir, { coreRepo: join(tmpdir(), "legacy-core") });
+
+      const accept = runInstall(dir, ["-Accept", "agents/zz-overlay.md"]);
+      expect(accept.exitCode).toBe(0);
+      expect(accept.stdout.toString()).toContain("Skipping the machine-specific sidecar");
+      expect(sidecarExists(dir)).toBe(false);
+      expect(JSON.parse(readFileSync(join(dir, MANIFEST_REL), "utf8")).accepted["agents/zz-overlay.md"]).toBeTruthy();
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  test.skipIf(!pwshPath)(
+    "(R5-3) GIT_DIR/GIT_WORK_TREE naming a repository with no .git near the target: sidecar not written, tracked state unknown",
+    () => {
+      const dir = nonRepoDir();
+      mkdirSync(join(dir, ".claude"), { recursive: true });
+      writeFileSync(join(dir, GITIGNORE_REL), `sentinel-keep-me${LF}`);
+
+      const result = runInstall(dir, [], { extraEnv: foreignGitEnv(dir) });
+      expect(result.stdout.toString()).toContain("its tracked state is unknown");
+      expect(sidecarExists(dir)).toBe(false);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  test.skipIf(!pwshPath)(
+    "(R5-3 on disk) GIT_DIR/GIT_WORK_TREE with a sidecar already on disk: whole run refused, file byte-identical",
+    () => {
+      const dir = nonRepoDir();
+      expect(runInstall(dir).exitCode).toBe(0);
+      expect(sidecarExists(dir)).toBe(true);
+      writeFileSync(join(dir, GITIGNORE_REL), `# operator trimmed it${LF}other-line${LF}`);
+      const sidecarBefore = readFileSync(join(dir, SIDECAR_REL));
+
+      const result = runInstall(dir, [], { extraEnv: foreignGitEnv(dir) });
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stdout.toString() + result.stderr.toString()).toContain("Refusing to touch the machine-specific sidecar");
+      expect(readFileSync(join(dir, SIDECAR_REL))).toEqual(sidecarBefore);
     },
     INSTALL_TIMEOUT_MS,
   );
