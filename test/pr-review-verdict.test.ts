@@ -182,6 +182,33 @@ describe("computeVerification()", () => {
       expect(result.state).toBe("incomplete");
     });
   });
+
+  // #148: a concurrency cancel-in-progress leaves a "cancelled" sibling on the same head as a
+  // completed success. That run carries no signal about the code, so it must not keep the check
+  // permanently incomplete once a completed success exists for the same check name + app.
+  describe("a cancelled run alongside a completed success for the same check (#148)", () => {
+    test.each([
+      ["success", "cancelled"],
+      ["cancelled", "success"],
+    ] as const)("conclusions [%s, %s]: passed, order does not matter", (first, second) => {
+      const result = verify(manyRuns(0, [{ conclusion: first }, { conclusion: second }]));
+      expect(result.state).toBe("passed");
+    });
+
+    // No success anywhere among that check's runs: the existing "cancelled: incomplete" case
+    // above (via withRun) already pins the single-run form of this; here two runs, still no
+    // success, still incomplete.
+    test("conclusions [cancelled, cancelled]: incomplete, no success to exempt it against", () => {
+      const result = verify(manyRuns(0, [{ conclusion: "cancelled" }, { conclusion: "cancelled" }]));
+      expect(result.state).toBe("incomplete");
+    });
+
+    // A real failure elsewhere in the same run set must not be hidden by the cancelled exemption.
+    test("conclusions [failure, cancelled] alongside a success: failed, not passed", () => {
+      const result = verify(manyRuns(0, [{ conclusion: "failure" }, { conclusion: "cancelled" }, { conclusion: "success" }]));
+      expect(result.state).toBe("failed");
+    });
+  });
 });
 
 describe("verificationOf() reads exactly the four fields from a PrSnapshot", () => {
