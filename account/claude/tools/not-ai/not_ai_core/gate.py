@@ -51,9 +51,28 @@ TABLE_SEPARATOR_RE = re.compile(r"^[\s|:-]+$")
 # Issue #122 defect 3, measured on the treatment corpus: 446 reported
 # contractions against 53 actual n't forms and 577 possessives -- the count
 # was mostly possessive density wearing a contraction label.
-CONTRACTION_PRONOUN_S = r"(?:it|he|she|that|there|here|what|who|let)'s"
+#
+# Issue #158: the closed set above originally omitted where, how, when and why,
+# so "where's", "how's", "when's" and "why's" fell through to "not in the set"
+# and were silently treated as possessives -- undercounting real contractions
+# rather than overcounting them, the opposite direction from #122's defect but
+# the same root cause, an alternation that enumerated the set incompletely.
+#
+# Built from its code point rather than typed as a literal character or a
+# backslash escape, per this project's tool-argument-decoding rule: a typed
+# escape sequence arrives at the file already decoded, so the safe way to get
+# a specific code point into source is to construct it at runtime.
+_CURLY_APOSTROPHE = chr(0x2019)  # U+2019 RIGHT SINGLE QUOTATION MARK
+# Prose routinely uses the curly apostrophe in place of the straight one; ANY
+# apostrophe in a contraction, not just the ambiguous 's suffix, can appear as
+# either form, so both are accepted everywhere below rather than only in the
+# pronoun/function-word alternation.
+_APOSTROPHE_CLASS = "[" + "'" + _CURLY_APOSTROPHE + "]"
+CONTRACTION_PRONOUN_S = (
+    rf"(?:it|he|she|that|there|here|what|who|let|where|how|when|why){_APOSTROPHE_CLASS}s"
+)
 CONTRACTION_RE = re.compile(
-    rf"\b(?:[A-Za-z]+n't|[A-Za-z]+'(?:re|ve|ll|d|m)|{CONTRACTION_PRONOUN_S})\b",
+    rf"\b(?:[A-Za-z]+n{_APOSTROPHE_CLASS}t|[A-Za-z]+{_APOSTROPHE_CLASS}(?:re|ve|ll|d|m)|{CONTRACTION_PRONOUN_S})\b",
     re.IGNORECASE,
 )
 PARTICIPIAL_OPENER_RE = re.compile(r"^(?:[A-Za-z]+ing)\b[^.!?]{0,100},")
