@@ -249,6 +249,52 @@ describe("runReview(): posting preconditions", () => {
   });
 });
 
+describe("runReview(): #155 expect-head, checked before the model runs", () => {
+  test("a mismatched expected head refuses before the model runs, with no poster involved", async () => {
+    const poster = new FakePoster();
+    const runner = runnerWith([]);
+    const outcome = runReview(deps({ poster, runner }), { commentOnly: false, expectHead: "f".repeat(40) });
+    await expect(outcome).rejects.toBeInstanceOf(RefusalError);
+    await expect(runReview(deps({ poster, runner }), { commentOnly: false, expectHead: "f".repeat(40) })).rejects.toThrow("not the expected");
+    expect(runner.calls).toBe(0);
+    expect(poster.posts).toEqual([]);
+  });
+
+  test("a mismatched expected head also refuses a dry run (no poster), before the model runs", async () => {
+    const runner = runnerWith([]);
+    await expect(runReview(deps({ poster: null, runner }), { commentOnly: false, expectHead: "f".repeat(40) })).rejects.toBeInstanceOf(RefusalError);
+    expect(runner.calls).toBe(0);
+  });
+
+  test("the comparison is case-sensitive: an uppercase rendering of the same head still refuses", async () => {
+    const runner = runnerWith([]);
+    await expect(
+      runReview(deps({ poster: null, runner }), { commentOnly: false, expectHead: HEAD.toUpperCase() }),
+    ).rejects.toBeInstanceOf(RefusalError);
+    expect(runner.calls).toBe(0);
+  });
+
+  test("a matching expected head runs and posts normally", async () => {
+    const poster = new FakePoster();
+    const outcome = await runReview(deps({ poster }), { commentOnly: false, expectHead: HEAD });
+    expect(outcome.status).toBe("posted");
+    expect(poster.posts).toEqual([{ commitId: HEAD, event: "APPROVE", body: outcome.body }]);
+  });
+
+  // Omitting expectHead (undefined) and passing expectHead: null are both "no expectation": every
+  // caller before #155 (offline.ts's acceptance harness, every OPTIONS literal above) passes
+  // neither field and must see byte-identical behaviour.
+  test("omitting expectHead and passing null both skip the check", async () => {
+    const posterUndefined = new FakePoster();
+    const outcomeUndefined = await runReview(deps({ poster: posterUndefined }), { commentOnly: false });
+    expect(outcomeUndefined.status).toBe("posted");
+
+    const posterNull = new FakePoster();
+    const outcomeNull = await runReview(deps({ poster: posterNull }), { commentOnly: false, expectHead: null });
+    expect(outcomeNull.status).toBe("posted");
+  });
+});
+
 describe("runReview(): refusals post nothing", () => {
   test("an identifying string in the body", async () => {
     const poster = new FakePoster();

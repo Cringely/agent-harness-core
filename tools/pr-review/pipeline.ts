@@ -41,6 +41,12 @@ export interface ReviewDeps {
 
 export interface ReviewOptions {
   commentOnly: boolean;
+  // #155: the head the caller means to review, when it knows one -- a wrapper's own earlier
+  // snapshot, an operator-copied PR head. Checked against the fetched snapshot before the model
+  // runs (see runReview); a mismatch refuses. Optional so a caller that never supplies it (every
+  // caller before #155) sees byte-identical behaviour; null and undefined both mean "no
+  // expectation, skip the check".
+  expectHead?: string | null;
 }
 
 export interface ReviewOutcome {
@@ -84,6 +90,17 @@ export async function runReview(deps: ReviewDeps, options: ReviewOptions): Promi
     throw new RefusalError("refusing to post: the reviewer's checkout has uncommitted changes, so the review would not trace to committed code");
   }
   const snapshot = await deps.source.snapshot();
+
+  // #155: checked case-sensitively right after the fetch, before verification or the model run,
+  // so a mismatched head costs nothing. This is one of #155's two checks; the other is the
+  // existing currentHeadSha() re-check immediately before postReview below, which already
+  // re-verifies this same snapshot.headSha right before it is used to post.
+  if (options.expectHead != null && options.expectHead !== snapshot.headSha) {
+    throw new RefusalError(
+      `refusing to review: the pull request's head is ${snapshot.headSha}, not the expected ${options.expectHead}; nothing was posted, so re-check and run again`,
+    );
+  }
+
   const verification = verificationOf(snapshot);
 
   let output: ReviewerOutput | null = null;
