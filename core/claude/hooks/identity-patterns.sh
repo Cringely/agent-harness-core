@@ -79,69 +79,67 @@
 
 # --- pattern-set construction -------------------------------------------
 
-# ERE-escapes a literal string for use inside the alternation this file
-# builds, leaving the result in the global $identity_escaped. Escapes
-# exactly the fourteen characters the sed expression this replaced escaped,
-# ] . ^ $ ( ) { } ? + * | \ [ and nothing else. Both directions matter and
-# neither is cosmetic: an arm that escapes too little turns operator-
-# declared text into live regex metacharacters, and an arm that escapes too
-# much is an arm that can never fire. test/identity-gate.test.ts pins the
-# set against a recorded input matrix rather than against this sentence.
+# ERE-escapes literal text for use inside the alternation this file builds,
+# leaving the result in the global $identity_escaped. Escapes exactly the
+# fourteen characters ] . ^ $ ( ) { } ? + * | \ [ and nothing else. Both
+# directions matter and neither is cosmetic: an arm that escapes too little
+# turns operator-declared text into live regex metacharacters, and an arm
+# that escapes too much is an arm that can never fire.
+# test/identity-gate.test.ts pins the set against a recorded input matrix
+# rather than against this sentence.
 #
-# NO FORK, AND NO STDOUT (#113). This used to be
-# `printf '%s' "$1" | sed 's/[].^$(){}?+*|\\[]/\\&/g'` read back through a
-# command substitution, and identity_load calls it once per declared entry,
-# so an ordinary identity file paid four process spawns per entry for it --
-# the $(...) subshell, both halves of the pipeline, and sed itself.
-# Measured on this workstation against a six-entry pattern set: 35 external
-# commands for one pre-commit invocation, twelve of them sed. The
-# per-character loop below runs entirely in the shell that is already
-# running, which is the same trade identity_hex_digit_value, identity_ltrim
-# and identity_json_unescape already took in #135 and for the same reason.
-# The result lands in a global for that reason too: a caller reading a
-# printed value back with $(...) would pay the fork this rewrite removes.
+# ONE CALL FOR THE WHOLE ENTRY LIST, NOT ONE PER ENTRY (#113). $1 may be a
+# single entry or the entire newline-separated list of them, and the result
+# is the same either way: `s///g` applies per line, and none of the fourteen
+# characters is a newline. identity_load passes the whole list once and
+# peels one escaped line per raw entry, so a twelve-name identity file runs
+# this once rather than twelve times, and the sed count a pre-commit spawns
+# stops growing with the number of declared entries -- which is #113's
+# claim, and is what test/identity-gate.test.ts's counting test measures.
+# The shape it replaced was this same pipeline read back through
+# `escaped=$(identity_regex_escape "$entry")` INSIDE the per-entry loop,
+# which spent four process spawns on every entry -- the $(...) subshell,
+# both halves of the pipeline, and sed itself.
 #
-# LOCALE. `?` counts characters under a UTF-8 locale and bytes under C, and
-# this function runs under whatever locale the hook inherited (unlike
-# identity_json_array, which forces C in its own subshell). It does not
-# matter here, because the split and the rejoin use the same expansion: a
-# multi-byte character is either carried whole or carried one byte at a
-# time, and every one of the fourteen escaped characters is ASCII, so no
-# UTF-8 continuation byte can be mistaken for one. The output is the same
-# bytes either way, which is what #135's F1 desync could not say about the
-# `cut -c` against ${#var} mixture it came from.
+# WHY NOT A PER-CHARACTER PARAMETER-EXPANSION LOOP, WHICH IS WHAT #113
+# SHIPPED FIRST. That loop peeled one character at a time with
+# `tail=${rest#?}` and `char=${rest%"$tail"}`, and it is not byte-
+# transparent. `${var%"$word"}` drops into bash's wide-character matcher
+# whenever the word holds a backslash, and a byte that is not valid UTF-8
+# comes back out of that matcher re-encoded: measured here, 0xE5 immediately
+# followed by a backslash became 0xEF 0xBF 0xA5 under LC_CTYPE=C.UTF-8 --
+# the LC_CTYPE Git for Windows sets for every hook it runs, per #135's
+# review, and this function runs in the hook's own shell rather than in
+# identity_json_array's forced-C subshell. A sweep of every lead byte
+# 0xC0-0xF4 against six following characters, 318 cases, found 53
+# divergences: one per lead byte, every one of them in the backslash column
+# and none in the other five. Zero under LC_ALL=C. It failed
+# CLOSED, because identity_control builds its canary from the raw entry and
+# the arm from the escaped one, so a divergence refuses the commit instead
+# of quietly narrowing detection. Fail-closed is not the bar: a security
+# control's pattern set must not depend on the caller's locale at all, and
+# sed never sees the shell's matcher, so the program below produces the same
+# bytes under every locale.
 #
-# The old sed's bracket expression had an ordering constraint worth keeping
-# on record even though no bracket expression survives here: `]` had to sit
-# first (POSIX: only literal there, never the closing delimiter) and `.`
-# could never immediately follow the bracket's own opening `[`, because
-# `[.` inside a POSIX bracket expression opens a collating-symbol construct
-# ([.ch.]) rather than matching a literal `[` then a literal `.`, and a
-# naive `[.^$(){}...]` ordering sent sed hunting for a `.]` that never
+# THE SENTINEL. `$(...)` strips every trailing newline, so writing an X
+# inside the subshell and stripping one X back off is what keeps an entry
+# that ends in a newline exact -- the one inexactness the old call site had,
+# fixed rather than carried forward. `&&` rather than `;` so the sentinel is
+# written only when sed succeeded and the status the caller tests is sed's:
+# a crashed sed has to refuse, not hand back a short pattern set.
+# 2026-09-05's incident was exactly that shape, a crashed `grep -F` whose
+# surrounding `|| echo NONE` printed a clean result over the top.
+#
+# The bracket expression's ordering is load-bearing, which is why it is
+# copied rather than retyped: `]` has to sit first (POSIX: only literal
+# there, never the closing delimiter) and `.` can never immediately follow
+# the bracket's own opening `[`, because `[.` opens a collating-symbol
+# construct ([.ch.]) rather than matching a literal `[` then a literal `.`,
+# and a naive `[.^$(){}...]` ordering sent sed hunting for a `.]` that never
 # arrived, failing the whole expression with "unterminated `s' command".
-# The case list below cannot reproduce that hazard: every character is its
-# own singly-quoted pattern, so none of them can open a construct.
 identity_regex_escape() {
-    identity_escaped=
-    identity_esc_rest=$1
-    while [ -n "$identity_esc_rest" ]; do
-        # $identity_esc_tail is everything after the first character;
-        # stripping that exact string back off the end as a literal suffix
-        # leaves the first character alone. The same two-expansion shape
-        # identity_json_unescape uses to peel a \uXXXX's hex digits, in
-        # place of a `cut` fork per character.
-        identity_esc_tail=${identity_esc_rest#?}
-        identity_esc_char=${identity_esc_rest%"$identity_esc_tail"}
-        case $identity_esc_char in
-            ']'|'.'|'^'|'$'|'('|')'|'{'|'}'|'?'|'+'|'*'|'|'|'\'|'[')
-                identity_escaped="${identity_escaped}\\${identity_esc_char}"
-                ;;
-            *)
-                identity_escaped="${identity_escaped}${identity_esc_char}"
-                ;;
-        esac
-        identity_esc_rest=$identity_esc_tail
-    done
+    identity_escaped=$(printf '%s' "$1" | sed 's/[].^$(){}?+*|\\[]/\\&/g' && printf X) || return 1
+    identity_escaped=${identity_escaped%X}
 }
 
 # Converts one hex digit character ($1, already validated by the caller as
@@ -745,29 +743,47 @@ identity_load() {
     identity_nl='
 '
 
+    # ONE escape for the whole list, ahead of the loop, rather than one call
+    # per entry inside it (#113). `s///g` runs per line, so escaping the list
+    # in a single pass produces exactly the bytes escaping each entry
+    # separately would, and the loop below peels one escaped line per raw
+    # entry. A sed that crashed rather than substituting would otherwise hand
+    # back a short or empty pattern set that still passed every later check,
+    # which is 2026-09-05's `grep -F` incident wearing a different binary's
+    # name, so this refuses instead.
+    if ! identity_regex_escape "$entries"; then
+        echo "identity gate: escaping the declared entries did not run cleanly. sed failed, is shadowed on PATH, or crashed mid-substitution. Refusing rather than building a pattern set out of whatever it managed to print." >&2
+        return 1
+    fi
+    identity_escaped_rest=$identity_escaped
+
     pattern=
     canaries=
     count=0
     while IFS= read -r entry; do
+        # Peel this entry's escaped twin BEFORE the blank-line skip below, so
+        # the two lists stay in lockstep: a blank raw line has a blank
+        # escaped line facing it and both have to be consumed. The pattern
+        # here is a literal newline followed by `*`, built in this file and
+        # never from operator data -- it can never acquire the backslash that
+        # sends ${var%...} into the wide-character matcher this function's
+        # own header records re-encoding non-UTF-8 bytes. On the last line
+        # there is no newline left to match, so `%%` returns the whole
+        # remainder and `#` leaves it alone; the loop ends there either way.
+        identity_escaped_one=${identity_escaped_rest%%"$identity_nl"*}
+        identity_escaped_rest=${identity_escaped_rest#*"$identity_nl"}
         [ -n "$entry" ] || continue
         if ! identity_edge_ok "$entry"; then
             echo "identity gate: '$identity_file' or the derived username/hostname declares an entry whose first or last character is not a word character. Wrapped in \\b<entry>\\b, an entry like that can never match anything -- a dead arm that would otherwise report healthy from both identity_load and identity_control (finding 9, 2026-09-05: a name pasted as a whole author line, 'Name <email>', or with a trailing space). The offending value is deliberately not printed; check names/emails in '$identity_file' for a pasted author line or stray leading/trailing punctuation or whitespace." >&2
             return 1
         fi
-        # Plain call, not `escaped=$(identity_regex_escape "$entry")`: the
-        # command substitution was the fork #113 is about, and it is the
-        # caller that pays it, not the function. Reading the global back is
-        # also what makes the value exact -- $(...) strips trailing
-        # newlines, so the old shape quietly disagreed with the function it
-        # called on any entry ending in one. Unreachable in production
-        # twice over (the `while IFS= read -r entry` loop this sits in
-        # cannot produce an entry containing a newline, and identity_edge_ok
-        # above has already refused anything whose last character is not a
-        # word character), which is exactly why it would never have shown up
-        # as a bug -- it would have shown up as a pattern arm that silently
-        # matched something slightly different from what was declared.
-        identity_regex_escape "$entry"
-        pattern="${pattern}${pattern:+|}\\b${identity_escaped}\\b"
+        # The arm comes from the escaped line, the canary from the raw entry.
+        # That asymmetry is deliberate and is what makes any future escaping
+        # divergence fail closed: identity_control below feeds the canaries
+        # through this same pattern, so an arm that no longer corresponds to
+        # its entry refuses the commit rather than silently matching less
+        # than was declared.
+        pattern="${pattern}${pattern:+|}\\b${identity_escaped_one}\\b"
         canaries="${canaries}${canaries:+$identity_nl}canary-${entry}-canary"
         count=$((count + 1))
     done <<EOF
