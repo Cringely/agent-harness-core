@@ -74,12 +74,22 @@ export function computeVerification(input: {
       incomplete.push(`required check "${required.name}" has no run on the head commit`);
       continue;
     }
+    // A completed "cancelled" run is GitHub's record of a duplicate superseded by the same
+    // workflow on the same commit (concurrency cancel-in-progress, #148); it carries no signal
+    // about the code. It stops counting against the check only once a completed success exists
+    // among this check's own runs (name+app already narrowed `runs` above). A head with only a
+    // cancelled run, and no success anywhere for that check, still reads incomplete exactly as
+    // before. No ordering or timestamp is needed: a real failure among the runs already forces
+    // the failed branch ahead of the incomplete branch below, so "a success exists" is enough.
+    const anySucceeded = runs.some((run) => run.status === "completed" && run.conclusion === "success");
     let anyFailed = false;
     let anyIncomplete = false;
     for (const run of runs) {
       if (run.status === "completed" && run.conclusion === "success") continue;
       if (run.status === "completed" && run.conclusion !== null && FAILED_CONCLUSIONS.has(run.conclusion)) {
         anyFailed = true;
+      } else if (run.status === "completed" && run.conclusion === "cancelled" && anySucceeded) {
+        continue;
       } else {
         anyIncomplete = true;
       }
