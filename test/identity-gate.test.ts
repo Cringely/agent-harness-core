@@ -37,7 +37,7 @@ import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 // annotated per test, because the next slow case would otherwise inherit the
 // 5s default and reintroduce this.
 setDefaultTimeout(30_000);
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { posixSh, posixShDir } from "./posix-sh";
@@ -963,5 +963,357 @@ describe("identity gate — pre-push content channel also reads blob bytes, not 
     const result = push(dir, "HEAD:refs/heads/main");
     expect(result.exitCode).not.toBe(0);
     expect(result.stderr.toString()).toContain("content of one or more commits");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #113. identity_regex_escape and identity_json_array each ran a
+// `printf | sed` pipeline inside a command substitution ONCE PER DECLARED
+// ENTRY, and core/claude/hooks/pre-commit pays whatever they cost on every
+// real commit in every project that installs this harness. Both are now
+// parameter-expansion loops that run in the shell already running.
+//
+// That rewrites the producer of a security control's pattern set, so two
+// separate claims need two separate tests and neither substitutes for the
+// other.
+//
+// EQUIVALENCE is the claim that matters. The tables below were recorded by
+// running the PRE-#113 functions over the matrix and reading their bytes back
+// through `od`; they are not derived from the code they now check. Twelve
+// executed bypasses were closed against this gate while its suite stayed
+// green (#91), so "the other tests still pass" is not evidence that a rewrite
+// here preserved detection, and a hook-level test can only show that SOME
+// pattern refused SOMETHING. These drive the shell functions directly,
+// because the exact built string is the thing under test.
+//
+// The matrix driver accepts either calling convention, a printed value or the
+// $identity_escaped global, so it keeps proving equivalence across a future
+// refactor in either direction instead of pinning today's plumbing. It
+// therefore passes against the old code too, by design: an equivalence test
+// only one side can run proves nothing about the other.
+//
+// COST is the claim that fails without the change, and the one ablated at the
+// commit that introduced it: the number of `sed` processes a single
+// pre-commit run spawns must not grow with the number of declared entries.
+// ---------------------------------------------------------------------------
+
+/** POSIX single-quotes a shell word, so a matrix case reaches the driver as
+ * the exact bytes written here -- metacharacters, quotes and newlines
+ * included -- rather than as something the shell re-read on the way in. */
+function shQuote(value: string): string {
+  return "'" + value.split("'").join("'\\''") + "'";
+}
+
+// [label, input, expected output]. Recorded from the pre-#113
+// `printf '%s' "$1" | sed 's/[].^$(){}?+*|\\[]/\\&/g'`.
+const ESCAPE_MATRIX: Array<[string, string, string]> = [
+  ["an empty entry", "", ""],
+  ["a plain declared name with a space", "Fictional Persona", "Fictional Persona"],
+  ["an email's dots", "fictional.persona@example.test", "fictional\\.persona@example\\.test"],
+  [
+    "every ERE metacharacter, once each",
+    "a.b*c+d?e[f]g(h)i{j}k^l$m|n\\o",
+    "a\\.b\\*c\\+d\\?e\\[f\\]g\\(h\\)i\\{j\\}k\\^l\\$m\\|n\\\\o",
+  ],
+  [
+    "metacharacters with nothing between them",
+    "][.^$(){}?+*|\\\\",
+    "\\]\\[\\.\\^\\$\\(\\)\\{\\}\\?\\+\\*\\|\\\\\\\\",
+  ],
+  ["a leading ], the one POSIX allows only first inside a bracket", "]abc", "\\]abc"],
+  ["the [. collating-symbol bait that broke the old sed's class ordering", "[.a.]", "\\[\\.a\\.\\]"],
+  ["non-ASCII passes through untouched", "Zoë Example", "Zoë Example"],
+  ["a double quote is not an ERE metacharacter", 'say "hi"', 'say "hi"'],
+  ["an embedded newline", "line1\nline2", "line1\nline2"],
+  ["a trailing newline, which the caller's old $(...) silently dropped", "abc\n", "abc\n"],
+  ["& is sed's replacement metacharacter and is never escaped here", "x&y\\1z", "x&y\\\\1z"],
+  ["a space-only entry", "   ", "   "],
+  ["punctuation with no ERE meaning stays literal", "~!@#%&/-_=:;,<>'", "~!@#%&/-_=:;,<>'"],
+  ["a tab", "tab\there", "tab\there"],
+  [
+    "a long name shaped like something a person would actually declare",
+    "Dr. Jane Q. O'Brien-Smith (III) [ret.] {x}*+?|^$\\",
+    "Dr\\. Jane Q\\. O'Brien-Smith \\(III\\) \\[ret\\.\\] \\{x\\}\\*\\+\\?\\|\\^\\$\\\\",
+  ],
+];
+
+// [label, raw JSON text, key, expected stdout, expected rc, expected stderr
+// fragment]. Recorded from the pre-#113 token-extraction sed.
+const ARRAY_MATRIX: Array<[string, string, string, string, number, string | null]> = [
+  ["an empty array", '{"names":[],"emails":[]}', "names", "", 0, null],
+  ["an absent key", '{"emails":["a@b.test"]}', "names", "", 0, null],
+  ["one entry", '{"names":["Fictional Persona"],"emails":[]}', "names", "Fictional Persona\n", 0, null],
+  [
+    "several entries",
+    '{"names":["Alpha One","Beta Two","Gamma Three"],"emails":["a@b.test"]}',
+    "names",
+    "Alpha One\nBeta Two\nGamma Three\n",
+    0,
+    null,
+  ],
+  [
+    "the emails key of the same document",
+    '{"names":["Alpha One"],"emails":["a@b.test","c@d.test"]}',
+    "emails",
+    "a@b.test\nc@d.test\n",
+    0,
+    null,
+  ],
+  [
+    "regex metacharacters inside an entry",
+    '{"names":["a.b*c+d?e[f]g(h)i{j}k^l$m|n\\\\o"]}',
+    "names",
+    "a.b*c+d?e[f]g(h)i{j}k^l$m|n\\o\n",
+    0,
+    null,
+  ],
+  [
+    "a ] inside an entry does not truncate the array (#91c)",
+    '{"names":["bracket ] inside","Alice Example"]}',
+    "names",
+    "bracket ] inside\nAlice Example\n",
+    0,
+    null,
+  ],
+  ["a non-ASCII entry", '{"names":["Zoë Example"]}', "names", "Zoë Example\n", 0, null],
+  [
+    "a non-ASCII entry carrying its own ] (#135 F1)",
+    '{"names":["Aééé]y","Alice Example"]}',
+    "names",
+    "Aééé]y\nAlice Example\n",
+    0,
+    null,
+  ],
+  ["an escaped double quote", '{"names":["say \\"hi\\""]}', "names", 'say "hi"\n', 0, null],
+  ["an escaped backslash", '{"names":["a\\\\b"]}', "names", "a\\b\n", 0, null],
+  ["an escaped solidus", '{"names":["a\\/b"]}', "names", "a/b\n", 0, null],
+  ["an escaped tab", '{"names":["tab\\there"]}', "names", "tab\there\n", 0, null],
+  [
+    "a printable \\uXXXX decodes (#91d)",
+    '{"names":["F\\u0069ctional Persona"]}',
+    "names",
+    "Fictional Persona\n",
+    0,
+    null,
+  ],
+  [
+    "\\u0027, which PowerShell's ConvertTo-Json emits for an apostrophe",
+    '{"names":["O\\u0027Brien"]}',
+    "names",
+    "O'Brien\n",
+    0,
+    null,
+  ],
+  ["\\n refuses rather than splitting the entry list", '{"names":["line1\\nline2"]}', "names", "", 1, "will not decode"],
+  ["a \\uXXXX outside printable ASCII refuses", '{"names":["\\u00e9x"]}', "names", "", 1, "will not decode"],
+  [
+    "an array truncated right after its [ refuses (#135 F2)",
+    '{"emails":["a@b.test"],"names":[',
+    "names",
+    "",
+    1,
+    "could not find the closing ']'",
+  ],
+  [
+    "a stray value after the closing ] refuses, after emitting what it had (#135 F7)",
+    '{"names":["A"] "B"]}',
+    "names",
+    "A\n",
+    1,
+    "not well-formed JSON here",
+  ],
+  ["an unterminated string refuses", '{"names":["abc}', "names", "", 1, "unterminated or malformed quoted string"],
+  [
+    "a token ending in a lone backslash refuses",
+    '{"names":["abc\\"]}',
+    "names",
+    "",
+    1,
+    "unterminated or malformed quoted string",
+  ],
+  [
+    "an array spread over several lines",
+    '{\n  "names": [\n    "Alpha One",\n    "Beta Two"\n  ],\n  "emails": []\n}',
+    "names",
+    "Alpha One\nBeta Two\n",
+    0,
+    null,
+  ],
+  ["an empty string entry", '{"names":[""],"emails":[]}', "names", "\n", 0, null],
+  ["a comma inside an entry", '{"names":["Last, First"]}', "names", "Last, First\n", 0, null],
+  [
+    "whitespace around the array's own punctuation",
+    '{"names"   :   [   "A"   ,   "B"   ]   }',
+    "names",
+    "A\nB\n",
+    0,
+    null,
+  ],
+  [
+    "twelve entries, the shape the per-entry spawn cost was measured on",
+    JSON.stringify({ names: Array.from({ length: 12 }, (_, i) => `Person Number ${i}`) }),
+    "names",
+    Array.from({ length: 12 }, (_, i) => `Person Number ${i}\n`).join(""),
+    0,
+    null,
+  ],
+];
+
+type MatrixResults = {
+  escaped: string[];
+  arrays: Array<{ stdout: string; stderr: string; rc: number }>;
+};
+
+/** Sources identity-patterns.sh in a real POSIX sh and runs both pattern-set
+ * builders over the matrices above, one file per result so the bytes survive
+ * the trip back without any trailing-newline stripping on the way. */
+function runBuilderMatrix(): MatrixResults {
+  const dir = mkdtempSync(join(tmpdir(), "identity-matrix-"));
+  tempDirs.push(dir);
+  const outDir = join(dir, "out");
+  mkdirSync(outDir, { recursive: true });
+
+  const driver: string[] = [
+    "#!/bin/sh",
+    '. "$1"',
+    "OUT=$2",
+    // identity_json_array names this in its refusal messages. A fixed
+    // literal, since no real file is being read here.
+    "identity_file=/fixture/.claude-account-identity.json",
+    "esc() {",
+    "    identity_escaped=__NOTSET__",
+    // Either convention: a printed value, or the global. The matrix is about
+    // the bytes, not about where they are handed back.
+    '    identity_regex_escape "$2" > "$OUT/esc-$1.printed"',
+    '    if [ "$identity_escaped" = __NOTSET__ ]; then',
+    '        cat "$OUT/esc-$1.printed" > "$OUT/esc-$1"',
+    "    else",
+    "        printf '%s' \"$identity_escaped\" > \"$OUT/esc-$1\"",
+    "    fi",
+    "}",
+    "arr() {",
+    // In a subshell, exactly as identity_load calls it: identity_json_array
+    // forces LC_ALL=C and that must not escape into anything else.
+    '    ( identity_json_array "$2" "$3" ) > "$OUT/arr-$1.out" 2> "$OUT/arr-$1.err"',
+    "    printf '%s' \"$?\" > \"$OUT/arr-$1.rc\"",
+    "}",
+  ];
+  ESCAPE_MATRIX.forEach((entry, i) => driver.push(`esc ${i} ${shQuote(entry[1])}`));
+  ARRAY_MATRIX.forEach((entry, i) => driver.push(`arr ${i} ${shQuote(entry[1])} ${shQuote(entry[2])}`));
+
+  const driverPath = join(dir, "driver.sh");
+  writeFileSync(driverPath, driver.join("\n") + "\n");
+
+  const sh = posixSh();
+  const shDir = posixShDir();
+  const env = shDir
+    ? { ...process.env, PATH: `${process.env.PATH ?? ""}${delimiter}${shDir}` }
+    : { ...process.env };
+  const run = Bun.spawnSync([sh, driverPath, LIB_SRC, outDir], { cwd: dir, env, stdout: "pipe", stderr: "pipe" });
+  if (run.exitCode !== 0) {
+    throw new Error(`matrix driver exited ${run.exitCode}: ${run.stderr.toString()}`);
+  }
+
+  return {
+    escaped: ESCAPE_MATRIX.map((_, i) => readFileSync(join(outDir, `esc-${i}`), "utf8")),
+    arrays: ARRAY_MATRIX.map((_, i) => ({
+      stdout: readFileSync(join(outDir, `arr-${i}.out`), "utf8"),
+      stderr: readFileSync(join(outDir, `arr-${i}.err`), "utf8"),
+      rc: Number(readFileSync(join(outDir, `arr-${i}.rc`), "utf8")),
+    })),
+  };
+}
+
+describe("identity gate — the pattern-set builders match the pipelines they replaced, byte for byte (#113)", () => {
+  test("identity_regex_escape escapes exactly the fourteen ERE metacharacters, on every recorded input", () => {
+    const results = runBuilderMatrix();
+    const mismatches = ESCAPE_MATRIX.map((entry, i) => [entry[0], entry[2], results.escaped[i]] as const)
+      .filter(([, expected, actual]) => expected !== actual)
+      .map(([label, expected, actual]) => `${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+    expect(mismatches).toEqual([]);
+  });
+
+  test("identity_json_array returns the same entries, the same exit status and the same refusals", () => {
+    const results = runBuilderMatrix();
+    const mismatches: string[] = [];
+    ARRAY_MATRIX.forEach((entry, i) => {
+      const label = entry[0];
+      const expectedStdout = entry[3];
+      const expectedRc = entry[4];
+      const stderrFragment = entry[5];
+      const got = results.arrays[i];
+      if (got.stdout !== expectedStdout) {
+        mismatches.push(`${label}: stdout expected ${JSON.stringify(expectedStdout)}, got ${JSON.stringify(got.stdout)}`);
+      }
+      if (got.rc !== expectedRc) {
+        mismatches.push(`${label}: rc expected ${expectedRc}, got ${got.rc}`);
+      }
+      if (stderrFragment === null) {
+        if (got.stderr !== "") mismatches.push(`${label}: expected no stderr, got ${JSON.stringify(got.stderr)}`);
+      } else if (!got.stderr.includes(stderrFragment)) {
+        mismatches.push(`${label}: stderr missing ${JSON.stringify(stderrFragment)}, got ${JSON.stringify(got.stderr)}`);
+      }
+    });
+    expect(mismatches).toEqual([]);
+  });
+});
+
+/** Test double for `sed`: records one line per invocation in $SPAWN_LOG, then
+ * execs the real sed from $REAL_SED -- the same indirection
+ * installNamesKeyCrashingSedStub uses, and for the same reason (no Windows
+ * path gets escaped into a written shell script). */
+function installCountingSedShim(): string {
+  const stubDir = mkdtempSync(join(tmpdir(), "identity-sedcount-"));
+  tempDirs.push(stubDir);
+  const stubPath = join(stubDir, "sed");
+  writeFileSync(stubPath, ["#!/bin/sh", "printf 'sed\\n' >> \"$SPAWN_LOG\"", 'exec "$REAL_SED" "$@"', ""].join("\n"));
+  chmodSync(stubPath, 0o755);
+  return stubDir;
+}
+
+/** Runs one pre-commit against a clean staged file and an identity file
+ * declaring `entryCount` names, and returns how many `sed` processes the run
+ * spawned. */
+function countSedSpawnsForEntries(entryCount: number): number {
+  const realSed = Bun.which("sed");
+  if (!realSed) throw new Error("no real sed on PATH to build the #113 counting shim against");
+  const names = Array.from({ length: entryCount }, (_, i) => `Person Number ${i}`);
+  const home = makeIdentityHome(JSON.stringify({ names, emails: [] }));
+  const dir = initPreCommitRepo();
+  stageClean(dir);
+
+  const logDir = mkdtempSync(join(tmpdir(), "identity-sedlog-"));
+  tempDirs.push(logDir);
+  const logPath = join(logDir, "spawns.log");
+  writeFileSync(logPath, "");
+
+  const result = runPreCommit(
+    dir,
+    envWith({
+      USERPROFILE: home,
+      HOME: home,
+      PATH: pathWithStubFirst(installCountingSedShim()),
+      REAL_SED: realSed,
+      // Forward slashes: the shim appends to this from a POSIX shell.
+      SPAWN_LOG: logPath.split("\\").join("/"),
+    }),
+  );
+  // A refused or crashed run would short-circuit the loop being measured and
+  // report a flattering number.
+  expect(result.exitCode).toBe(0);
+  return readFileSync(logPath, "utf8").split("\n").filter((line) => line.length > 0).length;
+}
+
+describe("identity gate — building the pattern set spawns no process per declared entry (#113)", () => {
+  // Ablated against the pre-#113 library at the commit that added this: two
+  // entries spawned 8 sed processes and twelve spawned 28, so the equality
+  // below failed and the ceiling below it failed too. Both hold at 2 now,
+  // which is the two key-extraction sed calls identity_json_array makes for
+  // "names" and "emails" and nothing else.
+  test("the sed count for a twelve-entry identity file equals the count for a two-entry one", () => {
+    const few = countSedSpawnsForEntries(2);
+    const many = countSedSpawnsForEntries(12);
+    expect(many).toBe(few);
+    expect(few).toBeLessThanOrEqual(4);
   });
 });

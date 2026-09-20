@@ -80,18 +80,68 @@
 # --- pattern-set construction -------------------------------------------
 
 # ERE-escapes a literal string for use inside the alternation this file
-# builds. The bracket expression below is ordered so `]` sits first (POSIX:
-# only literal there, never the closing delimiter) and `.` never
-# immediately follows the bracket's own opening `[` -- `[.` inside a POSIX
-# bracket expression opens a collating-symbol construct ([.ch.]), not a
-# literal `[` followed by a literal `.`, and a naive `[.^$(){}...]` ordering
-# sends sed hunting for a `.]` that never arrives, failing the whole
-# expression with "unterminated `s' command". Measured: reordering so `.`
-# is not bracket-adjacent to `[` is what fixes it; every other ERE
-# metacharacter in the class is a plain literal inside `[...]` regardless
-# of position.
+# builds, leaving the result in the global $identity_escaped. Escapes
+# exactly the fourteen characters the sed expression this replaced escaped,
+# ] . ^ $ ( ) { } ? + * | \ [ and nothing else. Both directions matter and
+# neither is cosmetic: an arm that escapes too little turns operator-
+# declared text into live regex metacharacters, and an arm that escapes too
+# much is an arm that can never fire. test/identity-gate.test.ts pins the
+# set against a recorded input matrix rather than against this sentence.
+#
+# NO FORK, AND NO STDOUT (#113). This used to be
+# `printf '%s' "$1" | sed 's/[].^$(){}?+*|\\[]/\\&/g'` read back through a
+# command substitution, and identity_load calls it once per declared entry,
+# so an ordinary identity file paid four process spawns per entry for it --
+# the $(...) subshell, both halves of the pipeline, and sed itself.
+# Measured on this workstation against a six-entry pattern set: 35 external
+# commands for one pre-commit invocation, twelve of them sed. The
+# per-character loop below runs entirely in the shell that is already
+# running, which is the same trade identity_hex_digit_value, identity_ltrim
+# and identity_json_unescape already took in #135 and for the same reason.
+# The result lands in a global for that reason too: a caller reading a
+# printed value back with $(...) would pay the fork this rewrite removes.
+#
+# LOCALE. `?` counts characters under a UTF-8 locale and bytes under C, and
+# this function runs under whatever locale the hook inherited (unlike
+# identity_json_array, which forces C in its own subshell). It does not
+# matter here, because the split and the rejoin use the same expansion: a
+# multi-byte character is either carried whole or carried one byte at a
+# time, and every one of the fourteen escaped characters is ASCII, so no
+# UTF-8 continuation byte can be mistaken for one. The output is the same
+# bytes either way, which is what #135's F1 desync could not say about the
+# `cut -c` against ${#var} mixture it came from.
+#
+# The old sed's bracket expression had an ordering constraint worth keeping
+# on record even though no bracket expression survives here: `]` had to sit
+# first (POSIX: only literal there, never the closing delimiter) and `.`
+# could never immediately follow the bracket's own opening `[`, because
+# `[.` inside a POSIX bracket expression opens a collating-symbol construct
+# ([.ch.]) rather than matching a literal `[` then a literal `.`, and a
+# naive `[.^$(){}...]` ordering sent sed hunting for a `.]` that never
+# arrived, failing the whole expression with "unterminated `s' command".
+# The case list below cannot reproduce that hazard: every character is its
+# own singly-quoted pattern, so none of them can open a construct.
 identity_regex_escape() {
-    printf '%s' "$1" | sed 's/[].^$(){}?+*|\\[]/\\&/g'
+    identity_escaped=
+    identity_esc_rest=$1
+    while [ -n "$identity_esc_rest" ]; do
+        # $identity_esc_tail is everything after the first character;
+        # stripping that exact string back off the end as a literal suffix
+        # leaves the first character alone. The same two-expansion shape
+        # identity_json_unescape uses to peel a \uXXXX's hex digits, in
+        # place of a `cut` fork per character.
+        identity_esc_tail=${identity_esc_rest#?}
+        identity_esc_char=${identity_esc_rest%"$identity_esc_tail"}
+        case $identity_esc_char in
+            ']'|'.'|'^'|'$'|'('|')'|'{'|'}'|'?'|'+'|'*'|'|'|'\'|'[')
+                identity_escaped="${identity_escaped}\\${identity_esc_char}"
+                ;;
+            *)
+                identity_escaped="${identity_escaped}${identity_esc_char}"
+                ;;
+        esac
+        identity_esc_rest=$identity_esc_tail
+    done
 }
 
 # Converts one hex digit character ($1, already validated by the caller as
@@ -301,6 +351,80 @@ identity_json_unescape() {
     printf '%s' "$out"
 }
 
+# Peels one complete JSON string token off the front of $1 into the global
+# $identity_token, both of its own quotes included, and leaves
+# $identity_token EMPTY when $1 does not start with a complete, terminated
+# token. identity_json_array's only caller of this treats empty as a parse
+# failure and refuses, so the empty result is the fail-closed answer, never
+# "no entry here".
+#
+# EXACTLY WHAT IT REPLACED (#113). This was
+# `sed -n 's/^\("\([^"\\]\|\\.\)*"\).*/\1/p'` run through a command
+# substitution once per declared entry, which is three of the process
+# spawns that issue counts. The BRE and the loop below agree by
+# construction, and the agreement is the whole point, so it is worth
+# writing down rather than leaving to a reader to re-derive:
+#   - `^"` means the token must start with a quote. The `case` above does
+#     that, and returns empty rather than scanning when it does not -- the
+#     caller already checks, but a helper that silently mis-parses an input
+#     its caller happens never to send is a trap for the next caller.
+#   - `[^"\\]` is any byte that is neither a quote nor a backslash: the
+#     literal branch below.
+#   - `\\.` is a backslash and whatever follows it, consumed as a pair, so
+#     an escaped quote cannot end the token: the backslash branch below.
+#     `.` in a BRE does not match a newline, and neither does the branch
+#     below need to care, because identity_json_array flattens every
+#     newline to a space before any of this runs.
+#   - The closing `"` is therefore the first quote not preceded by a
+#     backslash, and `\(...\)*` cannot reach past it however greedy it is,
+#     because neither inner branch can consume a bare quote.
+#   - No closing quote, or a lone trailing backslash, means the BRE does
+#     not match at all and sed prints nothing. Both return empty below.
+#
+# LOCALE: `?` counts bytes here rather than characters, because
+# identity_json_array forces LC_ALL=C in its own subshell before calling
+# this -- the same thing that made the old sed byte-oriented. See that
+# function's LOCALE note, and #135's F1 for what the byte/character
+# disagreement did when it was allowed to happen.
+identity_json_token() {
+    identity_token=
+    case $1 in
+        '"'*) : ;;
+        *) return 0 ;;
+    esac
+    identity_tok_acc='"'
+    identity_tok_rest=${1#\"}
+    while :; do
+        case $identity_tok_rest in
+            '')
+                # Ran out of input without a closing quote: unterminated.
+                return 0
+                ;;
+            '"'*)
+                identity_token="${identity_tok_acc}\""
+                return 0
+                ;;
+            '\'*)
+                # A single-quoted shell literal is not escape-processed, so
+                # '\'* is "starts with one backslash" -- the same reading
+                # identity_json_unescape's own header spells out.
+                identity_tok_after=${identity_tok_rest#\\}
+                [ -n "$identity_tok_after" ] || return 0
+                identity_tok_tail=${identity_tok_after#?}
+                identity_tok_char=${identity_tok_after%"$identity_tok_tail"}
+                identity_tok_acc="${identity_tok_acc}\\${identity_tok_char}"
+                identity_tok_rest=$identity_tok_tail
+                ;;
+            *)
+                identity_tok_tail=${identity_tok_rest#?}
+                identity_tok_char=${identity_tok_rest%"$identity_tok_tail"}
+                identity_tok_acc="${identity_tok_acc}${identity_tok_char}"
+                identity_tok_rest=$identity_tok_tail
+                ;;
+        esac
+    done
+}
+
 # Pulls every double-quoted string out of a JSON array value for $2 ("names"
 # or "emails") in the raw text $1, one per output line, with JSON string
 # escapes decoded (identity_json_unescape, above). No jq dependency,
@@ -411,7 +535,8 @@ identity_json_array() {
                 esac
                 ;;
             '"'*)
-                token=$(printf '%s' "$rest" | sed -n 's/^\("\([^"\\]\|\\.\)*"\).*/\1/p')
+                identity_json_token "$rest"
+                token=$identity_token
                 if [ -z "$token" ]; then
                     echo "identity gate: could not parse a declared '$key' entry in '$identity_file' -- an unterminated or malformed quoted string. Refusing rather than silently dropping it and whatever follows it." >&2
                     return 1
@@ -629,8 +754,20 @@ identity_load() {
             echo "identity gate: '$identity_file' or the derived username/hostname declares an entry whose first or last character is not a word character. Wrapped in \\b<entry>\\b, an entry like that can never match anything -- a dead arm that would otherwise report healthy from both identity_load and identity_control (finding 9, 2026-09-05: a name pasted as a whole author line, 'Name <email>', or with a trailing space). The offending value is deliberately not printed; check names/emails in '$identity_file' for a pasted author line or stray leading/trailing punctuation or whitespace." >&2
             return 1
         fi
-        escaped=$(identity_regex_escape "$entry")
-        pattern="${pattern}${pattern:+|}\\b${escaped}\\b"
+        # Plain call, not `escaped=$(identity_regex_escape "$entry")`: the
+        # command substitution was the fork #113 is about, and it is the
+        # caller that pays it, not the function. Reading the global back is
+        # also what makes the value exact -- $(...) strips trailing
+        # newlines, so the old shape quietly disagreed with the function it
+        # called on any entry ending in one. Unreachable in production
+        # twice over (the `while IFS= read -r entry` loop this sits in
+        # cannot produce an entry containing a newline, and identity_edge_ok
+        # above has already refused anything whose last character is not a
+        # word character), which is exactly why it would never have shown up
+        # as a bug -- it would have shown up as a pattern arm that silently
+        # matched something slightly different from what was declared.
+        identity_regex_escape "$entry"
+        pattern="${pattern}${pattern:+|}\\b${identity_escaped}\\b"
         canaries="${canaries}${canaries:+$identity_nl}canary-${entry}-canary"
         count=$((count + 1))
     done <<EOF
