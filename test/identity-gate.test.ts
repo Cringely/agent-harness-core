@@ -1317,3 +1317,219 @@ describe("identity gate — building the pattern set spawns no process per decla
     expect(few).toBeLessThanOrEqual(4);
   });
 });
+
+// ---------------------------------------------------------------------------
+// #113 follow-up. The first #113 patch replaced identity_regex_escape's
+// `printf | sed` pipeline with a per-character parameter-expansion loop that
+// peeled one character at a time. That loop is not byte-transparent: the
+// suffix-strip it peels with drops into bash's wide-character matcher
+// whenever the pattern it is handed begins with a backslash, and a byte that
+// is not valid UTF-8 comes back out of that matcher re-encoded.
+//
+// Measured against the merged library under LC_CTYPE=C.UTF-8, which is the
+// LC_CTYPE Git for Windows sets for every hook it runs (#135's review
+// measured that, and this function runs in the hook's own shell rather than
+// in identity_json_array's forced-C subshell): a name declared as Zo 0xE5
+// backslash Example built its pattern arm with 0xEF 0xBF 0xA5 where the 0xE5
+// belonged, identity_control refused the commit, and identity_match missed
+// the declared name. A sweep of every lead byte 0xC0-0xF4 against six
+// following characters, 318 cases, found 53 divergences: one per lead byte,
+// every one of them in the backslash column, and none under LC_ALL=C.
+//
+// That fails CLOSED, because identity_control builds its canary from the raw
+// entry and the arm from the escaped one. Fail-closed is not the bar. A
+// security control's pattern set must not depend on the caller's locale at
+// all, which is why the sed program is back and is now run once over the
+// whole entry list rather than once per entry.
+//
+// Both tests below set that LC_CTYPE deliberately. They fail against the
+// merged library and pass against the restored sed program, and every
+// expectation here is a byte the sed program produces -- the same bytes under
+// every locale, since sed never sees the shell's matcher.
+// ---------------------------------------------------------------------------
+
+/** One literal backslash, built from its code point rather than typed: every
+ * layer between this file and the shell script it generates reads a typed one
+ * as an escape introducer, and the bytes are the whole point here. */
+const BACKSLASH = String.fromCharCode(92);
+
+/** 0xC0-0xF4: every byte a UTF-8 decoder reads as the start of a multi-byte
+ * sequence, which is the entire population the re-encoding hazard lives in. */
+const LEAD_BYTES = Array.from({ length: 0xf4 - 0xc0 + 1 }, (_, i) => 0xc0 + i);
+
+/** What each lead byte is followed by: a backslash, the trigger, and a plain
+ * letter, the control. The sweep that found this ran six followers and every
+ * divergence sat in the backslash column, so two keeps the net and costs the
+ * suite 106 cases instead of 318. */
+const FOLLOWERS = [BACKSLASH, "a"];
+
+/** The bytes the pre-#113 sed program produces for Zo <lead> <follower>
+ * Example: the lead byte passes through untouched, and a following backslash
+ * is the one character of the two that gets escaped. */
+function expectedHighByteEscape(lead: number, follower: string): Buffer {
+  return Buffer.concat([
+    Buffer.from("Zo", "latin1"),
+    Buffer.from([lead]),
+    follower === BACKSLASH ? Buffer.from([0x5c, 0x5c]) : Buffer.from(follower, "latin1"),
+    Buffer.from("Example", "latin1"),
+  ]);
+}
+
+/** Runs identity_regex_escape over every lead byte and follower, in a real
+ * POSIX sh under the hook's own LC_CTYPE, one output file per case so the
+ * bytes survive the trip back. Returns them in LEAD_BYTES x FOLLOWERS order. */
+function runHighByteEscapes(): Buffer[] {
+  const dir = mkdtempSync(join(tmpdir(), "identity-highbyte-"));
+  tempDirs.push(dir);
+  const outDir = join(dir, "out");
+  mkdirSync(outDir, { recursive: true });
+
+  const driver = [
+    "#!/bin/sh",
+    '. "$1"',
+    "OUT=$2",
+    `BS=$(printf '${BACKSLASH}134')`,
+    "n=0",
+    "hi=192",
+    'while [ "$hi" -le 244 ]; do',
+    `    lead=$(printf "${BACKSLASH}${BACKSLASH}$(printf '%03o' "$hi")")`,
+    '    for follow in "$BS" a; do',
+    '        identity_regex_escape "Zo${lead}${follow}Example"',
+    "        printf '%s' \"$identity_escaped\" > \"$OUT/esc-$n\"",
+    "        n=$((n + 1))",
+    "    done",
+    "    hi=$((hi + 1))",
+    "done",
+    "",
+  ].join("\n");
+
+  const driverPath = join(dir, "driver.sh");
+  writeFileSync(driverPath, driver);
+
+  const run = Bun.spawnSync([posixSh(), driverPath, LIB_SRC, outDir], {
+    cwd: dir,
+    env: utf8HookEnv(),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (run.exitCode !== 0) {
+    throw new Error(`high-byte driver exited ${run.exitCode}: ${run.stderr.toString()}`);
+  }
+
+  return LEAD_BYTES.flatMap((_, i) =>
+    FOLLOWERS.map((__, j) => readFileSync(join(outDir, `esc-${i * FOLLOWERS.length + j}`))),
+  );
+}
+
+/** The env a hook runs under on Windows, with the fixture identity home
+ * swapped for whichever one the caller built. */
+function utf8HookEnv(home?: string): Record<string, string | undefined> {
+  const shDir = posixShDir();
+  const base = envWith(home === undefined ? {} : { USERPROFILE: home, HOME: home });
+  return {
+    ...base,
+    PATH: shDir ? `${base.PATH ?? ""}${delimiter}${shDir}` : base.PATH,
+    LC_ALL: "C.UTF-8",
+    LC_CTYPE: "C.UTF-8",
+  };
+}
+
+/** Declares a name whose bytes are not valid UTF-8, then reports what
+ * identity_load built and whether identity_control and identity_match agree
+ * that the declared name is still findable. */
+function runHighByteGate(): { rc: number; pattern: Buffer; control: string; match: string; stderr: string } {
+  const home = mkdtempSync(join(tmpdir(), "identity-highbyte-home-"));
+  tempDirs.push(home);
+  writeFileSync(
+    join(home, ".claude-account-identity.json"),
+    Buffer.concat([
+      Buffer.from('{"names":["Zo', "latin1"),
+      // The raw 0xE5, then a JSON-escaped backslash: the decoded entry is
+      // Zo 0xE5 backslash Example, which is the Finding-1 input exactly.
+      Buffer.from([0xe5, 0x5c, 0x5c]),
+      Buffer.from('Example"],"emails":["a@b.test"]}', "latin1"),
+    ]),
+  );
+
+  const dir = mkdtempSync(join(tmpdir(), "identity-highbyte-run-"));
+  tempDirs.push(dir);
+  const outDir = join(dir, "out");
+  mkdirSync(outDir, { recursive: true });
+
+  const driver = [
+    "#!/bin/sh",
+    '. "$1"',
+    "OUT=$2",
+    `BS=$(printf '${BACKSLASH}134')`,
+    `HI=$(printf '${BACKSLASH}345')`,
+    'NAME="Zo${HI}${BS}Example"',
+    'identity_load 2> "$OUT/err"',
+    "printf '%s' \"$?\" > \"$OUT/rc\"",
+    "printf '%s' \"$IDENTITY_PATTERN\" > \"$OUT/pattern\"",
+    'if identity_control 2>> "$OUT/err"; then printf pass > "$OUT/control"; else printf refused > "$OUT/control"; fi',
+    'if identity_match "Maintainer: $NAME here"; then printf found > "$OUT/match"; else printf missed > "$OUT/match"; fi',
+    "",
+  ].join("\n");
+
+  const driverPath = join(dir, "driver.sh");
+  writeFileSync(driverPath, driver);
+
+  const run = Bun.spawnSync([posixSh(), driverPath, LIB_SRC, outDir], {
+    cwd: dir,
+    env: utf8HookEnv(home),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (run.exitCode !== 0) {
+    throw new Error(`high-byte gate driver exited ${run.exitCode}: ${run.stderr.toString()}`);
+  }
+
+  return {
+    rc: Number(readFileSync(join(outDir, "rc"), "utf8")),
+    pattern: readFileSync(join(outDir, "pattern")),
+    control: readFileSync(join(outDir, "control"), "utf8"),
+    match: readFileSync(join(outDir, "match"), "utf8"),
+    stderr: readFileSync(join(outDir, "err"), "utf8"),
+  };
+}
+
+describe("identity gate — the pattern set is byte-transparent under the locale a hook actually runs in (#113)", () => {
+  test("every lead byte 0xC0-0xF4 survives escaping unchanged, backslash following or not", () => {
+    const results = runHighByteEscapes();
+    const mismatches: string[] = [];
+    LEAD_BYTES.forEach((lead, i) => {
+      FOLLOWERS.forEach((follower, j) => {
+        const expected = expectedHighByteEscape(lead, follower);
+        const actual = results[i * FOLLOWERS.length + j];
+        if (!expected.equals(actual)) {
+          const followerLabel = follower === BACKSLASH ? "a backslash" : `'${follower}'`;
+          mismatches.push(
+            `0x${lead.toString(16)} followed by ${followerLabel}: expected ${expected.toString("hex")}, got ${actual.toString("hex")}`,
+          );
+        }
+      });
+    });
+    expect(mismatches).toEqual([]);
+  });
+
+  test("a declared name carrying such a byte is still built into a live arm, and still found", () => {
+    const gate = runHighByteGate();
+    expect(gate.rc).toBe(0);
+    // The arm has to carry the declared bytes, not a re-encoding of them.
+    const arm = Buffer.concat([
+      Buffer.from([0x5c, 0x62]),
+      Buffer.from("Zo", "latin1"),
+      Buffer.from([0xe5, 0x5c, 0x5c]),
+      Buffer.from("Example", "latin1"),
+      Buffer.from([0x5c, 0x62]),
+    ]);
+    expect(gate.pattern.includes(arm)).toBe(true);
+    // Both halves matter. identity_control proves no arm went dead, and
+    // identity_match proves the gate would refuse content carrying the name
+    // -- a control that passes over a pattern nothing matches is the shape
+    // this file's own canary check exists to catch.
+    expect(gate.control).toBe("pass");
+    expect(gate.match).toBe("found");
+    expect(gate.stderr).toBe("");
+  });
+});
