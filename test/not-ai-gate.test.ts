@@ -313,4 +313,42 @@ describe("not-ai gate — issue #122, normalized counts", () => {
       expect(json.counts.contractions).toBe(4);
     },
   );
+
+  test.skipIf(!PYTHON)(
+    "where's, how's, when's and why's count as contractions",
+    () => {
+      // Issue #158: CONTRACTION_PRONOUN_S's closed set was
+      // it|he|she|that|there|here|what|who|let -- missing the four interrogatives, so each
+      // fell through to "not in the set" and was silently treated as a possessive instead of
+      // a contraction. Fixture is the exact one from the issue. Measured before this fix:
+      // contractions read 0 (all four missed). Fixed: contractions reads 4.
+      const { json } = runGate(
+        "interrogative-contractions.md",
+        "Where's the report? How's it going? When's the call, and why's it late?\n",
+      );
+      expect(json.counts.contractions).toBe(4);
+    },
+  );
+
+  test.skipIf(!PYTHON)(
+    "a curly apostrophe (U+2019) counts the same as a straight one, across every suffix form",
+    () => {
+      // Issue #158's third bullet: neither the pre-#134 nor the post-#134 pattern matched a
+      // curly apostrophe at all, in any suffix (n't, 're/ve/ll/d/m, or the pronoun/function-
+      // word 's set) -- a document written with typographic apostrophes throughout scored
+      // zero contractions regardless of how many it actually contained.
+      //
+      // Built via String.fromCharCode rather than a literal character or a \u escape typed
+      // into this source: a typed escape sequence arrives at the file already decoded, so
+      // the safe way to place a specific code point in test data is to construct it at
+      // runtime, the same rule the gate.py fix follows for the same character.
+      const curlyApostrophe = String.fromCharCode(0x2019);
+      const text =
+        `It${curlyApostrophe}s the company${curlyApostrophe}s policy that isn${curlyApostrophe}t up ` +
+        `for debate, we${curlyApostrophe}re aware of it, and where${curlyApostrophe}s the harm in that.\n`;
+      // Real contractions: It's, isn't, we're, where's (4). Possessive: company's (excluded).
+      const { json } = runGate("curly-apostrophe.md", text);
+      expect(json.counts.contractions).toBe(4);
+    },
+  );
 });
