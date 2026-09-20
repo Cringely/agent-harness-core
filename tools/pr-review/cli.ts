@@ -32,7 +32,7 @@ import { findIdentityHits, loadIdentity, type IdentityDecl } from "./identity";
 import { runReview, type ReviewOutcome } from "./pipeline";
 import { ClaudeCliRunner } from "./runner";
 import { REPO_ROOT, toolState } from "./tool-state";
-import { RefusalError, type PrSnapshot } from "./types";
+import { RefusalError, SHA_RE, type PrSnapshot } from "./types";
 import { verificationOf } from "./verdict";
 
 export const DEFAULT_REPO = "Cringely/agent-harness-core";
@@ -41,11 +41,22 @@ export class UsageError extends Error {}
 
 export type CliCommand =
   | { command: "help" }
-  | { command: "review" | "snapshot"; repo: string; pr: number; appId: string; post: boolean; commentOnly: boolean; json: boolean };
+  | {
+      command: "review" | "snapshot";
+      repo: string;
+      pr: number;
+      appId: string;
+      post: boolean;
+      commentOnly: boolean;
+      json: boolean;
+      // #155: the head the caller means to review or snapshot, if it knows one (a 40-character
+      // lowercase hex commit SHA). null when --expect-head was not given.
+      expectHead: string | null;
+    };
 
 const USAGE = [
-  'op read "<secret reference>" | bun <absolute path>/tools/pr-review/cli.ts review --pr <n> --app-id <id> --key-stdin [--post [--comment-only]] [--json] [--repo owner/name]',
-  'op read "<secret reference>" | bun <absolute path>/tools/pr-review/cli.ts snapshot --pr <n> --app-id <id> --key-stdin [--repo owner/name]',
+  'op read "<secret reference>" | bun <absolute path>/tools/pr-review/cli.ts review --pr <n> --app-id <id> --key-stdin [--post [--comment-only]] [--json] [--repo owner/name] [--expect-head <sha40>]',
+  'op read "<secret reference>" | bun <absolute path>/tools/pr-review/cli.ts snapshot --pr <n> --app-id <id> --key-stdin [--repo owner/name] [--expect-head <sha40>]',
 ].join("\n");
 
 export function parseCliArgs(argv: readonly string[], env: Record<string, string | undefined> = process.env): CliCommand {
@@ -58,6 +69,7 @@ export function parseCliArgs(argv: readonly string[], env: Record<string, string
     pr: { type: "string" },
     "app-id": { type: "string" },
     "key-stdin": { type: "boolean" },
+    "expect-head": { type: "string" },
     ...(command === "review" ? { post: { type: "boolean" }, "comment-only": { type: "boolean" }, json: { type: "boolean" } } : {}),
   };
   let values: Record<string, string | boolean | undefined>;
@@ -77,6 +89,18 @@ export function parseCliArgs(argv: readonly string[], env: Record<string, string
   }
   if (values["comment-only"] === true && values.post !== true) throw new UsageError("--comment-only only applies with --post");
 
+  // #155: optional on both commands. Absent leaves today's behaviour byte-identical (no check
+  // downstream); present, it must already be shaped like a real commit SHA, the same check
+  // github.ts applies to a fetched head, so a caller's typo is a usage error here rather than a
+  // guaranteed mismatch refusal three network calls later.
+  let expectHead: string | null = null;
+  if (values["expect-head"] !== undefined) {
+    if (typeof values["expect-head"] !== "string" || !SHA_RE.test(values["expect-head"])) {
+      throw new UsageError(`${command} needs --expect-head to be a 40-character lowercase hex commit SHA`);
+    }
+    expectHead = values["expect-head"];
+  }
+
   return {
     command,
     repo: typeof values.repo === "string" ? values.repo : DEFAULT_REPO,
@@ -85,6 +109,7 @@ export function parseCliArgs(argv: readonly string[], env: Record<string, string
     post: values.post === true,
     commentOnly: values["comment-only"] === true,
     json: command === "snapshot" || values.json === true,
+    expectHead,
   };
 }
 
@@ -272,7 +297,13 @@ export async function main(argv: string[], io: CliIo = REAL_IO): Promise<number>
   });
 
   if (parsed.command === "snapshot") {
-    console.log(JSON.stringify(summarizeSnapshot(await github.snapshot()), null, 2));
+    const snap = await github.snapshot();
+    // #155: snapshot never posts, so this only ever refuses a print, but it lets a wrapper that
+    // pinned a head confirm before it decides whether to run review at all.
+    if (parsed.expectHead !== null && parsed.expectHead !== snap.headSha) {
+      throw new RefusalError(`refusing to snapshot: the pull request's head is ${snap.headSha}, not the expected ${parsed.expectHead}`);
+    }
+    console.log(JSON.stringify(summarizeSnapshot(snap), null, 2));
     return 0;
   }
 
@@ -300,7 +331,7 @@ export async function main(argv: string[], io: CliIo = REAL_IO): Promise<number>
       toolRevision: tool.revision,
       toolDirty: tool.dirty,
     },
-    { commentOnly: parsed.commentOnly },
+    { commentOnly: parsed.commentOnly, expectHead: parsed.expectHead },
   );
   return reportOutcome(outcome, parsed.json, identity.decl);
 }

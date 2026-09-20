@@ -47,6 +47,15 @@ describe("parseCliArgs(): review", () => {
       post: true,
       commentOnly: false,
       json: true,
+      expectHead: null,
+    });
+  });
+
+  // #155
+  test("parses --expect-head", () => {
+    const sha = "a".repeat(40);
+    expect(parseCliArgs(["review", "--pr", "132", "--app-id", "123456", "--key-stdin", "--expect-head", sha], NO_ENV)).toMatchObject({
+      expectHead: sha,
     });
   });
 
@@ -65,6 +74,9 @@ describe("parseCliArgs(): review", () => {
     [["review", "--pr", "7", "--app-id", "1"]],
     [["review", "--pr", "7", "--app-id", "1", "--key-stdin", "--key-file", "/abs/app.pem"]],
     [["review", "--pr", "7", "--app-id", "1", "--key-stdin", "--comment-only"]],
+    [["review", "--pr", "7", "--app-id", "1", "--key-stdin", "--expect-head", "not-a-sha"]],
+    [["review", "--pr", "7", "--app-id", "1", "--key-stdin", "--expect-head", "A".repeat(40)]],
+    [["review", "--pr", "7", "--app-id", "1", "--key-stdin", "--expect-head", "a".repeat(39)]],
     [["no-such-command"]],
   ])("rejects %p", (argv) => {
     expect(() => parseCliArgs(argv, NO_ENV)).toThrow(UsageError);
@@ -85,6 +97,16 @@ describe("parseCliArgs(): snapshot", () => {
       post: false,
       commentOnly: false,
       json: true,
+      expectHead: null,
+    });
+  });
+
+  // #155: snapshot takes --expect-head too, so a wrapper can pin and confirm a head without
+  // running a review at all.
+  test("parses --expect-head", () => {
+    const sha = "b".repeat(40);
+    expect(parseCliArgs(["snapshot", "--pr", "132", "--app-id", "1", "--key-stdin", "--expect-head", sha], NO_ENV)).toMatchObject({
+      expectHead: sha,
     });
   });
 
