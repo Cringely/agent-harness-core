@@ -1559,12 +1559,41 @@ $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
 # how the file got edited. Guarded, because core.hooksPath REPLACES the whole
 # hooks directory for the repo: a project with its own .git/hooks/pre-push
 # would silently stop running it. Only wired when nothing is there to lose.
+
+# Absolute so the value is correct regardless of which subdirectory a
+# later `git commit` runs from. Read before the branch because the
+# foreign-repository skip below names it in its remediation hint too.
+$hooksDstAbs = (Resolve-Path -LiteralPath $hooksDst).Path
+
 $gitDirRaw = $null
 $gitCheck = & git -C $Target rev-parse --git-dir 2>$null
 if ($LASTEXITCODE -eq 0) { $gitDirRaw = $gitCheck }
 
 if (-not $gitDirRaw) {
     # Not a git repository (or git missing from PATH) — nothing to wire.
+}
+elseif (-not (Test-GitAnswersForTarget -AbsTarget (Resolve-Path -LiteralPath $Target).Path)) {
+    # Issue #145. Every probe below asks git through `-C $Target`, and GIT_DIR, GIT_WORK_TREE,
+    # GIT_INDEX_FILE and GIT_COMMON_DIR override that discovery. Git exports GIT_DIR into every
+    # hook it runs, so an installer launched from a hook in another repository read that
+    # repository's core.hooksPath and then WROTE this target's hooks directory into its config,
+    # redirecting or disabling the other project's hooks. The rev-parse above is kept ahead of
+    # this check so a target that is simply not in a repository stays the silent no-op it has
+    # always been, and only a git that answers, but answers about somewhere else, reaches here.
+    #
+    # Test-GitAnswersForTarget is the guard the sidecar probe has used since #140 (round-4 A),
+    # reused rather than reimplemented: one definition of "git answers for this target" keeps
+    # the two call sites from drifting into disagreeing about the same environment. It also
+    # covers dubious ownership and a missing git the same way, which is the fail-closed
+    # direction for a write this block cannot place correctly.
+    #
+    # Skip with a named reason rather than throwing: by this point the managed files, settings
+    # and manifest are already written, so a refusal here would abort a run that has otherwise
+    # succeeded, and the only thing left undone is a convenience wiring the operator can issue
+    # by hand. The sidecar's refusal is thrown instead because deleting a tracked file is not
+    # recoverable that way.
+    Write-Host "Skipping git hooksPath wiring: git did not answer for this target's own repository (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE or GIT_COMMON_DIR naming another repository, dubious ownership, git missing from PATH, or another unexpected result). Writing core.hooksPath now would land in whichever repository git answered for, not this one. Resolve the git error (for an exported location variable: unset it, or point it at this target's repository) and re-run the installer. To wire it by hand once git answers: git -C `"$Target`" config core.hooksPath `"$hooksDstAbs`""
+    $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'skipped-foreign-git' })
 }
 else {
     $gitDir = if ([System.IO.Path]::IsPathRooted($gitDirRaw)) { $gitDirRaw } else { Join-Path $Target $gitDirRaw }
@@ -1574,10 +1603,6 @@ else {
     $currentHooksPath = $null
     $chpCheck = & git -C $Target config --get core.hooksPath 2>$null
     if ($LASTEXITCODE -eq 0) { $currentHooksPath = $chpCheck }
-
-    # Absolute so the value is correct regardless of which subdirectory a
-    # later `git commit` runs from.
-    $hooksDstAbs = (Resolve-Path -LiteralPath $hooksDst).Path
 
     $alreadyWired = $false
     if ($currentHooksPath) {

@@ -552,6 +552,49 @@ Describe "Install-Harness" {
             Should -Be (Resolve-Path -LiteralPath "$script:target/.claude/hooks").Path
     }
 
+    It "skips core.hooksPath wiring, and writes into no repository at all, when a foreign GIT_DIR is exported" {
+        # Issue #145. Every probe in the wiring block asks git through `-C $Target`, and git
+        # exports GIT_DIR into every hook it runs, so an installer launched from a hook in
+        # another repository (or from any shell where the variable is set) read THAT
+        # repository's core.hooksPath and then wrote this target's hooks directory into its
+        # config, redirecting or disabling the other project's hooks. Same class as the
+        # sidecar probe's round-4 A finding, which #140 closed with Test-GitAnswersForTarget.
+        & git -C $script:target init -q *>&1 | Out-Null
+        $other = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-test-other-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $other | Out-Null
+        try {
+            & git -C $other init -q *>&1 | Out-Null
+            # Restored in the inner finally: leaking GIT_DIR into the rest of the file would
+            # make every later test in this run ask git about $other instead of its target.
+            $env:GIT_DIR = (Join-Path $other '.git')
+            try {
+                $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500
+            }
+            finally {
+                Remove-Item -LiteralPath 'Env:GIT_DIR' -ErrorAction SilentlyContinue
+            }
+
+            # The results table is the operator's only signal, so the skip carries a named
+            # reason rather than passing silently: a silent skip reads exactly like a wiring
+            # that happened.
+            $out | Should -Match 'skipped-foreign-git'
+            $out | Should -Match "git did not answer for this target's own repository"
+
+            # The defect itself: the foreign repository's config was written. `config --get`
+            # exits 1 when the key is unset, so this asserts nothing was written there.
+            & git -C $other config --get core.hooksPath *>$null
+            $LASTEXITCODE | Should -Be 1
+            # And nothing landed in the target either. Wiring the target anyway would mean
+            # trusting the same answers the guard just rejected; the installer is told to
+            # skip with a reason, not to guess which repository was meant.
+            & git -C $script:target config --get core.hooksPath *>$null
+            $LASTEXITCODE | Should -Be 1
+        }
+        finally {
+            Remove-Item -Recurse -Force $other
+        }
+    }
+
     It "installs the pre-commit hook with the owner execute bit actually set" -Skip:$IsWindows {
         & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
         $hook = Get-Item -LiteralPath "$script:target/.claude/hooks/pre-commit"
