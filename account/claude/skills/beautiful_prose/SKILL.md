@@ -14,7 +14,7 @@ A style contract, not a vibe. Treat violations as failures.
 
 ## Absolute prohibitions
 
-1. **Em dashes**: default to not using them. Prefer periods, commas, colons, semicolons, or line breaks. Single hyphens are legitimate in structural positions: headings, filenames (`Artist - Song Name.mp3`), ranges, and `label - value` pairs. Do not use a spaced single hyphen as an em-dash substitute in prose asides.
+1. **Em dashes**: default to not using them. Prefer periods, commas, colons, or line breaks. Not semicolons, which are banned in their own right (see below). Single hyphens are legitimate in structural positions: headings, filenames (`Artist - Song Name.mp3`), ranges, and `label - value` pairs. Do not use a spaced single hyphen as an em-dash substitute in prose asides.
 
    Rare exception, matching `writing-style.md`: a genuine aside that reads worse as a parenthetical may take one. This was an absolute ban until 2026-09-10 and was relaxed on measurement. Prose written under the absolute version ran at **0.0 em dashes per 10,000 words across 59,034 words** of this operator's linted documents, against **15.5** in their hand-authored notes and **43.9** in their own rules files, which are exempt from linting. Human writing uses them; a corpus at exactly zero is a corpus that has been filtered, and reads that way. The exception is rare, not open: if a draft carries several, the drafting is the problem rather than the rule.
 2. **Reversals**: ban "It's not X, it's Y" and variants ("This isn't about X. It's about Y", "Not X but Y", "X is a symptom; Y is the cause" as a cheap pivot).
@@ -22,7 +22,8 @@ A style contract, not a vibe. Treat violations as failures.
 4. **Therapeutic language**: "I hear you", "That sounds hard", "You're valid", "Give yourself grace", "Be kind to yourself".
 5. **AI tells and meta commentary**: "In this essay/document", "This piece explores", "We will discuss", "Here are the key takeaways", apologies for style.
 6. **Symmetry padding**: no balancing sentences for balance, no three-part lists unless earned, no "X, Y, and Z" as decoration.
-7. **Banned vocabulary**: delve, dive into, leverage, utilize, robust, holistic, seamless, comprehensive, pivotal, crucial, vital, essential, unprecedented, transformative, revolutionary, game-changer, streamline, empower, foster, harness, underscore, highlight, paradigm, synergy, tapestry, landscape, ecosystem, realm, nuanced, facilitate, operationalize, innovative, cutting-edge, state-of-the-art. (Canonical list; writing-style.md, the Cringely Vale style, and the portable variant derive from it.)
+7. **Semicolons**: banned (operator directive, 2026-09-21). Two independent clauses joined by one are two sentences, so write two. A semicolon separating list items is a comma or a line break, and a line chaining three or four comma-carrying items into one sentence is a list that should be bullets. Quoting a semicolon inside an example of some other tell, as prohibition 2 does, is not a use of one. Enforced by `Cringely.Semicolons`, which exempts code blocks and inline code, where a semicolon is syntax rather than style.
+8. **Banned vocabulary**: delve, dive into, leverage, utilize, robust, holistic, seamless, comprehensive, pivotal, crucial, vital, essential, unprecedented, transformative, revolutionary, game-changer, streamline, empower, foster, harness, underscore, highlight, paradigm, synergy, tapestry, landscape, ecosystem, realm, nuanced, facilitate, operationalize, innovative, cutting-edge, state-of-the-art. (Canonical list; writing-style.md, the Cringely Vale style, and the portable variant derive from it.)
 
 ## Positive constraints
 

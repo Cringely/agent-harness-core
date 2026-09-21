@@ -10,13 +10,13 @@ When a session starts real work in a dev project whose `.claude/` lacks the core
 pwsh {{CORE_REPO}}/install/Install-Harness.ps1 -Target <project-root>
 ```
 
-Add `-IncludeCeremonies` only for projects running standup/wave ceremonies. Prereqs: pwsh 7, bun on PATH (worktree gate no-ops silently without it), Git Bash for shell hooks. After install, suggest filling guardrails.md's project section and `{{PROJECT}}` placeholders. Don't run the installer unasked; offer it.
+Add `-IncludeCeremonies` only for projects running standup/wave ceremonies. Prereqs: pwsh 7, bun on PATH (worktree gate no-ops silently without it), Git Bash for shell hooks. After install, suggest filling guardrails.md's project section and `{{PROJECT}}` placeholders. Don't run the installer unasked. Offer it.
 
 ## After install, use what's there
 
 - Dispatch `task-reviewer` / `adversarial-reviewer` for that project's reviews instead of ad-hoc general-purpose reviewers.
-- `doc-steward` after merges that touch living docs. It stays on its cheap tier for reconciliation (citations, dates, status lines, stale references); when the repair is rewritten sentences rather than a corrected fact, that half goes to a Fable agent per `agent-usage.md`.
-- The worktree gate will deny unisolated write-agent dispatches; that's intended, use isolation instead of fighting it.
+- `doc-steward` after merges that touch living docs. It stays on its cheap tier for reconciliation (citations, dates, status lines, stale references). When the repair is rewritten sentences rather than a corrected fact, that half goes to a Fable agent per `agent-usage.md`.
+- The worktree gate will deny unisolated write-agent dispatches. That's intended, use isolation instead of fighting it.
 
 ## Account layer, on this machine and on any other
 
@@ -37,7 +37,7 @@ Use `git diff` here and not `git status`. The export writes LF, a Windows checko
 and a no-change re-export therefore flips the working-tree line endings without touching the
 index. Measured 2026-09-05 on a clean tree: `git status --short` listed 203 modified paths where
 `git diff --exit-code` returned 0. To put the endings back afterwards, run
-`git checkout -- account/claude`; the content is identical, so nothing is lost.
+`git checkout -- account/claude`. The content is identical, so nothing is lost.
 
 On a second machine, after `git pull` in the core repo:
 
@@ -51,8 +51,8 @@ it. Fix the source under `~/.claude/` and export again.
 ## Findings flow (both channels)
 
 1. Capture findings as memory notes during work (cheap, always).
-2. Second occurrence of a failure class or useful pattern across projects: promote it — commit to the core repo (pattern doc, agent def, hook, or template edit), push, shrink notes to pointers. Never blind-edit installed copies in a project; change core, re-run installer.
+2. Second occurrence of a failure class or useful pattern across projects: promote it — commit to the core repo (pattern doc, agent def, hook, or template edit), push, shrink notes to pointers. Never blind-edit installed copies in a project. Change core, re-run installer.
 
 ## Architecture reuse
 
-Building an agent system in any language: start from `patterns/INDEX.md` in the core repo. Stage-2 TS code extraction is deferred; propose it when a second TypeScript project needs the store/planner/dashboard code.
+Building an agent system in any language: start from `patterns/INDEX.md` in the core repo. Stage-2 TS code extraction is deferred. Propose it when a second TypeScript project needs the store/planner/dashboard code.

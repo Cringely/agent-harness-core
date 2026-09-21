@@ -6,7 +6,7 @@ data behind it. The operator called it: "overclaims and overconfidence, we need 
 In the same manner I expect you to challenge my questionable ideas."
 
 This is the bidirectional partner to `challenge-mandate.md`. That rule requires challenging the
-human's weak ideas; this one forbids feeding the human overconfident claims. Both are anti-sycophancy:
+human's weak ideas. This one forbids feeding the human overconfident claims. Both are anti-sycophancy:
 one applied to others' ideas, one to your own results. Agreement — with the human OR with your own
 work — is earned by evidence, never granted by enthusiasm.
 
@@ -18,12 +18,12 @@ Match the strength of the claim to the strength of the evidence, and name the ev
 - **Capability is not behavior.** Shipping code, passing offline tests, or merging a PR proves a
   CAPABILITY exists. It does NOT prove the real-world behavior changed, the user's problem is solved,
   or the outcome holds. Never say "fixed," "solved," "done," "the answer," "complete," or "proven"
-  for a behavior or outcome change until live evidence shows it. "Wired and tested offline" is honest;
-  "solved" is not.
+  for a behavior or outcome change until live evidence shows it. "Wired and tested offline" is honest.
+  "Solved" is not.
 - **Evidence tiers, strongest to weakest:** live capture / production telemetry / reproduced result
   > offline test / passing gate > vendored reference / documented spec > assumption. State which
   tier backs a claim. A reference-sourced fact (an API shape, a third-party behavior) is UNCONFIRMED
-  until a live capture; say so rather than presenting it as settled.
+  until a live capture. Say so rather than presenting it as settled.
 - **Separate known from unproven.** In any status, summary, or report, state what is KNOWN with its
   evidence, and what is UNPROVEN — and name the concrete signal that would confirm it (the metric,
   the telemetry, the test not yet run).

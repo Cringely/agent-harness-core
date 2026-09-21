@@ -23,13 +23,13 @@ One register per surface, five surfaces. Binding whether or not any plugin coope
 | Internal agent traffic: memory notes, handoffs, council transcripts, scratch and report files, the Obsidian mirror | exempt (see below) | none |
 
 Compressed register, stated here so it holds without a plugin: drop articles, filler, and
-pleasantries; fragments are fine; keep every technical term, path, command, identifier, and error
-string verbatim; never invent abbreviations. `subagent-prompting.md` carries the full version for
+pleasantries. Fragments are fine. Keep every technical term, path, command, identifier, and error
+string verbatim. Never invent abbreviations. `subagent-prompting.md` carries the full version for
 briefs.
 
 Commit messages split. Subject and bullets compressed. Rationale required by
 `change-management.md` (why the change was needed, what was rejected, trade-offs) stays normal
-prose; compression costs clarity in reasoning.
+prose. Compression costs clarity in reasoning.
 
 Auto-clarity overrides compression everywhere: security warnings, destructive-action
 confirmations, and any multi-step sequence where dropped conjunctions could invert the order get
@@ -65,7 +65,7 @@ rather than left as a quiet disagreement between the table and the hook.
 
 A worktree checkout is not internal traffic. What gets written there is a deliverable on its way to
 master, so it keeps linting, and both write hooks are built to say so. `Lint-DocumentProse.ps1`
-rebases a path at the worktree root before it matches the skip list; `lint-doc-prose.ts` excludes
+rebases a path at the worktree root before it matches the skip list. `lint-doc-prose.ts` excludes
 `.claude/worktrees/` from its `.claude/` rule. Without those two lines the `.claude/` that merely
 hosts a checkout swallows the whole thing, which is what both hooks used to do. A `memory/` note or
 a nested `.claude/` inside the worktree stays exempt on its own token.
@@ -90,8 +90,8 @@ clutter, and the whole page scans as one list.
 
 Under each label goes a real bulleted list, one to three items, each carrying one or two sentences.
 Two is the ceiling, not the target. The list markers are the point. A bold label followed by a paragraph is a wall of text
-with a label on it, and it fails this row exactly the way unbroken prose does; the reader gets no
-indentation, no per-claim boundary, and nothing to skip forward to. Bullets chunk; they do not
+with a label on it, and it fails this row exactly the way unbroken prose does. The reader gets no
+indentation, no per-claim boundary, and nothing to skip forward to. Bullets chunk. They do not
 compress. Resist the table: a table forces every claim to the width of its cell, and claims that
 need a clause of context die there. Use one only when the content is genuinely tabular.
 
@@ -109,7 +109,7 @@ reader can reconstruct what changed from the diff and cannot reconstruct what is
 how you know it works.
 
 Shortening prose does not satisfy this row, and neither does labelling it. A tightened block of
-paragraphs is still a block of paragraphs, and so is a labelled one; the complaint is shape, not
+paragraphs is still a block of paragraphs, and so is a labelled one. The complaint is shape, not
 length. Read the draft back as rendered markdown and check for actual indentation. If every line
 starts at the left margin, the row is not satisfied.
 
@@ -118,7 +118,7 @@ starts at the left margin, the row is not satisfied.
 Chat wrap-ups after a run, task, or investigation cap at roughly 400 words. Cap covers the report,
 not the work, and not file-based deliverables, which keep their own register and length.
 
-Lead with the number or verdict, first line. Two caveats inline at most, one line each; rest goes
+Lead with the number or verdict, first line. Two caveats inline at most, one line each. Rest goes
 to the artifact, note, or commit message, read on demand instead of every time. Never recap a
 design the operator was already briefed on. Bookkeeping (artifact republished, memory updated,
 index bumped) in one clause, not a paragraph. No pre-answering unasked questions. No defending a
@@ -133,7 +133,7 @@ overrides.
 
 ## Layering
 
-beautiful_prose skill is canonical for the banned-vocabulary list; this file mirrors it. Long-form
+beautiful_prose skill is canonical for the banned-vocabulary list. This file mirrors it. Long-form
 deliverables use the skill. Layer differences:
 
 - Em dashes: no longer a layer difference. The skill banned them absolutely until 2026-09-10 and
@@ -141,11 +141,11 @@ deliverables use the skill. Layer differences:
   Measured before the change: 0.0 per 10,000 words across 59,034 words of linted deliverables,
   against 15.5 in hand-authored human notes and 43.9 in this rules corpus, which no hook lints.
   A ban that produces exactly zero across sixty thousand words is not a preference being expressed.
-- Structural entropy and registers: skill-only; everyday output just avoids monotony (see
+- Structural entropy and registers: skill-only. Everyday output just avoids monotony (see
   Monotonous prose below).
 - Second-pass self-critique and lint checklist: skill-only workflow steps.
 
-Vocabulary changes land in the skill first; this file and the Cringely Vale style
+Vocabulary changes land in the skill first. This file and the Cringely Vale style
 (`~/.claude/tools/prose-lint/Build-CringelyStyle.ps1`) update from it in the same change.
 
 ## Four Alerts the Linter Gets Backwards
@@ -254,13 +254,13 @@ Prefer the plain sentence where it does the same work: "ablate the test" is a gr
 
 Gloss a needed specialist term in place on first use in a human-facing document. Six words in parentheses. Not a glossary, not a footnote.
 
-Rhetorical frames fatigue a reader the same way a repeated noun does. Once is style; four times is a template.
+Rhetorical frames fatigue a reader the same way a repeated noun does. Once is style. Four times is a template.
 
 Mechanical backstop: `Cringely.AblationOveruse` warns when a single paragraph says "ablate" three or more times. Vale counts occurrences per paragraph, so nothing catches a word recurring at a steady drip across a whole file. That call stays yours: could a competent person outside the project read it without stopping? If not, cut the jargon.
 
 ## Tone and Voice
 
-Robotic formality: policy documents still need to sound person-written. "The owning team is notified" is fine; a paragraph where every sentence follows "The [noun] [verb]s the [noun]" is a spec sheet. Mix in natural constructions. Occasionally open with "When", "If", or "After" instead of the subject.
+Robotic formality: policy documents still need to sound person-written. "The owning team is notified" is fine. A paragraph where every sentence follows "The [noun] [verb]s the [noun]" is a spec sheet. Mix in natural constructions. Occasionally open with "When", "If", or "After" instead of the subject.
 
 Functional word choice: avoid prose reading as a series of operations ("Performs X, executes Y, produces Z, surfaces W"). Prefer active subjects doing recognizable things: "MSO runs the quarterly review" over "MSO executes a quarterly review on behalf of AppSec."
 
@@ -274,14 +274,16 @@ Excessive formality in transitions: Furthermore, Moreover, Additionally, Subsequ
 
 No bold or italic for emphasis mid-sentence. Bold only for defined terms in a glossary, column headers in tables, and structural labels (e.g., "Option A" in a list of options). Never bold an adjective or verb to signal importance.
 
-Em dashes: avoid almost entirely. Replace with a period and new sentence, a comma, or parentheses. Rare exception: a genuine aside awkward as a parenthetical; otherwise default to not using them.
+Em dashes: avoid almost entirely. Replace with a period and new sentence, a comma, or parentheses. Rare exception: a genuine aside awkward as a parenthetical, otherwise default to not using them.
+
+Semicolons: banned (operator directive, 2026-09-21). Two independent clauses joined by a semicolon are two sentences, so write them as two. A semicolon splicing a list item is a comma or a line break. This binds every surface the em dash rule binds, including code comments and agent briefs, and it does not reach code itself, where a semicolon is syntax. Applies to the list separators inside a long clause as well, which are the common case in a spec or a prompt: break the clause into bullets rather than chaining items with semicolons.
 
 Mechanical bullet points: no converting continuous prose into bullets. Three or fewer related points belong in a sentence. Bullets are for genuinely enumerable, parallel items.
 
-Header inflation: content under ~300 words needs no section headers; prefer prose paragraphs.
+Header inflation: content under ~300 words needs no section headers. Prefer prose paragraphs.
 
 ## What Good Looks Like
 
 Say what is true. Say why it matters. Stop.
 
-Specific numbers, names, and outcomes beat adjectives. State a correct decision; name a trade-off. Vary how sentences start and how long they run. Read it back: would a person actually write this sentence this way?
+Specific numbers, names, and outcomes beat adjectives. State a correct decision. Name a trade-off. Vary how sentences start and how long they run. Read it back: would a person actually write this sentence this way?

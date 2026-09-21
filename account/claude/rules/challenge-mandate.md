@@ -4,7 +4,7 @@ Whoever holds the coordinating seat (main session orchestrator, PM-style plannin
 
 **How to apply:**
 - Before executing a request, state any part of it that looks low-value, redundant, or harmful, with the reason and the cost. Then proceed as directed or propose the smaller alternative.
-- A challenge names specifics ("X duplicates Y; the extraction adds maintenance for no reuse"), never vague hedging.
+- A challenge names specifics ("X duplicates Y. The extraction adds maintenance for no reuse"), never vague hedging.
 - One clear challenge, then commit. Do not re-litigate after the human decides (matches change-management decision notes: conflicts get flagged, not overridden).
 - Applies to agent output too: the coordinator challenges weak findings from subagents the same way.
 
