@@ -1609,25 +1609,32 @@ Describe "Install-Account" {
 
     # Task 10 review: a failure anywhere in the settings-merge block used to land outside every
     # catch in the script, past Task 8's mixed-state warning, surfacing as a bare exception with
-    # no word that $ClaudeHome was left half-installed. Locked FileShare.None (fully exclusive),
-    # the same mode the tree-copy catch's own test uses two Contexts up: the existing-settings
-    # read and the merged-settings write both sit inside the one try/catch this It is pinning, so
-    # it does not matter which of the two a locked file actually blocks, only that the merge
-    # fails and reports mixed state rather than surfacing bare.
+    # no word that $ClaudeHome was left half-installed. Locks settings.json below with a share
+    # mode chosen per platform, and checks the run still reports mixed state instead of
+    # surfacing bare.
     #
-    # Issue #151: was FileShare.Read (write exclusion only, reads still allowed), which relies on
-    # Windows' OS-enforced mandatory locking. .NET on Linux does not enforce a read-share lock
-    # against a same-process writer, so the second install's Set-Content went through with no
-    # throw and this It failed on a genuinely different platform, not a genuinely different
-    # invariant. FileShare.None is enforced cross-platform, confirmed by the sibling It already
-    # passing on Linux with the same lock mode.
+    # Issue #151: on Windows, FileShare.Read lets the existing-settings read (Get-Content, around
+    # line 784) through and blocks only the merged-settings write (Set-Content, around line 818),
+    # which is what this It's name describes: a settings.json write failure, not the tree copy.
+    # .NET on Linux does not enforce that share mode against a same-process writer (advisory
+    # locking, not Windows' OS-enforced kind), so on Linux the same Read lock let the second
+    # install's write through with no throw, and this It failed there for a platform reason, not
+    # the invariant it pins. FileShare.None is enforced on both platforms, so Linux uses it
+    # instead, but it blocks the read at line 784, not the write: Get-Content throws, the nested
+    # catch at line 786 calls Backup-BrokenSettings, and its own Copy-Item (line 745) throws on
+    # the same lock, which the outer catch at line 821 reports as mixed state. So on Linux this
+    # It exercises the read-then-backup path, not the write failure its name describes. That
+    # distinction does not apply to the mcpServers It around line 2001: there the read and the
+    # write sit in the one try/catch with no nested catch between them, so either failing reports
+    # the same warning.
     It "reports the mixed-state warning when the settings.json write fails, not just the tree copy" {
         $p = New-StandInPayload; $h = New-StandInClaudeHome
         try {
             & $script:install -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight | Out-Null
             $liveSettings = Join-Path $h 'settings.json'
-            $stream = [System.IO.File]::Open($liveSettings, 'Open', 'Read', 'None')
+            $shareMode = if ($IsWindows) { 'Read' } else { 'None' }
+            $stream = [System.IO.File]::Open($liveSettings, 'Open', 'Read', $shareMode)
             $threw = $false
             $warnings = $null
             try {
