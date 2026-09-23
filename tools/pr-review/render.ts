@@ -4,6 +4,7 @@
 // images, HTML, mentions or issue references. What renders outside a fence is template text plus
 // values this file checks itself: event names, validated enums, counts, SHAs and plain identifiers.
 
+import { DOCS_VERDICT_FORMS } from "./docs-verdict";
 import { CONFIDENCE_SET, LOAD_BEARING_SET, SEVERITY_SET, SHA_RE, type Finding, type ReviewEvent, type ReviewerOutput, type Verification } from "./types";
 
 export const MAX_FIELD_CHARS = 1_500;
@@ -43,6 +44,10 @@ export interface RenderInput {
   toolRevision: string;
   toolDirty: boolean;
   changedFiles: readonly string[];
+  // The pull request body's Docs verdict line (docs-verdict.ts), exactly as matched, or null when
+  // none qualified. Attacker-supplied text like every other pull-request string, so it renders
+  // through fenced() below rather than outside a fence.
+  docsVerdictLine: string | null;
 }
 
 export function sanitize(text: string, maxChars: number = MAX_FIELD_CHARS): string {
@@ -115,6 +120,9 @@ export function renderReviewBody(input: RenderInput): string {
   if (typeof input.basis !== "string" || !BASIS_RE.test(input.basis)) {
     throw new Error("basis contains a character outside computeEvent's output set");
   }
+  if (input.docsVerdictLine !== null && typeof input.docsVerdictLine !== "string") {
+    throw new Error("docsVerdictLine must be a string or null");
+  }
   if (input.output !== null) {
     for (const finding of input.output.findings) {
       if (!SEVERITY_SET.has(finding.severity) || !CONFIDENCE_SET.has(finding.confidence)) {
@@ -138,7 +146,15 @@ export function renderReviewBody(input: RenderInput): string {
   const verification = [`#### Verification: ${input.verification.state}`];
   if (input.verification.reasons.length > 0) verification.push("", fenced(input.verification.reasons.join("\n")));
 
-  const required: string[] = [header.join("\n"), verification.join("\n")];
+  // #217: code-authored, never the model. The matched line is quoted verbatim so a later body
+  // edit cannot change what this review evaluated (body edits do not dismiss an approval); a
+  // missing line renders a code-authored notice naming the two forms it looked for.
+  const docsVerdict =
+    input.docsVerdictLine === null
+      ? ["#### Docs verdict", "", "No Docs verdict line found. Expected one of:", "", fenced(DOCS_VERDICT_FORMS.join("\n"))].join("\n")
+      : ["#### Docs verdict", "", fenced(input.docsVerdictLine)].join("\n");
+
+  const required: string[] = [header.join("\n"), verification.join("\n"), docsVerdict];
   const optional: Array<{ name: string; text: string }> = [];
 
   if (input.output === null) {

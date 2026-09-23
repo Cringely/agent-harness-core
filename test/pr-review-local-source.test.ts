@@ -35,6 +35,8 @@ function makeRepo() {
   git(dir, "config", "user.email", "fixture@example.test");
   git(dir, "config", "core.autocrlf", "false");
   write(dir, "CONTRIBUTING.md", "BASE CONTRIBUTING\n");
+  write(dir, "README.md", "BASE README\n");
+  write(dir, "tools/pr-review/README.md", "BASE PR-REVIEW README\n");
   write(dir, ".github/workflows/test.yml", "jobs:\n");
   write(dir, "src/a.ts", "export const a = 1;\n");
   write(dir, "src/removed.ts", "gone\n");
@@ -81,6 +83,16 @@ describe("LocalGitSource.snapshot()", () => {
     const snap = await new LocalGitSource({ repoDir: dir, base: "HEAD~1", head: "HEAD", checks: "passed" }).snapshot();
     expect(snap.trustedContext).toEqual([{ path: "CONTRIBUTING.md", content: "BASE CONTRIBUTING\n" }]);
     expect(snap.headFiles.find((f) => f.path === "CONTRIBUTING.md")?.content).toBe("HEAD CONTRIBUTING\n");
+  });
+
+  // #217: same base-commit mechanism as trusted context above.
+  test("living documents are the base commit's copy", async () => {
+    const { dir } = makeRepo();
+    const snap = await new LocalGitSource({ repoDir: dir, base: "HEAD~1", head: "HEAD", checks: "passed" }).snapshot();
+    expect(snap.livingDocs).toEqual([
+      { path: "README.md", content: "BASE README\n" },
+      { path: "tools/pr-review/README.md", content: "BASE PR-REVIEW README\n" },
+    ]);
   });
 
   test("an unknown revision rejects rather than reviewing something else", async () => {

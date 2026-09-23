@@ -20,6 +20,7 @@
 import { GITHUB_API, githubHeaders } from "./app-auth";
 import { linkedIssueNumbers, selectHeadFiles } from "./snapshot";
 import {
+  LIVING_DOC_PATHS,
   MAX_HEAD_FILE_FETCHES,
   RefusalError,
   SHA_RE,
@@ -253,6 +254,11 @@ export class GitHubClient implements PrSource, ReviewPoster {
       const content = await this.rawOrNull(contentsPath(repo, path, baseSha));
       if (content !== null) trustedContext.push({ path, content });
     }
+    const livingDocs: FileText[] = [];
+    for (const path of LIVING_DOC_PATHS) {
+      const content = await this.rawOrNull(contentsPath(repo, path, baseSha));
+      if (content !== null) livingDocs.push({ path, content });
+    }
     const workflowText = await this.rawOrNull(contentsPath(repo, WORKFLOW_PATH, baseSha));
 
     const checkRuns = await this.fetchCheckRuns(repo, headSha);
@@ -273,6 +279,7 @@ export class GitHubClient implements PrSource, ReviewPoster {
       omittedFiles: [...omittedFiles, ...beyondFetchCap],
       linkedIssues,
       trustedContext,
+      livingDocs,
       workflowText,
       checkRuns,
     };

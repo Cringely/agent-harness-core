@@ -74,6 +74,11 @@ export interface PrSnapshot {
   omittedFiles: string[];
   linkedIssues: IssueText[];
   trustedContext: FileText[];
+  // Read at the pull request's BASE commit, same mechanism as trustedContext. Unlike
+  // trustedContext, these are not the standard the change is held to: they are claims about the
+  // project's current state (#217), rendered under their own label in the prompt so the reviewer
+  // checks them rather than obeys them.
+  livingDocs: FileText[];
   workflowText: string | null;
   checkRuns: CheckRun[];
 }
@@ -126,6 +131,12 @@ export const TRUSTED_CONTEXT_PATHS = [
   "account/claude/rules/fix-quality.md",
   "account/claude/rules/security.md",
 ] as const;
+
+// Read at the pull request's BASE commit, the same mechanism TRUSTED_CONTEXT_PATHS uses. Kept out
+// of TRUSTED_CONTEXT_PATHS on purpose: README.md describes the project's current state, it is not
+// a standard a change is held to. #146 moves this list to per-project configuration once the
+// reviewer runs against more than this one repository.
+export const LIVING_DOC_PATHS = ["README.md", "tools/pr-review/README.md"] as const;
 
 export const WORKFLOW_PATH = ".github/workflows/test.yml";
 
