@@ -1774,11 +1774,36 @@ else {
         $chpCheck = & git -C $Target config --get core.hooksPath 2>$null
         if ($LASTEXITCODE -eq 0) { $currentHooksPath = $chpCheck }
 
+        # #204: config --get is kept only for the display string in the messages below (the raw
+        # core.hooksPath value). It is not used to resolve $alreadyWired: a relative
+        # core.hooksPath is resolved by git against the worktree TOPLEVEL, never against
+        # $Target, and Join-Path-ing it onto $Target gave the right answer only when $Target
+        # already was the toplevel. With a subdirectory target whose own .claude/hooks happens
+        # to already exist (the harness's own prior copy step, earlier in this same run,
+        # creates exactly that directory), the naive join landed on $hooksDstAbs by coincidence
+        # and reported 'unchanged' while git actually read the toplevel's hooks directory
+        # instead (verified live: install into a subdirectory target with a relative
+        # core.hooksPath set at the toplevel printed 'unchanged', while
+        # `git -C $Target rev-parse --git-path hooks` resolved to the toplevel's .claude/hooks,
+        # not the subdirectory's). Same defect #202 fixed for the audit-time reachability check
+        # (Get-HooksPathReachability above); this is the install-time counterpart, resolved the
+        # same way: ask git directly with `rev-parse --git-path hooks`, which honours
+        # core.hooksPath resolved the way git itself resolves it and falls back to
+        # <git-dir>/hooks when unset. Normalised the same way Get-GitLocation and
+        # Get-HooksPathReachability normalise their own outputs: join onto $Target only when the
+        # printed path is not already rooted (git prints it relative to the -C directory when
+        # the repository was discovered rather than named by an environment variable), then
+        # GetFullPath and trim trailing separators before comparing.
         $alreadyWired = $false
         if ($currentHooksPath) {
-            $currentResolved = if ([System.IO.Path]::IsPathRooted($currentHooksPath)) { $currentHooksPath } else { Join-Path $Target $currentHooksPath }
-            if (Test-Path -LiteralPath $currentResolved) {
-                $alreadyWired = (Resolve-Path -LiteralPath $currentResolved).Path -ieq $hooksDstAbs
+            $hpCheck = & git -C $Target rev-parse --git-path hooks 2>$null
+            if ($LASTEXITCODE -eq 0 -and $hpCheck) {
+                $currentResolved = [string]$hpCheck
+                if ($IsWindows) { $currentResolved = $currentResolved.Replace('/', '\') }
+                if (-not [System.IO.Path]::IsPathRooted($currentResolved)) { $currentResolved = Join-Path $Target $currentResolved }
+                $currentResolved = [System.IO.Path]::GetFullPath($currentResolved).TrimEnd([char[]]@('\', '/'))
+                $d = $hooksDstAbs.TrimEnd([char[]]@('\', '/'))
+                $alreadyWired = if ($IsWindows) { $currentResolved -ieq $d } else { $currentResolved -ceq $d }
             }
         }
 
