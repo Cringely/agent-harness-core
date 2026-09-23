@@ -29,6 +29,7 @@ const snapshot = (overrides: Partial<PrSnapshot> = {}): PrSnapshot => ({
   omittedFiles: [],
   linkedIssues: [],
   trustedContext: [],
+  livingDocs: [],
   workflowText: "jobs:\n",
   checkRuns: syntheticCheckRuns("passed"),
   ...overrides,
@@ -126,6 +127,25 @@ describe("runReview(): the outcome", () => {
   test("carries no findings when the reviewer failed", async () => {
     const runner = new FakeRunner({ ok: false, reason: "the reviewer run ended in an error" });
     expect((await runReview(deps({ runner }), OPTIONS)).findings).toEqual([]);
+  });
+});
+
+// #217: the line is read from the snapshot's own body, by code, never from anything the reviewer
+// wrote, and it can only lower or leave the event, never change it.
+describe("runReview(): the Docs verdict line (#217) reaches the body, never the event", () => {
+  test("a qualifying line is quoted into the body under its own heading", async () => {
+    const source = { snapshot: async () => snapshot({ body: "Some notes.\n\nDocs: README updated: describes the new flag.\n\nMore notes." }) };
+    const outcome = await runReview(deps({ source }), OPTIONS);
+    expect(outcome.body).toContain("#### Docs verdict");
+    expect(outcome.body).toContain("Docs: README updated: describes the new flag.");
+  });
+
+  test("no qualifying line renders the code-authored notice, and the event is unaffected", async () => {
+    const source = { snapshot: async () => snapshot({ body: "No verdict line here." }) };
+    const outcome = await runReview(deps({ source }), OPTIONS);
+    expect(outcome.body).toContain("No Docs verdict line found");
+    expect(outcome.body).toContain("Docs: README still accurate: <what was checked>");
+    expect(outcome.event).toBe("APPROVE");
   });
 });
 

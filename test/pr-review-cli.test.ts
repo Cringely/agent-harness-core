@@ -138,6 +138,7 @@ describe("summarizeSnapshot()", () => {
       omittedFiles: [],
       linkedIssues: [{ number: 127, title: "ISSUE-TITLE", body: "ISSUE-BODY" }],
       trustedContext: [{ path: "CONTRIBUTING.md", content: "TRUSTED-TEXT" }],
+      livingDocs: [{ path: "README.md", content: "LIVING-DOC-TEXT" }],
       workflowText: "jobs:\n",
       checkRuns: syntheticCheckRuns("passed"),
     };
@@ -145,8 +146,9 @@ describe("summarizeSnapshot()", () => {
     expect(summary.verification).toEqual({ state: "passed", reasons: [] });
     expect(summary.linkedIssues).toEqual([127]);
     expect(summary.changedFilesComplete).toBe(true);
+    expect(summary.livingDocs).toEqual(["README.md"]);
     const text = JSON.stringify(summary);
-    for (const mark of ["TITLE-TEXT", "BODY-TEXT", "DIFF-TEXT", "COMMIT-TEXT", "CONTENT-TEXT", "ISSUE-BODY", "TRUSTED-TEXT"]) {
+    for (const mark of ["TITLE-TEXT", "BODY-TEXT", "DIFF-TEXT", "COMMIT-TEXT", "CONTENT-TEXT", "ISSUE-BODY", "TRUSTED-TEXT", "LIVING-DOC-TEXT"]) {
       expect(text).not.toContain(mark);
     }
   });
@@ -626,6 +628,7 @@ function fixtureSnapshot(headSha: string): PrSnapshot {
     omittedFiles: [],
     linkedIssues: [],
     trustedContext: [],
+    livingDocs: [],
     workflowText: "jobs:\n",
     checkRuns: syntheticCheckRuns("passed"),
   };

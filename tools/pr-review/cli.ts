@@ -131,6 +131,7 @@ export function summarizeSnapshot(snapshot: PrSnapshot): Record<string, unknown>
     commitCount: snapshot.commitMessages.length,
     linkedIssues: snapshot.linkedIssues.map((issue) => issue.number),
     trustedContext: snapshot.trustedContext.map((file) => file.path),
+    livingDocs: snapshot.livingDocs.map((file) => file.path),
     workflowPresent: snapshot.workflowText !== null,
     checkRuns: snapshot.checkRuns,
     // cv3: the one place that draws computeVerification's four fields out of a PrSnapshot, so this
