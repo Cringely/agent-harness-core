@@ -314,18 +314,15 @@ try {
     # -CoreRepo also does double duty as the {{CORE_REPO}} fold literal (Expand-Tokens below), so
     # a caller proving only that fold can hand it a spelling with no real drive on this host --
     # 'C:\projects\...' from a Windows-authored fixture, run on Linux. Join-Path resolves the
-    # drive against the filesystem provider before Test-Path ever runs, and throws
-    # DriveNotFoundException for one that does not exist here, which used to crash the whole
-    # install instead of reporting the gate the same absent way a real-but-missing -CoreRepo
-    # already does. The catch narrows to that path-resolution failure, not to the install having
-    # actually gone wrong -- $gateFound only ever becomes $true when Test-Path itself said so.
-    $gateFound = $false
-    try {
-        $gateSrc = Join-Path $CoreRepo 'core/claude/hooks/model-tier-gate.ts'
-        $gateFound = Test-Path -LiteralPath $gateSrc
-    }
-    catch { $gateSrc = "$CoreRepo/core/claude/hooks/model-tier-gate.ts" }
-    if ($gateFound) {
+    # drive letter against the filesystem provider before it returns, and throws
+    # DriveNotFoundException for one that does not exist here. Plain string interpolation skips
+    # that provider resolution, so Test-Path -LiteralPath on the built string just reports the
+    # file missing, the same absent way a real-but-missing -CoreRepo already does. Verified on
+    # this host: Join-Path against an absent drive letter throws "Cannot find drive", while
+    # Test-Path -LiteralPath on the equivalent string (built without Join-Path) returns $false
+    # for both backslash- and forward-slash-separated forms.
+    $gateSrc = "$CoreRepo/core/claude/hooks/model-tier-gate.ts"
+    if (Test-Path -LiteralPath $gateSrc) {
         $null = New-Item -ItemType Directory -Path (Join-Path $ClaudeHome 'hooks') -Force
         Copy-Item -LiteralPath $gateSrc -Destination (Join-Path $ClaudeHome 'hooks/model-tier-gate.ts') -Force
         Write-Host "  hooks/model-tier-gate.ts: from core$dryRun"
