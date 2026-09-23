@@ -886,6 +886,46 @@ Describe "Install-Harness" {
         Test-Path -LiteralPath $redirectFile | Should -BeFalse
     }
 
+    It "does not overwrite an existing local core.hooksPath when GIT_CONFIG is exported to an empty or missing file" {
+        # Load-bearing review finding on #218. The first #191 fix cleared GIT_CONFIG only
+        # around the final write, but the `--get core.hooksPath` probe that decides
+        # skipped-already-set still read through it unguarded. Against an exported GIT_CONFIG
+        # naming an empty or missing file, git's `--get` on that file reports unset even
+        # though the target's own local config already has a real core.hooksPath (a
+        # Husky-style .husky setup, here), so the probe hid the existing wiring, the
+        # skipped-already-set branch never fired, and the plain --local write that followed
+        # replaced .husky while still reporting "set to $hooksDstAbs".
+        & git -C $script:target init -q *>&1 | Out-Null
+        & git -C $script:target config --local core.hooksPath '.husky' *>&1 | Out-Null
+        $redirectFile = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-test-gitconfig-empty-" + [guid]::NewGuid())
+        # $redirectFile is deliberately never created: git's `--get` on a GIT_CONFIG file that
+        # does not exist yet exits non-zero the same way it does against a present-but-empty
+        # one, so this exercises the "empty or missing" case the finding names without a
+        # second variant.
+        $savedGitConfig = Get-Item -LiteralPath 'Env:GIT_CONFIG' -ErrorAction SilentlyContinue
+        $env:GIT_CONFIG = $redirectFile
+        try {
+            $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500
+        }
+        finally {
+            if ($savedGitConfig) { Set-Item -LiteralPath 'Env:GIT_CONFIG' -Value $savedGitConfig.Value }
+            else { Remove-Item -LiteralPath 'Env:GIT_CONFIG' -ErrorAction SilentlyContinue }
+        }
+
+        $out | Should -Match 'skipped-already-set'
+        # Not a plain 'set to ' check: the skipped-already-set warning text itself contains
+        # "is already set to '.husky'", so only the results-table row can tell a real write
+        # apart from that message.
+        $out | Should -Not -Match 'git:core\.hooksPath\s+set to '
+
+        # The invariant: .husky survives untouched, in the target's own local config.
+        $actual = & git -C $script:target config --local --get core.hooksPath
+        $LASTEXITCODE | Should -Be 0
+        $actual | Should -Be '.husky'
+
+        Test-Path -LiteralPath $redirectFile | Should -BeFalse
+    }
+
     It "installs the pre-commit hook with the owner execute bit actually set" -Skip:$IsWindows {
         & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
         $hook = Get-Item -LiteralPath "$script:target/.claude/hooks/pre-commit"
