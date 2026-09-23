@@ -1609,17 +1609,25 @@ elseif (-not (Test-GitAnswersForTarget -AbsTarget (Resolve-Path -LiteralPath $Ta
     # reused rather than reimplemented: one shared definition of "git answers for this target,"
     # though the two call sites now read different answers from it by design. This call site
     # passes -IgnoreIndex, the sidecar probe does not (see the function's own comment for why).
-    # Dubious ownership and a missing git never reach this elseif (#165): both make the rev-parse
-    # above exit non-zero, so $gitDirRaw stays null and the silent branch above handles them.
-    # Everything that lands here already has a git that answered for `-C $Target`; the only
-    # question left is whether it answered for this target's own repository.
+    # A missing git never reaches this elseif: `& git ...` on a PATH without git throws a
+    # terminating CommandNotFoundException at the rev-parse above, under this script's
+    # $ErrorActionPreference = 'Stop', with no try/catch there to hold it. The whole run aborts,
+    # not just this branch.
+    #
+    # Dubious ownership is not excluded the same way (#165, corrected from an earlier version of
+    # this comment that claimed it was). Without a location variable exported, it exits 128 at the
+    # rev-parse above and the silent branch above handles it. But git skips the ownership check
+    # once GIT_DIR is set explicitly, so with GIT_DIR exported that rev-parse succeeds and the
+    # reference probe below is what catches the foreign repository instead. Verified live on git
+    # 2.53.0.windows.1: GIT_TEST_ASSUME_DIFFERENT_OWNER=1 alone exits 128, the same call with
+    # GIT_DIR also set exits 0.
     #
     # Skip with a named reason rather than throwing: by this point the managed files, settings
     # and manifest are already written, so a refusal here would abort a run that has otherwise
     # succeeded, and the only thing left undone is a convenience wiring the operator can issue
     # by hand. The sidecar's refusal is thrown instead because deleting a tracked file is not
     # recoverable that way.
-    Write-Host "Skipping git hooksPath wiring: git answered, but not for this target's own repository (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE or GIT_COMMON_DIR naming another repository). Writing core.hooksPath now would land in whichever repository git answered for, not this one. Resolve the git error (for an exported location variable: unset it, or point it at this target's repository) and re-run the installer. To wire it by hand once git answers for this target: git -C `"$Target`" config core.hooksPath `"$hooksDstAbs`""
+    Write-Host "Skipping git hooksPath wiring: git answered, but not for this target's own repository (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE or GIT_COMMON_DIR naming another repository, or dubious ownership while GIT_DIR is exported). Writing core.hooksPath now would land in whichever repository git answered for, not this one. For an exported location variable, unset it or point it at this target's repository. For dubious ownership, add a safe.directory exception instead of exporting GIT_DIR. Then re-run the installer. To wire it by hand once git answers for this target: git -C `"$Target`" config core.hooksPath `"$hooksDstAbs`""
     $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'skipped-foreign-git' })
 }
 else {

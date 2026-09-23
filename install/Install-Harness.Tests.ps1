@@ -746,32 +746,30 @@ Describe "Install-Harness" {
         }
     }
 
-    It "skips core.hooksPath wiring when GIT_COMMON_DIR redirects the target's common dir to another repository" {
-        # #165 item 3, the field #165 itself named as unexercised. GIT_DIR is pinned to the
-        # target's own .git so toplevel and absolute-git-dir both still match; GIT_COMMON_DIR
-        # alone then redirects `rev-parse --git-common-dir` to the other repository -- the
-        # mismatch the guard's third field comparison exists to catch. Verified live: git accepts
-        # GIT_COMMON_DIR only when GIT_DIR is also exported; GIT_COMMON_DIR alone with no GIT_DIR
-        # made git report "not a git repository" instead of a field-level mismatch, which is why
-        # GIT_DIR is set here too.
+    It "skips core.hooksPath wiring when GIT_COMMON_DIR alone redirects the target's common dir to another repository" {
+        # #165 item 3, the field #165 itself named as unexercised. GIT_COMMON_DIR alone (no GIT_DIR
+        # pinned) redirects `rev-parse --git-common-dir` to the other repository while toplevel and
+        # absolute-git-dir stay at the target's own -- the mismatch the guard's third field
+        # comparison exists to catch. Verified live on git 2.53.0.windows.1: with only GIT_COMMON_DIR
+        # exported, `git -C <target> rev-parse --show-toplevel --absolute-git-dir --git-common-dir
+        # --git-path index` exits 0 and prints the target's own toplevel and git-dir alongside the
+        # foreign common-dir, and a plain `git -C <target> config core.hooksPath X` with no guard
+        # writes into the OTHER repository's .git/config, not the target's -- a live one-variable
+        # route to the cross-repo write this guard exists to stop. An earlier version of this test
+        # pinned GIT_DIR here on the belief that GIT_COMMON_DIR needs it. That belief was wrong.
         & git -C $script:target init -q *>&1 | Out-Null
         $other = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-test-commondir-" + [guid]::NewGuid())
         New-Item -ItemType Directory -Path $other | Out-Null
         try {
             & git -C $other init -q *>&1 | Out-Null
-            $ownGitDir = (Resolve-Path -LiteralPath "$script:target/.git").Path
             $otherGitDir = (Resolve-Path -LiteralPath "$other/.git").Path
             # Saved and restored, not merely removed (#165): see the foreign-GIT_DIR test above.
-            $savedGitDir = Get-Item -LiteralPath 'Env:GIT_DIR' -ErrorAction SilentlyContinue
             $savedGitCommonDir = Get-Item -LiteralPath 'Env:GIT_COMMON_DIR' -ErrorAction SilentlyContinue
-            $env:GIT_DIR = $ownGitDir
             $env:GIT_COMMON_DIR = $otherGitDir
             try {
                 $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500
             }
             finally {
-                if ($savedGitDir) { Set-Item -LiteralPath 'Env:GIT_DIR' -Value $savedGitDir.Value }
-                else { Remove-Item -LiteralPath 'Env:GIT_DIR' -ErrorAction SilentlyContinue }
                 if ($savedGitCommonDir) { Set-Item -LiteralPath 'Env:GIT_COMMON_DIR' -Value $savedGitCommonDir.Value }
                 else { Remove-Item -LiteralPath 'Env:GIT_COMMON_DIR' -ErrorAction SilentlyContinue }
             }
