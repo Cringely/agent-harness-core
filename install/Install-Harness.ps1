@@ -708,7 +708,8 @@ function Get-HooksPathReachability {
         if ($IsWindows) { $resolved = $resolved.Replace('/', '\') }
         if (-not [System.IO.Path]::IsPathRooted($resolved)) { $resolved = Join-Path $AbsTarget $resolved }
         $resolved = [System.IO.Path]::GetFullPath($resolved).TrimEnd([char[]]@('\', '/'))
-        $reachable = $resolved -ieq $HooksDstAbs.TrimEnd([char[]]@('\', '/'))
+        $d = $HooksDstAbs.TrimEnd([char[]]@('\', '/'))
+        $reachable = if ($IsWindows) { $resolved -ieq $d } else { $resolved -ceq $d }
     }
 
     return @{ GitAnswers = $true; Reachable = $reachable; Display = $currentHooksPath }
