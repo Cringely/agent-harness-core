@@ -27,7 +27,7 @@ portable, and reviewable alongside the code it governs.
 
 The plugin/skill stack this project assumes (documented below) is recorded per-machine in `.claude/.harness-manifest.local.json` under `stackDetected`, and a skill you expect may simply be absent here.
 
-Living docs stay true to what the code does. Living docs default to README.md, plus any doc this project names in the Project-specific rules section below. A pass that moves what one describes closes with a Docs verdict line, one of two forms: `Docs: README still accurate: <what was checked>` or `Docs: README updated: <what changed>`.
+Living docs stay true to what the code does. Living docs default to README.md, plus any doc this project names in the Project-specific rules section below. Every pass closes with a Docs verdict line, one of two forms: `Docs: README still accurate: <what was checked>` or `Docs: README updated: <what changed>`.
 
 <!-- guardrails:session-start-end — the SessionStart hook prints everything ABOVE this line. Keep the key just-in-time rules above it, and keep that block short: it lands in every fresh context. See agent-harness-core's patterns/always-on-context-budget.md for why this and the other unconditionally-loaded surfaces (rules files, skill descriptions) are the real budget, not agent count. -->
 
