@@ -434,6 +434,25 @@ function accountSegment(token: string): string {
 
 const sorted = (xs: string[]): string[] => [...xs].sort();
 
+/** Escapes every regex metacharacter in `segment`, not only the dot each
+ * current segment happens to carry, so the comparison below stays correct if
+ * a future segment ever adds one of the others. Local rather than reusing
+ * tools/pr-review/identity.ts's escapeRegExp: that helper belongs to a
+ * different tool, and importing across them for one line would couple two
+ * unrelated modules. */
+function escapeRegexLiteral(segment: string): string {
+  return segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Escaping only the dot (the prior form) leaves a backslash or another
+// metacharacter in the input untouched, so it would silently build the wrong
+// "wanted" string for a segment carrying one. No current entry in
+// AGENT_TRAFFIC_SEGMENTS does, so this is the only case in the file that can
+// still catch the gap.
+test("escapeRegexLiteral escapes every regex metacharacter, not only the dot", () => {
+  expect(escapeRegexLiteral("a.b\\c*d")).toBe("a\\.b\\\\c\\*d");
+});
+
 /** The whole set one mechanism is allowed to carry: the shared seven plus its
  * own declared extras, and nothing else. */
 const expectedSegments = (extras: string[]): string[] =>
@@ -447,7 +466,7 @@ const expectedSegments = (extras: string[]): string[] =>
 // makes it padding rather than a guard.
 describe("prose-lint exemption — the three mechanisms carry one segment set", () => {
   test.each(AGENT_TRAFFIC_SEGMENTS)("lint-doc-prose.ts matches %s/ as a segment", (segment) => {
-    const wanted = `(^|\\/)${segment.replace(/\./g, "\\.")}\\/`;
+    const wanted = `(^|\\/)${escapeRegexLiteral(segment)}\\/`;
     expect(tsSkipSources().some((src) => src.startsWith(wanted))).toBe(true);
   });
 
