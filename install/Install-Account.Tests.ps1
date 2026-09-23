@@ -1362,7 +1362,7 @@ Describe "Install-Account" {
     # which Convert-SettingsForTarget already sanitises before Merge-AccountSettings ever sees
     # it. The receiver's own settings.json takes no such pass, and Merge-AccountSettings and
     # Merge-HookEvent do their own @()-wrapping of its properties, so the same
-    # "Cannot index into a null array" hazard documented at Install-Account.ps1:643-654 recurs
+    # "Cannot index into a null array" hazard documented at Install-Account.ps1:657-668 recurs
     # here, fed this time by hand-edited data instead of the exporter's own output. Four cases
     # below, one It per site, matching this file's convention for the three sites already pinned
     # on the payload side.
@@ -1609,17 +1609,25 @@ Describe "Install-Account" {
 
     # Task 10 review: a failure anywhere in the settings-merge block used to land outside every
     # catch in the script, past Task 8's mixed-state warning, surfacing as a bare exception with
-    # no word that $ClaudeHome was left half-installed. Locks settings.json for write exclusion
-    # only (FileShare.Read), so the second install's own read of the existing file still
-    # succeeds and the failure is isolated to the final write, the same reproduction technique
-    # Task 8's own test uses for the tree-copy catch.
+    # no word that $ClaudeHome was left half-installed. Locked FileShare.None (fully exclusive),
+    # the same mode the tree-copy catch's own test uses two Contexts up: the existing-settings
+    # read and the merged-settings write both sit inside the one try/catch this It is pinning, so
+    # it does not matter which of the two a locked file actually blocks, only that the merge
+    # fails and reports mixed state rather than surfacing bare.
+    #
+    # Issue #151: was FileShare.Read (write exclusion only, reads still allowed), which relies on
+    # Windows' OS-enforced mandatory locking. .NET on Linux does not enforce a read-share lock
+    # against a same-process writer, so the second install's Set-Content went through with no
+    # throw and this It failed on a genuinely different platform, not a genuinely different
+    # invariant. FileShare.None is enforced cross-platform, confirmed by the sibling It already
+    # passing on Linux with the same lock mode.
     It "reports the mixed-state warning when the settings.json write fails, not just the tree copy" {
         $p = New-StandInPayload; $h = New-StandInClaudeHome
         try {
             & $script:install -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight | Out-Null
             $liveSettings = Join-Path $h 'settings.json'
-            $stream = [System.IO.File]::Open($liveSettings, 'Open', 'Read', 'Read')
+            $stream = [System.IO.File]::Open($liveSettings, 'Open', 'Read', 'None')
             $threw = $false
             $warnings = $null
             try {
@@ -1976,6 +1984,11 @@ Describe "Install-Account" {
     # damaged one file when it had damaged two. Locks claude.json against writers the same way
     # the settings.json mixed-state test locks settings.json, and needs a server the receiver
     # lacks, since Merge-McpServer only writes when it has something to add.
+    #
+    # Issue #151: FileShare.None, not .Read, same reason as the settings.json mixed-state test
+    # above -- a read-only share lock is Windows-only mandatory locking, unenforced against a
+    # same-process writer on Linux, and it does not matter here whether the lock blocks
+    # claude.json's read or its write since both sit inside the one try/catch this It pins.
     It "names -ClaudeJson too when the mcpServers write fails, not just -ClaudeHome" {
         $p = New-StandInPayload; $h = New-StandInClaudeHome
         try {
@@ -1985,7 +1998,7 @@ Describe "Install-Account" {
             @{ mcpServers = @{ beta = @{ type = 'stdio'; command = 'uvx'; args = @('beta'); env = @{} } } } |
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
 
-            $stream = [System.IO.File]::Open($cj, 'Open', 'Read', 'Read')
+            $stream = [System.IO.File]::Open($cj, 'Open', 'Read', 'None')
             $threw = $false
             $warnings = $null
             try {
