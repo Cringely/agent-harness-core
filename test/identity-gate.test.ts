@@ -1019,6 +1019,10 @@ function shQuote(value: string): string {
 
 // [label, input, expected output]. Recorded from the pre-#113
 // `printf '%s' "$1" | sed 's/[].^$(){}?+*|\\[]/\\&/g'`.
+//
+// The shipped matrices are 16 escape rows plus 26 array rows, 42 total.
+// The 78 cited in commit 3e9425c's message and in PR #163's merged
+// description cannot be reconciled with either count.
 const ESCAPE_MATRIX: Array<[string, string, string]> = [
   ["an empty entry", "", ""],
   ["a plain declared name with a space", "Fictional Persona", "Fictional Persona"],
