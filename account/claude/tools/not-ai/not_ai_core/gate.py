@@ -361,22 +361,43 @@ def _bold_label_lines(text: str) -> Iterable[str]:
     counting the own-line and run-in bold-label forms separately depends on
     exactly the line boundary `_prose_blocks` throws away, so this walks the
     same fence/heading exclusions on its own rather than reusing that output.
+
+    The fence walk mirrors `_prose_blocks` in the two places that matter here
+    too. A fence only closes on a marker using the same character AND at
+    least as many repeats as the one that opened it, so a short fence nested
+    inside a longer one does not close the outer fence early (issue #123a).
+    And an unterminated fence's buffered lines are replayed through this same
+    walk and yielded as ordinary lines rather than dropped, so a real label
+    after a stray opening marker is still counted (issue #122 finding 2).
     """
     in_fence = False
     fence_char = ""
+    fence_length = 0
+    fence_lines: list[str] = []
     for line in text.splitlines():
         fence_match = FENCE_RE.match(line)
         if in_fence:
-            if fence_match and fence_match.group(1)[0] == fence_char:
+            if (
+                fence_match
+                and fence_match.group(1)[0] == fence_char
+                and len(fence_match.group(1)) >= fence_length
+            ):
                 in_fence = False
+                fence_lines.clear()
+            else:
+                fence_lines.append(line)
             continue
         if fence_match:
             in_fence = True
             fence_char = fence_match.group(1)[0]
+            fence_length = len(fence_match.group(1))
+            fence_lines = []
             continue
         if ATX_HEADING_RE.match(line):
             continue
         yield line
+    if in_fence and fence_lines:
+        yield from _bold_label_lines("\n".join(fence_lines))
 
 
 def _count_bold_labels(text: str) -> tuple[int, int]:
