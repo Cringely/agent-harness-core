@@ -1785,7 +1785,28 @@ else {
         $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'skipped-existing-hooks' })
     }
     else {
-        & git -C $Target config core.hooksPath $hooksDstAbs
+        # --local (#191): `git config` with no --file redirects through GIT_CONFIG when that
+        # variable is exported, and GIT_CONFIG is not one of the four location variables
+        # Test-GitAnswersForTarget compares above, so an exported GIT_CONFIG sails through
+        # that guard untouched. Without --local this write would land in whatever file
+        # GIT_CONFIG names, the row below would still claim "set to $hooksDstAbs", and the
+        # target's own .git/config would keep no core.hooksPath at all.
+        #
+        # --local alone is not enough: git refuses to combine it with an exported GIT_CONFIG
+        # ("error: only one config file at a time", verified live on git 2.53.0.windows.1),
+        # which would turn a silent misdirect into a hard write failure instead of the correct
+        # write. GIT_CONFIG is cleared for the call and restored right after, the same
+        # save/remove/restore idiom Test-GitAnswersForTarget uses for its four location
+        # variables above, so an operator who set it on purpose still has it back for whatever
+        # ran the installer.
+        $savedGitConfig = Get-Item -LiteralPath 'Env:GIT_CONFIG' -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath 'Env:GIT_CONFIG' -ErrorAction SilentlyContinue
+        try {
+            & git -C $Target config --local core.hooksPath $hooksDstAbs
+        }
+        finally {
+            if ($savedGitConfig) { Set-Item -LiteralPath 'Env:GIT_CONFIG' -Value $savedGitConfig.Value }
+        }
         # A native command's non-zero exit does not trip $ErrorActionPreference = 'Stop',
         # so this write needs the same explicit check as the rev-parse and config --get
         # probes above. Without it the row below claims a wiring that never happened, and

@@ -849,6 +849,43 @@ Describe "Install-Harness" {
         }
     }
 
+    It "wires core.hooksPath into the target's own local config, not a GIT_CONFIG redirect" {
+        # Issue #191. `git config` with no --file redirects through GIT_CONFIG when that
+        # variable is exported, and GIT_CONFIG is none of the four location variables
+        # Test-GitAnswersForTarget compares (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE,
+        # GIT_COMMON_DIR), so an exported GIT_CONFIG sails through that guard untouched and
+        # reaches the write plain. Without --local the write lands in whatever file
+        # GIT_CONFIG names, the results row still claims "set to $hooksDstAbs", and the
+        # target's own .git/config keeps no core.hooksPath at all.
+        & git -C $script:target init -q *>&1 | Out-Null
+        $redirectFile = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-test-gitconfig-" + [guid]::NewGuid())
+        # Saved and restored, not merely removed (#165): see the foreign-GIT_DIR test above.
+        $savedGitConfig = Get-Item -LiteralPath 'Env:GIT_CONFIG' -ErrorAction SilentlyContinue
+        $env:GIT_CONFIG = $redirectFile
+        try {
+            $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500
+        }
+        finally {
+            if ($savedGitConfig) { Set-Item -LiteralPath 'Env:GIT_CONFIG' -Value $savedGitConfig.Value }
+            else { Remove-Item -LiteralPath 'Env:GIT_CONFIG' -ErrorAction SilentlyContinue }
+        }
+
+        $out | Should -Match 'git:core\.hooksPath'
+        $out | Should -Match 'set to '
+
+        # The defect itself: the write must reach the target's own repository config, not the
+        # file GIT_CONFIG named. --local pins the read to that file regardless of GIT_CONFIG.
+        $actual = & git -C $script:target config --local --get core.hooksPath
+        $LASTEXITCODE | Should -Be 0
+        (Resolve-Path -LiteralPath $actual).Path |
+            Should -Be (Resolve-Path -LiteralPath "$script:target/.claude/hooks").Path
+
+        # And nothing was ever written into the GIT_CONFIG file: it was never created, because
+        # the write never opened it. A row claiming "set to" while this file is what actually
+        # changed would be the exact silent redirect #191 named.
+        Test-Path -LiteralPath $redirectFile | Should -BeFalse
+    }
+
     It "installs the pre-commit hook with the owner execute bit actually set" -Skip:$IsWindows {
         & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
         $hook = Get-Item -LiteralPath "$script:target/.claude/hooks/pre-commit"
