@@ -1,0 +1,40 @@
+---
+# Semicolons, banned outright in prose.
+#
+# Operator directive, 2026-09-21. The rule and its rationale live in the
+# "Formatting Rules" section of ~/.claude/rules/writing-style.md, beside the
+# em-dash rule, because both are punctuation rather than vocabulary.
+#
+# Two independent clauses joined by a semicolon are two sentences: write two.
+# A semicolon separating list items is a comma or a line break.
+#
+# WHY NOT ai-tells.SemicolonUsage, which ships in the package and does this:
+# it is deliberately narrower. Upstream flags only a comma-free clause-final
+# continuation and exempts sixteen conjunctive adverbs (however, therefore,
+# namely, instead, ...), on the reasoning that a semicolon carrying a comma is
+# usually legitimate. Under this contract none of them is. The case that
+# actually shows up in local drafts is the one upstream exempts: a "To confirm"
+# or prerequisite line chaining four items, each with its own internal comma,
+# into a single sentence. That is a list wearing a sentence's clothes, and the
+# fix is bullets. So upstream stays disabled in .vale.ini and this replaces it,
+# rather than running both and raising two alerts on one span (Vale 3.15.1 has
+# no per-token severity, and every consumer of this kit runs `vale --output=line`,
+# which prints no severity to rank a pair by).
+#
+# SCOPE. Vale's markdown parser excludes fenced code blocks and inline code
+# spans from the text scope, so a semicolon in a shell command, a PowerShell
+# chain, a CSS rule, or a C-family statement never fires. That exemption is the
+# whole reason this is safe to run at `error`: in prose a semicolon is a style
+# choice, in code it is syntax. Verified against fixtures/sloppy.md.
+#
+# The HTML entity forms are matched too. An agent that has learned the rule
+# sometimes reaches for `&semi;` or a full-width variant rather than rewriting
+# the sentence, which is evasion rather than compliance.
+extends: existence
+message: "Semicolon. Banned by the writing-style contract: make it two sentences, or make the list a list."
+level: error
+nonword: true
+tokens:
+  - ';'
+  - '&semi;'
+  - '；'

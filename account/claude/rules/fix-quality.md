@@ -26,7 +26,7 @@ ablation was skipped) — "assumed" is a flag, not a footnote.
 Every new primitive (concurrency type, ThreadStatic, tunable constant, threshold, dedup
 structure, fallback path) carries a one-line justification naming the simpler cause-site
 alternative that was tried and rejected. New synchronization requires an actual call-path trace
-to a real off-main-thread caller in the code being shipped; without one, the fix is a
+to a real off-main-thread caller in the code being shipped. Without one, the fix is a
 main-thread-only assertion comment, not a lock. Trigger receipts by construct kind, not diff
 size — line-count thresholds are gameable. A diff much larger than the code it fixes is a smell
 prompting a restart from the cause, not an automatic reject.
@@ -46,7 +46,7 @@ Review passes (ADVANCE) only when both hold: the diff restores the named invaria
 the smallest change that does so. The reviewer — a fresh context given the finished diagnosis,
 a constrained task far easier than the original diagnose-and-fix — must either produce a
 smaller patch fixing the same root cause or certify none exists. Correct-but-larger is REVISE.
-Do not add simplicity as a separate stage or checkbox; a separate gate is a separate objective
+Do not add simplicity as a separate stage or checkbox. A separate gate is a separate objective
 the authoring context games.
 
 ## Pin the correctness baseline

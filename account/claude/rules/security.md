@@ -12,8 +12,8 @@ Every access grant should be the minimum needed.
 
 - Containers: `no-new-privileges`, `cap_drop: ALL`, `read_only: true` where feasible
 - API tokens: scoped to the resource/action they need
-- Network: services only on required networks; databases never on front network
-- File permissions: `0644` for bind-mount Docker secrets (non-root UIDs can't read 0600); `0600` for host-only secrets
+- Network: services only on required networks. Databases never on front network
+- File permissions: `0644` for bind-mount Docker secrets (non-root UIDs can't read 0600), `0600` for host-only secrets
 
 ## Identifying Information Never Reaches a Remote Repo
 
@@ -33,7 +33,7 @@ file contents:
   on every one of the 30, which is exactly why the leak survived: a repo can be clean on the field
   people check and dirty on the field beside it. Scan for the name and the email separately.
 - **File contents**, including generated payloads and vendored trees.
-- **Commit messages**, which `git-filter-repo --replace-text` does not rewrite; that needs
+- **Commit messages**, which `git-filter-repo --replace-text` does not rewrite. That needs
   `--message-callback`.
 - **Branch names, tags, PR and issue text.**
 
@@ -63,7 +63,7 @@ Never hardcode credentials, tokens, keys, or sensitive IPs in any file. Applies 
 
 ## Secure Configuration
 
-- New containers: hardened template (`no-new-privileges`, `cap_drop: ALL`, `read_only: true`); relax only with justification
+- New containers: hardened template (`no-new-privileges`, `cap_drop: ALL`, `read_only: true`). Relax only with justification
 - New services behind proxy: require auth middleware by default
 - Exposed ports: bind to specific interface IP, not `0.0.0.0`, unless documented
 - Default credentials: change or disable before first use
@@ -76,7 +76,7 @@ Any code accepting external input (CLI args, files, env vars, network) must vali
 - Never build shell commands by string concatenation — use arrays, avoid `eval`
 - In Python: `subprocess` with a list, never `shell=True` with external input
 - In SQL: parameterized queries only
-- Validate and canonicalize file paths; reject `..` traversal
+- Validate and canonicalize file paths. Reject `..` traversal
 
 ## Supply Chain
 

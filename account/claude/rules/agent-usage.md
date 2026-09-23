@@ -2,7 +2,7 @@
 
 ## Principle
 
-Two resources to protect, not one. Main context window: an agent absorbing a long search in a sandbox and handing back a summary beats the raw tool results landing in the main window. Premium model quota: a coordinator turn on Opus or Fable costs far more per token than a Haiku agent doing the same fetch. Rest of this file assumes session limits bind hardest on the expensive model — operator's read of how the quota behaves, not a published figure. Treat as premise; if wrong, the routing below aims at the wrong target.
+Two resources to protect, not one. Main context window: an agent absorbing a long search in a sandbox and handing back a summary beats the raw tool results landing in the main window. Premium model quota: a coordinator turn on Opus or Fable costs far more per token than a Haiku agent doing the same fetch. Rest of this file assumes session limits bind hardest on the expensive model — operator's read of how the quota behaves, not a published figure. Treat as premise. If wrong, the routing below aims at the wrong target.
 
 Coordinator is an interpreter, not an operator: reads agent reports, decides what they mean, instructs the next move. Its tokens buy judgment — deciding, arbitrating, planning, reviewing — not transcribing build output or paging through directory listings.
 
@@ -16,12 +16,12 @@ Delegation pays when the agent absorbs volume the coordinator would otherwise re
 
 - Output would run past roughly 50 lines in the main window — build and test runs, `docker logs`, recursive listings, full-file reads, log tails, dependency trees
 - Answering takes 2 or more tool calls
-- The task writes anything (implementation, refactor, config edit); plan execution and review are already unconditional above
+- The task writes anything (implementation, refactor, config edit). Plan execution and review are already unconditional above
 - The output needs filtering or judgment before the coordinator can use it
 
 **Run inline only when all three hold:** one call, output comfortably under ~50 lines, and the coordinator needs that raw text verbatim to decide the next move. One carve-out: a single-line trivial edit with no logic in it — typo, version bump, comment — stays inline. Matches the review exemption below, and follows from the cost argument: a brief describing a one-line change is longer than the change.
 
-Two provenance notes, so the rule stays revisable instead of hardening into doctrine. The 2-call threshold is an operator judgment call, not a number any Anthropic documentation supports; the research this file was reconciled against says nothing about call-count thresholds. It also sits in tension with the Opus 5 guidance in `subagent-prompting.md`, which says that model already over-delegates by default and recommends capping delegation on cost-sensitive workloads. Where the dispatch lands on a premium model rather than a cheap pinned one, hold nearer the old 4-call bar and let the model's own delegation instinct do the work.
+Two provenance notes, so the rule stays revisable instead of hardening into doctrine. The 2-call threshold is an operator judgment call, not a number any Anthropic documentation supports. The research this file was reconciled against says nothing about call-count thresholds. It also sits in tension with the Opus 5 guidance in `subagent-prompting.md`, which says that model already over-delegates by default and recommends capping delegation on cost-sensitive workloads. Where the dispatch lands on a premium model rather than a cheap pinned one, hold nearer the old 4-call bar and let the model's own delegation instinct do the work.
 
 ## Pin cheap models on mechanical agents
 
@@ -33,11 +33,11 @@ The mechanism is the same in all three places: the Agent tool's `model` paramete
 
 ## Pin Fable on prose deliverables
 
-Any subagent whose deliverable is prose a person will read gets `model: fable` on the dispatch. That covers docs, policy and runbook sections, memos, reports, deck narrative, README and wiki text, and PR and commit bodies an agent writes. Decide by the deliverable, not the task label: a doc-drift survey is mechanical and stays cheap, but a doc-drift rewrite produces sentences a person reads, so it runs Fable. Analysis, findings, verdicts, transcripts, and the scratch-file report an agent hands back are data for another agent to act on; they keep their tier under the rules above.
+Any subagent whose deliverable is prose a person will read gets `model: fable` on the dispatch. That covers docs, policy and runbook sections, memos, reports, deck narrative, README and wiki text, and PR and commit bodies an agent writes. Decide by the deliverable, not the task label: a doc-drift survey is mechanical and stays cheap, but a doc-drift rewrite produces sentences a person reads, so it runs Fable. Analysis, findings, verdicts, transcripts, and the scratch-file report an agent hands back are data for another agent to act on. They keep their tier under the rules above.
 
-The coordinator never drafts a prose deliverable inline. It briefs, judges, and selects; the writing goes to a Fable agent like any other delegated production work. Prose review runs Fable too, an exception to Opus-for-review above: the judgment is about prose. Correctness review (code, security, compliance) does not move.
+The coordinator never drafts a prose deliverable inline. It briefs, judges, and selects. The writing goes to a Fable agent like any other delegated production work. Prose review runs Fable too, an exception to Opus-for-review above: the judgment is about prose. Correctness review (code, security, compliance) does not move.
 
-The reason is quality, and economy now bounds it. Fable's prose baseline is materially better than the other tiers', so drafting at a lower tier and polishing afterward spends two passes to land below what Fable writes in one. (Operator directive, restated 2026-07-17 through 2026-08-11; promoted to a rule 2026-08-20 after a session in another project searched the rules files, found nothing tying a model tier to prose, and shipped Sonnet-written client prose.)
+The reason is quality, and economy now bounds it. Fable's prose baseline is materially better than the other tiers', so drafting at a lower tier and polishing afterward spends two passes to land below what Fable writes in one. (Operator directive, restated 2026-07-17 through 2026-08-11. Promoted to a rule 2026-08-20 after a session in another project searched the rules files, found nothing tying a model tier to prose, and shipped Sonnet-written client prose.)
 
 Two limits on the paragraph above, both operator directives of 2026-09-04.
 
@@ -47,7 +47,7 @@ exact paths, signatures that must match across tasks nobody reads together, test
 can actually fail, and commands that run verbatim. The prose is a header and a framing sentence
 per task. Judge the deliverable by what makes it wrong, not by whether a person reads it, and a
 plan goes wrong through a renamed function, not a clumsy sentence. Where a spec is mostly argued
-rationale it stays prose; where it is mostly contract it moves. That boundary is not settled and
+rationale it stays prose. Where it is mostly contract it moves. That boundary is not settled and
 should be drawn from a case rather than in advance.
 
 Fable is also expensive and rate-limited, which the "quality, not economy" line above used to deny
@@ -58,7 +58,7 @@ already decided.
 
 ## Effort Is a Judgment Call, Not a Mandate
 
-Pick the effort level the work justifies. `xhigh` where the reasoning is real, something cheaper where it is not; a premium reasoning budget spent on a mechanical task is waste. The key is `effort`, never `reasoning_effort`, which is ignored without error and leaves the agent at inherited session effort forever. Effort is settable in agent-def frontmatter and on a Workflow `agent()` call. The Agent tool's input schema has no `effort` parameter at all, so a plain dispatch cannot state one.
+Pick the effort level the work justifies. `xhigh` where the reasoning is real, something cheaper where it is not. A premium reasoning budget spent on a mechanical task is waste. The key is `effort`, never `reasoning_effort`, which is ignored without error and leaves the agent at inherited session effort forever. Effort is settable in agent-def frontmatter and on a Workflow `agent()` call. The Agent tool's input schema has no `effort` parameter at all, so a plain dispatch cannot state one.
 
 This replaces a mandate that every `sonnet` dispatch set `effort: "xhigh"` (operator directive 2026-08-11, withdrawn 2026-09-05). Recorded rather than deleted, because the mandate reads well and will be proposed again. It went for two reasons. The economic one: xhigh on every sonnet dispatch buys reasoning the work did not need. The mechanical one: the Agent tool cannot express any effort value, so the gate denied sonnet dispatches that had no legal way to comply, and the only route past it was escalating to a premium tier, which inverts the quality-per-dollar the rule was written to protect. It blocked three dispatches in one session and all three escalated to opus. A softer "sonnet must state SOME effort" rule carries the identical defect and is not the replacement.
 
@@ -81,9 +81,9 @@ Write your report to:
 Nothing else is read. Your final message does not reach me.
 ```
 
-Idle notification means "go read the file", not completed handoff. A file survives the agent going idle without speaking, survives the dispatcher being mid-turn, and is re-readable instead of consuming context once on arrival. Silence is still not approval: confirm a real verdict exists before merging. Dispatcher relays what matters to the user; the file is not shown to them.
+Idle notification means "go read the file", not completed handoff. A file survives the agent going idle without speaking, survives the dispatcher being mid-turn, and is re-readable instead of consuming context once on arrival. Silence is still not approval: confirm a real verdict exists before merging. Dispatcher relays what matters to the user. The file is not shown to them.
 
-Read-only agent types cannot use this channel. `appsec-sme` and `governance-sme` are declared `Read, Grep, Glob, WebFetch, WebSearch, Skill` — advisory by charter, no Write. `Explore` and `Plan` the same. Briefing one to "write your report to `<path>`" is an impossible instruction; the well-behaved failure is reporting BLOCKED ON DELIVERY and handing the full body back for the dispatcher to save — correct behavior, not a defect. Check the type's tool grant before naming a path: pick a type that holds Write (`task-reviewer`, `adversarial-reviewer`, `general-purpose`, `senior-developer` all do), or accept the handback and write the file yourself.
+Read-only agent types cannot use this channel. `appsec-sme` and `governance-sme` are declared `Read, Grep, Glob, WebFetch, WebSearch, Skill` — advisory by charter, no Write. `Explore` and `Plan` the same. Briefing one to "write your report to `<path>`" is an impossible instruction. The well-behaved failure is reporting BLOCKED ON DELIVERY and handing the full body back for the dispatcher to save — correct behavior, not a defect. Check the type's tool grant before naming a path: pick a type that holds Write (`task-reviewer`, `adversarial-reviewer`, `general-purpose`, `senior-developer` all do), or accept the handback and write the file yourself.
 
 Never add `memory:` to an advisory def as a workaround. Per `subagent-prompting.md`, `memory:` in a def silently grants Read, Write, and Edit over a `tools:` allowlist — removes more protection than it buys.
 
@@ -97,7 +97,7 @@ Only thing that skips review: a trivial change with no logic to review (typo, ve
 
 ## Plan Execution Is Always Subagent-Driven
 
-Executing a written implementation plan (superpowers or otherwise): always subagent-driven execution (superpowers:subagent-driven-development), fresh subagent per task, review between tasks. Never execute plan tasks inline in the main context, never offer inline execution as an option. Main context orchestrates, reviews, decides; subagents implement. (User standing rule, 2026-07-12.)
+Executing a written implementation plan (superpowers or otherwise): always subagent-driven execution (superpowers:subagent-driven-development), fresh subagent per task, review between tasks. Never execute plan tasks inline in the main context, never offer inline execution as an option. Main context orchestrates, reviews, decides. Subagents implement. (User standing rule, 2026-07-12.)
 
 ## Skill vs Agent (for overlapping domains)
 
@@ -110,7 +110,7 @@ Docker, PowerShell, and Bash each have a **skill** (knowledge injection, cheap) 
 - Reach for `mcp__code-context__search` first for any code question in an indexed repo, including one where the exact string is already known. Operator directive 2026-07-19 withdrew the older carve-out that allowed plain Grep for exact known strings and one-shot matches in code. Hits are authoritative enough to cite without re-opening files.
 - Use `sql` for aggregation questions ("how many callers of X", "which files mention Y most").
 - Surviving carve-outs are narrow. Grep still owns non-code text: docs, configs, logs. Glob still owns find-a-file-by-name. Absent-tools fallback is below.
-- First query on a repo auto-indexes (keyword results in seconds; semantic backfills ~2 min). A "partial index" flag in results means absence is not proof.
+- First query on a repo auto-indexes (keyword results in seconds, semantic backfills ~2 min). A "partial index" flag in results means absence is not proof.
 - Dispatching search-heavy subagents whose tool access includes MCP (`tools: *` agents): mention code-context in the brief. Restricted-tool agents (Explore, cavecrew) don't have it — brief them normally.
 
 If its tools are absent from a session, fall back to Grep/Glob without comment.
@@ -124,7 +124,7 @@ Use agents when the task **individually** clears these thresholds:
 | **Explore** | Understanding something would take 2+ search/read rounds, or the territory is unfamiliar |
 | **cheap mechanical agent** (`model: haiku`) | Anything that runs a command and reports what it said: builds, test runs, log tails, service checks, recursive listings, collecting a diff |
 | **prose agent** (`model: fable`) | Any deliverable that is prose a person will read: docs, policy and runbook sections, memos, reports, README and wiki text, PR and commit bodies. Decide by the deliverable, not the task label — a doc-drift survey stays cheap, a doc-drift rewrite runs Fable |
-| **code-reviewer** | Any change with logic in it, any security-relevant config (reverse proxy, SSO, firewall, secrets), anything altering service-to-service communication. Review runs on a premium model by design, so this is the one widened trigger that costs premium quota rather than saving it; that is a deliberate trade, not an oversight |
+| **code-reviewer** | Any change with logic in it, any security-relevant config (reverse proxy, SSO, firewall, secrets), anything altering service-to-service communication. Review runs on a premium model by design, so this is the one widened trigger that costs premium quota rather than saving it. That is a deliberate trade, not an oversight |
 | **code-architect** | A feature spans multiple services or compose files and needs design before implementation |
 | **code-explorer** | Need to trace an execution path or understand how an existing feature works across multiple layers |
 | **Plan** | Task has multiple valid approaches and needs architectural comparison before committing |
@@ -139,7 +139,7 @@ Narrow list, each narrow for a reason.
 - Remote SSH work depending on session state or environment context the agent won't inherit.
 - A task where writing the brief takes longer than doing the thing, and the thing produces almost no output.
 
-What moved: a single-file edit with real logic in it goes to an agent now, because writes are delegated; a one-line trivial change does not, per the carve-out above. A three-grep lookup goes to an agent, because two calls already clears the bar.
+What moved: a single-file edit with real logic in it goes to an agent now, because writes are delegated. A one-line trivial change does not, per the carve-out above. A three-grep lookup goes to an agent, because two calls already clears the bar.
 
 ## Parallel Agent Gate
 
@@ -153,4 +153,4 @@ When a single call is still right, chain related commands with `&&` rather than 
 
 ## SSH / Remote Work Note
 
-Agents can use Bash (and therefore SSH) but don't inherit session context, so direct tool use in the main context is often more practical for remote exploration. Agents for local codebase analysis; direct commands for remote host work.
+Agents can use Bash (and therefore SSH) but don't inherit session context, so direct tool use in the main context is often more practical for remote exploration. Agents for local codebase analysis. Direct commands for remote host work.
