@@ -564,21 +564,25 @@ Describe "Install-Harness" {
         New-Item -ItemType Directory -Path $other | Out-Null
         try {
             & git -C $other init -q *>&1 | Out-Null
-            # Restored in the inner finally: leaking GIT_DIR into the rest of the file would
-            # make every later test in this run ask git about $other instead of its target.
+            # Saved and restored, not merely removed (#165): a suite launched from an environment
+            # that already exports GIT_DIR (a git hook, an operator's shell) must see it back
+            # afterward, or every later test in this run inherits the leak instead of asking git
+            # about its own target.
+            $savedGitDir = Get-Item -LiteralPath 'Env:GIT_DIR' -ErrorAction SilentlyContinue
             $env:GIT_DIR = (Join-Path $other '.git')
             try {
                 $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500
             }
             finally {
-                Remove-Item -LiteralPath 'Env:GIT_DIR' -ErrorAction SilentlyContinue
+                if ($savedGitDir) { Set-Item -LiteralPath 'Env:GIT_DIR' -Value $savedGitDir.Value }
+                else { Remove-Item -LiteralPath 'Env:GIT_DIR' -ErrorAction SilentlyContinue }
             }
 
             # The results table is the operator's only signal, so the skip carries a named
             # reason rather than passing silently: a silent skip reads exactly like a wiring
             # that happened.
             $out | Should -Match 'skipped-foreign-git'
-            $out | Should -Match "git did not answer for this target's own repository"
+            $out | Should -Match "git answered, but not for this target's own repository"
 
             # The defect itself: the foreign repository's config was written. `config --get`
             # exits 1 when the key is unset, so this asserts nothing was written there.
@@ -604,12 +608,15 @@ Describe "Install-Harness" {
         # accept: toplevel, absolute-git-dir and git-common-dir all still name the target.
         & git -C $script:target init -q *>&1 | Out-Null
         $gitDir = (Resolve-Path -LiteralPath "$script:target/.git").Path
+        # Saved and restored, not merely removed (#165): see the foreign-GIT_DIR test above.
+        $savedGitIndexFile = Get-Item -LiteralPath 'Env:GIT_INDEX_FILE' -ErrorAction SilentlyContinue
         $env:GIT_INDEX_FILE = Join-Path $gitDir 'next-index-12345.lock'
         try {
             $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500
         }
         finally {
-            Remove-Item -LiteralPath 'Env:GIT_INDEX_FILE' -ErrorAction SilentlyContinue
+            if ($savedGitIndexFile) { Set-Item -LiteralPath 'Env:GIT_INDEX_FILE' -Value $savedGitIndexFile.Value }
+            else { Remove-Item -LiteralPath 'Env:GIT_INDEX_FILE' -ErrorAction SilentlyContinue }
         }
 
         $out | Should -Not -Match 'skipped-foreign-git'
@@ -644,13 +651,16 @@ Describe "Install-Harness" {
             Should -Match 'harness-manifest\.local\.json'
 
         $gitDir = (Resolve-Path -LiteralPath "$script:target/.git").Path
+        # Saved and restored, not merely removed (#165): see the foreign-GIT_DIR test above.
+        $savedGitIndexFile = Get-Item -LiteralPath 'Env:GIT_INDEX_FILE' -ErrorAction SilentlyContinue
         $env:GIT_INDEX_FILE = Join-Path $gitDir 'next-index-77777.lock'
         try {
             { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target } |
                 Should -Throw -ExpectedMessage '*could not confirm whether it is already tracked*'
         }
         finally {
-            Remove-Item -LiteralPath 'Env:GIT_INDEX_FILE' -ErrorAction SilentlyContinue
+            if ($savedGitIndexFile) { Set-Item -LiteralPath 'Env:GIT_INDEX_FILE' -Value $savedGitIndexFile.Value }
+            else { Remove-Item -LiteralPath 'Env:GIT_INDEX_FILE' -ErrorAction SilentlyContinue }
         }
 
         # The refusal's own promise: nothing was written. The working copy must still be there
@@ -674,12 +684,15 @@ Describe "Install-Harness" {
         $outsideDir = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-test-outside-index-" + [guid]::NewGuid())
         New-Item -ItemType Directory -Path $outsideDir | Out-Null
         try {
+            # Saved and restored, not merely removed (#165): see the foreign-GIT_DIR test above.
+            $savedGitIndexFile = Get-Item -LiteralPath 'Env:GIT_INDEX_FILE' -ErrorAction SilentlyContinue
             $env:GIT_INDEX_FILE = Join-Path $outsideDir 'index'
             try {
                 $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500
             }
             finally {
-                Remove-Item -LiteralPath 'Env:GIT_INDEX_FILE' -ErrorAction SilentlyContinue
+                if ($savedGitIndexFile) { Set-Item -LiteralPath 'Env:GIT_INDEX_FILE' -Value $savedGitIndexFile.Value }
+                else { Remove-Item -LiteralPath 'Env:GIT_INDEX_FILE' -ErrorAction SilentlyContinue }
             }
 
             $out | Should -Not -Match 'skipped-foreign-git'
@@ -698,6 +711,80 @@ Describe "Install-Harness" {
         }
         finally {
             Remove-Item -Recurse -Force $outsideDir
+        }
+    }
+
+    It "skips core.hooksPath wiring when GIT_WORK_TREE redirects the target's toplevel to another directory" {
+        # #165 item 3: GIT_DIR and GIT_INDEX_FILE were exercised above, GIT_WORK_TREE and
+        # GIT_COMMON_DIR were not, though Test-GitAnswersForTarget compares all four. GIT_WORK_TREE
+        # alone (no GIT_DIR needed) redirects `rev-parse --show-toplevel` away from the target
+        # while `--absolute-git-dir` stays put -- the toplevel mismatch the guard's field
+        # comparison exists to catch. Verified live: `git -C <target> rev-parse --show-toplevel`
+        # with only GIT_WORK_TREE exported prints the GIT_WORK_TREE path, not the target.
+        & git -C $script:target init -q *>&1 | Out-Null
+        $other = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-test-worktree-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $other | Out-Null
+        try {
+            # Saved and restored, not merely removed (#165): see the foreign-GIT_DIR test above.
+            $savedGitWorkTree = Get-Item -LiteralPath 'Env:GIT_WORK_TREE' -ErrorAction SilentlyContinue
+            $env:GIT_WORK_TREE = $other
+            try {
+                $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500
+            }
+            finally {
+                if ($savedGitWorkTree) { Set-Item -LiteralPath 'Env:GIT_WORK_TREE' -Value $savedGitWorkTree.Value }
+                else { Remove-Item -LiteralPath 'Env:GIT_WORK_TREE' -ErrorAction SilentlyContinue }
+            }
+
+            $out | Should -Match 'skipped-foreign-git'
+            $out | Should -Match "git answered, but not for this target's own repository"
+            & git -C $script:target config --get core.hooksPath *>$null
+            $LASTEXITCODE | Should -Be 1
+        }
+        finally {
+            Remove-Item -Recurse -Force $other
+        }
+    }
+
+    It "skips core.hooksPath wiring when GIT_COMMON_DIR redirects the target's common dir to another repository" {
+        # #165 item 3, the field #165 itself named as unexercised. GIT_DIR is pinned to the
+        # target's own .git so toplevel and absolute-git-dir both still match; GIT_COMMON_DIR
+        # alone then redirects `rev-parse --git-common-dir` to the other repository -- the
+        # mismatch the guard's third field comparison exists to catch. Verified live: git accepts
+        # GIT_COMMON_DIR only when GIT_DIR is also exported; GIT_COMMON_DIR alone with no GIT_DIR
+        # made git report "not a git repository" instead of a field-level mismatch, which is why
+        # GIT_DIR is set here too.
+        & git -C $script:target init -q *>&1 | Out-Null
+        $other = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-test-commondir-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $other | Out-Null
+        try {
+            & git -C $other init -q *>&1 | Out-Null
+            $ownGitDir = (Resolve-Path -LiteralPath "$script:target/.git").Path
+            $otherGitDir = (Resolve-Path -LiteralPath "$other/.git").Path
+            # Saved and restored, not merely removed (#165): see the foreign-GIT_DIR test above.
+            $savedGitDir = Get-Item -LiteralPath 'Env:GIT_DIR' -ErrorAction SilentlyContinue
+            $savedGitCommonDir = Get-Item -LiteralPath 'Env:GIT_COMMON_DIR' -ErrorAction SilentlyContinue
+            $env:GIT_DIR = $ownGitDir
+            $env:GIT_COMMON_DIR = $otherGitDir
+            try {
+                $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500
+            }
+            finally {
+                if ($savedGitDir) { Set-Item -LiteralPath 'Env:GIT_DIR' -Value $savedGitDir.Value }
+                else { Remove-Item -LiteralPath 'Env:GIT_DIR' -ErrorAction SilentlyContinue }
+                if ($savedGitCommonDir) { Set-Item -LiteralPath 'Env:GIT_COMMON_DIR' -Value $savedGitCommonDir.Value }
+                else { Remove-Item -LiteralPath 'Env:GIT_COMMON_DIR' -ErrorAction SilentlyContinue }
+            }
+
+            $out | Should -Match 'skipped-foreign-git'
+            $out | Should -Match "git answered, but not for this target's own repository"
+            & git -C $script:target config --get core.hooksPath *>$null
+            $LASTEXITCODE | Should -Be 1
+            & git -C $other config --get core.hooksPath *>$null
+            $LASTEXITCODE | Should -Be 1
+        }
+        finally {
+            Remove-Item -Recurse -Force $other
         }
     }
 

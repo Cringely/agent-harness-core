@@ -1609,15 +1609,17 @@ elseif (-not (Test-GitAnswersForTarget -AbsTarget (Resolve-Path -LiteralPath $Ta
     # reused rather than reimplemented: one shared definition of "git answers for this target,"
     # though the two call sites now read different answers from it by design. This call site
     # passes -IgnoreIndex, the sidecar probe does not (see the function's own comment for why).
-    # It also covers dubious ownership and a missing git the same way, which is the fail-closed
-    # direction for a write this block cannot place correctly.
+    # Dubious ownership and a missing git never reach this elseif (#165): both make the rev-parse
+    # above exit non-zero, so $gitDirRaw stays null and the silent branch above handles them.
+    # Everything that lands here already has a git that answered for `-C $Target`; the only
+    # question left is whether it answered for this target's own repository.
     #
     # Skip with a named reason rather than throwing: by this point the managed files, settings
     # and manifest are already written, so a refusal here would abort a run that has otherwise
     # succeeded, and the only thing left undone is a convenience wiring the operator can issue
     # by hand. The sidecar's refusal is thrown instead because deleting a tracked file is not
     # recoverable that way.
-    Write-Host "Skipping git hooksPath wiring: git did not answer for this target's own repository (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE or GIT_COMMON_DIR naming another repository, dubious ownership, git missing from PATH, or another unexpected result). Writing core.hooksPath now would land in whichever repository git answered for, not this one. Resolve the git error (for an exported location variable: unset it, or point it at this target's repository) and re-run the installer. To wire it by hand once git answers: git -C `"$Target`" config core.hooksPath `"$hooksDstAbs`""
+    Write-Host "Skipping git hooksPath wiring: git answered, but not for this target's own repository (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE or GIT_COMMON_DIR naming another repository). Writing core.hooksPath now would land in whichever repository git answered for, not this one. Resolve the git error (for an exported location variable: unset it, or point it at this target's repository) and re-run the installer. To wire it by hand once git answers for this target: git -C `"$Target`" config core.hooksPath `"$hooksDstAbs`""
     $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'skipped-foreign-git' })
 }
 else {
