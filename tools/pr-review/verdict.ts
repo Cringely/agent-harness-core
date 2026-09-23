@@ -40,9 +40,20 @@ export function ciCoveredPesterSuites(workflowText: string): Set<string> {
   return covered;
 }
 
-// A changed .ps1 counts as covered only when its own sibling suite runs in CI. Conservative on
-// purpose: a comment-only edit to an uncovered file also lands here, which withholds an approval
-// rather than granting one CI never earned.
+// A shared module with no sibling suite of its own, but dot-sourced by suites that do run in CI.
+// The sibling-name guess below has no suite to guess for a file like this, so it read every
+// change to it as uncovered even while other suites exercised the change (#152). Declared
+// explicitly rather than inferred, since nothing about the module's own name names its suites.
+// install/AccountShared.ps1: confirmed at this writing dot-sourced by both listed suites
+// (install/Export-Account.ps1:151, install/Install-Account.ps1:90).
+const SHARED_MODULE_SUITES: ReadonlyMap<string, readonly string[]> = new Map([
+  ["install/AccountShared.ps1", ["install/Export-Account.Tests.ps1", "install/Install-Account.Tests.ps1"]],
+]);
+
+// A changed .ps1 counts as covered when its own sibling suite runs in CI, or, for a module
+// declared in SHARED_MODULE_SUITES, when at least one of its declared suites does. Conservative
+// on purpose: a comment-only edit to an uncovered file also lands here, which withholds an
+// approval rather than granting one CI never earned.
 export function uncoveredPowerShellFiles(changedFiles: readonly string[], workflowText: string): string[] {
   const covered = ciCoveredPesterSuites(workflowText);
   return changedFiles.filter((path) => {
@@ -51,6 +62,9 @@ export function uncoveredPowerShellFiles(changedFiles: readonly string[], workfl
     // .github/workflows/test.yml names must not read as covered because a case-insensitive
     // rewrite happened to collide with the covered spelling. Only the extension itself is matched
     // case-insensitively, since that is the part `/\.ps1$/i` above already treats that way.
+    const normalized = path.replace(/\.ps1$/i, ".ps1");
+    const declared = SHARED_MODULE_SUITES.get(normalized);
+    if (declared) return !declared.some((suite) => covered.has(suite));
     const suite = /\.Tests\.ps1$/.test(path) ? path : path.replace(/\.ps1$/i, ".Tests.ps1");
     return !covered.has(suite);
   });

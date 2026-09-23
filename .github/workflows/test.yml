@@ -95,3 +95,6 @@ jobs:
 
       - name: Install-Harness.Tests.ps1
         run: pwsh -NoProfile -File install/Install-Harness.Tests.ps1
+
+      - name: Account-Hooks.Tests.ps1
+        run: pwsh -NoProfile -File install/Account-Hooks.Tests.ps1
