@@ -8,6 +8,16 @@
 // the dispatch is isolated (worktree or remote) or carries an explicit
 // written override with a reason.
 //
+// Floor: a write-capable dispatch never proceeds against this shared,
+// non-isolated checkout unless the hook proved the type read-only or a human
+// wrote down why isolation doesn't apply. The two fail paths below are both
+// derived from that floor, not chosen case by case. Where classification runs
+// but can't prove the type safe, the gate fails CLOSED, because an unproven
+// type is not a read-only type. Where the classification step itself can't
+// run (malformed input, a bug here), the gate fails OPEN, because a control
+// that blocks every dispatch gets disabled within a day, and then nothing is
+// gated at all.
+//
 // Classification is DERIVED, not hand-listed: the ground truth for "which
 // roles can write the repo" already lives in `.claude/agents/<type>.md`
 // `tools:` frontmatter. A hand-maintained list of write-capable types drifts
@@ -18,8 +28,9 @@
 //     every listed tool is on the provably-read-only allowlist; an absent/empty
 //     `tools:` field, `*`, "All tools", or any unlisted tool ⇒ requires isolation.
 //   - Definition file exists but is unreadable ⇒ that TYPE requires isolation
-//     (fail toward safety for the type; hook-level fail-open is reserved for
-//     malformed stdin and our own bugs).
+//     (fail-closed tier: classification ran and found nothing provably safe.
+//     The fail-open tier below is reserved for malformed stdin and our own
+//     bugs, where classification never ran at all).
 //   - No definition file → only the known built-ins are hardcoded: Explore and
 //     Plan are read-only (their published grant excludes Edit/Write/NotebookEdit);
 //     general-purpose, fork, and an OMITTED subagent_type (the tool defaults it to
@@ -41,12 +52,13 @@
 // "worktree"` would wrongly pass the gate. Real JSON parsing needs bun,
 // which projects using this hook are expected to have available.
 //
-// Fail-open contract: a broken hook must never brick dispatching. Every error
-// path (malformed stdin, missing fields, our own bugs) logs to stderr and exits 0
-// with no stdout, which Claude Code treats as "no opinion" — the normal
-// permission flow proceeds. Only a well-formed deny emits JSON. If `bun` itself
-// is missing from PATH the hook command fails non-zero-but-not-2, which Claude
-// Code also treats as non-blocking. No network, no mutation, stdin→stdout only.
+// Fail-open contract, the second tier of the floor above: a broken hook must
+// never brick dispatching. Every error path (malformed stdin, missing fields,
+// our own bugs) logs to stderr and exits 0 with no stdout, which Claude Code
+// treats as "no opinion" — the normal permission flow proceeds. Only a
+// well-formed deny emits JSON. If `bun` itself is missing from PATH the hook
+// command fails non-zero-but-not-2, which Claude Code also treats as
+// non-blocking. No network, no mutation, stdin→stdout only.
 // (An unreadable agent-definition file is NOT a hook error — it resolves to
 // "requires isolation" for that type, see above.)
 //
