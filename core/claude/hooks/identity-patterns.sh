@@ -578,6 +578,42 @@ identity_json_array() {
     return 0
 }
 
+# WHY NOT ONE BATCHED awk/sed PASS FOR THE WHOLE SET (#113, #169). #113's
+# own suggestion was "a single awk or a single sed invocation could produce
+# the whole set" -- parsing the JSON, escaping every entry, and building
+# IDENTITY_PATTERN and IDENTITY_CANARIES in one program, in place of the
+# fixed few sed calls plus shell loops that shipped instead (identity_load
+# below, and identity_regex_escape and identity_json_array above). #163's
+# PR body named and rejected three narrower alternatives but never this
+# one, the one #113 actually asked for, so the reason was undocumented
+# until #169 flagged the gap.
+#
+# The rejection is that a single pass over the raw array text is the same
+# shape that produced #91c (a declared entry's own `]`, matched by an
+# earlier single-regex extractor that took the first `]` it saw as the
+# array's close) and #135's F1, F2, and F7 (a non-ASCII entry carrying its
+# own `]`, an array truncated right after its `[`, a stray value after the
+# real closing `]`). Every one of those bugs came from treating the array
+# boundary as something a regex or a short awk pattern could find in one
+# step, rather than consuming it token by token the way identity_json_token
+# does above. A batched awk/sed program folding parse, escape and
+# pattern-build into one pass would still need that same token-by-token
+# care to avoid the identical bugs -- it is not a simpler version of
+# identity_json_token, it is the same walk rewritten in a language this
+# file does not otherwise use for it, on the function that four review
+# rounds (#91, #135) already hardened.
+#
+# What IS batched already: identity_regex_escape below takes one sed call
+# for the whole newline-joined entry list rather than one per entry (see
+# its own "ONE CALL FOR THE WHOLE ENTRY LIST" note), and identity_json_array
+# above takes one sed call per key to find where that key's array starts.
+# The remaining win a full single-pass rewrite would buy is those two
+# key-extraction sed calls collapsing toward one call total -- on a
+# control that already dropped from per-entry to fixed-cost. Reopening
+# #91c/#135's regression surface for that is the same trade #163's PR body
+# already declined for batching identity_control's per-canary grep, applied
+# to the parsing side instead of the verification side.
+#
 # Resolves the identity file, derives the workstation username and machine
 # hostname, and builds IDENTITY_PATTERN (one grep -iE alternation covering
 # every declared name, every declared email, the username, and the
