@@ -583,25 +583,12 @@ function Get-GitLocation {
 # the variables are restored before this function returns. Nothing is cleared for the real calls,
 # since an operator may set them on purpose, and GIT_DIR naming the target's own .git (a hook in
 # the target itself) compares equal and passes. Toplevel, absolute-git-dir and git-common-dir must
-# match exactly -- any difference there is "git cannot answer".
+# match exactly, and any difference there means "git cannot answer".
 #
-# #164 gave the index one carve-out here, and #181's round-2 review found it reopened round-3's
-# R2-1 leak: this same function also gates the sidecar's tracked probe (Get-SidecarPlan, below),
-# and that probe's answer has to depend on what the index CONTAINS, not where the index FILE
-# sits. Under `git commit --only`, the temporary index git points GIT_INDEX_FILE at during the
-# hook (`<gitdir>/next-index-NNNNN.lock`) holds HEAD's tree plus only the paths named on that
-# commit -- not the full staged set -- so `ls-files --error-unmatch` against it can report a
-# force-staged sidecar as untracked while the real index still holds it staged, and the carve-out
-# let that temporary index pass this guard as "git answering for the target" regardless.
-#
-# Split by caller instead: -IgnoreIndex, set only where the answer does not depend on the index at
-# all. Git hooksPath wiring (`git config core.hooksPath`) writes by toplevel, absolute-git-dir and
-# git-common-dir. The index plays no part in where that write lands, so the #164 case (a hook's
-# temporary index) is exactly what -IgnoreIndex is for and it does not need to know where the
-# temporary index resolves. The sidecar probe calls this with no switch and now requires an exact
-# index match, the same as toplevel, absolute-git-dir and git-common-dir -- so a hook's temporary
-# index answers "git cannot answer" there, and Get-SidecarPlan's Tracked stays unknown rather than
-# reading a partial index as ground truth.
+# hooksPath wiring ignores the index through -IgnoreIndex: `git config core.hooksPath` writes by
+# toplevel, absolute-git-dir and git-common-dir, and never reads the index. The sidecar probe
+# below keeps the exact four-field match, index included, because what it checks (whether a path
+# is tracked) depends on the index's contents.
 #
 # Two simpler checks were measured and rejected (2026-09-14): comparing --show-toplevel alone
 # misses the hook case, because a foreign GIT_DIR with no GIT_WORK_TREE makes the -C directory the
@@ -644,14 +631,14 @@ function Test-GitAnswersForTarget {
     }
 
     # A caller that does not read the index at all (git hooksPath wiring) does not need to know
-    # where a hook's temporary index resolves either -- toplevel, absolute-git-dir and
-    # git-common-dir already pinned equal above are what that write depends on.
+    # where a hook's temporary index resolves. Toplevel, absolute-git-dir and git-common-dir,
+    # already pinned equal above, are what that write depends on.
     if ($IgnoreIndex) { return $true }
 
-    # Every other caller, including the sidecar probe, requires an exact index match. No carve-out
-    # here: a hook's temporary index (`<gitdir>/next-index-NNNNN.lock`) holds a different set of
-    # entries than the real index, so accepting it as "close enough" is what let the sidecar probe
-    # read a partial index as the real answer (the R2-1 leak this split exists to close).
+    # Every other caller, including the sidecar probe, requires an exact index match. A hook's
+    # temporary index (`<gitdir>/next-index-NNNNN.lock`) holds a different set of entries than the
+    # real index, so accepting it as "close enough" would let the sidecar probe treat a partial
+    # index as the real answer.
     $indexAsRun = $asRun[$asRun.Count - 1]
     $indexOwn = $own[$own.Count - 1]
     if ($IsWindows) { return $indexAsRun -ieq $indexOwn }
@@ -725,9 +712,8 @@ function Get-SidecarPlan {
         $tracked = $false
         if ($inRepo) {
             $tracked = $null
-            # No -IgnoreIndex (#181): this question is about what the index contains, so a
-            # hook's temporary GIT_INDEX_FILE has to answer "git cannot answer" here rather than
-            # being treated as close enough, the way #164's carve-out once let it through.
+            # No -IgnoreIndex: this question depends on the index's contents (see the function's
+            # own comment for why).
             if (Test-GitAnswersForTarget -AbsTarget $absTarget) {
                 try {
                     & git -C $absTarget ls-files --error-unmatch -- $sidecarAbs 1>$null 2>$null
@@ -1620,15 +1606,11 @@ elseif (-not (Test-GitAnswersForTarget -AbsTarget (Resolve-Path -LiteralPath $Ta
     # always been, and only a git that answers, but answers about somewhere else, reaches here.
     #
     # Test-GitAnswersForTarget is the guard the sidecar probe has used since #140 (round-4 A),
-    # reused rather than reimplemented: one definition of "git answers for this target" keeps
-    # the two call sites from drifting into disagreeing about the same environment. It also
-    # covers dubious ownership and a missing git the same way, which is the fail-closed
+    # reused rather than reimplemented: one shared definition of "git answers for this target,"
+    # though the two call sites now read different answers from it by design. This call site
+    # passes -IgnoreIndex, the sidecar probe does not (see the function's own comment for why).
+    # It also covers dubious ownership and a missing git the same way, which is the fail-closed
     # direction for a write this block cannot place correctly.
-    #
-    # -IgnoreIndex (#181): `git config core.hooksPath` writes by toplevel, absolute-git-dir and
-    # git-common-dir, never by the index, so a hook's temporary GIT_INDEX_FILE (#164) has nothing
-    # to say about where this write lands. The sidecar probe below still calls this with no
-    # switch, since its ls-files question does depend on the index.
     #
     # Skip with a named reason rather than throwing: by this point the managed files, settings
     # and manifest are already written, so a refusal here would abort a run that has otherwise
