@@ -452,3 +452,58 @@ describe("not-ai gate — issue #166, apostrophe-aware word tokenization", () =>
     },
   );
 });
+
+describe("not-ai gate — issue #122, contrastive negation and bold run-in labels", () => {
+  test.skipIf(!PYTHON)(
+    "counts both contrastive-negation forms as one total, excluding two named things",
+    () => {
+      // Issue #122's "constructions to add": `X, not Y` and `rather than` are the two
+      // sub-forms that survived harmonisation across seven measured corpora, and they trade
+      // off against each other while the combined total stays flat -- counting one alone
+      // would mislead the same way the issue's own measurement run found it does, so only
+      // the combined total is asserted here. The comma form requires a lowercase word after
+      // "not": "Boston, not New York" names two places, not a value judgment, and does not
+      // count.
+      const { json } = runGate(
+        "contrastive-negation.md",
+        "This is fast, not slow, and it matters today. " +
+          "This is fast rather than slow, and that is clear. " +
+          "Boston, not New York, hosts the event this year.\n",
+      );
+      expect(json.word_count).toBe(28);
+      expect(json.counts.contrastive_negation).toBe(2);
+      expect(json.counts.contrastive_negation_per_10k).toBe(714.3);
+    },
+  );
+
+  test.skipIf(!PYTHON)(
+    "a bold label at a line's start counts as own-line or run-in by what follows it",
+    () => {
+      // Issue #122: four regexes were tried across five corpora in one measurement run, and
+      // one of them could not match the ordinary `**Label** text` (run-in) form at all, only
+      // a bold span that was the whole line (own-line) -- a zero that got reported as a
+      // finding. Fixture carries one of each, inside list items (a labelled list item counts
+      // the same as a bare paragraph line), plus a bold span mid-sentence (not a label, not
+      // counted either way), one inside a fenced code block, and one inside an ATX heading
+      // (both excluded, the same way `_prose_blocks` excludes them from sentence rhythm).
+      const { json } = runGate(
+        "bold-labels.md",
+        [
+          "- **Label one:** run-in inside a list item continues here today.",
+          "- **Label two**",
+          "",
+          "The **operator** decided this matters a lot for the outcome today.",
+          "",
+          "```",
+          "**not a label** in code, do not count this line at all please.",
+          "```",
+          "",
+          "# **Heading bold** should not count either way today.",
+          "",
+        ].join("\n"),
+      );
+      expect(json.counts.bold_label_run_in).toBe(1);
+      expect(json.counts.bold_label_own_line).toBe(1);
+    },
+  );
+});
