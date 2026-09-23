@@ -17,7 +17,23 @@ from typing import Iterable
 from .policy import GenrePolicy, get_policy
 
 
-WORD_RE = re.compile(r"\b[A-Za-z]+(?:'[A-Za-z]+)?\b")
+# Built from its code point rather than typed as a literal character or a
+# backslash escape, per this project's tool-argument-decoding rule: a typed
+# escape sequence arrives at the file already decoded, so the safe way to get
+# a specific code point into source is to construct it at runtime.
+_CURLY_APOSTROPHE = chr(0x2019)  # U+2019 RIGHT SINGLE QUOTATION MARK
+# Prose routinely uses the curly apostrophe in place of the straight one, in a
+# tokenized word's internal apostrophe as much as in a contraction's suffix,
+# so both forms are accepted everywhere below rather than only in one place.
+_APOSTROPHE_CLASS = "[" + "'" + _CURLY_APOSTROPHE + "]"
+
+# Issue #166: WORD_RE used to require a straight apostrophe only, so a curly
+# apostrophe (the common case for anything pasted out of a word processor, a
+# CMS, or most of the web) split one word into two tokens -- "It's" counted
+# as "It" and "s" -- which inflated word_count and every rate derived from it
+# (contractions_per_1000 among them) on exactly the documents most likely to
+# use typographic quotes.
+WORD_RE = re.compile(rf"\b[A-Za-z]+(?:{_APOSTROPHE_CLASS}[A-Za-z]+)?\b")
 # A literal space, not \s+. The only call site splits `normalized`, which line 216 has
 # already collapsed to single spaces, so the quantifier could never match more than one
 # character and only offered the regex engine somewhere to backtrack. CodeQL flagged it
@@ -57,17 +73,6 @@ TABLE_SEPARATOR_RE = re.compile(r"^[\s|:-]+$")
 # and were silently treated as possessives -- undercounting real contractions
 # rather than overcounting them, the opposite direction from #122's defect but
 # the same root cause, an alternation that enumerated the set incompletely.
-#
-# Built from its code point rather than typed as a literal character or a
-# backslash escape, per this project's tool-argument-decoding rule: a typed
-# escape sequence arrives at the file already decoded, so the safe way to get
-# a specific code point into source is to construct it at runtime.
-_CURLY_APOSTROPHE = chr(0x2019)  # U+2019 RIGHT SINGLE QUOTATION MARK
-# Prose routinely uses the curly apostrophe in place of the straight one; ANY
-# apostrophe in a contraction, not just the ambiguous 's suffix, can appear as
-# either form, so both are accepted everywhere below rather than only in the
-# pronoun/function-word alternation.
-_APOSTROPHE_CLASS = "[" + "'" + _CURLY_APOSTROPHE + "]"
 CONTRACTION_PRONOUN_S = (
     rf"(?:it|he|she|that|there|here|what|who|let|where|how|when|why){_APOSTROPHE_CLASS}s"
 )

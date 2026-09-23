@@ -352,3 +352,35 @@ describe("not-ai gate — issue #122, normalized counts", () => {
     },
   );
 });
+
+describe("not-ai gate — issue #166, apostrophe-aware word tokenization", () => {
+  test.skipIf(!PYTHON)(
+    "a curly apostrophe (U+2019) word tokenizes the same as its straight-apostrophe form",
+    () => {
+      // Issue #166: WORD_RE required a straight apostrophe only, so a curly apostrophe split
+      // one word into two tokens -- "It's" read as "It" and "s" -- which inflated word_count
+      // and every rate derived from it (contractions_per_1000 among them). #158 taught
+      // CONTRACTION_RE to accept U+2019 but WORD_RE was a separate concern, left unfixed at
+      // the time; this closes that gap.
+      //
+      // Built via String.fromCharCode rather than a literal character or a \u escape typed
+      // into this source: a typed escape sequence arrives at the file already decoded, so
+      // the safe way to place a specific code point in test data is to construct it at
+      // runtime, the same rule the gate.py fix follows for the same character.
+      const curlyApostrophe = String.fromCharCode(0x2019);
+      const straight =
+        "It's the company's policy that here's how it works: that's fine, " +
+        "and there's no problem with Alice's plan or the team's report.\n";
+      const curly = straight.split("'").join(curlyApostrophe);
+
+      // Measured before the fix: straight word_count 22 / contractions_per_1000 181.8,
+      // curly word_count 29 / contractions_per_1000 137.9. Fixed: both read identically.
+      const { json: straightJson } = runGate("apostrophe-straight.md", straight);
+      const { json: curlyJson } = runGate("apostrophe-curly.md", curly);
+      expect(straightJson.word_count).toBe(22);
+      expect(straightJson.counts.contractions_per_1000).toBe(181.8);
+      expect(curlyJson.word_count).toBe(straightJson.word_count);
+      expect(curlyJson.counts.contractions_per_1000).toBe(straightJson.counts.contractions_per_1000);
+    },
+  );
+});
