@@ -679,16 +679,36 @@ function Get-HooksPathReachability {
         return @{ GitAnswers = $false; Reachable = $false; Display = $null }
     }
 
+    # config --get is kept only for the display string in the audit note (the raw
+    # core.hooksPath value, or $null when unset). It is not used to resolve reachability: a
+    # relative core.hooksPath is resolved by git against the worktree TOPLEVEL, never against
+    # $AbsTarget, and Join-Path-ing it onto $AbsTarget gave the right answer only when
+    # $AbsTarget already was the toplevel. With a subdirectory target and a relative
+    # core.hooksPath, that produced a path underneath the subdirectory that happened to match
+    # $HooksDstAbs when the subdirectory's own .claude/hooks existed, reporting reachable while
+    # git actually read the hooks directory at the toplevel (verified live: a commit from a
+    # subdirectory target fired the toplevel's hook, not the subdirectory's).
     $currentHooksPath = $null
     $chpCheck = & git -C $AbsTarget config --get core.hooksPath 2>$null
     if ($LASTEXITCODE -eq 0) { $currentHooksPath = $chpCheck }
 
+    # `rev-parse --git-path hooks` asks git for the same directory it would actually read: it
+    # honours core.hooksPath when set (resolved the way git resolves it, toplevel-relative, not
+    # $AbsTarget-relative) and falls back to <git-dir>/hooks when unset. Normalised the same way
+    # Get-GitLocation normalises --git-common-dir and --git-path index above: join onto
+    # $AbsTarget only when the printed path is not already rooted (git prints it relative to the
+    # -C directory when the repository was discovered rather than named by an environment
+    # variable), then GetFullPath and trim trailing separators before comparing.
     $reachable = $false
-    if ($currentHooksPath) {
-        $resolved = if ([System.IO.Path]::IsPathRooted($currentHooksPath)) { $currentHooksPath } else { Join-Path $AbsTarget $currentHooksPath }
-        if (Test-Path -LiteralPath $resolved) {
-            $reachable = (Resolve-Path -LiteralPath $resolved).Path -ieq $HooksDstAbs
-        }
+    $hooksPathRaw = $null
+    $hpCheck = & git -C $AbsTarget rev-parse --git-path hooks 2>$null
+    if ($LASTEXITCODE -eq 0) { $hooksPathRaw = $hpCheck }
+    if ($hooksPathRaw) {
+        $resolved = [string]$hooksPathRaw
+        if ($IsWindows) { $resolved = $resolved.Replace('/', '\') }
+        if (-not [System.IO.Path]::IsPathRooted($resolved)) { $resolved = Join-Path $AbsTarget $resolved }
+        $resolved = [System.IO.Path]::GetFullPath($resolved).TrimEnd([char[]]@('\', '/'))
+        $reachable = $resolved -ieq $HooksDstAbs.TrimEnd([char[]]@('\', '/'))
     }
 
     return @{ GitAnswers = $true; Reachable = $reachable; Display = $currentHooksPath }

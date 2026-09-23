@@ -596,6 +596,25 @@ Describe "Install-Harness" {
         $driftedAudit | Should -Match 'hooks/pre-commit\s+in-sync \(unreachable: core\.hooksPath -> \.githooks\)'
     }
 
+    It "audit resolves a relative core.hooksPath against the worktree toplevel, not against the target, for a subdirectory target" {
+        # #136 round-2: git resolves a relative core.hooksPath against the repository's
+        # toplevel, never against the -C directory it was asked through. A subdirectory
+        # target installs its own .claude/hooks, and the pre-fix Join-Path-onto-$AbsTarget
+        # resolution happened to land on that same directory, so the audit reported
+        # reachable while git actually read the toplevel's .claude/hooks (verified live: a
+        # commit from the subdirectory target fires the toplevel's hook, not the
+        # subdirectory's).
+        & git -C $script:target init -q *>&1 | Out-Null
+        $sub = Join-Path $script:target 'sub'
+        New-Item -ItemType Directory -Path $sub | Out-Null
+        & git -C $script:target config core.hooksPath '.claude/hooks' *>&1 | Out-Null
+
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $sub | Out-Null
+        $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $sub -Audit *>&1 | Out-String -Width 500
+        $audit | Should -Match 'hooks/pre-commit\s+in-sync \(unreachable: core\.hooksPath -> \.claude/hooks\)'
+        $audit | Should -Not -Match 'All managed files in sync with core\.'
+    }
+
     It "skips core.hooksPath wiring, and writes into no repository at all, when a foreign GIT_DIR is exported" {
         # Issue #145. Every probe in the wiring block asks git through `-C $Target`, and git
         # exports GIT_DIR into every hook it runs, so an installer launched from a hook in
