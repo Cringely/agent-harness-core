@@ -506,6 +506,42 @@ identity_json_array() {
             ;;
     esac
     flat=$(printf '%s' "$raw" | tr '\n' ' ') || return 1
+
+    # Issue #91, round-2 review: the sed extraction below is a greedy
+    # `.*` match, so once the key lookup went case-insensitive it also
+    # started treating a shadowing duplicate as "the same key" and
+    # silently taking the LAST occurrence -- a differently-cased key
+    # declared twice at the same level, or the plain lowercase key
+    # nested inside some other object, both read as though only the
+    # trailing one had ever been declared. Measured:
+    # {"names":["Alice Example"],"emails":["a@b.test"],"Names":[]}
+    # drops "Alice Example" for the trailing empty "Names" array, rc 0,
+    # no refusal, and {"names":[...],"meta":{"NAMES":[]}} does the same
+    # to a perfectly ordinary top-level array. Counted here,
+    # case-insensitively via the same bracket-expression key_ci the
+    # extraction below uses, before that extraction ever runs: more than
+    # one occurrence refuses outright rather than guessing which one the
+    # operator meant.
+    identity_arr_key_matches=$(printf '%s' "$flat" | grep -oE "\"${key_ci}\"[[:space:]]*:")
+    identity_arr_key_rc=$?
+    if [ "$identity_arr_key_rc" -gt 1 ]; then
+        echo "identity gate: the '$key' key-count check in '$identity_file' did not run cleanly (grep exited $identity_arr_key_rc). Refusing rather than reading a crashed check as a single declaration." >&2
+        return 1
+    fi
+    identity_arr_key_hits=0
+    if [ "$identity_arr_key_rc" -eq 0 ]; then
+        while IFS= read -r identity_arr_key_hit_line; do
+            [ -n "$identity_arr_key_hit_line" ] || continue
+            identity_arr_key_hits=$((identity_arr_key_hits + 1))
+        done <<EOF
+$identity_arr_key_matches
+EOF
+    fi
+    if [ "$identity_arr_key_hits" -gt 1 ]; then
+        echo "identity gate: '$identity_file' declares a key matching \"$key\" (matched case-insensitively) $identity_arr_key_hits times -- a shadowing duplicate, whether a differently-cased key at the same level or the same key nested inside another object. Refusing rather than silently reading only the last one and dropping whatever the others declared. Keep exactly one '$key' key in the file." >&2
+        return 1
+    fi
+
     # #135's round-2 review (N1): unchecked, a crashed sed here (the exact
     # 2026-09-05 incident shape this file's header exists to catch, one
     # tool call in a batch failing silently) reads identically to "the
@@ -666,17 +702,22 @@ identity_json_array() {
 #
 # Returns:
 #   0  clean -- no BOM, no NUL byte anywhere in the file
-#   1  a UTF-16 byte-order mark, or a NUL byte with no BOM at all (non-BOM
-#      UTF-16, or some other encoding this byte-oriented parser cannot
-#      read) -- the caller refuses; the message is printed here, since
-#      only this function still has the byte-level evidence
-#   2  a UTF-8 byte-order mark. Not the failure above: EF BB BF is three
-#      ordinary, non-NUL bytes, so $(...) carries it through untouched and
-#      every parser in this file already skips past it on the way to the
-#      first quoted key -- this reads correctly today without this
-#      function's help. Reported anyway so the caller can strip it before
-#      reading, so a byte-exact comparison against the declared text is
-#      never carrying three bytes the operator never typed
+#   1  a UTF-16 byte-order mark, or a NUL byte anywhere in the file (with
+#      or without a leading UTF-8 BOM -- non-BOM UTF-16, a UTF-8 BOM
+#      pasted onto a UTF-16 body, or some other encoding this
+#      byte-oriented parser cannot read) -- the caller refuses; the
+#      message is printed here, since only this function still has the
+#      byte-level evidence
+#   2  a UTF-8 byte-order mark and nothing else wrong -- EF BB BF is
+#      three ordinary, non-NUL bytes, so $(...) carries it through
+#      untouched and every parser in this file already skips past it on
+#      the way to the first quoted key -- this reads correctly today
+#      without this function's help. Reported anyway so the caller can
+#      strip it before reading, so a byte-exact comparison against the
+#      declared text is never carrying three bytes the operator never
+#      typed. The NUL scan below still runs first, so a file starting
+#      with a UTF-8 BOM but carrying a NUL later (a UTF-16 body pasted
+#      behind it) returns 1, not 2.
 #   3  od itself could not be run (missing, or the file vanished between
 #      the readability check above and here) -- the caller refuses rather
 #      than reading a file that might not be UTF-8 as though it were
@@ -692,14 +733,26 @@ identity_check_encoding() {
             echo "identity gate: '$1' starts with a UTF-16 byte-order mark. This parser reads bytes, not UTF-16 code units, and cannot decode it correctly -- silently misreading it would build a pattern that looks fine and does not match real content (issue #91: this is exactly what a UTF-16LE file with a non-ASCII declared name did). Re-save the file as UTF-8 and retry." >&2
             return 1
             ;;
-        efbbbf*)
-            return 2
-            ;;
+    esac
+    # #91/round-2 review: the efbbbf case used to `return 2` right here,
+    # before the NUL scan below ever ran. A UTF-8 BOM followed by a
+    # UTF-16LE body (three ordinary bytes, then a body this byte-oriented
+    # parser cannot read) matched that case and returned 2 -- "clean,
+    # just strip the BOM" -- without the NUL scan ever seeing the body,
+    # so the file loaded with rc 0 and a non-ASCII declared name went
+    # straight through. That contradicts this function's own contract
+    # just above: 0 or 2 is supposed to mean no NUL byte anywhere in the
+    # file, not "no NUL byte before this early return". The BOM case now
+    # only records that a strip is needed; the NUL scan always runs.
+    identity_enc_utf8_bom=0
+    case $identity_enc_head in
+        efbbbf*) identity_enc_utf8_bom=1 ;;
     esac
     if printf '%s\n' "$identity_enc_bytes" | grep -qx 00; then
         echo "identity gate: '$1' contains a NUL byte, which no valid UTF-8 JSON document does. This is very likely UTF-16 without a byte-order mark, which this parser cannot decode correctly -- silently misreading it would build a pattern that looks fine and does not match real content. Re-save the file as UTF-8 and retry." >&2
         return 1
     fi
+    [ "$identity_enc_utf8_bom" = 1 ] && return 2
     return 0
 }
 

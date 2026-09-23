@@ -1113,6 +1113,30 @@ const ARRAY_MATRIX: Array<[string, string, string, string, number, string | null
     0,
     null,
   ],
+  // Issue #91, round-2 review: going case-insensitive above means a
+  // differently-cased duplicate of the SAME key now collides instead of
+  // reading as two distinct keys. The sed extraction is a greedy `.*`, so
+  // it silently took the LAST occurrence -- here, the trailing empty
+  // "Names" array -- and dropped the real declaration with rc 0, no
+  // refusal. Both shapes below (a same-level duplicate and the same
+  // lowercase key nested inside another object) must refuse rather than
+  // pick one silently.
+  [
+    "a differently-cased duplicate key refuses rather than silently shadowing the first (#91 round 2)",
+    '{"names":["Alice Example"],"emails":["a@b.test"],"Names":[]}',
+    "names",
+    "",
+    1,
+    "declares a key matching",
+  ],
+  [
+    "the same key nested inside another object also counts as a duplicate (#91 round 2)",
+    '{"names":["Alice Example"],"emails":["a@b.test"],"meta":{"NAMES":[]}}',
+    "names",
+    "",
+    1,
+    "declares a key matching",
+  ],
   [
     "several entries",
     '{"names":["Alpha One","Beta Two","Gamma Three"],"emails":["a@b.test"]}',
@@ -1787,5 +1811,24 @@ describe("identity gate — encoding detection on the identity file itself (#91)
     expect(stderr).toContain("identifying string");
     expect(stderr).not.toContain("UTF-16");
     expect(stderr).not.toContain("NUL byte");
+  });
+
+  // Round-2 review of #91: the efbbbf case used to `return 2` (clean,
+  // strip the BOM) before the NUL scan below it ever ran. A UTF-8 BOM
+  // pasted onto a UTF-16LE body -- three ordinary bytes, then a body
+  // this byte-oriented parser cannot read -- matched that case and
+  // loaded with rc 0, the non-ASCII declared name going straight
+  // through with a pattern arm that could never match its real UTF-8
+  // form. The NUL scan must run on every path, not just the ones with
+  // no BOM at all.
+  test("a UTF-8 BOM followed by a UTF-16LE body is refused on the embedded NUL, not silently stripped and accepted", () => {
+    const dir = initPreCommitRepo();
+    const json = JSON.stringify({ names: [`Widget Pers${String.fromCharCode(0xf6)}n`], emails: [EMAIL] });
+    const bytes = Buffer.concat([UTF8_BOM, Buffer.from(json, "utf16le")]);
+    const home = makeIdentityHomeBytes(bytes);
+    stageClean(dir);
+    const result = runPreCommit(dir, envWith({ USERPROFILE: home, HOME: home }));
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("NUL byte");
   });
 });
