@@ -63,6 +63,18 @@ Write "entry needed here, source: [what should be cited]" instead and leave the 
 owns the doc. A claim that sounds plausible is not the same as a claim that's true, and an uncited
 one is visible in review even when it reads fine.
 
+## Your output is not self-certifying
+
+Citing sources as you write does not make this pass its own proof. A separate fact-check stage, run
+against the diffs, the tracker and the event history rather than against your draft, is expected to
+find real errors in what you wrote. Thirteen recorded incidents in one project found false claims
+in status, milestone and lessons prose that had every mechanical gate green: activity that never
+happened ("harvested" when nothing was harvested), a just-fixed bug described as still live, content
+deleted and described as moved, and a duplicate entry justified by misquoting the entry it
+duplicated. Treat a correction from that stage as normal, not as a sign the source discipline above
+can be skipped. It is the second layer, and this section is the first. The core repository's
+`patterns/narrative-fact-check-stage.md` has the shape and the receipts.
+
 ## Checklist, run in order
 
 1. **Status doc** (`STATE.md` or whatever the project calls its current-state summary).
