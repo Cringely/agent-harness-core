@@ -26,12 +26,22 @@ describe("findDocsVerdictLine(): the two forms with a real tail", () => {
   });
 });
 
+// Built from character codes rather than typed as literal escapes: U+200B (zero-width space),
+// the character render.ts's UNSAFE_CHARS also strips before a string is quoted into the posted
+// review.
+const ZERO_WIDTH_SPACE = String.fromCharCode(0x200b);
+
 describe("findDocsVerdictLine(): rejects a tail that says nothing", () => {
   test.each([
     ["an empty tail", "Docs: README still accurate: "],
     ["a whitespace-only tail", "Docs: README updated:    "],
     ["the still-accurate placeholder, unfilled", "Docs: README still accurate: <what was checked>"],
     ["the updated placeholder, unfilled", "Docs: README updated: <what changed>"],
+    ["a tail made only of zero-width characters", `Docs: README updated: ${ZERO_WIDTH_SPACE}${ZERO_WIDTH_SPACE}${ZERO_WIDTH_SPACE}`],
+    [
+      "the placeholder with a zero-width character inserted, dodging the literal Set lookup",
+      `Docs: README updated: <what${ZERO_WIDTH_SPACE} changed>`,
+    ],
   ])("%s", (_label, body) => {
     expect(findDocsVerdictLine(body)).toBeNull();
   });

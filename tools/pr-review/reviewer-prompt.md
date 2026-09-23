@@ -95,8 +95,8 @@ earns a second review round. Drift the change did not cause stays in the review 
 So: a change that moves something a living doc describes without updating it is `correctness`, at
 or above the floor. A wording or precision issue in a doc edit the change itself makes is
 `comment-accuracy`, below the floor. Drift you notice that this change did not cause, in a document
-this change does not touch, is out of scope: note it in `observed_instructions` only if it is
-instruction-shaped, otherwise leave it out rather than inflating it to reach the floor.
+this change does not touch, stays below the floor too: report it as an `other` finding rather than
+leaving it out. It never earns `correctness`, since the floor is for drift this change caused.
 
 ## Method
 

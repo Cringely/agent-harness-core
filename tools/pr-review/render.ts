@@ -5,20 +5,13 @@
 // values this file checks itself: event names, validated enums, counts, SHAs and plain identifiers.
 
 import { DOCS_VERDICT_FORMS } from "./docs-verdict";
-import { CONFIDENCE_SET, LOAD_BEARING_SET, SEVERITY_SET, SHA_RE, type Finding, type ReviewEvent, type ReviewerOutput, type Verification } from "./types";
+import { CONFIDENCE_SET, LOAD_BEARING_SET, SEVERITY_SET, SHA_RE, UNSAFE_CHARS, type Finding, type ReviewEvent, type ReviewerOutput, type Verification } from "./types";
 
 export const MAX_FIELD_CHARS = 1_500;
 export const MAX_RENDERED_FINDINGS = 25;
 // GitHub caps a review body at 65,536 characters; the margin absorbs template text.
 export const MAX_BODY_CHARS = 60_000;
 
-// #120's plan D5 list (docs/superpowers/plans/2026-09-11-pr-review-app.md) exactly: C0 controls
-// other than tab and newline, DEL, the Arabic letter mark, zero-width and directional marks, line
-// and paragraph separators, the bidirectional overrides and isolates, invisible operators, and the
-// byte-order mark. Not every character that can make displayed text differ from its bytes: other
-// confusables (soft hyphen, Mongolian vowel separator, variation selectors, tag characters) are a
-// known gap the plan does not close here, tracked outside this task rather than widened on sight.
-const UNSAFE_CHARS = /[\u0000-\u0008\u000B-\u001F\u007F\u061C\u200B-\u200F\u2028-\u202E\u2060-\u2069\uFEFF]/g;
 const IDENTIFIER_RE = /^[A-Za-z0-9._\-\[\]]+$/;
 // The three literals ReviewEvent allows (types.ts:34) and the three Verification.state allows
 // (types.ts:37), restated at runtime because a type annotation enforces nothing once bun skips

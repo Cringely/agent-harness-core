@@ -180,6 +180,16 @@ export const LOAD_BEARING_SET: ReadonlySet<string> = new Set(LOAD_BEARING_SEVERI
 // is posted against and check-run commit references.
 export const SHA_RE = /^[0-9a-f]{40}$/;
 
+// #120's plan D5 list (docs/superpowers/plans/2026-09-11-pr-review-app.md) exactly: C0 controls
+// other than tab and newline, DEL, the Arabic letter mark, zero-width and directional marks, line
+// and paragraph separators, the bidirectional overrides and isolates, invisible operators, and the
+// byte-order mark. Not every character that can make displayed text differ from its bytes: other
+// confusables (soft hyphen, Mongolian vowel separator, variation selectors, tag characters) are a
+// known gap the plan does not close here, tracked outside this task rather than widened on sight.
+// Hoisted here (#217 repair) because docs-verdict.ts needs the same strip before its tail check:
+// a tail made only of these characters must not read as a filled-in verdict.
+export const UNSAFE_CHARS = /[\u0000-\u0008\u000B-\u001F\u007F\u061C\u200B-\u200F\u2028-\u202E\u2060-\u2069\uFEFF]/g;
+
 const REPO_PART_RE = /^[A-Za-z0-9._-]+$/;
 
 // Validates a GitHub "owner/name" repository identifier and splits it. Returns null for anything

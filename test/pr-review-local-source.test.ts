@@ -44,6 +44,9 @@ function makeRepo() {
   git(dir, "commit", "-q", "-m", "base");
   const base = git(dir, "rev-parse", "HEAD");
   write(dir, "CONTRIBUTING.md", "HEAD CONTRIBUTING\n");
+  // Written so base and head copies differ: a living-docs test that read HEAD instead of BASE
+  // would still pass if this file only had one version across both commits.
+  write(dir, "README.md", "HEAD README\n");
   write(dir, "src/a.ts", "export const a = 2;\n");
   write(dir, "big.txt", "x".repeat(MAX_HEAD_FILE_BYTES + 1));
   write(dir, "blob.bin", Buffer.from([0x00, 0x01, 0x02]));
@@ -70,9 +73,9 @@ describe("LocalGitSource.snapshot()", () => {
     expect(snap.linkedIssues).toEqual(issues);
     expect(snap.diff).toContain("-export const a = 1;");
     expect(snap.diff).toContain("+export const a = 2;");
-    expect(snap.changedFiles).toEqual(["CONTRIBUTING.md", "big.txt", "blob.bin", "src/a.ts", "src/removed.ts"]);
+    expect(snap.changedFiles).toEqual(["CONTRIBUTING.md", "README.md", "big.txt", "blob.bin", "src/a.ts", "src/removed.ts"]);
     expect(snap.commitMessages).toEqual(["feat: change a\n\nsecond paragraph"]);
-    expect(snap.headFiles.map((f) => f.path)).toEqual(["CONTRIBUTING.md", "src/a.ts"]);
+    expect(snap.headFiles.map((f) => f.path)).toEqual(["CONTRIBUTING.md", "README.md", "src/a.ts"]);
     expect(snap.omittedFiles).toEqual(["big.txt", "blob.bin"]);
     expect(snap.workflowText).toBe("jobs:\n");
     expect(snap.changedFilesComplete).toBe(true);
