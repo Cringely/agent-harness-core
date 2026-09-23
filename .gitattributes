@@ -7,3 +7,14 @@
 core/claude/hooks/pre-commit text eol=lf
 core/claude/hooks/pre-push text eol=lf
 core/claude/hooks/commit-msg text eol=lf
+
+# The exported account payload is always written with LF by
+# install/Export-Account.ps1. Without this rule, core.autocrlf checks the
+# whole tree out as CRLF on Windows, and a fresh clone shows every payload
+# file as modified with no real content change. This rule is scoped to
+# account/claude/** rather than the whole repo on purpose: it exists for
+# checkout ergonomics on a generated payload, not to make a failing test
+# pass by coupling its correctness to this file. Sets the same eol=lf the
+# rules above already give *.sh and the hook filenames under it, so this
+# does not change their effective value.
+account/claude/** text eol=lf
