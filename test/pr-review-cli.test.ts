@@ -6,6 +6,7 @@
 // GitHubClient is ever constructed.
 
 import { afterAll, describe, expect, test } from "bun:test";
+import { generateKeyPairSync } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,13 +19,14 @@ import {
   main,
   parseCliArgs,
   reportOutcome,
+  reportRefusal,
   stripControlChars,
   summarizeSnapshot,
 } from "../tools/pr-review/cli";
 import { syntheticCheckRuns } from "../tools/pr-review/local-source";
 import type { ReviewOutcome } from "../tools/pr-review/pipeline";
 import { REPO_ROOT } from "../tools/pr-review/tool-state";
-import { RefusalError, type PrSnapshot } from "../tools/pr-review/types";
+import { RefusalError, type PrSnapshot, type PrSource, type ReviewPoster } from "../tools/pr-review/types";
 
 const NO_ENV = {};
 const FIXTURE_IDENTITY = { names: [], emails: [], username: "fixture-user", hostname: "fixture-host" };
@@ -530,6 +532,179 @@ describe("cli.ts subprocess: BUN-CWD wiring (R11-5)", () => {
       expect(result.stderr).toContain("stdin carried no key");
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("reportRefusal()", () => {
+  test("json: prints a status: refused object on stdout and exits 2", () => {
+    const printed: string[] = [];
+    const log = console.log;
+    console.log = (...args: unknown[]) => printed.push(args.join(" "));
+    try {
+      const code = reportRefusal("refusing to review: the pull request's head is a, not the expected b", true);
+      expect(code).toBe(2);
+      expect(JSON.parse(printed.join("\n"))).toEqual({
+        status: "refused",
+        refusal: "refusing to review: the pull request's head is a, not the expected b",
+      });
+    } finally {
+      console.log = log;
+    }
+  });
+
+  test("plain text: prints a refused: line on stderr and exits 2", () => {
+    const printed: string[] = [];
+    const error = console.error;
+    console.error = (...args: unknown[]) => printed.push(args.join(" "));
+    try {
+      const code = reportRefusal("refusing to snapshot: mismatch", false);
+      expect(code).toBe(2);
+      expect(printed.join("\n")).toBe("refused: refusing to snapshot: mismatch");
+    } finally {
+      console.error = error;
+    }
+  });
+
+  test("strips control characters from the message the same way reportOutcome does", () => {
+    // ESC-METHOD: built from character code 0, never typed as an escape sequence.
+    const nul = String.fromCharCode(0);
+    const printed: string[] = [];
+    const log = console.log;
+    console.log = (...args: unknown[]) => printed.push(args.join(" "));
+    try {
+      reportRefusal(`refusing${nul}now`, true);
+      const text = printed.join("\n");
+      expect(text).not.toContain(nul);
+      expect(JSON.parse(text).refusal).toBe("refusingnow");
+    } finally {
+      console.log = log;
+    }
+  });
+});
+
+// #167: main()'s --expect-head wiring and refusal shape, exercised through main() itself with a
+// fake PrSource/ReviewPoster on the io.buildSource seam -- no App key parsed for real, no network
+// call, no live pull request. currentHeadSha and postReview throw if ever called: every case below
+// refuses before either would run (a mismatched head is checked before the model runs on review,
+// and snapshot never posts at all), so a call reaching them is this fixture catching a defect, not
+// a gap in it.
+const FAKE_PEM = generateKeyPairSync("rsa", {
+  modulusLength: 2048,
+  publicKeyEncoding: { type: "spki", format: "pem" },
+  privateKeyEncoding: { type: "pkcs1", format: "pem" },
+}).privateKey;
+const KEY_STDIN = { isTTY: false, read: async () => FAKE_PEM };
+
+class FakeSource implements PrSource, ReviewPoster {
+  constructor(private readonly snap: PrSnapshot) {}
+  async snapshot(): Promise<PrSnapshot> {
+    return this.snap;
+  }
+  async currentHeadSha(): Promise<never> {
+    throw new Error("must not be called: every #167 fixture case refuses before a post's head re-check");
+  }
+  async postReview(): Promise<never> {
+    throw new Error("must not be called: every #167 fixture case refuses before a post");
+  }
+}
+
+function fixtureSnapshot(headSha: string): PrSnapshot {
+  return {
+    repo: "owner/name",
+    number: 9,
+    title: "t",
+    body: "b",
+    baseSha: "0".repeat(40),
+    headSha,
+    isOpen: true,
+    diff: "diff --git a/a.ts b/a.ts",
+    changedFiles: ["a.ts"],
+    changedFilesComplete: true,
+    commitMessages: ["m"],
+    headFiles: [],
+    omittedFiles: [],
+    linkedIssues: [],
+    trustedContext: [],
+    workflowText: "jobs:\n",
+    checkRuns: syntheticCheckRuns("passed"),
+  };
+}
+
+function fixtureIo(headSha: string) {
+  return { cwd: () => NEUTRAL_DIR, exit: fakeExit, stdin: KEY_STDIN, buildSource: () => new FakeSource(fixtureSnapshot(headSha)) };
+}
+
+describe("main(): --expect-head wiring and refusal shape (#167)", () => {
+  // Proves the CLI-to-pipeline wiring (parseCliArgs's expectHead reaching runReview's options
+  // literal in main()): with the literal's `expectHead: parsed.expectHead` property deleted, this
+  // request no longer refuses -- the fetched head ("a"x40) is never compared against the flag, the
+  // dry run proceeds, and this assertion fails (verified by deleting it and restoring, 2026-09-22).
+  test("a mismatched --expect-head on review refuses as JSON, without a poster or model run", async () => {
+    const printed: string[] = [];
+    const log = console.log;
+    console.log = (...args: unknown[]) => printed.push(args.join(" "));
+    try {
+      const argv = ["review", "--pr", "9", "--app-id", "1", "--key-stdin", "--json", "--expect-head", "b".repeat(40)];
+      const code = await main(argv, fixtureIo("a".repeat(40)));
+      expect(code).toBe(2);
+      const parsed = JSON.parse(printed.join("\n"));
+      expect(parsed.status).toBe("refused");
+      expect(parsed.refusal).toContain("not the expected");
+    } finally {
+      console.log = log;
+    }
+  });
+
+  test("a mismatched --expect-head on review refuses in plain text when --json is not given", async () => {
+    const printed: string[] = [];
+    const error = console.error;
+    console.error = (...args: unknown[]) => printed.push(args.join(" "));
+    try {
+      const argv = ["review", "--pr", "9", "--app-id", "1", "--key-stdin", "--expect-head", "1".repeat(40)];
+      const code = await main(argv, fixtureIo("2".repeat(40)));
+      expect(code).toBe(2);
+      expect(printed.join("\n")).toContain("refused: refusing to review");
+    } finally {
+      console.error = error;
+    }
+  });
+
+  // Proves the snapshot command's own three-line check: deleting it leaves this request printing
+  // the fetched (wrong) snapshot and exiting 0 instead of refusing (verified by deleting it and
+  // restoring, 2026-09-22) -- exactly the ablation the issue reported.
+  test("a mismatched --expect-head on snapshot refuses as JSON instead of printing the wrong snapshot", async () => {
+    const printed: string[] = [];
+    const log = console.log;
+    console.log = (...args: unknown[]) => printed.push(args.join(" "));
+    try {
+      const argv = ["snapshot", "--pr", "9", "--app-id", "1", "--key-stdin", "--expect-head", "c".repeat(40)];
+      const code = await main(argv, fixtureIo("d".repeat(40)));
+      expect(code).toBe(2);
+      const parsed = JSON.parse(printed.join("\n"));
+      expect(parsed).toEqual({
+        status: "refused",
+        refusal: "refusing to snapshot: the pull request's head is dddddddddddddddddddddddddddddddddddddddd, not the expected cccccccccccccccccccccccccccccccccccccccc",
+      });
+    } finally {
+      console.log = log;
+    }
+  });
+
+  test("a matching --expect-head on snapshot proceeds and prints the real snapshot", async () => {
+    const head = "e".repeat(40);
+    const printed: string[] = [];
+    const log = console.log;
+    console.log = (...args: unknown[]) => printed.push(args.join(" "));
+    try {
+      const argv = ["snapshot", "--pr", "9", "--app-id", "1", "--key-stdin", "--expect-head", head];
+      const code = await main(argv, fixtureIo(head));
+      expect(code).toBe(0);
+      const parsed = JSON.parse(printed.join("\n"));
+      expect(parsed.headSha).toBe(head);
+      expect(parsed.status).toBeUndefined();
+    } finally {
+      console.log = log;
     }
   });
 });

@@ -22,12 +22,14 @@ The `claude` CLI must be logged in. The CLI hands the reviewing model the logged
 
 Two commands. Both take the key on stdin and both mint an installation token.
 
-    op read "<secret reference>" | bun <absolute path>/tools/pr-review/cli.ts review --pr <n> --app-id <id> --key-stdin [--post [--comment-only]] [--json] [--repo owner/name]
-    op read "<secret reference>" | bun <absolute path>/tools/pr-review/cli.ts snapshot --pr <n> --app-id <id> --key-stdin [--repo owner/name]
+    op read "<secret reference>" | bun <absolute path>/tools/pr-review/cli.ts review --pr <n> --app-id <id> --key-stdin [--post [--comment-only]] [--json] [--repo owner/name] [--expect-head <sha40>]
+    op read "<secret reference>" | bun <absolute path>/tools/pr-review/cli.ts snapshot --pr <n> --app-id <id> --key-stdin [--repo owner/name] [--expect-head <sha40>]
 
 `snapshot` reads the pull request, runs no model and posts nothing. It prints, as JSON, what the reviewer would be given (paths, counts and SHAs, never the pull request's own text) together with the computed verification. It is the first thing to run against a new App installation, since it exercises the key, the permission checks and the token without a model run or a post.
 
 `review` is a dry run unless `--post` is given: it runs the whole pipeline, prints the review body it would post, writes a `status=... event=... computed=...` line to stderr, and posts nothing. `--post` posts the review under the App's identity and prints the review's URL. `--comment-only`, which applies only with `--post`, posts the same body as a `COMMENT` whatever event was computed; it is the form used when the tool reviews the pull request that lands it, where it must not approve itself. `--json` prints the full outcome as JSON in place of the body. `--repo` defaults to `Cringely/agent-harness-core`.
+
+`--expect-head <sha40>` is optional on both commands: a 40-character lowercase hex commit SHA the caller already believes is the pull request's head, from its own earlier snapshot or a copied value. The tool fetches the pull request itself either way, and checks the fetched head against this one before doing anything else with it (`snapshot` before printing, `review` before the model runs), so a caller that pinned a head some other way finds out it moved rather than reviewing or snapshotting the wrong commit. Omitting it leaves both commands byte-identical to before the flag existed.
 
 The working directory matters, and it is why each command names the script by its absolute path. Bun loads `bunfig.toml` and any file whose name starts with `.env` from the current working directory before the tool runs, from that directory only and not from its parents or the script's own directory (measured live on Bun 1.3.14). Run from inside a checkout, a pull request that had merged either file at the repository root would run code in, or redirect the network of, the very process holding the App key, and a refusal issued afterwards cannot undo a preload that already ran. So the working directory must be outside every checkout of this repository, the main clone and any worktree alike, and must contain no `bunfig.toml` and no `.env` file of any suffix. An empty directory kept for the purpose is the simple choice. Both commands check this before reading the key and refuse otherwise, comparing paths after symlinks and junctions are resolved, so a checkout reached through a junction does not slip past. Every repository path the tool needs is resolved from the script's own location, never from where you ran it.
 
@@ -59,6 +61,7 @@ A refusal exits 2 and posts nothing. The reasons, roughly in the order the tool 
 - A posting run from a checkout with uncommitted changes.
 - The rendered body, or any string the model wrote, carries an identifying string: a declared name or email, the account email, the workstation username or the machine hostname. This applies to dry runs too. The refusal names only the hit's class (`declared name #1`, `email #2`, and so on), and the body and findings are blanked, so nothing caught is republished.
 - A posting run against a pull request that is not open, unless the run is `--comment-only`.
+- `--expect-head` was given and the fetched head does not match it. `snapshot` prints nothing, and `review` never reaches the model.
 
 One failure is neither a refusal nor a clean run. If GitHub accepted the post but its response failed the tool's validation, the run exits 1 after printing the review's id and URL, or `unknown` for whichever the response lacked, with a note that a review may already exist. Check the pull request before running again, or a second review lands beside the first.
 
