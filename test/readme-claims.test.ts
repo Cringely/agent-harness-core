@@ -166,19 +166,16 @@ describe("README <-> patterns/INDEX.md <-> patterns/*.md", () => {
     expect(indexLinkedFiles()).toEqual(actualPatternFiles());
   });
 
-  // Canary: an INDEX.md row naming a file that is not on disk must be caught, proving the
-  // bijection check is not vacuously true because both sides happen to be empty or equal by
-  // construction.
-  test("canary: a fake INDEX.md row is caught against the real directory", () => {
-    const fakeIndex = [
-      "| Doc | Problem it solves |",
-      "|---|---|",
-      "| [`nonexistent-pattern.md`](nonexistent-pattern.md) | Made up for this test. |",
-    ].join("\n");
-    const files: string[] = [];
-    for (const m of fakeIndex.matchAll(/\[`([^`]+\.md)`\]\(([^)]+)\)/g)) files.push(m[1]!);
-    expect(files.sort()).not.toEqual(actualPatternFiles());
-  });
+  // No canary here, unlike the agent and hook rows above. Those canaries call
+  // backtickIdentifiers, the same extraction function the real assertion uses, against synthetic
+  // input, so they exercise that function's discriminating power directly. A canary for this
+  // block would need the same property against indexLinkedFiles, but a ghost INDEX.md row is
+  // already caught by "every INDEX.md row link resolves" above (linked-but-absent), and an
+  // orphan patterns/*.md file is already caught by the bijection test right above this comment
+  // (present-but-unlinked). Both were verified by mutation: a `ghost-pattern-file.md` row failed
+  // both of those tests, and an unlinked `orphan-verify-only.md` failed the bijection test. A
+  // canary reimplementing the link regex inline, rather than calling indexLinkedFiles, would not
+  // exercise that function at all and so proves nothing about it (#221 review).
 });
 
 // A number word (one..ten) or bare digit, immediately followed by "jobs"/"suites", or by
