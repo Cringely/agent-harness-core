@@ -72,7 +72,7 @@ in status, milestone and lessons prose that had every mechanical gate green: act
 happened ("harvested" when nothing was harvested), a just-fixed bug described as still live, content
 deleted and described as moved, and a duplicate entry justified by misquoting the entry it
 duplicated. Treat a correction from that stage as normal, not as a sign the source discipline above
-can be skipped. It is the second layer, and this section is the first. The core repository's
+can be skipped. It is the second layer, and the "No invented narrative" rule above is the first. The core repository's
 `patterns/narrative-fact-check-stage.md` has the shape and the receipts.
 
 ## Checklist, run in order

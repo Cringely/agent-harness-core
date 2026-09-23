@@ -127,11 +127,13 @@ belongs to this stage as much as to any review.
 
 ## Provenance
 
-The record comes from one project so far, thirteen incidents between 2026-07-18 and 2026-09-19,
-plus the four passes fact-checked in the session that promoted this doc. Most were a
-documentation-reconciliation
-pass on a cheap tier by design, but two were implementer lanes writing decision entries about work
-they had done themselves, one of which reported a passing test count measured before its last edit.
+The record comes from one project so far, thirteen incidents between 2026-07-18 and 2026-09-19.
+The last of them, the eight-claim pass, was also the first of four passes fact-checked in the
+session that promoted this doc, so the record holds sixteen events, not seventeen. The eight is in
+that project's incident log. The three, four and four that followed exist only in the session
+record. Most were a documentation-reconciliation pass on a cheap tier by design, but two were
+implementer lanes reporting on their own work: one asserted pilot state it had not observed, and
+one reported a passing test count measured before its last edit.
 So the class is not one role. It is any agent writing narrative prose about work or state it did not
 directly observe, on any tier: the eight-claim pass ran on a mid-tier model and was caught by a
 stronger one. What is local to that project is the specific gates that were green, a size cap and a
