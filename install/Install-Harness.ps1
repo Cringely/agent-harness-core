@@ -539,7 +539,16 @@ if (Test-Path -LiteralPath $sidecarPath) {
             foreach ($key in $loadedSidecar.Keys) { $sidecar[$key] = $loadedSidecar[$key] }
         }
         catch {
-            Write-Warning "Ignoring unparsable sidecar ('.claude/.harness-manifest.local.json'): $($_.Exception.Message). Its content is machine-local and regenerable, so the run continues as if it were empty."
+            # -Quiet's only contract is the tab-separated status/file report
+            # session-start-drift-check.sh parses byte for byte (line ~1279 below). A
+            # PowerShell warning is written to the same stream `pwsh -File` merges into that
+            # captured output, not to a channel the hook's `2>/dev/null` can strip, so this
+            # warning used to land inside the machine-readable report as an uncounted, tab-free
+            # line the hook's awk then read as a phantom drift status. Skipped only in -Quiet:
+            # every other caller (a plain install, -Audit without -Quiet) still sees it.
+            if (-not $Quiet) {
+                Write-Warning "Ignoring unparsable sidecar ('.claude/.harness-manifest.local.json'): $($_.Exception.Message). Its content is machine-local and regenerable, so the run continues as if it were empty."
+            }
         }
     }
 }
