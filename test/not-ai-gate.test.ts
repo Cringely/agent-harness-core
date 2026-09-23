@@ -269,6 +269,74 @@ describe("not-ai gate — markdown-aware sentence segmentation", () => {
     expect(json.passed).toBe(false);
     expect(exitCode).toBe(1);
   });
+
+  test.skipIf(!PYTHON)(
+    "a fence nested inside a longer fence of the same character does not close it early",
+    () => {
+      // Issue #123a. CommonMark: a fence's closing marker needs the same character AND at
+      // least as many repeats as the one that opened it. The old check compared only the
+      // first character, so a doc whose outer fence uses four backticks around content that
+      // shows a plain-backtick fence as a literal example -- three backticks, then more
+      // lines, then three backticks again -- closed the outer fence on that first inner
+      // triple-backtick line. Everything after leaked out as ordinary markdown: the "code
+      // line" read as prose (and its embedded sentence-looking text got counted), the
+      // second inner triple-backtick line opened a brand new (bogus) fence, and the real
+      // closing four-backtick line closed that bogus fence instead of the real one.
+      // Measured before this fix: sentences=3 (the leaked code line split into two
+      // "sentences" plus the real closing sentence, with the intro merged into one of
+      // them by the broken flush sequence). Fixed: the whole four-backtick block is one
+      // continuous fence, so only the two real sentences on either side of it count.
+      const { json } = runGate(
+        "nested-fence.md",
+        [
+          "Intro sentence before the fence explains one plan in enough detail to matter today.",
+          "",
+          "````",
+          "Example of a fenced block:",
+          "```",
+          "some code line looks like a sentence. Really it should not count.",
+          "```",
+          "End of the nested example.",
+          "````",
+          "",
+          "Closing sentence after the fence wraps up the example nicely today.",
+          "",
+        ].join("\n"),
+      );
+      expect(json.counts.sentences).toBe(2);
+    },
+  );
+
+  test.skipIf(!PYTHON)(
+    "a GFM table with no leading pipe on its rows is still recognised as a table",
+    () => {
+      // Issue #123c. GFM does not require a table row to start with "|" -- "Name | Role"
+      // over "--- | ---" is a legal table with no leading pipe anywhere. Header detection
+      // required TABLE_ROW_RE (a leading "|") on the header line, so this form fell through
+      // to plain text entirely: header, separator and every body row glued into one long
+      // pseudo-sentence with no `.!?` break anywhere in it. Measured before this fix:
+      // sentences=1 (the whole table plus the closing sentence fused together, since the
+      // table itself has no terminal punctuation for SENTENCE_RE to find). Fixed: the
+      // separator row is what actually distinguishes a table from prose, so the header no
+      // longer needs its own leading pipe, and the table is dropped like the leading-pipe
+      // form is, leaving the two real sentences on either side of it.
+      const { json } = runGate(
+        "table-no-leading-pipe.md",
+        [
+          "Intro sentence before the table explains what follows in some useful detail.",
+          "",
+          "Name | Role",
+          "--- | ---",
+          "Alice | Engineer",
+          "Bob | Manager",
+          "",
+          "Closing sentence after the table wraps up the section with some detail.",
+          "",
+        ].join("\n"),
+      );
+      expect(json.counts.sentences).toBe(2);
+    },
+  );
 });
 
 describe("not-ai gate — issue #122, normalized counts", () => {

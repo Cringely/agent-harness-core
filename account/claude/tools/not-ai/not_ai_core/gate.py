@@ -178,6 +178,7 @@ def _prose_blocks(text: str) -> tuple[list[str], bool]:
     content_col: int | None = None
     in_fence = False
     fence_char = ""
+    fence_length = 0
     fence_lines: list[str] = []
 
     def flush() -> None:
@@ -194,7 +195,21 @@ def _prose_blocks(text: str) -> tuple[list[str], bool]:
 
         fence_match = FENCE_RE.match(line)
         if in_fence:
-            if fence_match and fence_match.group(1)[0] == fence_char:
+            # CommonMark: a fence closes only on a marker using the same character
+            # AND at least as many repeats as the one that opened it. Comparing
+            # only the first character (as this used to) means a shorter same-
+            # character fence nested inside a longer one -- e.g. a doc that shows
+            # a fenced-code example, so its outer fence uses four backticks around
+            # content containing a plain ``` -- closes the outer fence early on
+            # that inner line. Everything after (the intended closing ```` and any
+            # real prose past it) then reads as ordinary markdown instead of
+            # staying inside the fence, miscounting both the fence's own content
+            # and whatever follows it (issue #123a).
+            if (
+                fence_match
+                and fence_match.group(1)[0] == fence_char
+                and len(fence_match.group(1)) >= fence_length
+            ):
                 in_fence = False
                 fence_lines.clear()
             else:
@@ -205,6 +220,7 @@ def _prose_blocks(text: str) -> tuple[list[str], bool]:
             flush()
             in_fence = True
             fence_char = fence_match.group(1)[0]
+            fence_length = len(fence_match.group(1))
             fence_lines = []
             index += 1
             continue
@@ -220,22 +236,39 @@ def _prose_blocks(text: str) -> tuple[list[str], bool]:
             index += 1
             continue
 
+        # GFM does not require a table's header row to start with "|" --
+        # "Name | Role" over "--- | ---" is a legal table with no leading
+        # pipe on either line. Requiring TABLE_ROW_RE (leading "|") on the
+        # header line rejected that legal form outright, so the header,
+        # separator and every body row fell through to plain text and glued
+        # into one long pseudo-sentence (issue #123c). The separator row
+        # already carries the real signal here: TABLE_SEPARATOR_RE only
+        # matches a line made entirely of whitespace, "|", ":" and "-", so
+        # requiring the line right after "line" to match it (with both "-"
+        # and "|" present) is what tells a table apart from an ordinary
+        # sentence that happens to contain "|" -- the header line itself
+        # only needs to contain "|" at all, leading or not.
         if (
-            TABLE_ROW_RE.match(line)
+            "|" in line
             and index + 1 < total
             and TABLE_SEPARATOR_RE.match(lines[index + 1])
             and "-" in lines[index + 1]
             and "|" in lines[index + 1]
         ):
+            leading_pipe = bool(TABLE_ROW_RE.match(line))
             flush()
             index += 2
-            # Body rows only, matched the same way the header row above is:
-            # by starting with "|". The old condition instead checked "|"
-            # anywhere in the line, so a prose paragraph immediately after
-            # the table -- no blank line, just a plain sentence that happens
-            # to mention a shell pipe -- was swallowed as more table and
-            # dropped (issue #123b).
-            while index < total and TABLE_ROW_RE.match(lines[index]):
+            # Body-row continuation matches the header's own style. A
+            # leading-pipe header's body rows must also start with "|" --
+            # unchanged from before, and this is what keeps #134's
+            # pipe-after-table regression test green: a prose line that
+            # merely mentions a shell pipe without a leading "|" still ends
+            # the table there. A header with no leading pipe has no leading
+            # "|" on its body rows either, so continuation there just
+            # requires the line to be non-blank and contain "|".
+            while index < total and lines[index].strip() and (
+                TABLE_ROW_RE.match(lines[index]) if leading_pipe else "|" in lines[index]
+            ):
                 index += 1
             continue
 
@@ -248,6 +281,19 @@ def _prose_blocks(text: str) -> tuple[list[str], bool]:
             continue
 
         indent = len(line) - len(line.lstrip())
+        # Receipt for this de-indent check (issue #123, "de-indent machinery"
+        # item): the reviewer of fix/122-gate-segmentation measured five
+        # reduced variants of this segmenter against six real documents and
+        # rejected four of them on those numbers. The fifth variant, which
+        # removes this check outright and lets any less-indented line keep
+        # continuing the open list item, produced output identical to the
+        # current code on all six documents and had zero lazy-continuation
+        # instances across the repository's 157 tracked markdown files at
+        # measurement time. It was kept anyway: those 157 files not
+        # exercising the case does not mean the case cannot occur, and
+        # removing the check reopens exactly the glue this rewrite exists to
+        # close -- a de-indented line silently continuing the previous list
+        # item instead of starting a new block (see the docstring above).
         if content_col is not None and indent < content_col:
             flush()
         current.append(stripped)
