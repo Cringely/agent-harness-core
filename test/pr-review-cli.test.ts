@@ -641,8 +641,15 @@ function fixtureSnapshot(headSha: string): PrSnapshot {
     // dry run reach a live `claude` process under the account's own login -- confirmed live on this
     // machine while writing this fix, where reverting this line to a real diff string let a "review"
     // run with no --expect-head start a real reviewer process that bun's test timeout had to kill.
-    // A null diff closes that regardless of whether the check around it still holds. See the
-    // describe block below this file's #167 tests for the test and why it does not use a PATH stub.
+    // A null diff closes that regardless of whether the check around it still holds. A separate
+    // test asserting the resulting dry-run reviewerFailure message was tried and dropped (review
+    // finding on #216, 2026-09-23): with no --expect-head, that assertion reaches a real,
+    // unmocked ClaudeCliRunner (cli.ts constructs one unconditionally, it is not on the CliIo
+    // seam) whenever this diff:null guard alone regresses, confirmed live with a PATH-first stub
+    // claude that recorded a start -- a real model call under the account's own login is exactly
+    // what #195 exists to prevent. This line is the guard. The #167 tests above already prove the
+    // --expect-head wiring separately, each behind a mismatched --expect-head that refuses before
+    // deps.runner.run() could ever be reached.
     diff: null,
     changedFiles: ["a.ts"],
     changedFilesComplete: true,
@@ -740,47 +747,6 @@ describe("main(): --expect-head wiring and refusal shape (#167)", () => {
       const parsed = JSON.parse(printed.join("\n"));
       expect(parsed.headSha).toBe(head);
       expect(parsed.status).toBeUndefined();
-    } finally {
-      console.log = log;
-    }
-  });
-});
-
-// #195: closes the gap the #167 tests above leave open. Every one of them passes a mismatched
-// --expect-head, so they refuse before deps.runner.run() could ever be reached -- proving the
-// --expect-head wiring, not that a review can never reach the model. If that wiring alone
-// regressed (the property deleted from the options literal, as the #167 tests above already
-// ablate), a run like the one below would fall through to a real, unmocked ClaudeCliRunner
-// (cli.ts constructs one unconditionally, it is not on the CliIo seam) under this process's own
-// PATH and claude CLI login. fixtureSnapshot's diff is null for exactly this reason: pipeline.ts
-// refuses to call deps.runner.run() at all once snapshot.diff === null, before it ever asks
-// whether the wiring above caught anything, so this test does not depend on that wiring holding.
-//
-// A PATH-injected stub `claude` that writes a marker file was tried first, the way other suites in
-// this repo stub a binary on PATH, and rejected: ClaudeCliRunner's constructor calls
-// Bun.which("claude") with no PATH argument, and Bun.which does not observe a test's runtime
-// mutation of process.env.PATH (confirmed against Bun 1.3.14 with a throwaway probe script) -- the
-// marker would never appear whether or not the code under test was correct, proving nothing either
-// way. The check below instead reads pipeline.ts's own branching: only the diff === null branch
-// produces this exact reviewerFailure string with reviewerOk false, and that branch is mutually
-// exclusive with the one that calls deps.runner.run(). Ablation: reverting fixtureSnapshot's diff
-// to a non-null string reaches a real ClaudeCliRunner built against this machine's actual PATH
-// instead, and reviewerFailure becomes "the claude CLI was not found on PATH" on a machine with no
-// claude CLI installed, or a real model call on one that has it logged in -- either way this
-// assertion fails (verified by reverting and restoring, 2026-09-23).
-describe("main(): a review with no diff never reaches the reviewer runner (#195)", () => {
-  test("a review with no --expect-head refuses at the diff check, not by starting the model", async () => {
-    const printed: string[] = [];
-    const log = console.log;
-    console.log = (...args: unknown[]) => printed.push(args.join(" "));
-    try {
-      const argv = ["review", "--pr", "9", "--app-id", "1", "--key-stdin", "--json"];
-      const code = await main(argv, fixtureIo("a".repeat(40)));
-      expect(code).toBe(0);
-      const parsed = JSON.parse(printed.join("\n"));
-      expect(parsed.status).toBe("dry-run");
-      expect(parsed.reviewerOk).toBe(false);
-      expect(parsed.reviewerFailure).toBe("the pull request diff was unavailable, so no model review ran");
     } finally {
       console.log = log;
     }
