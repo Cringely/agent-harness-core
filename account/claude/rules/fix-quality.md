@@ -98,8 +98,8 @@ on comment wording would have been.
 **Discovery is not commitment, and not a filing either.** A finding written into a review comment is
 recorded. It becomes a GitHub issue only when it is a correctness or security gap outside the scope
 of the pull request under review, or a decision that belongs to the operator, and the operator is
-told each time one is filed. Anything else gets fixed in the same pull request if it is trivial, or
-stays in the comment. Agents doing implementation work do not create issues at all.
+told each time one is filed. Anything else gets fixed in the same pull request when it is trivial,
+or stays in the comment, and an agent doing the work never opens an issue of its own.
 
 This replaced "Finding something files it" on 2026-09-23. That line read as an instruction to turn
 every reviewer's minor list into issues, which is the unfiltered-queue failure this section names.
