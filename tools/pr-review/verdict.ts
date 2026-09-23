@@ -29,8 +29,10 @@ export const REQUIRED_CHECKS: ReadonlyArray<{ name: string; appSlug: string }> =
 
 const FAILED_CONCLUSIONS: ReadonlySet<string> = new Set(["failure", "timed_out"]);
 
-// Suites on a `run:` line only. test.yml names two more suites in comments precisely because CI
-// does not run them (#90); counting those would report coverage that does not exist.
+// Suites on a `run:` line only (#90). Counting a suite named only in a comment would report
+// coverage that does not exist. Every suite in this workflow currently sits on a `run:` line, so
+// this function only matters the day a suite is added without one. It still reads that one as
+// uncovered rather than trusting a comment that names it.
 export function ciCoveredPesterSuites(workflowText: string): Set<string> {
   const covered = new Set<string>();
   for (const line of workflowText.split(/\r?\n/)) {
