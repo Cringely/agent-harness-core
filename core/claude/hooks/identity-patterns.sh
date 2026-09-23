@@ -130,6 +130,12 @@
 # 2026-09-05's incident was exactly that shape, a crashed `grep -F` whose
 # surrounding `|| echo NONE` printed a clean result over the top.
 #
+# ON A NON-ZERO RETURN, $identity_escaped IS EMPTY (#172). A crashed sed can
+# still write partial output to stdout before it dies, and `$(...)` captures
+# whatever made it out, so the failure branch clears the variable explicitly
+# rather than leaving that partial text sitting in a global a future caller
+# might read without checking the status first.
+#
 # The bracket expression's ordering is load-bearing, which is why it is
 # copied rather than retyped: `]` has to sit first (POSIX: only literal
 # there, never the closing delimiter) and `.` can never immediately follow
@@ -138,7 +144,7 @@
 # and a naive `[.^$(){}...]` ordering sent sed hunting for a `.]` that never
 # arrived, failing the whole expression with "unterminated `s' command".
 identity_regex_escape() {
-    identity_escaped=$(printf '%s' "$1" | sed 's/[].^$(){}?+*|\\[]/\\&/g' && printf X) || return 1
+    identity_escaped=$(printf '%s' "$1" | sed 's/[].^$(){}?+*|\\[]/\\&/g' && printf X) || { identity_escaped=; return 1; }
     identity_escaped=${identity_escaped%X}
 }
 
