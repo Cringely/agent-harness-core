@@ -1751,51 +1751,75 @@ elseif (-not (Test-GitAnswersForTarget -AbsTarget (Resolve-Path -LiteralPath $Ta
     $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'skipped-foreign-git' })
 }
 else {
-    $gitDir = if ([System.IO.Path]::IsPathRooted($gitDirRaw)) { $gitDirRaw } else { Join-Path $Target $gitDirRaw }
-    $gitDir = (Resolve-Path -LiteralPath $gitDir).Path
-    $gitHooksDir = Join-Path $gitDir 'hooks'
+    # Load-bearing review finding on #218: the fix first shipped for #191 cleared GIT_CONFIG
+    # only around the final write, but the `--get core.hooksPath` probe just below reads
+    # through GIT_CONFIG the exact same way the write used to. An exported GIT_CONFIG naming
+    # an empty or missing file made that probe report "unset" even when the target's own
+    # local config already carried a real core.hooksPath (a Husky-style .husky setup, say).
+    # That hid the existing wiring from the skipped-already-set branch below and let the
+    # write that follows replace the target's real hooks wiring while still reporting
+    # "set to ...". Clearing GIT_CONFIG once for the whole branch, probe and write both,
+    # makes them agree on the same file: the target's own local config, every time. Same
+    # save/remove/restore idiom Test-GitAnswersForTarget uses for its four location
+    # variables above, so an operator who set GIT_CONFIG on purpose still has it back for
+    # whatever ran the installer.
+    $savedGitConfig = Get-Item -LiteralPath 'Env:GIT_CONFIG' -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath 'Env:GIT_CONFIG' -ErrorAction SilentlyContinue
+    try {
+        $gitDir = if ([System.IO.Path]::IsPathRooted($gitDirRaw)) { $gitDirRaw } else { Join-Path $Target $gitDirRaw }
+        $gitDir = (Resolve-Path -LiteralPath $gitDir).Path
+        $gitHooksDir = Join-Path $gitDir 'hooks'
 
-    $currentHooksPath = $null
-    $chpCheck = & git -C $Target config --get core.hooksPath 2>$null
-    if ($LASTEXITCODE -eq 0) { $currentHooksPath = $chpCheck }
+        $currentHooksPath = $null
+        $chpCheck = & git -C $Target config --get core.hooksPath 2>$null
+        if ($LASTEXITCODE -eq 0) { $currentHooksPath = $chpCheck }
 
-    $alreadyWired = $false
-    if ($currentHooksPath) {
-        $currentResolved = if ([System.IO.Path]::IsPathRooted($currentHooksPath)) { $currentHooksPath } else { Join-Path $Target $currentHooksPath }
-        if (Test-Path -LiteralPath $currentResolved) {
-            $alreadyWired = (Resolve-Path -LiteralPath $currentResolved).Path -ieq $hooksDstAbs
+        $alreadyWired = $false
+        if ($currentHooksPath) {
+            $currentResolved = if ([System.IO.Path]::IsPathRooted($currentHooksPath)) { $currentHooksPath } else { Join-Path $Target $currentHooksPath }
+            if (Test-Path -LiteralPath $currentResolved) {
+                $alreadyWired = (Resolve-Path -LiteralPath $currentResolved).Path -ieq $hooksDstAbs
+            }
         }
-    }
 
-    $existingHookFiles = @()
-    if (Test-Path -LiteralPath $gitHooksDir) {
-        $existingHookFiles = @(Get-ChildItem -LiteralPath $gitHooksDir -File | Where-Object { $_.Extension -ne '.sample' })
-    }
+        $existingHookFiles = @()
+        if (Test-Path -LiteralPath $gitHooksDir) {
+            $existingHookFiles = @(Get-ChildItem -LiteralPath $gitHooksDir -File | Where-Object { $_.Extension -ne '.sample' })
+        }
 
-    if ($alreadyWired) {
-        $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'unchanged' })
-    }
-    elseif ($currentHooksPath) {
-        Write-Host "Skipping git hooksPath wiring: core.hooksPath is already set to '$currentHooksPath'. Git reads hooks from exactly one directory, so none of the harness's git hooks (commit-msg, pre-commit, pre-push) will run until this is resolved. See `"core.hooksPath and other hook managers`" in .claude/guardrails.md for how to chain them in by hand, or replace the current wiring: git -C `"$Target`" config core.hooksPath `"$hooksDstAbs`""
-        $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'skipped-already-set' })
-    }
-    elseif ($existingHookFiles.Count -gt 0) {
-        $names = ($existingHookFiles | Select-Object -ExpandProperty Name) -join ', '
-        Write-Host "Skipping git hooksPath wiring: $gitHooksDir already has hook(s) ($names) that core.hooksPath would replace. Git reads hooks from exactly one directory, so none of the harness's git hooks (commit-msg, pre-commit, pre-push) will run until this is resolved. See `"core.hooksPath and other hook managers`" in .claude/guardrails.md for how to chain them in by hand, or wire the harness hooks anyway: git -C `"$Target`" config core.hooksPath `"$hooksDstAbs`""
-        $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'skipped-existing-hooks' })
-    }
-    else {
-        & git -C $Target config core.hooksPath $hooksDstAbs
-        # A native command's non-zero exit does not trip $ErrorActionPreference = 'Stop',
-        # so this write needs the same explicit check as the rev-parse and config --get
-        # probes above. Without it the row below claims a wiring that never happened, and
-        # that table is the only signal the operator gets.
-        if ($LASTEXITCODE -eq 0) {
-            $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = "set to $hooksDstAbs" })
+        if ($alreadyWired) {
+            $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'unchanged' })
+        }
+        elseif ($currentHooksPath) {
+            Write-Host "Skipping git hooksPath wiring: core.hooksPath is already set to '$currentHooksPath'. Git reads hooks from exactly one directory, so none of the harness's git hooks (commit-msg, pre-commit, pre-push) will run until this is resolved. See `"core.hooksPath and other hook managers`" in .claude/guardrails.md for how to chain them in by hand, or replace the current wiring: git -C `"$Target`" config core.hooksPath `"$hooksDstAbs`""
+            $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'skipped-already-set' })
+        }
+        elseif ($existingHookFiles.Count -gt 0) {
+            $names = ($existingHookFiles | Select-Object -ExpandProperty Name) -join ', '
+            Write-Host "Skipping git hooksPath wiring: $gitHooksDir already has hook(s) ($names) that core.hooksPath would replace. Git reads hooks from exactly one directory, so none of the harness's git hooks (commit-msg, pre-commit, pre-push) will run until this is resolved. See `"core.hooksPath and other hook managers`" in .claude/guardrails.md for how to chain them in by hand, or wire the harness hooks anyway: git -C `"$Target`" config core.hooksPath `"$hooksDstAbs`""
+            $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'skipped-existing-hooks' })
         }
         else {
-            $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = "FAILED (git exit $LASTEXITCODE) - hook not wired" })
+            # --local (#191): with GIT_CONFIG cleared for the whole branch above, this write
+            # already lands in the target's own local config the same way an unqualified
+            # `git config` write would. --local is kept anyway so the write still names its
+            # target explicitly rather than relying on GIT_CONFIG staying cleared, and so it
+            # can never again combine with a GIT_CONFIG this branch forgot to clear.
+            & git -C $Target config --local core.hooksPath $hooksDstAbs
+            # A native command's non-zero exit does not trip $ErrorActionPreference = 'Stop',
+            # so this write needs the same explicit check as the rev-parse and config --get
+            # probes above. Without it the row below claims a wiring that never happened, and
+            # that table is the only signal the operator gets.
+            if ($LASTEXITCODE -eq 0) {
+                $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = "set to $hooksDstAbs" })
+            }
+            else {
+                $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = "FAILED (git exit $LASTEXITCODE) - hook not wired" })
+            }
         }
+    }
+    finally {
+        if ($savedGitConfig) { Set-Item -LiteralPath 'Env:GIT_CONFIG' -Value $savedGitConfig.Value }
     }
 }
 
