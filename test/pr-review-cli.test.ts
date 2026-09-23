@@ -609,6 +609,21 @@ class FakeSource implements PrSource, ReviewPoster {
   }
 }
 
+// #195: github.ts throws exactly this RefusalError from its own snapshot() for a fork pull request
+// (github.ts:171), before cli.ts's snapshot command ever gets a PrSnapshot to check --expect-head
+// against. Stands in for that call the same way FakeSource stands in for a clean one.
+class RefusingSnapshotSource implements PrSource, ReviewPoster {
+  async snapshot(): Promise<never> {
+    throw new RefusalError("the pull request comes from a fork or a deleted repository; this tool reviews branches of the repository itself");
+  }
+  async currentHeadSha(): Promise<never> {
+    throw new Error("must not be called: this fixture refuses at snapshot(), before any post could be considered");
+  }
+  async postReview(): Promise<never> {
+    throw new Error("must not be called: this fixture refuses at snapshot(), before any post could be considered");
+  }
+}
+
 function fixtureSnapshot(headSha: string): PrSnapshot {
   return {
     repo: "owner/name",
@@ -618,7 +633,17 @@ function fixtureSnapshot(headSha: string): PrSnapshot {
     baseSha: "0".repeat(40),
     headSha,
     isOpen: true,
-    diff: "diff --git a/a.ts b/a.ts",
+    // #195: null rather than a real diff string. pipeline.ts refuses to call deps.runner.run() at
+    // all once snapshot.diff === null ("the pull request diff was unavailable"), before deciding
+    // whether the diff is small enough to send. Every case below reaches main() with a real
+    // ClaudeCliRunner (cli.ts constructs one unconditionally, it is not on this seam), so if the
+    // expectHead wiring this file's #167 tests pin ever regressed, a truthy diff here would let the
+    // dry run reach a live `claude` process under the account's own login -- confirmed live on this
+    // machine while writing this fix, where reverting this line to a real diff string let a "review"
+    // run with no --expect-head start a real reviewer process that bun's test timeout had to kill.
+    // A null diff closes that regardless of whether the check around it still holds. See the
+    // describe block below this file's #167 tests for the test and why it does not use a PATH stub.
+    diff: null,
     changedFiles: ["a.ts"],
     changedFilesComplete: true,
     commitMessages: ["m"],
@@ -631,8 +656,20 @@ function fixtureSnapshot(headSha: string): PrSnapshot {
   };
 }
 
+// #195: loadIdentity is fixed here too, not only buildSource. Every "review"-command case below
+// reaches main()'s identity load before runReview() is ever called, and without this the real
+// loadIdentity() ran against this machine's own ~/.claude-account-identity.json and claude CLI
+// account state -- a malformed file on whichever machine runs the suite would fail these for a
+// reason that has nothing to do with what they test. The snapshot-command cases below return
+// before main() reaches this call, so the override is inert for them.
 function fixtureIo(headSha: string) {
-  return { cwd: () => NEUTRAL_DIR, exit: fakeExit, stdin: KEY_STDIN, buildSource: () => new FakeSource(fixtureSnapshot(headSha)) };
+  return {
+    cwd: () => NEUTRAL_DIR,
+    exit: fakeExit,
+    stdin: KEY_STDIN,
+    buildSource: () => new FakeSource(fixtureSnapshot(headSha)),
+    loadIdentity: () => ({ ok: true as const, decl: FIXTURE_IDENTITY, declared: true, accountEmail: false }),
+  };
 }
 
 describe("main(): --expect-head wiring and refusal shape (#167)", () => {
@@ -703,6 +740,77 @@ describe("main(): --expect-head wiring and refusal shape (#167)", () => {
       const parsed = JSON.parse(printed.join("\n"));
       expect(parsed.headSha).toBe(head);
       expect(parsed.status).toBeUndefined();
+    } finally {
+      console.log = log;
+    }
+  });
+});
+
+// #195: closes the gap the #167 tests above leave open. Every one of them passes a mismatched
+// --expect-head, so they refuse before deps.runner.run() could ever be reached -- proving the
+// --expect-head wiring, not that a review can never reach the model. If that wiring alone
+// regressed (the property deleted from the options literal, as the #167 tests above already
+// ablate), a run like the one below would fall through to a real, unmocked ClaudeCliRunner
+// (cli.ts constructs one unconditionally, it is not on the CliIo seam) under this process's own
+// PATH and claude CLI login. fixtureSnapshot's diff is null for exactly this reason: pipeline.ts
+// refuses to call deps.runner.run() at all once snapshot.diff === null, before it ever asks
+// whether the wiring above caught anything, so this test does not depend on that wiring holding.
+//
+// A PATH-injected stub `claude` that writes a marker file was tried first, the way other suites in
+// this repo stub a binary on PATH, and rejected: ClaudeCliRunner's constructor calls
+// Bun.which("claude") with no PATH argument, and Bun.which does not observe a test's runtime
+// mutation of process.env.PATH (confirmed against Bun 1.3.14 with a throwaway probe script) -- the
+// marker would never appear whether or not the code under test was correct, proving nothing either
+// way. The check below instead reads pipeline.ts's own branching: only the diff === null branch
+// produces this exact reviewerFailure string with reviewerOk false, and that branch is mutually
+// exclusive with the one that calls deps.runner.run(). Ablation: reverting fixtureSnapshot's diff
+// to a non-null string reaches a real ClaudeCliRunner built against this machine's actual PATH
+// instead, and reviewerFailure becomes "the claude CLI was not found on PATH" on a machine with no
+// claude CLI installed, or a real model call on one that has it logged in -- either way this
+// assertion fails (verified by reverting and restoring, 2026-09-23).
+describe("main(): a review with no diff never reaches the reviewer runner (#195)", () => {
+  test("a review with no --expect-head refuses at the diff check, not by starting the model", async () => {
+    const printed: string[] = [];
+    const log = console.log;
+    console.log = (...args: unknown[]) => printed.push(args.join(" "));
+    try {
+      const argv = ["review", "--pr", "9", "--app-id", "1", "--key-stdin", "--json"];
+      const code = await main(argv, fixtureIo("a".repeat(40)));
+      expect(code).toBe(0);
+      const parsed = JSON.parse(printed.join("\n"));
+      expect(parsed.status).toBe("dry-run");
+      expect(parsed.reviewerOk).toBe(false);
+      expect(parsed.reviewerFailure).toBe("the pull request diff was unavailable, so no model review ran");
+    } finally {
+      console.log = log;
+    }
+  });
+});
+
+// #195: the snapshot command's own github.snapshot() call sat outside the try/catch that #167 added
+// around review's runReview() call, so a RefusalError github.ts throws from inside it (a fork or
+// deleted-repo pull request, github.ts:171, or a non-default base branch, github.ts:175) reached
+// import.meta.main's plain-text handler even though snapshot's own --json is always true
+// (parseCliArgs above), unlike every other refusal snapshot or review can produce. Ablation:
+// narrowing the try in cli.ts back to wrap only the runReview() branch makes this throw out of
+// main() uncaught instead of being returned, and this test fails with that thrown RefusalError
+// surfacing as an unhandled rejection rather than exit code 2 (verified by narrowing and
+// restoring, 2026-09-23).
+describe("main(): snapshot's own refusals reach the same JSON shape as review's (#195)", () => {
+  test("a RefusalError from github.snapshot() reports as {status, refusal} JSON, not an uncaught throw", async () => {
+    const printed: string[] = [];
+    const log = console.log;
+    console.log = (...args: unknown[]) => printed.push(args.join(" "));
+    try {
+      const io = { cwd: () => NEUTRAL_DIR, exit: fakeExit, stdin: KEY_STDIN, buildSource: () => new RefusingSnapshotSource() };
+      const argv = ["snapshot", "--pr", "9", "--app-id", "1", "--key-stdin"];
+      const code = await main(argv, io);
+      expect(code).toBe(2);
+      const parsed = JSON.parse(printed.join("\n"));
+      expect(parsed).toEqual({
+        status: "refused",
+        refusal: "the pull request comes from a fork or a deleted repository; this tool reviews branches of the repository itself",
+      });
     } finally {
       console.log = log;
     }
