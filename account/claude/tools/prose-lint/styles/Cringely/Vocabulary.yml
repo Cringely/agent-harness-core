@@ -1,5 +1,5 @@
 extends: existence
-message: "Banned vocabulary (AI tell): '%s'. See beautiful_prose contract."
+message: "Banned vocabulary (AI tell): '%s'. See writing-style.md."
 level: warning
 ignorecase: true
 tokens:

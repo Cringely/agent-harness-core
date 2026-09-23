@@ -16,7 +16,7 @@ One register per surface, five surfaces. Binding whether or not any plugin coope
 
 | Surface | Authority | Register |
 |---|---|---|
-| Docs, policies, reports, emails, essays, any file-based prose deliverable | beautiful_prose skill + Vale (`/prose-lint`) | full prose |
+| Docs, policies, reports, emails, essays, any file-based prose deliverable | this file + Vale (`/prose-lint`), not-ai skill for editing existing prose | full prose |
 | Code comments, agent briefs and subagent messages, commit subjects and bullets | compressed (see below) | compressed |
 | User-facing chat responses and summaries | this file | normal prose |
 | PR descriptions, review summaries, status artifacts read against a diff | Scannable Structure below | structured |
@@ -133,20 +133,13 @@ overrides.
 
 ## Layering
 
-beautiful_prose skill is canonical for the banned-vocabulary list. This file mirrors it. Long-form
-deliverables use the skill. Layer differences:
+This file is canonical for the banned-vocabulary list. Vocabulary changes land here first. The
+Cringely Vale style (`~/.claude/tools/prose-lint/Build-CringelyStyle.ps1`) updates from it in the
+same change.
 
-- Em dashes: no longer a layer difference. The skill banned them absolutely until 2026-09-10 and
-  now carries the same rare-exception allowance this file does, so one rule covers every surface.
-  Measured before the change: 0.0 per 10,000 words across 59,034 words of linted deliverables,
-  against 15.5 in hand-authored human notes and 43.9 in this rules corpus, which no hook lints.
-  A ban that produces exactly zero across sixty thousand words is not a preference being expressed.
-- Structural entropy and registers: skill-only. Everyday output just avoids monotony (see
-  Monotonous prose below).
-- Second-pass self-critique and lint checklist: skill-only workflow steps.
-
-Vocabulary changes land in the skill first. This file and the Cringely Vale style
-(`~/.claude/tools/prose-lint/Build-CringelyStyle.ps1`) update from it in the same change.
+Em dashes: measured across 59,034 words of linted deliverables at 0.0 per 10,000 words, against
+15.5 in hand-authored human notes and 43.9 in this rules corpus, which no hook lints. A ban that
+produces exactly zero across sixty thousand words is not a preference being expressed.
 
 ## Four Alerts the Linter Gets Backwards
 

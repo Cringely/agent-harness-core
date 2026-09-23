@@ -36,13 +36,13 @@ To update to a newer `vale-ai-tells` release:
 
 ### Vocabulary (One-Way)
 
-`ai-tells` is the third-party `tbhb/vale-ai-tells` upstream package, used as-is and never hand-edited. It is not derived from this kit's own contract. The personal vocabulary list lives in the Cringely style, generated from the `beautiful_prose` skill (see below).
+`ai-tells` is the third-party `tbhb/vale-ai-tells` upstream package, used as-is and never hand-edited. It is not derived from this kit's own contract. The personal vocabulary list lives in the Cringely style, generated from `rules/writing-style.md` (see below).
 
 ### Cringely Style (Generated Vocabulary)
 
-`styles/Cringely/Vocabulary.yml` is a second, local vocabulary style layered on top of `ai-tells` (`BasedOnStyles = ai-tells, Cringely` in `.vale.ini`). It exists to catch the exact banned words from the `beautiful_prose` skill's canonical list as a plain word-existence check, independent of `ai-tells`' own (broader, inflection-aware) vocabulary rules.
+`styles/Cringely/Vocabulary.yml` is a second, local vocabulary style layered on top of `ai-tells` (`BasedOnStyles = ai-tells, Cringely` in `.vale.ini`). It exists to catch the exact banned words from `rules/writing-style.md`'s canonical list as a plain word-existence check, independent of `ai-tells`' own (broader, inflection-aware) vocabulary rules.
 
-**One-way rule**: the canonical word list lives in the `beautiful_prose` skill. `Vocabulary.yml` is generated from it by `Build-CringelyStyle.ps1` and must never be hand-edited. To update it, edit the `$canonical` array in the script (to match the skill) and re-run:
+**One-way rule**: the canonical word list lives in `rules/writing-style.md`. `Vocabulary.yml` is generated from it by `Build-CringelyStyle.ps1` and must never be hand-edited. To update it, edit the `$canonical` array in the script (to match writing-style.md) and re-run:
 
 ```powershell
 pwsh -NoProfile -File "$HOME\.claude\tools\prose-lint\Build-CringelyStyle.ps1"

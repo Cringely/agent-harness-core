@@ -7,7 +7,7 @@
 // machine-global hook covers only one operator's machine; versioning the TRIGGER
 // in the repo means any Claude Code session in the checkout fires it. The STYLES
 // engine stays the prose-lint skill's kit, which has its own SSOT
-// (beautiful_prose skill + the Cringely style builder + `vale sync`) and must
+// (writing-style.md + the Cringely style builder + `vale sync`) and must
 // not be duplicated into the repo.
 //
 // WARN, never deny (matches the prose-lint skill's "advisory, not a gate"
@@ -168,7 +168,7 @@ export function buildContext(file: string, findings: string): string {
     "",
     "These are Vale findings, NOT a gate. Quoted text, code identifiers, and API",
     "names trigger false positives, so name those in the PR body rather than",
-    '"fixing" them. If real tells remain, apply the beautiful_prose skill Edit mode',
+    '"fixing" them. If real tells remain, apply the not-ai skill',
     "to the flagged passages instead of hand-guessing.",
   ].join("\n");
 }

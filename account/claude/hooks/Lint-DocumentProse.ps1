@@ -108,7 +108,7 @@ $text
 
 These are Vale findings, NOT a gate. Quoted text, code identifiers, and API names
 trigger false positives, so call those out rather than "fixing" them. If real
-tells remain, offer a beautiful_prose Edit-mode rewrite of the flagged passages.
+tells remain, offer a not-ai skill rewrite of the flagged passages.
 "@
 
 $out = @{

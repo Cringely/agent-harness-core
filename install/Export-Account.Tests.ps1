@@ -78,7 +78,7 @@ exit 0
             'runtime state'            | Set-Content (Join-Path $claude 'shell-snapshots/snap-1.ps1')
             '{"token":"x"}'            | Set-Content (Join-Path $claude '.credentials.json')
 
-            # A cloned skill's .git/ internals: real payload shipped skills/beautiful_prose/.git,
+            # A cloned skill's .git/ internals: real payload shipped a cloned skill's .git tree,
             # 28 files including the operator's committer email in the reflog, before this fix.
             'ref: refs/heads/main'     | Set-Content (Join-Path $claude 'skills/cloned-skill/.git/HEAD')
             'operator@example.com'     | Set-Content (Join-Path $claude 'skills/cloned-skill/.git/refs/heads/main')
@@ -230,7 +230,7 @@ exit 0
     }
 
     It "drops a cloned skill's .git internals, at any depth, while keeping the skill itself" {
-        # Real export measured: skills/beautiful_prose/.git shipped 28 files, including the
+        # Real export measured: a cloned skill's .git shipped 28 files, including the
         # operator's committer email in .git/logs/HEAD, before Copy-AccountTree excluded .git.
         $stand = New-StandInHome
         $out = New-OutputRoot

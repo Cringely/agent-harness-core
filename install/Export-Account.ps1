@@ -495,7 +495,7 @@ function Copy-AccountTree {
     # -Force so hidden entries are enumerated; a dir\* wildcard silently skips them on Windows.
     foreach ($f in @(Get-ChildItem -LiteralPath $from -Recurse -File -Force)) {
         $rel = ($f.FullName.Substring($from.Length).TrimStart('\', '/')) -replace '\\', '/'
-        # A cloned skill (e.g. skills/beautiful_prose, installed from a marketplace) carries its
+        # A cloned skill (e.g. skills/some-vendored-skill, installed from a marketplace) carries its
         # own .git/ internals: refs, packed-refs, and a reflog with the operator's committer
         # email in plain text. None of that is the account layer the operator authors, and none
         # of it belongs in a payload meant to ship to another machine. Checked on every path
