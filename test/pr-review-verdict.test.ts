@@ -233,6 +233,19 @@ describe("computeVerification()", () => {
       expect(result.state).toBe("failed");
     });
   });
+
+  // #168 (second comment): the exemption's own `run.status === "completed"` guard is unpinned.
+  // It gates the candidate run being considered for exemption, the one carrying conclusion
+  // "cancelled", not the success run beside it (the success run's completeness is already a
+  // separate condition inside anySucceeded above). Without the guard, a run reported with status
+  // "in_progress" and conclusion "cancelled" would still match `conclusion === "cancelled" &&
+  // anySucceeded` and get exempted, reading passed while that run has not actually completed.
+  // GitHub does not emit status "in_progress" with a non-null conclusion today, which is why this
+  // sits below the severity floor rather than at it, but the guard exists and nothing pins it.
+  test("a run with status in_progress and conclusion cancelled beside a success: still incomplete, the exemption needs status completed", () => {
+    const result = verify(manyRuns(0, [{ status: "in_progress", conclusion: "cancelled" }, { conclusion: "success" }]));
+    expect(result.state).toBe("incomplete");
+  });
 });
 
 describe("verificationOf() reads exactly the four fields from a PrSnapshot", () => {
