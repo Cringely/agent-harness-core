@@ -8,15 +8,19 @@
 // the dispatch is isolated (worktree or remote) or carries an explicit
 // written override with a reason.
 //
-// Floor: a write-capable dispatch never proceeds against this shared,
-// non-isolated checkout unless the hook proved the type read-only or a human
-// wrote down why isolation doesn't apply. The two fail paths below are both
-// derived from that floor, not chosen case by case. Where classification runs
-// but can't prove the type safe, the gate fails CLOSED, because an unproven
-// type is not a read-only type. Where the classification step itself can't
-// run (malformed input, a bug here), the gate fails OPEN, because a control
-// that blocks every dispatch gets disabled within a day, and then nothing is
-// gated at all.
+// Floor: once the hook can read a subagent_type out of a well-formed payload,
+// a write-capable dispatch never proceeds against this shared, non-isolated
+// checkout unless the hook proved the type read-only or a human wrote down
+// why isolation doesn't apply. The CLOSED path below derives from that floor:
+// where classification runs but can't prove the type safe, the gate denies,
+// because an unproven type is not a read-only type. The OPEN path is a
+// deliberate reliability trade against the floor, not a consequence of it,
+// taken only where the floor cannot be evaluated at all — the payload is
+// missing the fields classification needs, or the hook itself errors. A
+// control that blocks every dispatch gets disabled within a day, and then
+// nothing is gated at all, so an unparseable payload passes unchecked rather
+// than taking the gate down. See test/agent-worktree-gate.test.ts:199-203 and
+// :409 for the payload shapes this trade covers.
 //
 // Classification is DERIVED, not hand-listed: the ground truth for "which
 // roles can write the repo" already lives in `.claude/agents/<type>.md`
@@ -52,8 +56,9 @@
 // "worktree"` would wrongly pass the gate. Real JSON parsing needs bun,
 // which projects using this hook are expected to have available.
 //
-// Fail-open contract, the second tier of the floor above: a broken hook must
-// never brick dispatching. Every error path (malformed stdin, missing fields,
+// Fail-open contract, the trade against the floor above for the case the
+// floor can't reach: a broken hook must never brick dispatching. Every error
+// path (malformed stdin, missing fields,
 // our own bugs) logs to stderr and exits 0 with no stdout, which Claude Code
 // treats as "no opinion" — the normal permission flow proceeds. Only a
 // well-formed deny emits JSON. If `bun` itself is missing from PATH the hook
