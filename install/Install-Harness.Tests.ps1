@@ -552,6 +552,50 @@ Describe "Install-Harness" {
             Should -Be (Resolve-Path -LiteralPath "$script:target/.claude/hooks").Path
     }
 
+    It "install prints a plain warning naming the three git hooks and pointing at guardrails.md when core.hooksPath is already set" {
+        # #136/#126: the pre-fix message only named "the harness pre-commit hook", which
+        # undersold the finding -- commit-msg and pre-push are equally inert, not just pre-commit.
+        & git -C $script:target init -q *>&1 | Out-Null
+        & git -C $script:target config core.hooksPath '.githooks' *>&1 | Out-Null
+        $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500
+        $out | Should -Match 'skipped-already-set'
+        $out | Should -Match 'none of the harness''s git hooks \(commit-msg, pre-commit, pre-push\) will run'
+        $out | Should -Match 'core\.hooksPath and other hook managers.*\.claude/guardrails\.md'
+    }
+
+    It "audit reports an installed git hook as unreachable, naming core.hooksPath, when core.hooksPath already pointed elsewhere at install time" {
+        # #136: the installer still writes the hook files under .claude/hooks/ when wiring is
+        # skipped, and a pre-fix audit compared their content against core and reported
+        # 'in-sync' -- true and misleading, since git never reads that directory here.
+        & git -C $script:target init -q *>&1 | Out-Null
+        & git -C $script:target config core.hooksPath '.githooks' *>&1 | Out-Null
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target | Out-Null
+
+        $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $audit | Should -Match 'hooks/pre-commit\s+in-sync \(unreachable: core\.hooksPath -> \.githooks\)'
+        $audit | Should -Match 'hooks/commit-msg\s+in-sync \(unreachable: core\.hooksPath -> \.githooks\)'
+        $audit | Should -Match 'hooks/pre-push\s+in-sync \(unreachable: core\.hooksPath -> \.githooks\)'
+        # The whole point: an unreachable hook must count as needing attention, not disappear
+        # into the 'in-sync' exclusion the way it did before the reachability note changed the
+        # status string.
+        $audit | Should -Not -Match 'All managed files in sync with core\.'
+    }
+
+    It "audit reports git hooks as unreachable when core.hooksPath is redirected after a clean install" {
+        # #126's point: wiring is decided once, at install time, but core.hooksPath can change
+        # any time afterward (a project adopting husky, or hand-editing config), and only a
+        # live re-check at audit time catches that.
+        & git -C $script:target init -q *>&1 | Out-Null
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target | Out-Null
+        $wiredAudit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $wiredAudit | Should -Match '(?m)hooks/pre-commit\s+in-sync\s*\r?$'
+        $wiredAudit | Should -Not -Match 'unreachable'
+
+        & git -C $script:target config core.hooksPath '.githooks' *>&1 | Out-Null
+        $driftedAudit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $driftedAudit | Should -Match 'hooks/pre-commit\s+in-sync \(unreachable: core\.hooksPath -> \.githooks\)'
+    }
+
     It "skips core.hooksPath wiring, and writes into no repository at all, when a foreign GIT_DIR is exported" {
         # Issue #145. Every probe in the wiring block asks git through `-C $Target`, and git
         # exports GIT_DIR into every hook it runs, so an installer launched from a hook in
