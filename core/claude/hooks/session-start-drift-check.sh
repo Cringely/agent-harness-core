@@ -15,16 +15,17 @@
 # (.harness-manifest.json): it is an absolute path, which is machine-specific and does not
 # belong in a file a target repo commits (issue #137). A project that installed an earlier
 # version of this layer has coreRepo embedded in the committed manifest instead; this hook
-# does not fall back to reading it from there, so the drift check goes quiet until the next
-# install/-Accept/-Unaccept/-Prune run splits it out into the sidecar. That one-time gap is
-# the same shape as every other migration in this repo (Install-Harness.ps1's own doc
-# comment on ConvertTo-ManifestV2): the installer repairs the shape on its next touch rather
-# than every reader carrying a permanent fallback for a shape only the installer produces.
+# does not fall back to reading it from there, so the comparison below stays unavailable
+# until the next install/-Accept/-Unaccept/-Prune run splits it out into the sidecar. That
+# gap prints, not silence: the missing-sidecar check just below covers exactly this case.
+# The migration itself is the same shape as every other one in this repo (Install-Harness.ps1's
+# own doc comment on ConvertTo-ManifestV2): the installer repairs the shape on its next touch
+# rather than every reader carrying a permanent fallback for a shape only the installer produces.
 #
-# Every failure degrades to silence and exit 0 — no sidecar, no coreRepo, a coreRepo that
-# is not a core checkout (an unmounted NAS is the ordinary case here), no pwsh, an audit
-# that throws. A drift check that breaks a session start is worse than no drift check, so
-# there is no path here that reports its own failure.
+# Every OTHER failure degrades to silence and exit 0: no coreRepo, a coreRepo that is not a
+# core checkout (an unmounted NAS is the ordinary case here), no pwsh, an audit that throws.
+# A drift check that breaks a session start is worse than no drift check, so none of those
+# report their own failure. A missing sidecar is the one exception: see the block below.
 #
 # SECURITY: coreRepo comes out of a project-local JSON file. It is untrusted input naming a
 # directory this hook is about to run a script from, so before anything executes it must
@@ -96,12 +97,15 @@ core_repo=$(printf '%s\n' "$core_repo" | sed 's|\\\\|\\|g; s|\\/|/|g' 2>/dev/nul
 
 # coreRepo must not name a directory inside the project being audited. Without this the check
 # below is only a name-shape test: any directory holding install/Install-Harness.ps1 gets run,
-# so a PR carrying a force-added .harness-manifest.local.json (.gitignore keeps it out of a
-# normal add, not out of one that overrides it) plus an install/Install-Harness.ps1 anywhere
-# in the tree buys arbitrary PowerShell at every session start on every equipped machine. That
-# is a real escalation over editing the hook, which is visible in review and prompted by
-# Claude Code. A core checkout is by definition not part of a consumer project, so nothing
-# legitimate is refused.
+# so a PR that gets an attacker-chosen coreRepo into the sidecar, plus that install script
+# anywhere in the tree, buys arbitrary PowerShell at every session start on every equipped
+# machine. Two routes reach the sidecar: a force-added .harness-manifest.local.json
+# (.gitignore keeps it out of a normal add, not out of one that overrides it), and a plain
+# commit setting a top-level coreRepo in the tracked .harness-manifest.json, which the
+# installer's legacy carry-forward copies into the sidecar on the next run, no force-add
+# needed. That is a real escalation over editing the hook, which is visible in review and
+# prompted by Claude Code. A core checkout is by definition not part of a consumer project, so
+# nothing legitimate is refused.
 #   cd+pwd rather than a string compare on the raw values: the sidecar holds a native path
 # written by PowerShell and $root arrives in whatever form the harness set it, so the two are
 # only comparable once both have been through the same normalization. CDPATH= because a
