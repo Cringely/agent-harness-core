@@ -99,10 +99,9 @@ The assumed stack:
   domain specialists moved out; see `CONTRIBUTING.md`). The agent and the plugin aren't
   interchangeable: one is a single reviewer definition, the other an orchestrated multi-agent run.
   Reach for the account-layer agent on a diff, the plugin on a codebase.
-- Personal skills at `~/.claude/skills/`: **beautiful_prose** (canonical banned-vocabulary
-  contract for prose deliverables), **prose-lint** (the Vale check this file's own pre-commit hook
-  runs), **memory-system** (write/recall/lint rules for persistent memory notes), and
-  **subagent-prompting** (brief anatomy and per-model prompting notes).
+- Personal skills at `~/.claude/skills/`: **prose-lint** (the Vale check this file's own
+  pre-commit hook runs), **memory-system** (write/recall/lint rules for persistent memory notes),
+  and **subagent-prompting** (brief anatomy and per-model prompting notes).
 
 ### When two of these disagree
 
@@ -111,8 +110,8 @@ they cover overlapping ground: register, length, banned words, structure. Where 
 output register, `writing-style.md`'s surface-routing table (five surfaces: file-based prose
 deliverables, code comments and briefs, user-facing chat, structured status artifacts read against
 a diff, and internal agent traffic, which it exempts) is the existing arbiter. It names which
-register applies on which surface, and `beautiful_prose` is canonical for the banned-vocabulary
-list that table mirrors.
+register applies on which surface, and writing-style.md is itself canonical for the
+banned-vocabulary list in that table.
 
 For every other kind of overlap between these layers, there is no agreed precedence yet. Don't
 invent one in the moment; note the conflict and ask, or use judgment and flag the call you made so

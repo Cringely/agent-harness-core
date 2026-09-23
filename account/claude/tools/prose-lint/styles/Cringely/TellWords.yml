@@ -59,7 +59,8 @@
 #
 # REJECTED, folding these into Cringely.Vocabulary. Two reasons, either fatal.
 # Vocabulary.yml is regenerated with a whole-file Set-Content by
-# Build-CringelyStyle.ps1 from the beautiful_prose word list, so a hand-added
+# Build-CringelyStyle.ps1 from its own canonical list, mirrored from
+# writing-style.md, so a hand-added
 # token there is destroyed on the next run and nothing reports it. And
 # Cringely.Vocabulary is switched off entirely under [**/agent-harness-core/**]
 # in .vale.ini, which is where most of this harness's prose lives -- precisely

@@ -1,11 +1,11 @@
 #Requires -Version 7
 # Generates styles/Cringely/Vocabulary.yml from (a) the canonical banned-word list
 # and (b) the slop-forensics frequency-derived list (top 100, minus exclusions).
-# One-way rule: vocabulary lives in the beautiful_prose skill; this script derives, never defines.
+# One-way rule: vocabulary lives in writing-style.md, not here. This script derives, never defines.
 $ErrorActionPreference = 'Stop'
 
-# (a) Canonical list — mirrors the skill's banned vocabulary (single words only;
-# multi-word phrases are covered by ai-tells FillerPhrases or the skill's prompt rules).
+# (a) Canonical list — mirrors writing-style.md's banned vocabulary (single words only;
+# multi-word phrases are covered by ai-tells FillerPhrases or writing-style.md's prompt rules).
 $canonical = @(
   'delve','dive into','leverage','utilize','robust','holistic','seamless','comprehensive',
   'pivotal','crucial','vital','essential','unprecedented','transformative',
@@ -43,7 +43,7 @@ New-Item -ItemType Directory -Force $styleDir | Out-Null
 
 $yml = @"
 extends: existence
-message: "Banned vocabulary (AI tell): '%s'. See beautiful_prose contract."
+message: "Banned vocabulary (AI tell): '%s'. See writing-style.md."
 level: warning
 ignorecase: true
 tokens:

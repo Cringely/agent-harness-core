@@ -52,20 +52,6 @@ release URL in `account/claude/tools/prose-lint/.vale.ini`. Consult that
 repository for its licence terms. Nothing in that tree carries an inline notice;
 attribution previously existed only as the package URL in the kit's README.
 
-## beautiful_prose
-
-`account/claude/skills/beautiful_prose/`.
-
-Vendored from https://github.com/SHADOWPR0/beautiful_prose, by SHADOWPR0. That
-repository states no licence: it carries no LICENSE, COPYING or NOTICE file, and
-GitHub shows no licence designation for it. The vendored copy carries no licence
-text, no author line and no upstream reference either.
-
-So this is redistributed with attribution but without stated permission, which
-attribution does not grant. It is recorded here rather than left silent. If the
-author would prefer it removed, or adds a licence that this repository cannot
-satisfy, open an issue and it comes out of the payload.
-
 ## filesystem-context
 
 `account/claude/skills/filesystem-context/`.
@@ -75,9 +61,10 @@ refers to sibling skills in a collection that is not present here. The tree carr
 no licence, no LICENSE file and no upstream URL, so its origin is an author line and
 nothing more.
 
-Redistributed with attribution but without stated permission, on the same terms as
-beautiful_prose above. If an author of that collection would prefer it removed, open
-an issue and it comes out of the payload.
+So this is redistributed with attribution but without stated permission, which
+attribution does not grant. It is recorded here rather than left silent. If an
+author of that collection would prefer it removed, open an issue and it comes out
+of the payload.
 
 ## not-ai
 

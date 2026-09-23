@@ -13,7 +13,7 @@ Run Vale with the personal lint kit against the file the user names.
 2. Run:
    `vale --config "{{CLAUDE_HOME}}/tools/prose-lint/.vale.ini" --output=line "<target-file>"`
 3. Report findings grouped by rule, with line numbers, ordered by count. Zero findings: say the file passes and stop.
-4. Offer exactly one follow-up: rewrite the flagged passages using the beautiful_prose skill's Edit mode. Only proceed if the user accepts.
+4. Offer exactly one follow-up: rewrite the flagged passages using the not-ai skill. Only proceed if the user accepts.
 
 ## Notes
 
