@@ -12,7 +12,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
-import { basename, dirname, join, parse, resolve } from "node:path";
+import { basename, delimiter, dirname, join, parse, resolve } from "node:path";
 import { FINDINGS_JSON_SCHEMA } from "../tools/pr-review/findings";
 import {
   ClaudeCliRunner,
@@ -22,6 +22,25 @@ import {
   neutralWorkingDirectory,
   parseStreamJson,
 } from "../tools/pr-review/runner";
+import { posixSh, posixShDir } from "./posix-sh";
+
+// #144: the "descendant holding the pipes open" case below needs a real POSIX `sh` (plus `cat`
+// and `sleep` beside it) to drive ClaudeCliRunner through a real spawn. Resolved once here,
+// the same shape as gitignore-sidecar-protection.test.ts's pwshPath, so a host with no `sh`
+// anywhere (posixSh() exhausted PATH and git's own usr/bin) gets a named skip instead of the
+// resolution failure reading as "the reviewer process could not be started" -- the runner's
+// generic rejection for a command that never spawned -- or, from inside the test body, an
+// uncaught throw.
+let grandchildSh: string | undefined;
+try {
+  grandchildSh = posixSh();
+} catch (err) {
+  console.warn(
+    `pr-review-runner.test.ts: no POSIX sh found, "a descendant holding the pipes open..." skipped. ${
+      err instanceof Error ? err.message : String(err)
+    }`,
+  );
+}
 
 const init = (patch: Record<string, unknown> = {}) =>
   JSON.stringify({
@@ -41,6 +60,28 @@ const assistant = (...blocks: Array<Record<string, unknown>>) => assistantFrom("
 const result = (patch: Record<string, unknown> = {}) =>
   JSON.stringify({ type: "result", subtype: "success", is_error: false, structured_output: { summary: "s", findings: [], observed_instructions: [] }, ...patch });
 const stream = (...lines: string[]) => lines.join("\n") + "\n";
+
+// Saved and restored around the "descendant holding the pipes open" test, which spawns
+// grandchildSh through ClaudeCliRunner -- and that always runs the child with this process's
+// own process.env, never a caller-supplied one. When grandchildSh came from git's own usr/bin
+// (posixShDir() set) rather than off the ambient PATH, the shell's own `cat` and `sleep` live
+// beside it and need that directory on PATH too, or the shell resolves but its subprocesses
+// don't. Restored unconditionally so a host where the ambient PATH already carries sh (posix,
+// or Git Bash) is untouched.
+async function withGrandchildShOnPath<T>(fn: () => Promise<T>): Promise<T> {
+  const shDir = posixShDir();
+  if (!shDir) return fn();
+  const saved = process.env.PATH;
+  process.env.PATH = `${saved ?? ""}${delimiter}${shDir}`;
+  try {
+    // Awaited here, not just returned: fn's promise must settle before the finally below puts
+    // PATH back, or the restore races the still-running spawn and the grandchild loses `cat`
+    // and `sleep` mid-flight.
+    return await fn();
+  } finally {
+    process.env.PATH = saved;
+  }
+}
 
 // Saved and restored around the two tests below that need a temp-dir env variable no filesystem
 // actually holds, so neither leaks into a test that runs after it.
@@ -274,16 +315,18 @@ describe("ClaudeCliRunner against a fake claude", () => {
   // open. Before the fix, run() cleared its deadline as soon as the immediate `sh` process exited,
   // so draining the pipe then waited for the backgrounded process with no bound at all (Q2, Q3,
   // Q3b, all captured against the same shape of descendant).
-  test("a descendant holding the pipes open past the time limit does not hang the run", async () => {
+  test.skipIf(!grandchildSh)("a descendant holding the pipes open past the time limit does not hang the run", async () => {
     const streamFile = join(dir, "grandchild-stream.jsonl");
     writeFileSync(streamFile, stream(init(), assistant({ type: "tool_use", name: "StructuredOutput" }), result()));
-    const started = Date.now();
-    const run = await new ClaudeCliRunner({
-      command: ["sh", "-c", `cat "${streamFile}"; sleep 5 & exit 0`],
-      timeoutMs: 300,
-    }).run({ systemPrompt: "s", userPrompt: "u" });
-    expect(run.ok).toBe(false);
-    if (!run.ok) expect(run.reason).toContain("time limit");
-    expect(Date.now() - started).toBeLessThan(8_000);
+    await withGrandchildShOnPath(async () => {
+      const started = Date.now();
+      const run = await new ClaudeCliRunner({
+        command: [grandchildSh!, "-c", `cat "${streamFile}"; sleep 5 & exit 0`],
+        timeoutMs: 300,
+      }).run({ systemPrompt: "s", userPrompt: "u" });
+      expect(run.ok).toBe(false);
+      if (!run.ok) expect(run.reason).toContain("time limit");
+      expect(Date.now() - started).toBeLessThan(8_000);
+    });
   }, 20_000);
 });

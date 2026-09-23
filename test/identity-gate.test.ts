@@ -446,6 +446,19 @@ describe("identity gate — identity-patterns.sh: locale and truncation residual
   });
 });
 
+// #144: `Bun.which("sed")` finds nothing from a Windows shell whose PATH lacks Git's usr\bin
+// (PowerShell, cmd), and the N1 test below used to throw when that happened rather than skip --
+// the same class of failure as pr-review-runner.test.ts's grandchildSh gap, just for `sed`
+// instead of `sh`. No shared resolver for `sed` exists the way posix-sh.ts resolves `sh` (nothing
+// here needs `sed` off a caller-supplied PATH the way that file's grandchild does), so this
+// resolves once at module load and the test below skips with a named reason instead of throwing.
+const realSedForN1 = Bun.which("sed");
+if (!realSedForN1) {
+  console.warn(
+    'identity-gate.test.ts: no real sed on PATH, "a crashed key-extraction sed for \'names\'..." skipped.',
+  );
+}
+
 // #135's round-2 adversarial review of the round-1 fix (still PR #135) found
 // one more load-bearing gap: identity_json_array's key-extraction sed was
 // never status-checked. N1 in that review.
@@ -465,16 +478,14 @@ describe("identity gate — identity-patterns.sh: key-extraction sed residual (i
   // every other call -- token extraction, the emails key, identity_regex_
   // escape -- so a healthy hook around one crashed call is exactly what
   // gets exercised, not a wholesale broken sed.
-  test("a crashed key-extraction sed for 'names' refuses rather than silently emptying that channel", () => {
+  test.skipIf(!realSedForN1)("a crashed key-extraction sed for 'names' refuses rather than silently emptying that channel", () => {
     const dir = initPreCommitRepo();
     writeFileSync(join(dir, "notes.txt"), `this document mentions ${NAME} by name\n`);
     git(["add", "notes.txt"], dir);
-    const realSed = Bun.which("sed");
-    if (!realSed) throw new Error("no real sed on PATH to build the N1 shim against");
     const stubDir = installNamesKeyCrashingSedStub();
     const result = runPreCommit(
       dir,
-      envWith({ PATH: pathWithStubFirst(stubDir), REAL_SED: realSed }),
+      envWith({ PATH: pathWithStubFirst(stubDir), REAL_SED: realSedForN1! }),
     );
     expect(result.exitCode).not.toBe(0);
     expect(result.stderr.toString()).toContain("did not run cleanly");
