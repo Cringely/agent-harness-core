@@ -209,6 +209,30 @@ describe("computeVerification()", () => {
       expect(result.state).toBe("failed");
     });
   });
+
+  // #168: the #148 exemption above is narrow on purpose, keyed on the literal conclusion
+  // "cancelled". A different non-success terminal conclusion sitting beside a completed success
+  // for the same check must still read incomplete (or failed, for a FAILED_CONCLUSIONS member)
+  // exactly as it did before #159 introduced the exemption. The single-run test.each at line 100
+  // never reaches the exemption branch, since it only triggers once a completed success exists for
+  // the same check, and none of those single-run cases have one.
+  describe("a non-cancelled terminal conclusion alongside a completed success is not exempted (#168)", () => {
+    test.each(["skipped", "neutral", "action_required", "stale"])(
+      "conclusions [%s, success]: still incomplete, not exempted like cancelled",
+      (conclusion) => {
+        const result = verify(manyRuns(0, [{ conclusion }, { conclusion: "success" }]));
+        expect(result.state).toBe("incomplete");
+      },
+    );
+
+    // timed_out is a FAILED_CONCLUSIONS member (line 30), so beside a success it must still read
+    // failed, the same way [failure, success] does above, rather than being pulled toward the
+    // cancelled exemption's "passed" outcome.
+    test("conclusions [timed_out, success]: still failed, not exempted like cancelled", () => {
+      const result = verify(manyRuns(0, [{ conclusion: "timed_out" }, { conclusion: "success" }]));
+      expect(result.state).toBe("failed");
+    });
+  });
 });
 
 describe("verificationOf() reads exactly the four fields from a PrSnapshot", () => {
