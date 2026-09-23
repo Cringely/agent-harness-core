@@ -84,8 +84,10 @@ someone's next task, not this one's blocker.
 
 **Put a severity floor on what gets acted on.** Correctness, security, and anything that fails open
 get fixed in the round that found them. Comment accuracy, stale citations, naming, and coverage gaps
-get filed. The distinction is not how true the finding is. All of them were true in the session that
-produced this rule, and two full rounds went to corrections of what a comment claimed about itself.
+do not. They stay in the review comment on the pull request that surfaced them, which is already
+durable and linked to the code it reviewed. The distinction is not how true the finding is. All of
+them were true in the session that produced this rule, and two full rounds went to corrections of
+what a comment claimed about itself.
 
 **One review round per artifact.** A second round happens for a load-bearing finding and for nothing
 else. That bar is real and it does get cleared: the round that earned its place here found a
@@ -93,8 +95,17 @@ security gate failing open, and the round after it found that the fix had introd
 the path it did not cover. Neither would have been caught by stopping earlier. The two rounds spent
 on comment wording would have been.
 
-**Discovery is not commitment.** Finding something files it. Filing is cheap, complete in itself, and
-leaves the decision to spend effort with the person whose effort it is.
+**Discovery is not commitment, and not a filing either.** A finding written into a review comment is
+recorded. It becomes a GitHub issue only when it is a correctness or security gap outside the scope
+of the pull request under review, or a decision that belongs to the operator, and the operator is
+told each time one is filed. Anything else gets fixed in the same pull request if it is trivial, or
+stays in the comment. Agents doing implementation work do not create issues at all.
+
+This replaced "Finding something files it" on 2026-09-23. That line read as an instruction to turn
+every reviewer's minor list into issues, which is the unfiltered-queue failure this section names.
+It happened during a burn-down that closed 18 issues and filed 11, eight of them from review
+output, and the operator asked: "Why are we sprawling more issues when the goal is to eliminate
+them". Report a burn-down by its net change in open issues, never by closes alone.
 
 The failure this prevents is not zeal. It is the quiet substitution of an unreachable finish line for
 a reachable one, which reads as diligence right up until someone asks when it ends.
