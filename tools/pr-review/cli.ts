@@ -3,8 +3,8 @@
 // anywhere: nothing under install/ copies tools/.
 //
 // The App's private key is read only from stdin, piped from 1Password (operator ruling, 2026-09-11):
-//   op read "<secret reference>" | bun <absolute path>/tools/pr-review/cli.ts review --pr <n> --app-id <id> --key-stdin [--post [--comment-only]] [--json] [--repo owner/name]
-//   op read "<secret reference>" | bun <absolute path>/tools/pr-review/cli.ts snapshot --pr <n> --app-id <id> --key-stdin [--repo owner/name]
+//   op read "<secret reference>" | bun <absolute path>/tools/pr-review/cli.ts review --pr <n> --app-id <id> --key-stdin [--post [--comment-only]] [--json] [--repo owner/name] [--expect-head <sha40>]
+//   op read "<secret reference>" | bun <absolute path>/tools/pr-review/cli.ts snapshot --pr <n> --app-id <id> --key-stdin [--repo owner/name] [--expect-head <sha40>]
 // review without --post is a dry run. snapshot mints a token and reads the pull request, runs no model
 // and posts nothing, and prints what the reviewer would be given plus the computed verification.
 // --app-id may come from PR_REVIEW_APP_ID instead.
@@ -23,6 +23,7 @@
 // Exit codes: 0 reviewed or snapshotted, 2 refused (nothing posted), 1 usage or runtime error,
 // including any HTTP failure from GitHub.
 
+import type { KeyObject } from "node:crypto";
 import { readdirSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -32,7 +33,7 @@ import { findIdentityHits, loadIdentity, type IdentityDecl } from "./identity";
 import { runReview, type ReviewOutcome } from "./pipeline";
 import { ClaudeCliRunner } from "./runner";
 import { REPO_ROOT, toolState } from "./tool-state";
-import { RefusalError, SHA_RE, type PrSnapshot } from "./types";
+import { RefusalError, SHA_RE, type PrSnapshot, type PrSource, type ReviewPoster } from "./types";
 import { verificationOf } from "./verdict";
 
 export const DEFAULT_REPO = "Cringely/agent-harness-core";
@@ -238,6 +239,35 @@ export function reportOutcome(outcome: ReviewOutcome, json: boolean, identity: I
   return exitCodeForStatus(outcome.status);
 }
 
+// #167: the shape for a refusal that never reached a ReviewOutcome to hand reportOutcome above --
+// runReview()'s own two thrown preconditions (no account email, an unclean checkout) and, since
+// #155, a mismatched --expect-head on either command. Before this, a --json caller got empty
+// stdout and a plain-text stderr line for these instead of the {status: "refused", ...} shape it
+// parses for every refusal runReview returns rather than throws. Only status and refusal are
+// filled in: no snapshot backs these three, so there is no real event, verification or finding
+// list to put in the rest of ReviewOutcome's shape without inventing one.
+export function reportRefusal(message: string, json: boolean): number {
+  const refusal = stripControlChars(message);
+  if (json) {
+    console.log(JSON.stringify({ status: "refused", refusal }, null, 2));
+  } else {
+    console.error(`refused: ${refusal}`);
+  }
+  return 2;
+}
+
+// #167: how main() turns a validated key into the client both commands fetch through. Pulled out
+// of main() and put on the CliIo seam below so a test can hand back a PrSource/ReviewPoster that
+// returns a chosen headSha with no App key or network call, which is what proves the
+// --expect-head wiring (into runReview's options, and the snapshot command's own check) and the
+// refusal shape above without needing a real installation. Optional and defaulted rather than
+// added as a fourth required CliIo field: every existing test that builds a partial CliIo (the
+// BUN-CWD and stdin-refusal tests below) never reaches this call, so requiring it there would
+// break them for no reason.
+function realBuildSource(repo: string, pr: number, appId: string, key: KeyObject): PrSource & ReviewPoster {
+  return new GitHubClient({ repo, pr, minter: new AppTokenMinter({ appId, key, repo }) });
+}
+
 // A seam over process-level effects (the real stdin read, and process.exit itself), so main() can be
 // exercised without ever truly reading a console's stdin or truly terminating the test runner. cli.ts
 // never passes an override in production; import.meta.main below relies on the default.
@@ -245,12 +275,14 @@ interface CliIo {
   cwd: () => string;
   exit: (code: number) => never;
   stdin: { isTTY: boolean; read: () => Promise<string> };
+  buildSource?: (repo: string, pr: number, appId: string, key: KeyObject) => PrSource & ReviewPoster;
 }
 
 const REAL_IO: CliIo = {
   cwd: () => process.cwd(),
   exit: (code) => process.exit(code) as never,
   stdin: { isTTY: Boolean(process.stdin.isTTY), read: () => Bun.stdin.text() },
+  buildSource: realBuildSource,
 };
 
 export async function main(argv: string[], io: CliIo = REAL_IO): Promise<number> {
@@ -290,18 +322,17 @@ export async function main(argv: string[], io: CliIo = REAL_IO): Promise<number>
     // means nothing downstream can end up waiting on that dangling read first.
     io.exit(2);
   }
-  const github = new GitHubClient({
-    repo: parsed.repo,
-    pr: parsed.pr,
-    minter: new AppTokenMinter({ appId: parsed.appId, key: key.key, repo: parsed.repo }),
-  });
+  const github = (io.buildSource ?? realBuildSource)(parsed.repo, parsed.pr, parsed.appId, key.key);
 
   if (parsed.command === "snapshot") {
     const snap = await github.snapshot();
     // #155: snapshot never posts, so this only ever refuses a print, but it lets a wrapper that
-    // pinned a head confirm before it decides whether to run review at all.
+    // pinned a head confirm before it decides whether to run review at all. #167: routed through
+    // reportRefusal rather than thrown, since snapshot's own --json is always true (parseCliArgs
+    // above) and a thrown RefusalError here used to reach import.meta.main's plain-text handler
+    // unconditionally, never the JSON shape a snapshot caller parses.
     if (parsed.expectHead !== null && parsed.expectHead !== snap.headSha) {
-      throw new RefusalError(`refusing to snapshot: the pull request's head is ${snap.headSha}, not the expected ${parsed.expectHead}`);
+      return reportRefusal(`refusing to snapshot: the pull request's head is ${snap.headSha}, not the expected ${parsed.expectHead}`, parsed.json);
     }
     console.log(JSON.stringify(summarizeSnapshot(snap), null, 2));
     return 0;
@@ -318,21 +349,32 @@ export async function main(argv: string[], io: CliIo = REAL_IO): Promise<number>
     );
   }
   const tool = toolState();
-  const outcome = await runReview(
-    {
-      source: github,
-      runner: new ClaudeCliRunner(),
-      poster: parsed.post ? github : null,
-      identity: identity.decl,
-      // A11.6: without this, ReviewDeps.accountEmail defaults to undefined, and pipeline.ts's
-      // posting precondition (deps.accountEmail !== true) refuses every posting run regardless of
-      // whether the claude CLI's account state actually named an email.
-      accountEmail: identity.accountEmail,
-      toolRevision: tool.revision,
-      toolDirty: tool.dirty,
-    },
-    { commentOnly: parsed.commentOnly, expectHead: parsed.expectHead },
-  );
+  let outcome: ReviewOutcome;
+  try {
+    outcome = await runReview(
+      {
+        source: github,
+        runner: new ClaudeCliRunner(),
+        poster: parsed.post ? github : null,
+        identity: identity.decl,
+        // A11.6: without this, ReviewDeps.accountEmail defaults to undefined, and pipeline.ts's
+        // posting precondition (deps.accountEmail !== true) refuses every posting run regardless of
+        // whether the claude CLI's account state actually named an email.
+        accountEmail: identity.accountEmail,
+        toolRevision: tool.revision,
+        toolDirty: tool.dirty,
+      },
+      { commentOnly: parsed.commentOnly, expectHead: parsed.expectHead },
+    );
+  } catch (error) {
+    // #167: runReview() throws RefusalError for a precondition checked before any snapshot-backed
+    // ReviewOutcome exists to report (no account email, an unclean checkout, and #155's
+    // expect-head mismatch, all before the model runs) -- every refusal it returns instead of
+    // throwing already reaches reportOutcome below. Without this catch, a --json caller got empty
+    // stdout and a stderr line for these three, unlike every refusal runReview returns.
+    if (error instanceof RefusalError) return reportRefusal(error.message, parsed.json);
+    throw error;
+  }
   return reportOutcome(outcome, parsed.json, identity.decl);
 }
 
