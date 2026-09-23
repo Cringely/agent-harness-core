@@ -446,6 +446,21 @@ describe("identity gate — identity-patterns.sh: locale and truncation residual
   });
 });
 
+// #144: `Bun.which("sed")` finds nothing from a Windows shell whose PATH lacks Git's usr\bin
+// (PowerShell, cmd), and the N1 test below used to throw when that happened rather than skip --
+// the same class of failure as pr-review-runner.test.ts's grandchildSh gap, just for `sed`
+// instead of `sh`. No shared resolver for `sed` exists the way posix-sh.ts resolves `sh` (nothing
+// here needs `sed` off a caller-supplied PATH the way that file's grandchild does), so this
+// resolves once at module load and every test that needs a real sed skips with a named reason
+// instead of throwing. countSedSpawnsForEntries (the #113 count test, further down this file)
+// shares this same resolution rather than calling Bun.which("sed") again on its own.
+const realSed = Bun.which("sed");
+if (!realSed) {
+  console.warn(
+    'identity-gate.test.ts: no real sed on PATH, tests needing a real sed binary are skipped.',
+  );
+}
+
 // #135's round-2 adversarial review of the round-1 fix (still PR #135) found
 // one more load-bearing gap: identity_json_array's key-extraction sed was
 // never status-checked. N1 in that review.
@@ -465,16 +480,14 @@ describe("identity gate — identity-patterns.sh: key-extraction sed residual (i
   // every other call -- token extraction, the emails key, identity_regex_
   // escape -- so a healthy hook around one crashed call is exactly what
   // gets exercised, not a wholesale broken sed.
-  test("a crashed key-extraction sed for 'names' refuses rather than silently emptying that channel", () => {
+  test.skipIf(!realSed)("a crashed key-extraction sed for 'names' refuses rather than silently emptying that channel", () => {
     const dir = initPreCommitRepo();
     writeFileSync(join(dir, "notes.txt"), `this document mentions ${NAME} by name\n`);
     git(["add", "notes.txt"], dir);
-    const realSed = Bun.which("sed");
-    if (!realSed) throw new Error("no real sed on PATH to build the N1 shim against");
     const stubDir = installNamesKeyCrashingSedStub();
     const result = runPreCommit(
       dir,
-      envWith({ PATH: pathWithStubFirst(stubDir), REAL_SED: realSed }),
+      envWith({ PATH: pathWithStubFirst(stubDir), REAL_SED: realSed! }),
     );
     expect(result.exitCode).not.toBe(0);
     expect(result.stderr.toString()).toContain("did not run cleanly");
@@ -1273,9 +1286,11 @@ function installCountingSedShim(): string {
 
 /** Runs one pre-commit against a clean staged file and an identity file
  * declaring `entryCount` names, and returns how many `sed` processes the run
- * spawned. */
+ * spawned. Requires the module-level `realSed` resolved earlier in this file;
+ * callers must skip via `test.skipIf(!realSed)` rather than call this when
+ * it is null (#144: throwing here reads as a real failure on a seat with no
+ * `sed` on PATH, the same class of gap N1 above had before it was fixed). */
 function countSedSpawnsForEntries(entryCount: number): number {
-  const realSed = Bun.which("sed");
   if (!realSed) throw new Error("no real sed on PATH to build the #113 counting shim against");
   const names = Array.from({ length: entryCount }, (_, i) => `Person Number ${i}`);
   const home = makeIdentityHome(JSON.stringify({ names, emails: [] }));
@@ -1310,7 +1325,7 @@ describe("identity gate — building the pattern set spawns no process per decla
   // below failed and the ceiling below it failed too. Both hold at 2 now,
   // which is the two key-extraction sed calls identity_json_array makes for
   // "names" and "emails" and nothing else.
-  test("the sed count for a twelve-entry identity file equals the count for a two-entry one", () => {
+  test.skipIf(!realSed)("the sed count for a twelve-entry identity file equals the count for a two-entry one", () => {
     const few = countSedSpawnsForEntries(2);
     const many = countSedSpawnsForEntries(12);
     expect(many).toBe(few);
