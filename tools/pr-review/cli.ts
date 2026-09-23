@@ -29,7 +29,7 @@ import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { AppTokenMinter, readPrivateKey } from "./app-auth";
 import { GitHubClient } from "./github";
-import { findIdentityHits, loadIdentity, type IdentityDecl } from "./identity";
+import { findIdentityHits, loadIdentity, type IdentityDecl, type IdentityLoad } from "./identity";
 import { runReview, type ReviewOutcome } from "./pipeline";
 import { ClaudeCliRunner } from "./runner";
 import { REPO_ROOT, toolState } from "./tool-state";
@@ -240,12 +240,14 @@ export function reportOutcome(outcome: ReviewOutcome, json: boolean, identity: I
 }
 
 // #167: the shape for a refusal that never reached a ReviewOutcome to hand reportOutcome above --
-// runReview()'s own two thrown preconditions (no account email, an unclean checkout) and, since
-// #155, a mismatched --expect-head on either command. Before this, a --json caller got empty
-// stdout and a plain-text stderr line for these instead of the {status: "refused", ...} shape it
-// parses for every refusal runReview returns rather than throws. Only status and refusal are
-// filled in: no snapshot backs these three, so there is no real event, verification or finding
-// list to put in the rest of ReviewOutcome's shape without inventing one.
+// every RefusalError runReview() surfaces, whether thrown by one of its own preconditions (no
+// account email, an unclean checkout, since #155 a mismatched --expect-head) or by a call it makes
+// on the way there (app-auth.ts's token-minting checks, github.ts's fork, base-branch and
+// changed-mid-review checks), plus the snapshot command's own mismatch check below. Before this, a
+// --json caller got empty stdout and a plain-text stderr line for these instead of the {status:
+// "refused", ...} shape it parses for every refusal runReview returns rather than throws. Only
+// status and refusal are filled in: no snapshot backs a thrown refusal, so there is no real event,
+// verification or finding list to put in the rest of ReviewOutcome's shape without inventing one.
 export function reportRefusal(message: string, json: boolean): number {
   const refusal = stripControlChars(message);
   if (json) {
@@ -276,13 +278,22 @@ interface CliIo {
   exit: (code: number) => never;
   stdin: { isTTY: boolean; read: () => Promise<string> };
   buildSource?: (repo: string, pr: number, appId: string, key: KeyObject) => PrSource & ReviewPoster;
+  // #195: same optional-and-defaulted shape as buildSource above. loadIdentity() already takes an
+  // options bag that overrides the real profile (identity.ts), so a test that needs a chosen
+  // IdentityDecl calls it itself and hands the closure here, rather than main() always reading the
+  // account's real ~/.claude-account-identity.json and claude CLI state.
+  loadIdentity?: () => IdentityLoad;
 }
 
+// #195: buildSource and loadIdentity are left unset here rather than assigned their real
+// implementations a second time -- main()'s own `io.buildSource ?? realBuildSource` and
+// `io.loadIdentity ?? loadIdentity` already default to them, and REAL_IO is the one CliIo value
+// that never overrides either, so the two defaults agreeing here as well as there was one default
+// stated twice for the same case.
 const REAL_IO: CliIo = {
   cwd: () => process.cwd(),
   exit: (code) => process.exit(code) as never,
   stdin: { isTTY: Boolean(process.stdin.isTTY), read: () => Bun.stdin.text() },
-  buildSource: realBuildSource,
 };
 
 export async function main(argv: string[], io: CliIo = REAL_IO): Promise<number> {
@@ -324,34 +335,34 @@ export async function main(argv: string[], io: CliIo = REAL_IO): Promise<number>
   }
   const github = (io.buildSource ?? realBuildSource)(parsed.repo, parsed.pr, parsed.appId, key.key);
 
-  if (parsed.command === "snapshot") {
-    const snap = await github.snapshot();
-    // #155: snapshot never posts, so this only ever refuses a print, but it lets a wrapper that
-    // pinned a head confirm before it decides whether to run review at all. #167: routed through
-    // reportRefusal rather than thrown, since snapshot's own --json is always true (parseCliArgs
-    // above) and a thrown RefusalError here used to reach import.meta.main's plain-text handler
-    // unconditionally, never the JSON shape a snapshot caller parses.
-    if (parsed.expectHead !== null && parsed.expectHead !== snap.headSha) {
-      return reportRefusal(`refusing to snapshot: the pull request's head is ${snap.headSha}, not the expected ${parsed.expectHead}`, parsed.json);
-    }
-    console.log(JSON.stringify(summarizeSnapshot(snap), null, 2));
-    return 0;
-  }
-
-  const identity = loadIdentity();
-  if (!identity.ok) {
-    console.error(`refused: ${stripControlChars(identity.reason)}`);
-    return 2;
-  }
-  if (!identity.declared) {
-    console.error(
-      "warning: ~/.claude-account-identity.json is absent, so the review body is checked only for the username, the hostname and any email in the claude CLI's account state",
-    );
-  }
-  const tool = toolState();
-  let outcome: ReviewOutcome;
+  // #167: wraps both commands, not only review's own runReview() call below -- github.snapshot()
+  // can itself throw RefusalError (a fork or deleted-repo pull request, one not targeting the
+  // default branch), and unguarded that reached import.meta.main's plain-text handler even for the
+  // snapshot command, whose own --json is always true (parseCliArgs above).
   try {
-    outcome = await runReview(
+    if (parsed.command === "snapshot") {
+      const snap = await github.snapshot();
+      // #155: snapshot never posts, so this only ever refuses a print, but it lets a wrapper that
+      // pinned a head confirm before it decides whether to run review at all.
+      if (parsed.expectHead !== null && parsed.expectHead !== snap.headSha) {
+        return reportRefusal(`refusing to snapshot: the pull request's head is ${snap.headSha}, not the expected ${parsed.expectHead}`, parsed.json);
+      }
+      console.log(JSON.stringify(summarizeSnapshot(snap), null, 2));
+      return 0;
+    }
+
+    const identity = (io.loadIdentity ?? loadIdentity)();
+    if (!identity.ok) {
+      console.error(`refused: ${stripControlChars(identity.reason)}`);
+      return 2;
+    }
+    if (!identity.declared) {
+      console.error(
+        "warning: ~/.claude-account-identity.json is absent, so the review body is checked only for the username, the hostname and any email in the claude CLI's account state",
+      );
+    }
+    const tool = toolState();
+    const outcome = await runReview(
       {
         source: github,
         runner: new ClaudeCliRunner(),
@@ -366,16 +377,18 @@ export async function main(argv: string[], io: CliIo = REAL_IO): Promise<number>
       },
       { commentOnly: parsed.commentOnly, expectHead: parsed.expectHead },
     );
+    return reportOutcome(outcome, parsed.json, identity.decl);
   } catch (error) {
-    // #167: runReview() throws RefusalError for a precondition checked before any snapshot-backed
-    // ReviewOutcome exists to report (no account email, an unclean checkout, and #155's
-    // expect-head mismatch, all before the model runs) -- every refusal it returns instead of
-    // throwing already reaches reportOutcome below. Without this catch, a --json caller got empty
-    // stdout and a stderr line for these three, unlike every refusal runReview returns.
+    // #167: this catches every RefusalError either command surfaces on the way here -- runReview()'s
+    // own preconditions (no account email, an unclean checkout, #155's expect-head mismatch), one
+    // thrown by a call it makes along the way (app-auth.ts's token-minting checks, github.ts's fork,
+    // base-branch and changed-mid-review checks), and the same github.ts checks reached through
+    // github.snapshot() for the snapshot command above -- every refusal runReview returns rather than
+    // throws already reaches reportOutcome above. Without this catch, a --json caller got empty
+    // stdout and a stderr line for any of these, unlike every refusal runReview returns.
     if (error instanceof RefusalError) return reportRefusal(error.message, parsed.json);
     throw error;
   }
-  return reportOutcome(outcome, parsed.json, identity.decl);
 }
 
 if (import.meta.main) {
