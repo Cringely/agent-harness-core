@@ -693,19 +693,33 @@ EOF
 # bytes: everything captured through $(...) below is od's own hex TEXT
 # output, which never contains a byte from the file itself, so it is safe
 # to carry through a variable. `-v` disables od's repeated-line elision so
-# a long run of NUL bytes cannot hide the first one; splitting on
-# `tr -s '[:space:]' '\n'` gives one two-digit hex byte per line rather
-# than a concatenated hex string, which matters because two ordinary,
-# non-NUL neighbouring bytes (0xd0 then 0x0f) concatenate to "d00f", and a
-# bare substring search for "00" would misread that as a NUL that was
-# never there.
+# a long run of NUL bytes cannot hide the first one. The shell's own word
+# splitting then turns that output into one positional parameter per byte,
+# and the NUL count sees one two-digit hex byte per line rather than a
+# concatenated hex string. That matters because two ordinary, non-NUL
+# neighbouring bytes (0xd0 then 0x0f) concatenate to "d00f", and a bare
+# substring search for "00" would misread that as a NUL that was never
+# there.
+#
+# EVERY TOOL HERE IS CHECKED, AND "NO EVIDENCE" IS NEVER "CLEAN" (issue
+# #91, round 3). Until round 3 this function split od's output with a
+# `tr | sed` stage whose exit status nothing read, then asked
+# `grep -qx 00`, where a crash reads the same as "no match". The review of
+# the round-2 head put a sed on PATH that exits 1 on that stage: the byte
+# list came back empty, the BOM check saw no BOM, the NUL check saw no
+# NUL, and a UTF-16LE file with a non-ASCII name loaded with rc 0, the
+# name going straight through. So the split is now the shell's own, with
+# no tool to fail, and the one tool call left (the NUL count) is refused
+# on a crash (grep exit above 1) and on a missing count. An od that
+# printed nothing for a file that is not empty is refused as well, since
+# that is a failed measurement, not a file with no bytes in it.
 #
 # Returns:
 #   0  clean -- no BOM, no NUL byte anywhere in the file
 #   1  a UTF-16 byte-order mark, or a NUL byte anywhere in the file (with
 #      or without a leading UTF-8 BOM -- non-BOM UTF-16, a UTF-8 BOM
 #      pasted onto a UTF-16 body, or some other encoding this
-#      byte-oriented parser cannot read) -- the caller refuses; the
+#      byte-oriented parser cannot read) -- the caller refuses. The
 #      message is printed here, since only this function still has the
 #      byte-level evidence
 #   2  a UTF-8 byte-order mark and nothing else wrong -- EF BB BF is
@@ -718,19 +732,30 @@ EOF
 #      typed. The NUL scan below still runs first, so a file starting
 #      with a UTF-8 BOM but carrying a NUL later (a UTF-16 body pasted
 #      behind it) returns 1, not 2.
-#   3  od itself could not be run (missing, or the file vanished between
-#      the readability check above and here) -- the caller refuses rather
-#      than reading a file that might not be UTF-8 as though it were
+#   3  the probe itself failed: od could not be run (missing, or the file
+#      vanished between the readability check above and here), od printed
+#      no bytes for a file that is not empty, or the NUL count crashed or
+#      printed no count -- the caller refuses rather than reading a file
+#      that might not be UTF-8 as though it were
 identity_check_encoding() {
-    identity_enc_out=$(od -An -tx1 -v "$1" 2>/dev/null) || {
-        echo "identity gate: could not read '$1' byte-by-byte to check its encoding (od failed or is unavailable). Refusing rather than reading a file that might not be UTF-8 as if it were." >&2
+    identity_enc_file=$1
+    identity_enc_out=$(od -An -tx1 -v "$identity_enc_file" 2>/dev/null) || {
+        echo "identity gate: could not read '$identity_enc_file' byte-by-byte to check its encoding (od failed or is unavailable). Refusing rather than reading a file that might not be UTF-8 as if it were." >&2
         return 3
     }
-    identity_enc_bytes=$(printf '%s' "$identity_enc_out" | tr -s '[:space:]' '\n' | sed '/^$/d')
-    identity_enc_head=$(printf '%s\n' "$identity_enc_bytes" | head -n 3 | tr -d '\n')
+    # Unquoted on purpose: one positional parameter per hex byte. With -v,
+    # od prints only hex digits and whitespace, so nothing here can glob.
+    set -- $identity_enc_out
+    if [ "$#" -eq 0 ]; then
+        # A genuinely empty file is identity_load's to report, below.
+        [ -s "$identity_enc_file" ] || return 0
+        echo "identity gate: od printed no bytes for '$identity_enc_file', which is not empty. Refusing rather than reading an empty measurement as a clean file." >&2
+        return 3
+    fi
+    identity_enc_head=$1${2-}${3-}
     case $identity_enc_head in
         fffe*|feff*)
-            echo "identity gate: '$1' starts with a UTF-16 byte-order mark. This parser reads bytes, not UTF-16 code units, and cannot decode it correctly -- silently misreading it would build a pattern that looks fine and does not match real content (issue #91: this is exactly what a UTF-16LE file with a non-ASCII declared name did). Re-save the file as UTF-8 and retry." >&2
+            echo "identity gate: '$identity_enc_file' starts with a UTF-16 byte-order mark. This parser reads bytes, not UTF-16 code units, and cannot decode it correctly -- silently misreading it would build a pattern that looks fine and does not match real content (issue #91: this is exactly what a UTF-16LE file with a non-ASCII declared name did). Re-save the file as UTF-8 and retry." >&2
             return 1
             ;;
     esac
@@ -743,13 +768,25 @@ identity_check_encoding() {
     # straight through. That contradicts this function's own contract
     # just above: 0 or 2 is supposed to mean no NUL byte anywhere in the
     # file, not "no NUL byte before this early return". The BOM case now
-    # only records that a strip is needed; the NUL scan always runs.
+    # only records that a strip is needed, and the NUL scan always runs.
     identity_enc_utf8_bom=0
     case $identity_enc_head in
         efbbbf*) identity_enc_utf8_bom=1 ;;
     esac
-    if printf '%s\n' "$identity_enc_bytes" | grep -qx 00; then
-        echo "identity gate: '$1' contains a NUL byte, which no valid UTF-8 JSON document does. This is very likely UTF-16 without a byte-order mark, which this parser cannot decode correctly -- silently misreading it would build a pattern that looks fine and does not match real content. Re-save the file as UTF-8 and retry." >&2
+    identity_enc_nuls=$(printf '%s\n' "$@" | grep -c -x 00)
+    identity_enc_nul_rc=$?
+    if [ "$identity_enc_nul_rc" -gt 1 ]; then
+        echo "identity gate: the NUL-byte scan of '$identity_enc_file' did not run cleanly (grep exited $identity_enc_nul_rc). Refusing rather than reading a crashed scan as a file with no NUL in it." >&2
+        return 3
+    fi
+    case $identity_enc_nuls in
+        ''|*[!0-9]*)
+            echo "identity gate: the NUL-byte scan of '$identity_enc_file' printed no count (grep exited $identity_enc_nul_rc). grep -c prints a count even when it is 0, so this is a failed scan. Refusing rather than reading it as a file with no NUL in it." >&2
+            return 3
+            ;;
+    esac
+    if [ "$identity_enc_nuls" -gt 0 ]; then
+        echo "identity gate: '$identity_enc_file' contains a NUL byte, which no valid UTF-8 JSON document does. This is very likely UTF-16 without a byte-order mark, which this parser cannot decode correctly -- silently misreading it would build a pattern that looks fine and does not match real content. Re-save the file as UTF-8 and retry." >&2
         return 1
     fi
     [ "$identity_enc_utf8_bom" = 1 ] && return 2

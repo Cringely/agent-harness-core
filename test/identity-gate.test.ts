@@ -1832,3 +1832,141 @@ describe("identity gate — encoding detection on the identity file itself (#91)
     expect(result.stderr.toString()).toContain("NUL byte");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #91, round 3. The review of the round-2 head found that
+// identity_check_encoding never checked its own tools. The exit status of
+// its tr/sed stage was discarded, and a crashed `grep -qx 00` read as "no
+// NUL". A failing tool therefore made the probe answer "clean", and a
+// UTF-16LE file loaded exactly as it did before the probe existed: every
+// NUL dropped, and a non-ASCII declared name turned into a pattern arm that
+// never matches. Each stub below breaks one tool the probe uses (or used),
+// and each case stages content carrying the declared name's real UTF-8
+// form. A probe that fails open therefore lets that name through with exit
+// 0, which is the failure these tests pin. Every stub that targets one call
+// execs the real tool for every other call, so the rest of the hook runs
+// normally around the one broken call.
+// ---------------------------------------------------------------------------
+
+const NON_ASCII_NAME = `Widget Pers${String.fromCharCode(0xf6)}n`;
+
+const realGrep = Bun.which("grep");
+if (!realGrep) {
+  console.warn("identity-gate.test.ts: no real grep on PATH, tests needing a real grep binary are skipped.");
+}
+
+/** A UTF-16LE identity file declaring NON_ASCII_NAME, with or without a BOM. */
+function utf16leNonAsciiHome(withBom: boolean): string {
+  const body = Buffer.from(JSON.stringify({ names: [NON_ASCII_NAME], emails: [EMAIL] }), "utf16le");
+  return makeIdentityHomeBytes(withBom ? Buffer.concat([UTF16LE_BOM, body]) : body);
+}
+
+function stageNonAsciiName(dir: string) {
+  writeFileSync(join(dir, "notes.txt"), `this document mentions ${NON_ASCII_NAME} by name\n`);
+  git(["add", "notes.txt"], dir);
+}
+
+/** Writes an executable sh script named `tool` into a fresh directory. */
+function installToolStub(tool: string, body: string[]): string {
+  const stubDir = mkdtempSync(join(tmpdir(), `identity-enc-${tool}-`));
+  tempDirs.push(stubDir);
+  const stubPath = join(stubDir, tool);
+  writeFileSync(stubPath, ["#!/bin/sh", ...body, ""].join("\n"));
+  chmodSync(stubPath, 0o755);
+  return stubDir;
+}
+
+describe("identity gate — the encoding probe refuses when its own tools fail (#91 round 3)", () => {
+  // The control for every stub case below: the same name, declared in a
+  // plain UTF-8 file with no BOM and no stub, loads and gates content. A
+  // stub case that refuses is refusing because of the probe, not because
+  // this name cannot be loaded at all.
+  test("control: a UTF-8 file with no BOM declaring the same non-ASCII name loads, and the name is caught", () => {
+    const home = makeIdentityHome(JSON.stringify({ names: [NON_ASCII_NAME], emails: [EMAIL] }));
+    const env = envWith({ USERPROFILE: home, HOME: home });
+    const clean = initPreCommitRepo();
+    stageClean(clean);
+    expect(runPreCommit(clean, env).exitCode).toBe(0);
+    const dirty = initPreCommitRepo();
+    stageNonAsciiName(dirty);
+    const result = runPreCommit(dirty, env);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("identifying string");
+  });
+
+  // The round-2 reviewer's reproduction: a sed that exits 1 only for the
+  // old probe's blank-line filter.
+  test.skipIf(!realSed)("a sed crashing on the old probe's blank-line filter cannot make a UTF-16LE file with a BOM load", () => {
+    const stubDir = installToolStub("sed", ['case "$*" in', "    *'/^$/d'*) exit 1 ;;", "esac", 'exec "$REAL_SED" "$@"']);
+    const home = utf16leNonAsciiHome(true);
+    const dir = initPreCommitRepo();
+    stageNonAsciiName(dir);
+    const result = runPreCommit(
+      dir,
+      envWith({ USERPROFILE: home, HOME: home, PATH: pathWithStubFirst(stubDir), REAL_SED: realSed! }),
+    );
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("UTF-16 byte-order mark");
+  });
+
+  // od exiting non-zero was already refused. The shape that got through was
+  // an od whose failure never reached its exit status: no output, exit 0.
+  // Nothing else in the hooks runs od, so this stub replaces it outright.
+  test("an od that prints nothing and exits 0 for a non-empty file is an empty measurement, and refuses", () => {
+    const stubDir = installToolStub("od", ["exit 0"]);
+    const home = utf16leNonAsciiHome(true);
+    const dir = initPreCommitRepo();
+    stageNonAsciiName(dir);
+    const result = runPreCommit(dir, envWith({ USERPROFILE: home, HOME: home, PATH: pathWithStubFirst(stubDir) }));
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("od printed no bytes");
+  });
+
+  // The grep stubs target only the NUL count (its arguments end in "x 00"
+  // in both the old `grep -qx 00` and the new count), so the load-time
+  // canary and every scan keep the real grep. The file has no BOM, because
+  // a file with one is refused on its first bytes before the NUL count
+  // runs, and a stub there could not tell the old probe from the new one.
+  test.skipIf(!realGrep)("a grep that prints a count and then exits 2 on the NUL count refuses", () => {
+    const stubDir = installToolStub("grep", [
+      'case "$*" in',
+      "    *'x 00')",
+      "        echo 0",
+      "        exit 2",
+      "        ;;",
+      "esac",
+      'exec "$REAL_GREP" "$@"',
+    ]);
+    const home = utf16leNonAsciiHome(false);
+    const dir = initPreCommitRepo();
+    stageNonAsciiName(dir);
+    const result = runPreCommit(
+      dir,
+      envWith({ USERPROFILE: home, HOME: home, PATH: pathWithStubFirst(stubDir), REAL_GREP: realGrep! }),
+    );
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("NUL-byte scan");
+    expect(result.stderr.toString()).toContain("did not run cleanly");
+  });
+
+  // 2026-09-05's incident shape: a matcher that fails as "no match", exit
+  // 1, printing nothing. grep -c prints its count even when that count is
+  // 0, so a missing count is a failed measurement, not a clean one.
+  test.skipIf(!realGrep)("a grep that exits 1 on the NUL count without printing a count refuses", () => {
+    const stubDir = installToolStub("grep", [
+      'case "$*" in',
+      "    *'x 00') exit 1 ;;",
+      "esac",
+      'exec "$REAL_GREP" "$@"',
+    ]);
+    const home = utf16leNonAsciiHome(false);
+    const dir = initPreCommitRepo();
+    stageNonAsciiName(dir);
+    const result = runPreCommit(
+      dir,
+      envWith({ USERPROFILE: home, HOME: home, PATH: pathWithStubFirst(stubDir), REAL_GREP: realGrep! }),
+    );
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("printed no count");
+  });
+});
