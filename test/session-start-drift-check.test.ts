@@ -41,8 +41,8 @@ const INSTALL_TIMEOUT_MS = 120_000;
 const pwshPath = Bun.which("pwsh");
 
 // Every case here drives the real hook, and the hook exits 0 before printing anything when
-// pwsh is absent (session-start-drift-check.sh:120); the cases that install a project need
-// it a second time. So a host without PowerShell runs a fraction of this file. Bun prints
+// pwsh is absent (session-start-drift-check.sh:137). The cases that install a project need
+// it a second time, so a host without PowerShell runs a fraction of this file. Bun prints
 // the skip count, but a total read off the last line of a run does not carry that caveat
 // with it, and a raw pass count from one host has already been quoted more than once as
 // though it measured the suite. Say it once, at the top, where it is unmissable. No number
@@ -378,6 +378,34 @@ describe("session-start drift-check hook — every degradation exits silent and 
     expect(result.stderr.length).toBe(0);
     expect(result.exitCode).toBe(0);
   });
+
+  // Regression: a sidecar whose coreRepo is intact (readable by the hook's sed) but whose
+  // overall JSON is malformed reaches Install-Harness.ps1's own sidecar load, which used to
+  // call Write-Warning from inside -Audit -Quiet. That warning landed in the same stream
+  // `pwsh -File` merges into the captured, machine-readable report this hook parses byte for
+  // byte, past the hook's own `2>/dev/null`, and the awk step below counted the tab-free
+  // warning line as a phantom drift status on an otherwise in-sync project. Needs a real
+  // install (not bareProject) so a fix is provable: an in-sync project has zero legitimate
+  // attention rows, so any byte on stdout here is the warning leaking through.
+  test.skipIf(!pwshPath)(
+    "malformed sidecar JSON with an intact coreRepo: silent, not counted as drift",
+    () => {
+      const dir = installedProject();
+      const sidecarPath = join(dir, SIDECAR_REL);
+      const real = JSON.parse(readFileSync(sidecarPath, "utf8")) as { coreRepo: string };
+      // Truncated after an open brace: invalid JSON overall, but the coreRepo field is a
+      // complete, correctly quoted string the hook's sed can still extract.
+      writeFileSync(
+        sidecarPath,
+        `{"coreRepo": ${JSON.stringify(real.coreRepo)}, "stackDetected": {`,
+      );
+      const result = runHook(dir);
+      expect(result.stdout.length).toBe(0);
+      expect(result.stderr.length).toBe(0);
+      expect(result.exitCode).toBe(0);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
 });
 
 describe("session-start drift-check hook — coreRepo is untrusted input", () => {

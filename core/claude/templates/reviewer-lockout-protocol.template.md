@@ -10,10 +10,10 @@ rule mechanically today.
 
 This file is reference material for whoever writes a coordinator's dispatch rules, not an
 installed artifact: `Install-Harness.ps1` copies templates by explicit name (guardrails,
-scratch.gitignore, ceremony-ledger, settings.hooks.json) and this file is not among them. Nothing
-in an installed project points at this path. A project that adopts the rule carries it in its own
-guardrails or rules file by hand, and the enforcement-status section at the bottom applies there
-too: nothing checks it mechanically.
+scratch.gitignore, manifest-local.gitignore, ceremony-ledger, settings.hooks.json) and this file
+is not among them. Nothing in an installed project points at this path. A project that adopts the
+rule carries it in its own guardrails or rules file by hand, and the enforcement-status section
+at the bottom applies there too: nothing checks it mechanically.
 
 Extends this repo's existing "independent review, never self-review" rule (see
 `guardrails.template.md`'s worked-example table) from one hop to N. That rule stops an author from
