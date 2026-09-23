@@ -452,3 +452,116 @@ describe("not-ai gate — issue #166, apostrophe-aware word tokenization", () =>
     },
   );
 });
+
+describe("not-ai gate — issue #122, contrastive negation and bold run-in labels", () => {
+  test.skipIf(!PYTHON)(
+    "counts both contrastive-negation forms as one total, excluding two named things",
+    () => {
+      // Issue #122's "constructions to add": `X, not Y` and `rather than` are the two
+      // sub-forms that survived harmonisation across seven measured corpora, and they trade
+      // off against each other while the combined total stays flat -- counting one alone
+      // would mislead the same way the issue's own measurement run found it does, so only
+      // the combined total is asserted here. The comma form requires a lowercase word after
+      // "not": "Boston, not New York" names two places, not a value judgment, and does not
+      // count.
+      const { json } = runGate(
+        "contrastive-negation.md",
+        "This is fast, not slow, and it matters today. " +
+          "This is fast rather than slow, and that is clear. " +
+          "Boston, not New York, hosts the event this year.\n",
+      );
+      expect(json.word_count).toBe(28);
+      expect(json.counts.contrastive_negation).toBe(2);
+      expect(json.counts.contrastive_negation_per_10k).toBe(714.3);
+    },
+  );
+
+  test.skipIf(!PYTHON)(
+    "a bold label at a line's start counts as own-line or run-in by what follows it",
+    () => {
+      // Issue #122: four regexes were tried across five corpora in one measurement run, and
+      // one of them could not match the ordinary `**Label** text` (run-in) form at all, only
+      // a bold span that was the whole line (own-line) -- a zero that got reported as a
+      // finding. Fixture carries one of each, inside list items (a labelled list item counts
+      // the same as a bare paragraph line), plus a bold span mid-sentence (not a label, not
+      // counted either way), one inside a fenced code block, and one inside an ATX heading
+      // (both excluded, the same way `_prose_blocks` excludes them from sentence rhythm).
+      const { json } = runGate(
+        "bold-labels.md",
+        [
+          "- **Label one:** run-in inside a list item continues here today.",
+          "- **Label two**",
+          "",
+          "The **operator** decided this matters a lot for the outcome today.",
+          "",
+          "```",
+          "**not a label** in code, do not count this line at all please.",
+          "```",
+          "",
+          "# **Heading bold** should not count either way today.",
+          "",
+        ].join("\n"),
+      );
+      expect(json.counts.bold_label_run_in).toBe(1);
+      expect(json.counts.bold_label_own_line).toBe(1);
+    },
+  );
+
+  test.skipIf(!PYTHON)(
+    "a bold-looking line inside a nested fence of the same character does not count",
+    () => {
+      // PR #193 review finding: _bold_label_lines re-implemented the fence walk from
+      // scratch instead of reusing _prose_blocks' #123a fix, and closed a fence on any
+      // same-character marker whatever its length. A four-backtick fence wrapping a
+      // plain three-backtick example closed early on the first inner ``` line, so the
+      // line right after it read as ordinary markdown and its "**Label:**" run-in got
+      // counted even though it lives inside the outer code block. Measured before this
+      // fix: bold_label_run_in reads 1. Fixed: the whole four-backtick block is one
+      // continuous fence, so the count stays 0.
+      const { json } = runGate(
+        "nested-fence-bold-label.md",
+        [
+          "Intro sentence before the fence explains one plan in enough detail today.",
+          "",
+          "````",
+          "Example of a fenced block:",
+          "```",
+          "- **Label:** this run-in lives inside a nested fence and must not count.",
+          "```",
+          "End of the nested example.",
+          "````",
+          "",
+          "Closing sentence after the fence wraps up the example nicely today.",
+          "",
+        ].join("\n"),
+      );
+      expect(json.counts.bold_label_run_in).toBe(0);
+      expect(json.counts.bold_label_own_line).toBe(0);
+    },
+  );
+
+  test.skipIf(!PYTHON)(
+    "a bold label after an unterminated fence is still recovered and counted",
+    () => {
+      // PR #193 review finding: _bold_label_lines dropped everything after an
+      // unterminated fence instead of recovering it as prose, unlike _prose_blocks'
+      // #122 finding 2 fix. A real label sitting after a stray opening marker with no
+      // closing marker anywhere in the document went uncounted. Measured before this
+      // fix: bold_label_run_in reads 0. Fixed: the fence's unclosed remainder is
+      // replayed through the same walk, so the label is recovered and counted.
+      const { json } = runGate(
+        "unterminated-fence-bold-label.md",
+        [
+          "Intro sentence before the stray fence explains what follows today.",
+          "",
+          "```",
+          "",
+          "- **Label:** this real label sits after an unterminated fence and must count.",
+          "",
+        ].join("\n"),
+      );
+      expect(json.counts.bold_label_run_in).toBe(1);
+      expect(json.counts.bold_label_own_line).toBe(0);
+    },
+  );
+});

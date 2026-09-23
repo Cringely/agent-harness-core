@@ -101,6 +101,39 @@ MECHANICAL_PATTERNS = {
     "negative-parallelism": r"\bnot just\b[^.!?]{0,80}\bbut\b",
 }
 
+# Issue #122, "contrastive negation": the operator named `X, not Y` and
+# `it's not X, but Y` as an overused pattern independently of this gate. The
+# diagnosis run harmonised every sub-form that survived across seven corpora
+# down to two: a comma followed by "not" and a lowercase word (the lowercase
+# requirement excludes "Boston, not New York", two named things rather than a
+# value judgment), and the phrase "rather than". Measured rates per 10k words:
+# 22.6 third-party control, 24.3 hand-authored human, 39.3 repo docs, 46.9 hook
+# comments, 48.9 pre-rules-era, 60.4 commits, 63.6 rules corpus, 75.1 PR
+# bodies -- every corpus of ours running at roughly twice both external
+# controls. The two sub-forms trade off against each other while the combined
+# total stays flat, so only the combined count is reported. Counting one form
+# alone would mislead exactly the way the issue's own measurement run found it
+# does. No finding fires on this count: an overuse threshold is a judgment
+# call about how much is too much, which the issue's numbers inform but do not
+# themselves answer, so the gate reports the rate and leaves the threshold to
+# the operator rather than picking one unasked.
+CONTRASTIVE_NEGATION_COMMA_RE = re.compile(r",\s+not\s+[a-z]")
+CONTRASTIVE_NEGATION_RATHER_RE = re.compile(r"\brather than\b", re.IGNORECASE)
+
+# Issue #122, "bold run-in labels": four regexes were tried across five
+# corpora in one measurement run, and one of them could not match the
+# ordinary `**Label** text` (run-in) form at all -- it only matched a bold
+# span that was the entire line ("**Label**" alone) -- which produced a zero
+# that got reported as a finding. A bold span anchored at the very start of a
+# line's content (after stripping a list marker or blockquote prefix) is a
+# label either way. Whether anything follows it on that same line is what
+# tells the two forms apart. A bold span anywhere else in a line (ordinary
+# mid-sentence emphasis) is neither form and is not counted. Fenced code and
+# ATX headings are excluded the same way `_prose_blocks` excludes them from
+# sentence measurement: a heading already carries its own structural marker,
+# and bold inside a code sample is not a prose label.
+BOLD_LABEL_AT_START_RE = re.compile(r"^\*\*(?P<label>[^*\n]+)\*\*(?P<rest>.*)$")
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -320,6 +353,80 @@ def sentences(text: str) -> tuple[list[str], bool]:
     return items, unterminated_fence
 
 
+def _bold_label_lines(text: str) -> Iterable[str]:
+    """Yield raw lines outside fenced code and ATX headings, one at a time.
+
+    `_prose_blocks` joins paragraph lines into a single string with newlines
+    collapsed to spaces, which is right for sentence rhythm but wrong here:
+    counting the own-line and run-in bold-label forms separately depends on
+    exactly the line boundary `_prose_blocks` throws away, so this walks the
+    same fence/heading exclusions on its own rather than reusing that output.
+
+    The fence walk mirrors `_prose_blocks` in the two places that matter here
+    too. A fence only closes on a marker using the same character AND at
+    least as many repeats as the one that opened it, so a short fence nested
+    inside a longer one does not close the outer fence early (issue #123a).
+    And an unterminated fence's buffered lines are replayed through this same
+    walk and yielded as ordinary lines rather than dropped, so a real label
+    after a stray opening marker is still counted (issue #122 finding 2).
+    """
+    in_fence = False
+    fence_char = ""
+    fence_length = 0
+    fence_lines: list[str] = []
+    for line in text.splitlines():
+        fence_match = FENCE_RE.match(line)
+        if in_fence:
+            if (
+                fence_match
+                and fence_match.group(1)[0] == fence_char
+                and len(fence_match.group(1)) >= fence_length
+            ):
+                in_fence = False
+                fence_lines.clear()
+            else:
+                fence_lines.append(line)
+            continue
+        if fence_match:
+            in_fence = True
+            fence_char = fence_match.group(1)[0]
+            fence_length = len(fence_match.group(1))
+            fence_lines = []
+            continue
+        if ATX_HEADING_RE.match(line):
+            continue
+        yield line
+    if in_fence and fence_lines:
+        yield from _bold_label_lines("\n".join(fence_lines))
+
+
+def _count_bold_labels(text: str) -> tuple[int, int]:
+    """Count `**Label**` markers anchored at a line's start, split by form.
+
+    Returns (own_line, run_in). A list marker or blockquote prefix is
+    stripped before matching, so a labelled list item counts the same as a
+    bare paragraph line. A trailing colon with nothing else after it still
+    reads as own-line: "**Corpora**:" on its own line is the same label the
+    unpunctuated form is, not a run-in with an empty body.
+    """
+    own_line = 0
+    run_in = 0
+    for line in _bold_label_lines(text):
+        list_match = LIST_MARKER_RE.match(line)
+        content = list_match.group("content") if list_match else line.strip()
+        if content.startswith(">"):
+            content = content.lstrip(">").strip()
+        match = BOLD_LABEL_AT_START_RE.match(content)
+        if not match:
+            continue
+        rest = match.group("rest").strip()
+        if rest in ("", ":"):
+            own_line += 1
+        else:
+            run_in += 1
+    return own_line, run_in
+
+
 def _find(pattern: str, text: str) -> Iterable[re.Match[str]]:
     return re.finditer(pattern, text, re.IGNORECASE)
 
@@ -361,6 +468,10 @@ def evaluate(
     distinct_openings, max_opening = _opening_count(items)
     max_short_run = _max_consecutive_short(lengths)
     contraction_count = len(CONTRACTION_RE.findall(text))
+    contrastive_count = len(CONTRASTIVE_NEGATION_COMMA_RE.findall(text)) + len(
+        CONTRASTIVE_NEGATION_RATHER_RE.findall(text)
+    )
+    bold_own_line, bold_run_in = _count_bold_labels(text)
     counts: dict[str, float | int] = {
         "dashes": text.count("—") + text.count("–"),
         "curly_quotes": sum(text.count(mark) for mark in "“”‘’"),
@@ -378,6 +489,12 @@ def evaluate(
         # comparison a raw count can support. The finding threshold below still
         # reads the raw `max_opening` -- only the reported figure changes.
         "max_same_opening": round(max_opening / len(items), 3) if items else 0.0,
+        # Reported per 10k words to match the diagnosis run's own unit. No
+        # finding is raised on this count (see CONTRASTIVE_NEGATION_COMMA_RE).
+        "contrastive_negation": contrastive_count,
+        "contrastive_negation_per_10k": round(contrastive_count * 10000 / len(tokens), 1) if tokens else 0.0,
+        "bold_label_own_line": bold_own_line,
+        "bold_label_run_in": bold_run_in,
     }
     findings: list[Finding] = []
     if not text.strip():
