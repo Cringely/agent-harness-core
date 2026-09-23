@@ -84,8 +84,10 @@ can be skipped. It is the second layer, and the "No invented narrative" rule abo
    narrative aside, falls under the no-invented-narrative rule above. A milestone or gate counts
    as done only when every item in its own definition is closed, checked against the actual
    tracker, not against how finished the batch feels.
-3. **README's status or progress section.** Update it when the milestone doc moved. Keep it a
-   short summary that points to the fuller doc, not a duplicate of it.
+3. **Each declared living doc's status or progress section.** README.md by default, plus any doc
+   the project names in guardrails.md's Project-specific rules section. Update whichever one no
+   longer matches what merged. Keep each a short summary that points to the fuller doc, not a
+   duplicate of it.
 4. **Generated views** (`docs/backlog.md`, a roadmap, or similar). If the project
    regenerates one of these from a script, run that script rather than hand-editing the output,
    and treat the generated file as read-only otherwise. Nothing to do here if the project has no
