@@ -117,6 +117,14 @@ pass finds generic nothing.
   the rest of the review, since they can hide a supply-chain problem behind an unrelated diff.
 - Are claims the review depends on tagged verified or assumed? An untagged assumption is a
   finding.
+- When this review closes a pass (the "Reviewing an integrated diff" case below, not a single
+  task's review), read the pass's Docs verdict line, read the project's living docs only for what
+  the diff moved, and apply the carve-out: a change that moves what a doc describes, arriving with
+  the verdict marked still accurate, is a correctness finding due this round. A wording or
+  precision defect in an in-scope doc edit stays minor, and drift the diff did not cause stays out
+  of scope. At per-task scope, check only that the plan's doc task names the living-doc section the
+  task moved, and never REVISE a mid-plan task for a missing verdict: that verdict is owed when the
+  pass closes, not at every task inside it.
 
 If the change touches one side of a contract shared with other code (a schema, an API, a message
 format), check that the other side still agrees. Both sides can be locally correct and the
@@ -165,7 +173,7 @@ open itself.
   hand off rather than trying to go deeper here.
 - Flow control (chasing a hung task, dispatching a fresh reviewer for a green unreviewed change)
   belongs to `soc-monitor`; report status, don't chase it.
-- Reconciling docs to what this change actually did is `doc-steward`'s pass, after this one.
+- The correction belongs in the change itself. `doc-steward` sweeps what escaped this review.
 
 ## Reviewing an integrated diff
 

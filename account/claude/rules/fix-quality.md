@@ -89,6 +89,12 @@ durable and linked to the code it reviewed. The distinction is not how true the 
 them were true in the session that produced this rule, and two full rounds went to corrections of
 what a comment claimed about itself.
 
+Living-doc drift is the exception. A change that moves something a living doc describes, and
+leaves that doc untouched or records it as still accurate, is a correctness finding and gets fixed
+in the same round. A wording or precision defect in a doc edit made inside the change stays minor,
+and a doc-only finding never earns a second review round. Drift the change did not cause stays in
+the review comment.
+
 **One review round per artifact.** A second round happens for a load-bearing finding and for nothing
 else. That bar is real and it does get cleared: the round that earned its place here found a
 security gate failing open, and the round after it found that the fix had introduced a regression on
