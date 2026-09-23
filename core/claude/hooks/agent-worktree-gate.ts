@@ -10,8 +10,11 @@
 //
 // Floor: once the hook can read a subagent_type out of a well-formed payload,
 // a write-capable dispatch never proceeds against this shared, non-isolated
-// checkout unless the hook proved the type read-only or a human wrote down
-// why isolation doesn't apply. The CLOSED path below derives from that floor:
+// checkout unless the hook proved the type read-only or it is a built-in the
+// hook trusts as read-only (Explore, Plan). The only other way through is a
+// reasoned override the dispatcher wrote itself: an ISOLATION-OVERRIDE line
+// in the prompt, or a PROJECT_EXCEPTIONS entry. The CLOSED path below
+// derives from that floor:
 // where classification runs but can't prove the type safe, the gate denies,
 // because an unproven type is not a read-only type. The OPEN path is a
 // deliberate reliability trade against the floor, not a consequence of it,
