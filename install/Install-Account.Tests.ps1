@@ -664,6 +664,16 @@ Describe "Install-Account" {
 
     # Review round 1, item 5, coverage row: -SkipPreflight actually skips, proven with the same
     # emptied-PATH setup test 3 uses to show the probe fires when it is not skipped.
+    #
+    # Issue #151: -TargetIsWindows:$true pinned rather than left to default to the host. The
+    # chmod warning below (line ~337) fires whenever `-not $TargetIsWindows -and (chmod absent)`,
+    # unconditionally on -SkipPreflight by design -- it is not part of the tool-preflight check
+    # this It exists to prove gets suppressed. Left to default, $TargetIsWindows tracks the host
+    # running the suite: on Windows CI that branch never fires and the coincidence was invisible,
+    # but on Linux CI $emptyBin genuinely has no chmod either, so the chmod warning fires for
+    # real and its own text ("chmod not on PATH") satisfies -Match 'Not on PATH' case-
+    # insensitively, failing an It that was never testing the chmod branch at all. Pinning Windows
+    # isolates the assertion to the -SkipPreflight gate it names.
     It "suppresses the preflight warning under -SkipPreflight even with every tool absent" {
         $p = New-StandInPayload; $h = New-StandInClaudeHome
         $emptyBin = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-bin-" + [guid]::NewGuid())
@@ -673,7 +683,7 @@ Describe "Install-Account" {
         try {
             $env:PATH = $emptyBin
             $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight *>&1 | Out-String
+                -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -TargetIsWindows:$true *>&1 | Out-String
         }
         finally { $env:PATH = $savedPath; Remove-Item -Recurse -Force $emptyBin -EA SilentlyContinue }
         try {
