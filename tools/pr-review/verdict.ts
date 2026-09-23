@@ -45,9 +45,17 @@ export function ciCoveredPesterSuites(workflowText: string): Set<string> {
 // change to it as uncovered even while other suites exercised the change (#152). Declared
 // explicitly rather than inferred, since nothing about the module's own name names its suites.
 // install/AccountShared.ps1: confirmed at this writing dot-sourced by both listed suites
-// (install/Export-Account.ps1:151, install/Install-Account.ps1:90).
+// (install/Export-Account.Tests.ps1, install/Install-Account.Tests.ps1).
+// account/claude/hooks/*.ps1: the four hooks install/Account-Hooks.Tests.ps1 exercises (#207
+// put that suite on a run line in CI). Same shape as AccountShared.ps1, one declared suite
+// each rather than a directory-prefix rule, since the map already matches this way and a
+// prefix match would be a second lookup mechanism for the same one-suite case.
 const SHARED_MODULE_SUITES: ReadonlyMap<string, readonly string[]> = new Map([
   ["install/AccountShared.ps1", ["install/Export-Account.Tests.ps1", "install/Install-Account.Tests.ps1"]],
+  ["account/claude/hooks/Guard-SkillSize.ps1", ["install/Account-Hooks.Tests.ps1"]],
+  ["account/claude/hooks/Lint-DocumentProse.ps1", ["install/Account-Hooks.Tests.ps1"]],
+  ["account/claude/hooks/Scan-MemorySecrets.ps1", ["install/Account-Hooks.Tests.ps1"]],
+  ["account/claude/hooks/Sync-MemoryToObsidian.ps1", ["install/Account-Hooks.Tests.ps1"]],
 ]);
 
 // A changed .ps1 counts as covered when its own sibling suite runs in CI, or, for a module
@@ -58,13 +66,13 @@ export function uncoveredPowerShellFiles(changedFiles: readonly string[], workfl
   const covered = ciCoveredPesterSuites(workflowText);
   return changedFiles.filter((path) => {
     if (!/\.ps1$/i.test(path)) return false;
+    const normalized = path.replace(/\.ps1$/i, ".ps1");
+    const declared = SHARED_MODULE_SUITES.get(normalized);
+    if (declared) return !declared.some((suite) => covered.has(suite));
     // Suite names are compared exact-case (m1): a changed file whose case differs from what
     // .github/workflows/test.yml names must not read as covered because a case-insensitive
     // rewrite happened to collide with the covered spelling. Only the extension itself is matched
     // case-insensitively, since that is the part `/\.ps1$/i` above already treats that way.
-    const normalized = path.replace(/\.ps1$/i, ".ps1");
-    const declared = SHARED_MODULE_SUITES.get(normalized);
-    if (declared) return !declared.some((suite) => covered.has(suite));
     const suite = /\.Tests\.ps1$/.test(path) ? path : path.replace(/\.ps1$/i, ".Tests.ps1");
     return !covered.has(suite);
   });
