@@ -38,11 +38,8 @@ Government Licence v3.0
 the Australian Signals Directorate / ACSC (© Commonwealth of Australia) licensed under
 CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
 
-Each tree's `SKILL.md` carries the SPDX `license:` field, and the reference files
-under every tree named above now carry the matching per-file marker (issue #70:
-the reference files under `owasp-cicd/`, `owasp-infrastructure/` and `owasp-mcp/`
-used to carry none). Read the attribution here as applying to every file in the
-trees named above regardless.
+Each tree's `SKILL.md` carries the SPDX `license:` field. Read the attribution
+here as applying to every file in the trees named above.
 
 ## vale-ai-tells
 
