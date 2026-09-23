@@ -1322,9 +1322,13 @@ function countSedSpawnsForEntries(entryCount: number): number {
 describe("identity gate — building the pattern set spawns no process per declared entry (#113)", () => {
   // Ablated against the pre-#113 library at the commit that added this: two
   // entries spawned 8 sed processes and twelve spawned 28, so the equality
-  // below failed and the ceiling below it failed too. Both hold at 2 now,
-  // which is the two key-extraction sed calls identity_json_array makes for
-  // "names" and "emails" and nothing else.
+  // below failed and the ceiling below it failed too. The property that
+  // matters, and that both assertions below check, is that the count is
+  // constant in the number of declared entries (O(1), not O(n)) -- not a
+  // particular number, which drifts as the library gains or loses sed
+  // calls on the fixed-cost side. #171: the comment here used to name a
+  // constant and went stale within one merge when #170 reintroduced the
+  // whole-list escape call.
   test.skipIf(!realSed)("the sed count for a twelve-entry identity file equals the count for a two-entry one", () => {
     const few = countSedSpawnsForEntries(2);
     const many = countSedSpawnsForEntries(12);
