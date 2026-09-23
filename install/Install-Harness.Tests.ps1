@@ -595,6 +595,58 @@ Describe "Install-Harness" {
         }
     }
 
+    It "wires git core.hooksPath when GIT_INDEX_FILE points inside the target's own git directory" {
+        # Issue #164. Git exports a temporary lock file (e.g. `<gitdir>/next-index-NNNNN.lock`)
+        # into hooks it runs during `commit --only`, rebase, stash and merge, so an installer
+        # launched from one of those hooks in the TARGET's own repository saw a GIT_INDEX_FILE
+        # that did not match the default `.git/index` path and refused, even though git was
+        # answering for the target the whole time. This is the legitimate case the guard must
+        # accept: toplevel, absolute-git-dir and git-common-dir all still name the target.
+        & git -C $script:target init -q *>&1 | Out-Null
+        $gitDir = (Resolve-Path -LiteralPath "$script:target/.git").Path
+        $env:GIT_INDEX_FILE = Join-Path $gitDir 'next-index-12345.lock'
+        try {
+            $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500
+        }
+        finally {
+            Remove-Item -LiteralPath 'Env:GIT_INDEX_FILE' -ErrorAction SilentlyContinue
+        }
+
+        $out | Should -Not -Match 'skipped-foreign-git'
+        $out | Should -Match 'git:core\.hooksPath'
+        $out | Should -Match 'set to '
+        $actual = & git -C $script:target config --get core.hooksPath
+        $LASTEXITCODE | Should -Be 0
+        (Resolve-Path -LiteralPath $actual).Path |
+            Should -Be (Resolve-Path -LiteralPath "$script:target/.claude/hooks").Path
+    }
+
+    It "still skips core.hooksPath wiring when GIT_INDEX_FILE points outside the target's git directory" {
+        # The other half of #164: the carve-out for a temporary index must not reopen the case
+        # the guard exists to refuse. An index file outside the target's own absolute-git-dir is
+        # exactly the redirection the guard is for, so it still answers "git cannot answer".
+        & git -C $script:target init -q *>&1 | Out-Null
+        $outsideDir = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-test-outside-index-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $outsideDir | Out-Null
+        try {
+            $env:GIT_INDEX_FILE = Join-Path $outsideDir 'index'
+            try {
+                $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500
+            }
+            finally {
+                Remove-Item -LiteralPath 'Env:GIT_INDEX_FILE' -ErrorAction SilentlyContinue
+            }
+
+            $out | Should -Match 'skipped-foreign-git'
+            $out | Should -Match "git did not answer for this target's own repository"
+            & git -C $script:target config --get core.hooksPath *>$null
+            $LASTEXITCODE | Should -Be 1
+        }
+        finally {
+            Remove-Item -Recurse -Force $outsideDir
+        }
+    }
+
     It "installs the pre-commit hook with the owner execute bit actually set" -Skip:$IsWindows {
         & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
         $hook = Get-Item -LiteralPath "$script:target/.claude/hooks/pre-commit"

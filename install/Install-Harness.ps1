@@ -582,11 +582,23 @@ function Get-GitLocation {
 # a second probe; the answers actually used come from the environment as the operator set it, and
 # the variables are restored before this function returns. Nothing is cleared for the real calls,
 # since an operator may set them on purpose, and GIT_DIR naming the target's own .git (a hook in
-# the target itself) compares equal and passes. Any difference in the four locations is "git cannot
-# answer". Two simpler checks were measured and rejected (2026-09-14): comparing --show-toplevel
-# alone misses the hook case, because a foreign GIT_DIR with no GIT_WORK_TREE makes the -C
-# directory the toplevel, so it still names the target; and comparing against the `.git` walk
-# below misreports a junction target, because git resolves the junction and the walk does not.
+# the target itself) compares equal and passes. Toplevel, absolute-git-dir and git-common-dir must
+# match exactly -- any difference there is "git cannot answer".
+#
+# The index gets one carve-out (#164). Git exports a temporary lock file into every hook it runs
+# during `commit --only`, rebase, stash and merge (`<gitdir>/next-index-NNNNN.lock`, measured
+# live), so an exact-match index comparison refused a GIT_INDEX_FILE that in fact named a location
+# inside the target's own git directory -- git was answering for the target, and the guard said it
+# wasn't. The index path is accepted when it matches the reference exactly, as before, or when it
+# resolves inside the target's own absolute-git-dir, which by that point in the function is
+# already pinned equal to the reference (the exact-match loop above runs first). Any other index
+# location -- including one outside the target's git directory entirely -- still answers "git
+# cannot answer".
+#
+# Two simpler checks were measured and rejected (2026-09-14): comparing --show-toplevel alone
+# misses the hook case, because a foreign GIT_DIR with no GIT_WORK_TREE makes the -C directory the
+# toplevel, so it still names the target; and comparing against the `.git` walk below misreports a
+# junction target, because git resolves the junction and the walk does not.
 function Test-GitAnswersForTarget {
     param([string]$AbsTarget)
 
@@ -616,11 +628,26 @@ function Test-GitAnswersForTarget {
     }
     if ($null -eq $own) { return $false }
 
-    for ($i = 0; $i -lt $asRun.Count; $i++) {
+    # Toplevel, absolute-git-dir and git-common-dir (indices 0-2) are the repository's identity.
+    # GIT_INDEX_FILE cannot move any of them, so these three still require an exact match.
+    for ($i = 0; $i -lt $asRun.Count - 1; $i++) {
         $same = if ($IsWindows) { $asRun[$i] -ieq $own[$i] } else { $asRun[$i] -ceq $own[$i] }
         if (-not $same) { return $false }
     }
-    return $true
+
+    # Index (the last element) gets the #164 carve-out. Exact match is still accepted, and so is
+    # an as-run index path that resolves inside the target's own absolute-git-dir (index 1, just
+    # pinned equal above) -- the only container a legitimate temporary index can occupy.
+    $indexAsRun = $asRun[$asRun.Count - 1]
+    $indexOwn = $own[$own.Count - 1]
+    $indexSame = if ($IsWindows) { $indexAsRun -ieq $indexOwn } else { $indexAsRun -ceq $indexOwn }
+    if ($indexSame) { return $true }
+
+    $ownGitDirPrefix = $own[1].TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+    if ($IsWindows) {
+        return $indexAsRun.StartsWith($ownGitDirPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+    return $indexAsRun.StartsWith($ownGitDirPrefix, [System.StringComparison]::Ordinal)
 }
 
 # Decision step. Reads on-disk presence, the tracked answer and the ignored answer, applies the
