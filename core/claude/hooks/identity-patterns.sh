@@ -578,6 +578,40 @@ identity_json_array() {
     return 0
 }
 
+# WHY NOT ONE BATCHED awk/sed PASS FOR THE WHOLE SET (#113, #169). #113's
+# own suggestion was "a single awk or a single sed invocation could produce
+# the whole set" -- parsing the JSON, escaping every entry, and building
+# IDENTITY_PATTERN and IDENTITY_CANARIES in one program, in place of the
+# fixed few sed calls plus shell loops that shipped instead (identity_load
+# below, and identity_regex_escape and identity_json_array above). #163's
+# PR body named and rejected three narrower alternatives but never this
+# one, the one #113 actually asked for, so the reason was undocumented
+# until #169 flagged the gap.
+#
+# personal_terms_parse below already runs exactly this: a single batched
+# awk pass over this same flat {"key": ["..."]} shape, token by token, with
+# the same \uXXXX policy (its own COST note, #113). This file already does
+# the walk a batched pass here would need, in the language #113 asked for
+# -- so the hold-off is not that this file avoids awk/sed for that shape.
+#
+# The hold-off is what a rewrite would put at risk. identity_json_array is
+# the parser #91 and #135 took four review rounds to harden, proved
+# against the 26-row ARRAY_MATRIX in test/identity-gate.test.ts, and
+# folding it into one pass means re-proving that matrix byte for byte on
+# new code.
+#
+# What IS batched already: identity_regex_escape below takes one sed call
+# for the whole newline-joined entry list rather than one per entry (see
+# its own "ONE CALL FOR THE WHOLE ENTRY LIST" note), and identity_json_array
+# above takes one tr call plus one sed call per key to find where that
+# key's array starts. Moving identity_json_array onto a
+# personal_terms_parse-style pass would save that fixed tr plus sed per
+# key per run -- a real but small win on a control that already dropped
+# from per-entry to fixed cost, against re-proving a parser #91 and #135
+# already had to repair twice. Recorded here as a follow-up worth
+# reconsidering if that cost is ever paid for another reason, not as a
+# rejected idea.
+#
 # Resolves the identity file, derives the workstation username and machine
 # hostname, and builds IDENTITY_PATTERN (one grep -iE alternation covering
 # every declared name, every declared email, the username, and the
