@@ -680,13 +680,11 @@ function Test-GitAnswersForTarget {
 # directory and core.hooksPath names it -- a fact no per-file hash comparison can see. Used by
 # -Audit's reachability check below.
 #
-# Not shared with the install-time wiring section further down, which computes a related but
-# not identical answer (it also needs $gitHooksDir and $existingHookFiles, to decide whether
-# writing core.hooksPath now would replace someone else's un-pathed hooks). Duplicating the
-# git-answers-for-this-target lookup here, rather than refactoring both call sites onto one
-# function, keeps this audit-only fix from touching the wiring section's already-tested
-# behavior -- #136/#126 scope is the audit report and the install message, not a redesign of
-# hooksPath detection.
+# Shared with the install-time wiring section further down (#222): both call sites need the
+# same "does core.hooksPath, as git actually resolves it, land on our hooks directory"
+# answer, and only the wiring section additionally needs $gitHooksDir and
+# $existingHookFiles to decide whether writing core.hooksPath now would replace someone
+# else's un-pathed hooks.
 #
 # Returns a hashtable: GitAnswers (bool, Test-GitAnswersForTarget's #145 foreign-repository
 # guard passed), Reachable (bool, core.hooksPath resolves to $HooksDstAbs) and Display (the raw
@@ -1770,17 +1768,18 @@ else {
         $gitDir = (Resolve-Path -LiteralPath $gitDir).Path
         $gitHooksDir = Join-Path $gitDir 'hooks'
 
-        $currentHooksPath = $null
-        $chpCheck = & git -C $Target config --get core.hooksPath 2>$null
-        if ($LASTEXITCODE -eq 0) { $currentHooksPath = $chpCheck }
-
-        $alreadyWired = $false
-        if ($currentHooksPath) {
-            $currentResolved = if ([System.IO.Path]::IsPathRooted($currentHooksPath)) { $currentHooksPath } else { Join-Path $Target $currentHooksPath }
-            if (Test-Path -LiteralPath $currentResolved) {
-                $alreadyWired = (Resolve-Path -LiteralPath $currentResolved).Path -ieq $hooksDstAbs
-            }
-        }
+        # #204/#222: a relative core.hooksPath is resolved by git against the worktree
+        # TOPLEVEL, never against $Target, so a naive Join-Path onto the raw $Target only
+        # gave the right answer when $Target already was the toplevel (or, worse, onto a
+        # $Target that was itself still relative, which GetFullPath then resolved against
+        # the process's own working directory instead of either). Get-HooksPathReachability
+        # already carries the correct resolution -- ask git directly with
+        # `rev-parse --git-path hooks`, joined onto a Resolve-Path'd absolute target -- and
+        # is reused here rather than duplicated a second time. $currentHooksPath still comes
+        # from its Display field for the messages below, and $alreadyWired from Reachable.
+        $reach = Get-HooksPathReachability -AbsTarget (Resolve-Path -LiteralPath $Target).Path -HooksDstAbs $hooksDstAbs
+        $currentHooksPath = $reach.Display
+        $alreadyWired = $reach.Reachable
 
         $existingHookFiles = @()
         if (Test-Path -LiteralPath $gitHooksDir) {

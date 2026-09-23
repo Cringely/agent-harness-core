@@ -618,6 +618,87 @@ Describe "Install-Harness" {
         $audit | Should -Not -Match 'All managed files in sync with core\.'
     }
 
+    It "install-time wiring resolves a relative core.hooksPath against the worktree toplevel, not against the target, for a subdirectory target" {
+        # #204: same defect as the audit-time case above (#136 round-2), one level earlier.
+        # The install-time $alreadyWired check joined a relative core.hooksPath onto $Target
+        # instead of asking git to resolve it, and for a subdirectory target that join landed
+        # on the subdirectory's own .claude/hooks -- which this same run had just created a
+        # moment earlier, copying the template files in regardless of wiring -- so the two
+        # paths coincided and the row falsely claimed 'unchanged'. Git itself never reads that
+        # directory here: a relative core.hooksPath resolves against the toplevel, so git
+        # reads the toplevel's .claude/hooks, which this test never creates.
+        & git -C $script:target init -q *>&1 | Out-Null
+        $sub = Join-Path $script:target 'sub'
+        New-Item -ItemType Directory -Path $sub | Out-Null
+        & git -C $script:target config core.hooksPath '.claude/hooks' *>&1 | Out-Null
+
+        $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $sub *>&1 | Out-String -Width 500
+        # The honest answer here is 'skipped-already-set': core.hooksPath is set, so the
+        # installer must not claim it points at the harness's hooks when git resolves it
+        # elsewhere, and must not overwrite it without being told to.
+        $out | Should -Match 'git:core\.hooksPath\s+skipped-already-set'
+        $out | Should -Not -Match 'git:core\.hooksPath\s+unchanged'
+
+        # Cross-check against git's own resolution, the same way the top-level wiring test
+        # above does: the claim in the table has to agree with the repository's actual
+        # behaviour, not just with whichever branch the installer happened to take. git
+        # prints a relative path here (discovered, not named, via -C), so join it onto $sub
+        # before resolving -- Resolve-Path alone would resolve it against the test's own
+        # working directory instead. GetFullPath, not Resolve-Path, because git's real answer
+        # (the toplevel's .claude/hooks) is never created by this test -- that absence is the
+        # point, and Resolve-Path would throw on it.
+        $actualHooksDirRaw = & git -C $sub rev-parse --git-path hooks
+        $LASTEXITCODE | Should -Be 0
+        $actualHooksDirAbs = if ([System.IO.Path]::IsPathRooted($actualHooksDirRaw)) { $actualHooksDirRaw } else { Join-Path $sub $actualHooksDirRaw }
+        $actualHooksDirAbs = [System.IO.Path]::GetFullPath($actualHooksDirAbs).TrimEnd([char[]]@('\', '/'))
+        $topLevelHooksAbs = (Join-Path (Resolve-Path -LiteralPath $script:target).Path '.claude\hooks').TrimEnd([char[]]@('\', '/'))
+        $subHooksDstAbs = (Resolve-Path -LiteralPath (Join-Path $sub '.claude/hooks')).Path.TrimEnd([char[]]@('\', '/'))
+        # git reads the toplevel's .claude/hooks, not the subdirectory's -- the exact
+        # coincidence the buggy Join-Path resolution missed.
+        $actualHooksDirAbs | Should -Be $topLevelHooksAbs
+        $actualHooksDirAbs | Should -Not -Be $subHooksDstAbs
+    }
+
+    It "install-time wiring does not falsely report skipped-already-set for a relative -Target and a relative core.hooksPath when the session location and the process CWD have diverged" {
+        # #222 round-2 repair, the opposite failure from the two tests above: the #204 fix
+        # resolved $currentHooksPath correctly, but still joined the relative
+        # `rev-parse --git-path hooks` output onto the raw, possibly-relative $Target and
+        # called [System.IO.Path]::GetFullPath, which resolves against the .NET process
+        # directory rather than PowerShell's own location (documented above
+        # Resolve-LayerPath, and exercised the same way by the C1/C2 tests in
+        # Export-Account.Tests.ps1: Set-Location from this repo's drive into a stand-in on
+        # another drive is what leaves the two apart in this environment).
+        #
+        # A relative -Target alone does not reach the buggy branch: when core.hooksPath was
+        # set by this installer it is always the absolute $hooksDstAbs, so `rev-parse
+        # --git-path hooks` echoes it back already rooted and the Join-Path/GetFullPath
+        # pair is skipped. The branch needs core.hooksPath itself to be relative too, which
+        # `git rev-parse --git-path hooks` then also prints relative when asked through a
+        # relative -C -- the situation an operator who wired hooks by hand with a relative
+        # value (a Husky-style setup, or an older harness install) leaves behind. Reproduced
+        # live against the pre-fix code before this test was written: the wrongly-joined
+        # path landed on this worktree's own .claude/hooks (wherever the .NET process
+        # directory happened to still point) instead of the stand-in target's, so 'unchanged'
+        # never matched and the row read 'skipped-already-set' for a target that was already
+        # correctly wired.
+        & git -C $script:target init -q *>&1 | Out-Null
+        & git -C $script:target config core.hooksPath '.claude/hooks' *>&1 | Out-Null
+
+        $startLocation = Get-Location
+        try {
+            Set-Location -LiteralPath $script:target
+            # The copy step that installs .claude/hooks's contents runs unconditionally,
+            # ahead of the wiring branch under test, so the relative core.hooksPath set
+            # above already names the directory the harness just populated.
+            $out = & "$PSScriptRoot/Install-Harness.ps1" -Target '.' *>&1 | Out-String -Width 500
+            $out | Should -Match 'git:core\.hooksPath\s+unchanged'
+            $out | Should -Not -Match 'skipped-already-set'
+        }
+        finally {
+            Set-Location -LiteralPath $startLocation
+        }
+    }
+
     It "skips core.hooksPath wiring, and writes into no repository at all, when a foreign GIT_DIR is exported" {
         # Issue #145. Every probe in the wiring block asks git through `-C $Target`, and git
         # exports GIT_DIR into every hook it runs, so an installer launched from a hook in
