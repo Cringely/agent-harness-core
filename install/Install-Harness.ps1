@@ -582,13 +582,20 @@ function Get-GitLocation {
 # a second probe; the answers actually used come from the environment as the operator set it, and
 # the variables are restored before this function returns. Nothing is cleared for the real calls,
 # since an operator may set them on purpose, and GIT_DIR naming the target's own .git (a hook in
-# the target itself) compares equal and passes. Any difference in the four locations is "git cannot
-# answer". Two simpler checks were measured and rejected (2026-09-14): comparing --show-toplevel
-# alone misses the hook case, because a foreign GIT_DIR with no GIT_WORK_TREE makes the -C
-# directory the toplevel, so it still names the target; and comparing against the `.git` walk
-# below misreports a junction target, because git resolves the junction and the walk does not.
+# the target itself) compares equal and passes. Toplevel, absolute-git-dir and git-common-dir must
+# match exactly, and any difference there means "git cannot answer".
+#
+# hooksPath wiring ignores the index through -IgnoreIndex: `git config core.hooksPath` writes by
+# toplevel, absolute-git-dir and git-common-dir, and never reads the index. The sidecar probe
+# below keeps the exact four-field match, index included, because what it checks (whether a path
+# is tracked) depends on the index's contents.
+#
+# Two simpler checks were measured and rejected (2026-09-14): comparing --show-toplevel alone
+# misses the hook case, because a foreign GIT_DIR with no GIT_WORK_TREE makes the -C directory the
+# toplevel, so it still names the target; and comparing against the `.git` walk below misreports a
+# junction target, because git resolves the junction and the walk does not.
 function Test-GitAnswersForTarget {
-    param([string]$AbsTarget)
+    param([string]$AbsTarget, [switch]$IgnoreIndex)
 
     $asRun = Get-GitLocation -AbsTarget $AbsTarget
     if ($null -eq $asRun) { return $false }
@@ -616,11 +623,26 @@ function Test-GitAnswersForTarget {
     }
     if ($null -eq $own) { return $false }
 
-    for ($i = 0; $i -lt $asRun.Count; $i++) {
+    # Toplevel, absolute-git-dir and git-common-dir (indices 0-2) are the repository's identity.
+    # GIT_INDEX_FILE cannot move any of them, so these three still require an exact match.
+    for ($i = 0; $i -lt $asRun.Count - 1; $i++) {
         $same = if ($IsWindows) { $asRun[$i] -ieq $own[$i] } else { $asRun[$i] -ceq $own[$i] }
         if (-not $same) { return $false }
     }
-    return $true
+
+    # A caller that does not read the index at all (git hooksPath wiring) does not need to know
+    # where a hook's temporary index resolves. Toplevel, absolute-git-dir and git-common-dir,
+    # already pinned equal above, are what that write depends on.
+    if ($IgnoreIndex) { return $true }
+
+    # Every other caller, including the sidecar probe, requires an exact index match. A hook's
+    # temporary index (`<gitdir>/next-index-NNNNN.lock`) holds a different set of entries than the
+    # real index, so accepting it as "close enough" would let the sidecar probe treat a partial
+    # index as the real answer.
+    $indexAsRun = $asRun[$asRun.Count - 1]
+    $indexOwn = $own[$own.Count - 1]
+    if ($IsWindows) { return $indexAsRun -ieq $indexOwn }
+    return $indexAsRun -ceq $indexOwn
 }
 
 # Decision step. Reads on-disk presence, the tracked answer and the ignored answer, applies the
@@ -690,6 +712,8 @@ function Get-SidecarPlan {
         $tracked = $false
         if ($inRepo) {
             $tracked = $null
+            # No -IgnoreIndex: this question depends on the index's contents (see the function's
+            # own comment for why).
             if (Test-GitAnswersForTarget -AbsTarget $absTarget) {
                 try {
                     & git -C $absTarget ls-files --error-unmatch -- $sidecarAbs 1>$null 2>$null
@@ -1572,7 +1596,7 @@ if ($LASTEXITCODE -eq 0) { $gitDirRaw = $gitCheck }
 if (-not $gitDirRaw) {
     # Not a git repository (or git missing from PATH) — nothing to wire.
 }
-elseif (-not (Test-GitAnswersForTarget -AbsTarget (Resolve-Path -LiteralPath $Target).Path)) {
+elseif (-not (Test-GitAnswersForTarget -AbsTarget (Resolve-Path -LiteralPath $Target).Path -IgnoreIndex)) {
     # Issue #145. Every probe below asks git through `-C $Target`, and GIT_DIR, GIT_WORK_TREE,
     # GIT_INDEX_FILE and GIT_COMMON_DIR override that discovery. Git exports GIT_DIR into every
     # hook it runs, so an installer launched from a hook in another repository read that
@@ -1582,9 +1606,10 @@ elseif (-not (Test-GitAnswersForTarget -AbsTarget (Resolve-Path -LiteralPath $Ta
     # always been, and only a git that answers, but answers about somewhere else, reaches here.
     #
     # Test-GitAnswersForTarget is the guard the sidecar probe has used since #140 (round-4 A),
-    # reused rather than reimplemented: one definition of "git answers for this target" keeps
-    # the two call sites from drifting into disagreeing about the same environment. It also
-    # covers dubious ownership and a missing git the same way, which is the fail-closed
+    # reused rather than reimplemented: one shared definition of "git answers for this target,"
+    # though the two call sites now read different answers from it by design. This call site
+    # passes -IgnoreIndex, the sidecar probe does not (see the function's own comment for why).
+    # It also covers dubious ownership and a missing git the same way, which is the fail-closed
     # direction for a write this block cannot place correctly.
     #
     # Skip with a named reason rather than throwing: by this point the managed files, settings

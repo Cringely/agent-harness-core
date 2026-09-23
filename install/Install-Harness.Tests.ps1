@@ -595,6 +595,112 @@ Describe "Install-Harness" {
         }
     }
 
+    It "wires git core.hooksPath when GIT_INDEX_FILE points inside the target's own git directory" {
+        # Issue #164. Git exports a temporary lock file (e.g. `<gitdir>/next-index-NNNNN.lock`)
+        # into hooks it runs during `commit --only`, rebase, stash and merge, so an installer
+        # launched from one of those hooks in the TARGET's own repository saw a GIT_INDEX_FILE
+        # that did not match the default `.git/index` path and refused, even though git was
+        # answering for the target the whole time. This is the legitimate case the guard must
+        # accept: toplevel, absolute-git-dir and git-common-dir all still name the target.
+        & git -C $script:target init -q *>&1 | Out-Null
+        $gitDir = (Resolve-Path -LiteralPath "$script:target/.git").Path
+        $env:GIT_INDEX_FILE = Join-Path $gitDir 'next-index-12345.lock'
+        try {
+            $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500
+        }
+        finally {
+            Remove-Item -LiteralPath 'Env:GIT_INDEX_FILE' -ErrorAction SilentlyContinue
+        }
+
+        $out | Should -Not -Match 'skipped-foreign-git'
+        $out | Should -Match 'git:core\.hooksPath'
+        $out | Should -Match 'set to '
+        $actual = & git -C $script:target config --get core.hooksPath
+        $LASTEXITCODE | Should -Be 0
+        (Resolve-Path -LiteralPath $actual).Path |
+            Should -Be (Resolve-Path -LiteralPath "$script:target/.claude/hooks").Path
+    }
+
+    It "throws the sidecar refusal instead of leaking a staged sidecar when GIT_INDEX_FILE names a hook's temporary index (#181 R2-1)" {
+        # #164's carve-out let a hook's temporary index (`<gitdir>/next-index-NNNNN.lock`,
+        # exported during `commit --only`, rebase, stash and merge) pass the shared guard as
+        # "git answering for the target." That guard also gates the sidecar's tracked probe, and
+        # the probe's answer has to depend on what the index CONTAINS, not where the index file
+        # sits: a sidecar staged in the real index but absent from a hook's temporary one -- what
+        # `commit --only` builds when the sidecar is not one of the paths named on that commit --
+        # read as untracked, and Get-SidecarPlan deleted the working copy while the staged entry
+        # reached the next commit untouched (round-3's R2-1). Fixed by requiring an exact index
+        # match for this caller instead of the carve-out, so a hook's temporary index now answers
+        # "git cannot answer" here too, and this throws the refusal instead of guessing.
+        & git -C $script:target init -q *>&1 | Out-Null
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target | Out-Null
+
+        # Un-ignore the sidecar so a plain `git add` stages it without -f, the same as a sidecar
+        # force-added or staged by hand before this gate existed (round-3's original R2-1 case).
+        'nothing ignored here' | Set-Content "$script:target/.claude/.gitignore"
+        & git -C $script:target add -- .claude/.harness-manifest.local.json
+        $LASTEXITCODE | Should -Be 0
+        & git -C $script:target diff --cached --name-only -- .claude/.harness-manifest.local.json |
+            Should -Match 'harness-manifest\.local\.json'
+
+        $gitDir = (Resolve-Path -LiteralPath "$script:target/.git").Path
+        $env:GIT_INDEX_FILE = Join-Path $gitDir 'next-index-77777.lock'
+        try {
+            { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target } |
+                Should -Throw -ExpectedMessage '*could not confirm whether it is already tracked*'
+        }
+        finally {
+            Remove-Item -LiteralPath 'Env:GIT_INDEX_FILE' -ErrorAction SilentlyContinue
+        }
+
+        # The refusal's own promise: nothing was written. The working copy must still be there
+        # (the pre-fix defect deleted it) and the real index's staged entry untouched.
+        Test-Path -LiteralPath "$script:target/.claude/.harness-manifest.local.json" | Should -BeTrue
+        & git -C $script:target diff --cached --name-only -- .claude/.harness-manifest.local.json |
+            Should -Match 'harness-manifest\.local\.json'
+    }
+
+    It "wires core.hooksPath but still declines the sidecar when GIT_INDEX_FILE points outside the target's git directory" {
+        # #181 round 2: the #164 carve-out lived in the shared guard, so it also loosened the
+        # sidecar's tracked probe, which depends on what the index CONTAINS rather than where the
+        # index file sits (the R2-1 leak). Fixed by splitting the two callers instead of sharing
+        # one answer: hooksPath wiring passes -IgnoreIndex, since `git config core.hooksPath`
+        # writes by toplevel, absolute-git-dir and git-common-dir and the index plays no part in
+        # where that write lands, so an unrelated GIT_INDEX_FILE has nothing to say about it. The
+        # sidecar probe still calls with no switch and requires an exact index match. This one
+        # environment now produces both halves of that split in a single run: wiring proceeds,
+        # and the sidecar write is declined pending a git that can actually confirm it.
+        & git -C $script:target init -q *>&1 | Out-Null
+        $outsideDir = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-test-outside-index-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $outsideDir | Out-Null
+        try {
+            $env:GIT_INDEX_FILE = Join-Path $outsideDir 'index'
+            try {
+                $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500
+            }
+            finally {
+                Remove-Item -LiteralPath 'Env:GIT_INDEX_FILE' -ErrorAction SilentlyContinue
+            }
+
+            $out | Should -Not -Match 'skipped-foreign-git'
+            $out | Should -Match 'git:core\.hooksPath'
+            $out | Should -Match 'set to '
+            $actual = & git -C $script:target config --get core.hooksPath
+            $LASTEXITCODE | Should -Be 0
+            (Resolve-Path -LiteralPath $actual).Path |
+                Should -Be (Resolve-Path -LiteralPath "$script:target/.claude/hooks").Path
+
+            # The sidecar question is a separate call with no -IgnoreIndex, so the same
+            # unrelated GIT_INDEX_FILE still reads as "git cannot answer" there, and no sidecar
+            # is written on an unconfirmed answer.
+            $out | Should -Match "git could not answer for this target's own repository"
+            Test-Path -LiteralPath "$script:target/.claude/.harness-manifest.local.json" | Should -BeFalse
+        }
+        finally {
+            Remove-Item -Recurse -Force $outsideDir
+        }
+    }
+
     It "installs the pre-commit hook with the owner execute bit actually set" -Skip:$IsWindows {
         & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
         $hook = Get-Item -LiteralPath "$script:target/.claude/hooks/pre-commit"
