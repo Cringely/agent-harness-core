@@ -48,3 +48,42 @@ export function posixSh(): string {
 export function posixShDir(): string | undefined {
   return cachedShDir;
 }
+
+let cachedBash: string | undefined;
+/** Set only when bash came from git's own directory. Mirrors cachedShDir above. */
+let cachedBashDir: string | undefined;
+
+// bash SPECIFICALLY, never whatever `sh` happens to resolve to (issue #91). On this repo's own
+// CI runner (ubuntu-24.04) /bin/sh is dash, and dash's parameter expansion never drops into the
+// wide-character matcher that #113/#170's locale regression is about -- a case that only diverges
+// under bash. A test meant to catch that regression, run through posixSh() there, would pass
+// against BOTH the fixed sed-based parser and the buggy parameter-expansion one it replaced,
+// which is exactly "cannot fail on CI". Use this instead of posixSh() for any case whose whole
+// point is that divergence; every other case in these suites is locale-invariant by construction
+// (forced LC_ALL=C, or a parser that never touches the shell's own character matcher) and stays on
+// posixSh().
+export function posixBash(): string {
+  if (cachedBash) return cachedBash;
+  try {
+    const probe = Bun.spawnSync(["bash", "-c", "exit 0"], { stdout: "ignore", stderr: "ignore" });
+    const resolved = probe.success && Bun.which("bash");
+    if (resolved) return (cachedBash = resolved);
+  } catch {
+    // not on PATH; fall through to git's copy
+  }
+  const out = Bun.spawnSync(["git", "--exec-path"], { stdout: "pipe", stderr: "pipe" });
+  const execPath = new TextDecoder().decode(out.stdout).trim();
+  const root = execPath.replace(/[\\/](?:mingw\d*|usr|clang\d*)[\\/]libexec[\\/]git-core[\\/]?$/i, "");
+  const candidate = join(root, "usr", "bin", "bash.exe");
+  if (existsSync(candidate)) {
+    cachedBashDir = dirname(candidate);
+    return (cachedBash = candidate);
+  }
+  throw new Error(`no bash found: not on PATH, and no bash.exe at ${candidate} (git --exec-path was "${execPath}")`);
+}
+
+/** The directory holding the fallback bash, or undefined when bash resolved off the ambient PATH.
+ * Only meaningful after posixBash() has run once. */
+export function posixBashDir(): string | undefined {
+  return cachedBashDir;
+}

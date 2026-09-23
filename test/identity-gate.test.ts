@@ -40,7 +40,7 @@ setDefaultTimeout(30_000);
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { posixSh, posixShDir } from "./posix-sh";
+import { posixBash, posixBashDir, posixSh, posixShDir } from "./posix-sh";
 
 const PRE_COMMIT_SRC = join(import.meta.dir, "..", "core", "claude", "hooks", "pre-commit");
 const PRE_PUSH_SRC = join(import.meta.dir, "..", "core", "claude", "hooks", "pre-push");
@@ -77,6 +77,17 @@ function makeIdentityHome(content: string | null): string {
   if (content !== null) {
     writeFileSync(join(dir, ".claude-account-identity.json"), content);
   }
+  return dir;
+}
+
+/** Same as makeIdentityHome, but for raw bytes rather than a UTF-8 string --
+ * for a UTF-16 or byte-order-mark fixture, which no JS string literal can
+ * represent (a UTF-16LE-encoded ASCII byte and a raw NUL are indistinguishable
+ * once round-tripped through a JS string's own UTF-16 storage). */
+function makeIdentityHomeBytes(bytes: Buffer): string {
+  const dir = mkdtempSync(join(tmpdir(), "identity-home-bytes-"));
+  tempDirs.push(dir);
+  writeFileSync(join(dir, ".claude-account-identity.json"), bytes);
   return dir;
 }
 
@@ -495,18 +506,29 @@ describe("identity gate — identity-patterns.sh: key-extraction sed residual (i
 });
 
 /** Test double for `sed`: crashes (exit 1, no output) only when invoked with
- * the literal substring `"names"` in its arguments -- the shape of
- * identity_json_array's key-extraction sed call when key="names" -- and
- * execs the real sed (passed in via $REAL_SED, never embedded as a literal
- * path here to avoid escaping a Windows path inside a written shell script)
- * for every other invocation. */
+ * the literal substring `"[Nn][Aa][Mm][Ee][Ss]"` in its arguments -- the
+ * shape of identity_json_array's key-extraction sed call when key="names"
+ * since issue #91's case-insensitive key match (the bracket-expression
+ * form of the key, not the plain `"names"` literal the pre-#91 sed used) --
+ * and execs the real sed (passed in via $REAL_SED, never embedded as a
+ * literal path here to avoid escaping a Windows path inside a written
+ * shell script) for every other invocation. The match substring is itself
+ * single-quoted so its own `[`/`]` are literal characters in the stub's
+ * case pattern rather than glob bracket expressions. */
 function installNamesKeyCrashingSedStub(): string {
   const stubDir = mkdtempSync(join(tmpdir(), "identity-sedshim-"));
   tempDirs.push(stubDir);
   const stubPath = join(stubDir, "sed");
   writeFileSync(
     stubPath,
-    ["#!/bin/sh", 'case "$*" in', '    *\'"names"\'*) exit 1 ;;', "esac", 'exec "$REAL_SED" "$@"', ""].join("\n"),
+    [
+      "#!/bin/sh",
+      'case "$*" in',
+      '    *\'"[Nn][Aa][Mm][Ee][Ss]"\'*) exit 1 ;;',
+      "esac",
+      'exec "$REAL_SED" "$@"',
+      "",
+    ].join("\n"),
   );
   chmodSync(stubPath, 0o755);
   return stubDir;
@@ -1060,6 +1082,37 @@ const ARRAY_MATRIX: Array<[string, string, string, string, number, string | null
   ["an empty array", '{"names":[],"emails":[]}', "names", "", 0, null],
   ["an absent key", '{"emails":["a@b.test"]}', "names", "", 0, null],
   ["one entry", '{"names":["Fictional Persona"],"emails":[]}', "names", "Fictional Persona\n", 0, null],
+  // Issue #91: the key lookup used to be a case-sensitive literal match, so
+  // a file declaring "Names" (a hand-edit, a differently-cased export from
+  // some other tool) read exactly like the key never having been declared
+  // at all -- the same silent-empty-channel shape as "an absent key" above,
+  // except the operator actually declared entries and the gate never saw
+  // them. The lookup for $2="names" must recognise any ASCII case of the
+  // literal key text.
+  [
+    "a differently-cased key is recognised (#91)",
+    '{"Names":["Fictional Persona"],"emails":[]}',
+    "names",
+    "Fictional Persona\n",
+    0,
+    null,
+  ],
+  [
+    "an all-uppercase key is recognised (#91)",
+    '{"NAMES":["Fictional Persona"],"emails":[]}',
+    "names",
+    "Fictional Persona\n",
+    0,
+    null,
+  ],
+  [
+    "a mixed-case emails key is recognised (#91)",
+    '{"names":[],"EmAiLs":["a@b.test"]}',
+    "emails",
+    "a@b.test\n",
+    0,
+    null,
+  ],
   [
     "several entries",
     '{"names":["Alpha One","Beta Two","Gamma Three"],"emails":["a@b.test"]}',
@@ -1432,6 +1485,18 @@ describe("identity gate — identity_regex_escape clears identity_escaped on a c
 // merged library and pass against the restored sed program, and every
 // expectation here is a byte the sed program produces -- the same bytes under
 // every locale, since sed never sees the shell's matcher.
+//
+// ISSUE #91: SET LC_CTYPE IS NOT ENOUGH ON ITS OWN. Both drivers used to run
+// through posixSh(), and this repo's CI (.github/workflows/test.yml) runs
+// `bun test` on ubuntu-24.04, where /bin/sh is dash. Dash's parameter
+// expansion is byte-oriented regardless of locale, so the divergence above
+// -- measured against the pre-#170 parameter-expansion loop, with LC_CTYPE
+// set exactly as below -- reproduces under bash and does not reproduce
+// under dash. A regression back to that loop would pass this suite on CI
+// (dash) while failing it on this workstation (Git for Windows' sh.exe,
+// which is bash) -- green on the runner that gates a merge, red only on a
+// machine nobody runs CI on. Both drivers now spawn posixBash() explicitly,
+// never posixSh(), so the test discriminates on the platform that matters.
 // ---------------------------------------------------------------------------
 
 /** One literal backslash, built from its code point rather than typed: every
@@ -1461,9 +1526,12 @@ function expectedHighByteEscape(lead: number, follower: string): Buffer {
   ]);
 }
 
-/** Runs identity_regex_escape over every lead byte and follower, in a real
- * POSIX sh under the hook's own LC_CTYPE, one output file per case so the
- * bytes survive the trip back. Returns them in LEAD_BYTES x FOLLOWERS order. */
+/** Runs identity_regex_escape over every lead byte and follower, under bash
+ * specifically (posixBash(), never posixSh() -- see that function's own
+ * comment: CI's /bin/sh is dash, which cannot reproduce the wide-character
+ * divergence this is a regression guard for) at the hook's own LC_CTYPE,
+ * one output file per case so the bytes survive the trip back. Returns
+ * them in LEAD_BYTES x FOLLOWERS order. */
 function runHighByteEscapes(): Buffer[] {
   const dir = mkdtempSync(join(tmpdir(), "identity-highbyte-"));
   tempDirs.push(dir);
@@ -1492,7 +1560,7 @@ function runHighByteEscapes(): Buffer[] {
   const driverPath = join(dir, "driver.sh");
   writeFileSync(driverPath, driver);
 
-  const run = Bun.spawnSync([posixSh(), driverPath, LIB_SRC, outDir], {
+  const run = Bun.spawnSync([posixBash(), driverPath, LIB_SRC, outDir], {
     cwd: dir,
     env: utf8HookEnv(),
     stdout: "pipe",
@@ -1508,13 +1576,16 @@ function runHighByteEscapes(): Buffer[] {
 }
 
 /** The env a hook runs under on Windows, with the fixture identity home
- * swapped for whichever one the caller built. */
+ * swapped for whichever one the caller built. Both callers below invoke
+ * through posixBash(), not posixSh(), so this adds posixBash()'s own
+ * fallback directory to PATH rather than posixSh()'s -- the two can differ
+ * on a platform where "sh" is not bash. */
 function utf8HookEnv(home?: string): Record<string, string | undefined> {
-  const shDir = posixShDir();
+  const bashDir = posixBashDir();
   const base = envWith(home === undefined ? {} : { USERPROFILE: home, HOME: home });
   return {
     ...base,
-    PATH: shDir ? `${base.PATH ?? ""}${delimiter}${shDir}` : base.PATH,
+    PATH: bashDir ? `${base.PATH ?? ""}${delimiter}${bashDir}` : base.PATH,
     LC_ALL: "C.UTF-8",
     LC_CTYPE: "C.UTF-8",
   };
@@ -1522,7 +1593,8 @@ function utf8HookEnv(home?: string): Record<string, string | undefined> {
 
 /** Declares a name whose bytes are not valid UTF-8, then reports what
  * identity_load built and whether identity_control and identity_match agree
- * that the declared name is still findable. */
+ * that the declared name is still findable. Runs under bash, not posixSh()
+ * -- same reason as runHighByteEscapes above. */
 function runHighByteGate(): { rc: number; pattern: Buffer; control: string; match: string; stderr: string } {
   const home = mkdtempSync(join(tmpdir(), "identity-highbyte-home-"));
   tempDirs.push(home);
@@ -1560,7 +1632,7 @@ function runHighByteGate(): { rc: number; pattern: Buffer; control: string; matc
   const driverPath = join(dir, "driver.sh");
   writeFileSync(driverPath, driver);
 
-  const run = Bun.spawnSync([posixSh(), driverPath, LIB_SRC, outDir], {
+  const run = Bun.spawnSync([posixBash(), driverPath, LIB_SRC, outDir], {
     cwd: dir,
     env: utf8HookEnv(home),
     stdout: "pipe",
@@ -1617,5 +1689,103 @@ describe("identity gate — the pattern set is byte-transparent under the locale
     expect(gate.control).toBe("pass");
     expect(gate.match).toBe("found");
     expect(gate.stderr).toBe("");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #91: the identity file was read with `cat` into a shell variable
+// with no encoding check at all. Neither POSIX sh nor bash can hold a NUL
+// byte in a variable, so a UTF-16 file (BOM or not -- Windows PowerShell
+// 5.1's `Out-File` default is UTF-16LE with a BOM, a realistic way this
+// file gets written) had every NUL silently dropped by `$(cat ...)`. An
+// ASCII-only UTF-16 file happens to survive that looking like plain text,
+// but a non-ASCII declared name does not: each of its UTF-16 code units
+// loses its NUL half and what remains is not valid UTF-8, so the pattern
+// arm built from it never matched that name's real UTF-8 form in a scanned
+// commit -- load succeeded, the canary (built from the same broken parse)
+// passed, and the declared name went straight through. identity_check_encoding
+// closes this by refusing before that drop ever happens, checking the
+// file's actual bytes with `od` rather than through a variable.
+//
+// Every byte sequence below is built from numeric byte arrays, never a
+// typed escape: a JS string literal cannot represent a raw NUL or an
+// unpaired high byte without going through the exact re-encoding this file
+// exists to avoid trusting.
+// ---------------------------------------------------------------------------
+
+const UTF16LE_BOM = Buffer.from([0xff, 0xfe]);
+const UTF16BE_BOM = Buffer.from([0xfe, 0xff]);
+const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
+
+describe("identity gate — encoding detection on the identity file itself (#91)", () => {
+  test("a UTF-16LE file with a BOM and an ASCII-only name is refused", () => {
+    const dir = initPreCommitRepo();
+    const json = JSON.stringify({ names: [NAME], emails: [EMAIL] });
+    const bytes = Buffer.concat([UTF16LE_BOM, Buffer.from(json, "utf16le")]);
+    const home = makeIdentityHomeBytes(bytes);
+    stageClean(dir);
+    const result = runPreCommit(dir, envWith({ USERPROFILE: home, HOME: home }));
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("UTF-16 byte-order mark");
+  });
+
+  // The reported case: a non-ASCII declared name in a UTF-16LE file with a
+  // BOM used to load "successfully" with a pattern arm that could never
+  // match the same name's real UTF-8 form -- fail-open. This pins that it
+  // now refuses instead, at load time, rather than silently building a
+  // dead arm.
+  test("a UTF-16LE file with a BOM and a non-ASCII name is refused, not silently loaded with a broken arm", () => {
+    const dir = initPreCommitRepo();
+    // "Widget Persön" (o with diaeresis), i.e. a name a JSON writer
+    // could plausibly declare without any escape at all.
+    const json = JSON.stringify({ names: [`Widget Pers${String.fromCharCode(0xf6)}n`], emails: [EMAIL] });
+    const bytes = Buffer.concat([UTF16LE_BOM, Buffer.from(json, "utf16le")]);
+    const home = makeIdentityHomeBytes(bytes);
+    stageClean(dir);
+    const result = runPreCommit(dir, envWith({ USERPROFILE: home, HOME: home }));
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("UTF-16 byte-order mark");
+  });
+
+  test("a UTF-16BE file with a BOM is refused", () => {
+    const dir = initPreCommitRepo();
+    const json = JSON.stringify({ names: [NAME], emails: [EMAIL] });
+    const bytes = Buffer.concat([UTF16BE_BOM, Buffer.from(json, "utf16le").swap16()]);
+    const home = makeIdentityHomeBytes(bytes);
+    stageClean(dir);
+    const result = runPreCommit(dir, envWith({ USERPROFILE: home, HOME: home }));
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("UTF-16 byte-order mark");
+  });
+
+  // No BOM at all -- still UTF-16, still refused, on the embedded-NUL check
+  // rather than the BOM check.
+  test("a UTF-16LE file with NO byte-order mark is refused on the embedded NUL, not silently read as UTF-8", () => {
+    const dir = initPreCommitRepo();
+    const json = JSON.stringify({ names: [NAME], emails: [EMAIL] });
+    const bytes = Buffer.from(json, "utf16le");
+    const home = makeIdentityHomeBytes(bytes);
+    stageClean(dir);
+    const result = runPreCommit(dir, envWith({ USERPROFILE: home, HOME: home }));
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("NUL byte");
+  });
+
+  // A UTF-8 BOM is not the failure above: EF BB BF is three ordinary,
+  // non-NUL bytes, so this must load correctly (decode: strip it and
+  // proceed), never refuse and never silently build an empty pattern.
+  test("a UTF-8 file with a BOM loads correctly and the declared name still gates content", () => {
+    const dir = initPreCommitRepo();
+    const json = JSON.stringify({ names: [NAME], emails: [EMAIL] });
+    const bytes = Buffer.concat([UTF8_BOM, Buffer.from(json, "utf8")]);
+    const home = makeIdentityHomeBytes(bytes);
+    writeFileSync(join(dir, "notes.txt"), `this document mentions ${NAME} by name\n`);
+    git(["add", "notes.txt"], dir);
+    const result = runPreCommit(dir, envWith({ USERPROFILE: home, HOME: home }));
+    expect(result.exitCode).not.toBe(0);
+    const stderr = result.stderr.toString();
+    expect(stderr).toContain("identifying string");
+    expect(stderr).not.toContain("UTF-16");
+    expect(stderr).not.toContain("NUL byte");
   });
 });

@@ -475,12 +475,36 @@ identity_json_token() {
 # match sees a changed locale -- that match must keep whatever locale the
 # top-level hook actually runs under (this file's header, "WHY grep -E's
 # \b").
+#
+# KEY MATCH IS CASE-INSENSITIVE, NOT A LOCALE-DEPENDENT FOLD (issue #91). $2
+# is always the literal "names" or "emails" from identity_load's two call
+# sites, and the sed below used to match that literal case-sensitively, so
+# a file declaring "Names" (a hand-edit, a differently-cased export from
+# some other tool) read as the key never having been declared at all --
+# the same silent-empty-channel shape as the missing-key case this
+# function's own header already treats as "zero declared entries", except
+# here the operator DID declare entries and the gate never saw them. Never
+# `sed`'s `I` substitution flag, a GNU extension outside what this file's
+# header commits to running under any sed, and never grep -i's locale-
+# dependent case fold, the exact hazard this file's own "KNOWN LIMIT:
+# NON-ASCII CASE FOLDING" header section already declines for the same
+# reason. Both cases of each ASCII letter are spelled out explicitly
+# instead, in a bracket expression, which needs no locale and no
+# extension and works identically under any POSIX sed.
 identity_json_array() {
     LC_ALL=C
     export LC_ALL
 
     raw=$1
     key=$2
+    case $key in
+        names) key_ci='[Nn][Aa][Mm][Ee][Ss]' ;;
+        emails) key_ci='[Ee][Mm][Aa][Ii][Ll][Ss]' ;;
+        *)
+            echo "identity gate: internal error, identity_json_array called with an unknown key '$key'." >&2
+            return 1
+            ;;
+    esac
     flat=$(printf '%s' "$raw" | tr '\n' ' ') || return 1
     # #135's round-2 review (N1): unchecked, a crashed sed here (the exact
     # 2026-09-05 incident shape this file's header exists to catch, one
@@ -490,7 +514,7 @@ identity_json_array() {
     # populated and the both-empty refusal never fires. `sed -n` itself
     # exits 0 on a clean no-match, so checking the exit status here does
     # not turn an absent key into a false refusal.
-    tail=$(printf '%s' "$flat" | sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\[/[/p") || {
+    tail=$(printf '%s' "$flat" | sed -n "s/.*\"${key_ci}\"[[:space:]]*:[[:space:]]*\[/[/p") || {
         echo "identity gate: the '$key' key lookup in '$identity_file' did not run cleanly. Refusing rather than reading a crashed extraction as an absent key." >&2
         return 1
     }
@@ -612,6 +636,73 @@ identity_json_array() {
 # reconsidering if that cost is ever paid for another reason, not as a
 # rejected idea.
 #
+# Detects a byte-order mark or an embedded NUL byte in the identity file at
+# $1, before anything downstream reads it into a shell variable (issue #91).
+# Neither POSIX sh nor bash can hold a NUL byte in a variable, so by the
+# time bytes would reach identity_load's `raw=$(cat ...)` any NUL is
+# already gone -- a UTF-16 file (with or without a byte-order mark) encodes
+# every ASCII character as itself plus a NUL, and Windows PowerShell 5.1's
+# `Out-File` default is UTF-16LE with a BOM, a realistic way this file gets
+# written. An ASCII-only UTF-16 file happens to survive that NUL-stripping
+# looking like plain text, but a non-ASCII declared name does not: each of
+# its UTF-16 code units loses its NUL half and what remains is not valid
+# UTF-8, so the pattern arm built from it never matches that name's real
+# UTF-8 form in a scanned commit. Load succeeds, the per-arm canary in
+# identity_control below is built from this same broken parse and passes,
+# and the declared name goes straight through -- a silent false negative
+# for the exact channel this gate exists to close, the same shape issue
+# #91d already fixed for an undecoded \uXXXX escape.
+#
+# Checked with `od`, the only thing here that ever sees the file's actual
+# bytes: everything captured through $(...) below is od's own hex TEXT
+# output, which never contains a byte from the file itself, so it is safe
+# to carry through a variable. `-v` disables od's repeated-line elision so
+# a long run of NUL bytes cannot hide the first one; splitting on
+# `tr -s '[:space:]' '\n'` gives one two-digit hex byte per line rather
+# than a concatenated hex string, which matters because two ordinary,
+# non-NUL neighbouring bytes (0xd0 then 0x0f) concatenate to "d00f", and a
+# bare substring search for "00" would misread that as a NUL that was
+# never there.
+#
+# Returns:
+#   0  clean -- no BOM, no NUL byte anywhere in the file
+#   1  a UTF-16 byte-order mark, or a NUL byte with no BOM at all (non-BOM
+#      UTF-16, or some other encoding this byte-oriented parser cannot
+#      read) -- the caller refuses; the message is printed here, since
+#      only this function still has the byte-level evidence
+#   2  a UTF-8 byte-order mark. Not the failure above: EF BB BF is three
+#      ordinary, non-NUL bytes, so $(...) carries it through untouched and
+#      every parser in this file already skips past it on the way to the
+#      first quoted key -- this reads correctly today without this
+#      function's help. Reported anyway so the caller can strip it before
+#      reading, so a byte-exact comparison against the declared text is
+#      never carrying three bytes the operator never typed
+#   3  od itself could not be run (missing, or the file vanished between
+#      the readability check above and here) -- the caller refuses rather
+#      than reading a file that might not be UTF-8 as though it were
+identity_check_encoding() {
+    identity_enc_out=$(od -An -tx1 -v "$1" 2>/dev/null) || {
+        echo "identity gate: could not read '$1' byte-by-byte to check its encoding (od failed or is unavailable). Refusing rather than reading a file that might not be UTF-8 as if it were." >&2
+        return 3
+    }
+    identity_enc_bytes=$(printf '%s' "$identity_enc_out" | tr -s '[:space:]' '\n' | sed '/^$/d')
+    identity_enc_head=$(printf '%s\n' "$identity_enc_bytes" | head -n 3 | tr -d '\n')
+    case $identity_enc_head in
+        fffe*|feff*)
+            echo "identity gate: '$1' starts with a UTF-16 byte-order mark. This parser reads bytes, not UTF-16 code units, and cannot decode it correctly -- silently misreading it would build a pattern that looks fine and does not match real content (issue #91: this is exactly what a UTF-16LE file with a non-ASCII declared name did). Re-save the file as UTF-8 and retry." >&2
+            return 1
+            ;;
+        efbbbf*)
+            return 2
+            ;;
+    esac
+    if printf '%s\n' "$identity_enc_bytes" | grep -qx 00; then
+        echo "identity gate: '$1' contains a NUL byte, which no valid UTF-8 JSON document does. This is very likely UTF-16 without a byte-order mark, which this parser cannot decode correctly -- silently misreading it would build a pattern that looks fine and does not match real content. Re-save the file as UTF-8 and retry." >&2
+        return 1
+    fi
+    return 0
+}
+
 # Resolves the identity file, derives the workstation username and machine
 # hostname, and builds IDENTITY_PATTERN (one grep -iE alternation covering
 # every declared name, every declared email, the username, and the
@@ -704,7 +795,23 @@ identity_load() {
         return 1
     fi
 
-    raw=$(cat "$identity_file" 2>/dev/null)
+    identity_check_encoding "$identity_file"
+    identity_enc_rc=$?
+    identity_skip_bom=0
+    case $identity_enc_rc in
+        0) : ;;
+        2) identity_skip_bom=1 ;;
+        *) return 1 ;;
+    esac
+
+    if [ "$identity_skip_bom" = 1 ]; then
+        # A UTF-8 byte-order mark: three ordinary bytes, skipped rather
+        # than read, so nothing downstream carries three bytes the
+        # operator never typed. See identity_check_encoding's own header.
+        raw=$(tail -c +4 "$identity_file" 2>/dev/null)
+    else
+        raw=$(cat "$identity_file" 2>/dev/null)
+    fi
     if [ -z "$raw" ]; then
         echo "identity gate: '$identity_file' is empty." >&2
         return 1
