@@ -582,10 +582,23 @@ Describe "Install-Account" {
         New-Item -ItemType Directory -Path $stubBin -Force | Out-Null
         $log = Join-Path $stubBin 'invoked.log'
         Set-Content (Join-Path $stubBin 'chmod.cmd') "@echo off`r`necho called %* >> `"$log`"`r`nexit /b 0"
+        # Issue #151: a stub built only as `chmod.cmd` is invisible on Linux. PowerShell's
+        # non-Windows command resolution matches a literal filename, never PATHEXT, so `Get-Command
+        # chmod` skips straight past it to the real chmod further down PATH, which then does the
+        # real chmod for real and never touches $log. A second stub under the bare name `chmod`,
+        # marked executable, answers on Linux the same way `chmod.cmd` answers on Windows --
+        # Install-Harness.Tests.ps1's own chmod shim already uses this technique.
+        $chmodPosix = Join-Path $stubBin 'chmod'
+        Set-Content -LiteralPath $chmodPosix -Value "#!/bin/sh`necho called `$@ >> '$log'`nexit 0`n" -NoNewline
+        if (-not $IsWindows) { & /bin/chmod +x $chmodPosix }
         $savedPath = $env:PATH
         $logExisted = $false
         try {
-            $env:PATH = "$stubBin;$savedPath"
+            # Issue #151: a hardcoded `;` join only works as a PATH separator on Windows. On
+            # Linux the whole string becomes one bogus directory name, so PATH resolution finds
+            # neither the stub nor anything real. [System.IO.Path]::PathSeparator picks the
+            # separator the running platform actually uses.
+            $env:PATH = $stubBin + [System.IO.Path]::PathSeparator + $savedPath
             & $script:install -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -TargetIsWindows:$false -WhatIf | Out-Null
             $logExisted = Test-Path -LiteralPath $log
@@ -678,6 +691,13 @@ Describe "Install-Account" {
         $stubBin = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-npmstub-" + [guid]::NewGuid())
         New-Item -ItemType Directory -Path $stubBin -Force | Out-Null
         Set-Content (Join-Path $stubBin 'npm.cmd') "@echo off`r`necho C:\fake\global`r`nexit /b 0"
+        # Issue #151: same Linux-visibility gap as the chmod stubs -- `npm.cmd` answers nothing
+        # on Linux, where a bare `npm` (if present on the real PATH further down) would be found
+        # instead once $env:PATH stops being just $stubBin, or nothing would be found at all.
+        # A bare-name companion makes the stub itself answer on Linux, same as on Windows.
+        $npmPosix = Join-Path $stubBin 'npm'
+        Set-Content -LiteralPath $npmPosix -Value "#!/bin/sh`necho /fake/global`nexit 0`n" -NoNewline
+        if (-not $IsWindows) { & /bin/chmod +x $npmPosix }
         $savedPath = $env:PATH
         $out = $null
         try {
@@ -762,10 +782,19 @@ Describe "Install-Account" {
         $stubBin = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-chmodfail-" + [guid]::NewGuid())
         New-Item -ItemType Directory -Path $stubBin -Force | Out-Null
         Set-Content (Join-Path $stubBin 'chmod.cmd') "@echo off`r`necho chmod-stub: cannot operate 1>&2`r`nexit /b 1"
+        # Issue #151: same Linux-visibility gap as the logging chmod stub above, a bare-name
+        # companion so the failing chmod answers on Linux instead of the real one succeeding.
+        $chmodPosix = Join-Path $stubBin 'chmod'
+        Set-Content -LiteralPath $chmodPosix -Value "#!/bin/sh`necho chmod-stub: cannot operate 1>&2`nexit 1`n" -NoNewline
+        if (-not $IsWindows) { & /bin/chmod +x $chmodPosix }
         $savedPath = $env:PATH
         $out = $null
         try {
-            $env:PATH = "$stubBin;$savedPath"
+            # Issue #151: a hardcoded `;` join only works as a PATH separator on Windows. On
+            # Linux the whole string becomes one bogus directory name, so PATH resolution finds
+            # neither the stub nor anything real. [System.IO.Path]::PathSeparator picks the
+            # separator the running platform actually uses.
+            $env:PATH = $stubBin + [System.IO.Path]::PathSeparator + $savedPath
             $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -TargetIsWindows:$false *>&1 | Out-String
         }
@@ -787,10 +816,23 @@ Describe "Install-Account" {
         New-Item -ItemType Directory -Path $stubBin -Force | Out-Null
         $log = Join-Path $stubBin 'invoked.log'
         Set-Content (Join-Path $stubBin 'chmod.cmd') "@echo off`r`necho called %* >> `"$log`"`r`nexit /b 0"
+        # Issue #151: a stub built only as `chmod.cmd` is invisible on Linux. PowerShell's
+        # non-Windows command resolution matches a literal filename, never PATHEXT, so `Get-Command
+        # chmod` skips straight past it to the real chmod further down PATH, which then does the
+        # real chmod for real and never touches $log. A second stub under the bare name `chmod`,
+        # marked executable, answers on Linux the same way `chmod.cmd` answers on Windows --
+        # Install-Harness.Tests.ps1's own chmod shim already uses this technique.
+        $chmodPosix = Join-Path $stubBin 'chmod'
+        Set-Content -LiteralPath $chmodPosix -Value "#!/bin/sh`necho called `$@ >> '$log'`nexit 0`n" -NoNewline
+        if (-not $IsWindows) { & /bin/chmod +x $chmodPosix }
         $savedPath = $env:PATH
         $logExisted = $false
         try {
-            $env:PATH = "$stubBin;$savedPath"
+            # Issue #151: a hardcoded `;` join only works as a PATH separator on Windows. On
+            # Linux the whole string becomes one bogus directory name, so PATH resolution finds
+            # neither the stub nor anything real. [System.IO.Path]::PathSeparator picks the
+            # separator the running platform actually uses.
+            $env:PATH = $stubBin + [System.IO.Path]::PathSeparator + $savedPath
             & $script:install -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -TargetIsWindows:$true | Out-Null
             # Checked before $stubBin is removed below: deleting the stub first would make
@@ -810,10 +852,23 @@ Describe "Install-Account" {
         New-Item -ItemType Directory -Path $stubBin -Force | Out-Null
         $log = Join-Path $stubBin 'invoked.log'
         Set-Content (Join-Path $stubBin 'chmod.cmd') "@echo off`r`necho called %* >> `"$log`"`r`nexit /b 0"
+        # Issue #151: a stub built only as `chmod.cmd` is invisible on Linux. PowerShell's
+        # non-Windows command resolution matches a literal filename, never PATHEXT, so `Get-Command
+        # chmod` skips straight past it to the real chmod further down PATH, which then does the
+        # real chmod for real and never touches $log. A second stub under the bare name `chmod`,
+        # marked executable, answers on Linux the same way `chmod.cmd` answers on Windows --
+        # Install-Harness.Tests.ps1's own chmod shim already uses this technique.
+        $chmodPosix = Join-Path $stubBin 'chmod'
+        Set-Content -LiteralPath $chmodPosix -Value "#!/bin/sh`necho called `$@ >> '$log'`nexit 0`n" -NoNewline
+        if (-not $IsWindows) { & /bin/chmod +x $chmodPosix }
         $savedPath = $env:PATH
         $logContent = $null
         try {
-            $env:PATH = "$stubBin;$savedPath"
+            # Issue #151: a hardcoded `;` join only works as a PATH separator on Windows. On
+            # Linux the whole string becomes one bogus directory name, so PATH resolution finds
+            # neither the stub nor anything real. [System.IO.Path]::PathSeparator picks the
+            # separator the running platform actually uses.
+            $env:PATH = $stubBin + [System.IO.Path]::PathSeparator + $savedPath
             & $script:install -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -TargetIsWindows:$false | Out-Null
             # Read the log before the stub directory is removed below: the earlier version of
@@ -842,10 +897,23 @@ Describe "Install-Account" {
         New-Item -ItemType Directory -Path $stubBin -Force | Out-Null
         $log = Join-Path $stubBin 'invoked.log'
         Set-Content (Join-Path $stubBin 'chmod.cmd') "@echo off`r`necho called %* >> `"$log`"`r`nexit /b 0"
+        # Issue #151: a stub built only as `chmod.cmd` is invisible on Linux. PowerShell's
+        # non-Windows command resolution matches a literal filename, never PATHEXT, so `Get-Command
+        # chmod` skips straight past it to the real chmod further down PATH, which then does the
+        # real chmod for real and never touches $log. A second stub under the bare name `chmod`,
+        # marked executable, answers on Linux the same way `chmod.cmd` answers on Windows --
+        # Install-Harness.Tests.ps1's own chmod shim already uses this technique.
+        $chmodPosix = Join-Path $stubBin 'chmod'
+        Set-Content -LiteralPath $chmodPosix -Value "#!/bin/sh`necho called `$@ >> '$log'`nexit 0`n" -NoNewline
+        if (-not $IsWindows) { & /bin/chmod +x $chmodPosix }
         $savedPath = $env:PATH
         $logContent = $null
         try {
-            $env:PATH = "$stubBin;$savedPath"
+            # Issue #151: a hardcoded `;` join only works as a PATH separator on Windows. On
+            # Linux the whole string becomes one bogus directory name, so PATH resolution finds
+            # neither the stub nor anything real. [System.IO.Path]::PathSeparator picks the
+            # separator the running platform actually uses.
+            $env:PATH = $stubBin + [System.IO.Path]::PathSeparator + $savedPath
             & $script:install -PayloadRoot $p -ClaudeHome $hParent `
                 -ClaudeJson (Join-Path $hParent 'claude.json') -SkipPreflight -TargetIsWindows:$false | Out-Null
             if (Test-Path -LiteralPath $log) { $logContent = Get-Content -Raw $log }
@@ -876,10 +944,23 @@ Describe "Install-Account" {
         New-Item -ItemType Directory -Path $stubBin -Force | Out-Null
         $log = Join-Path $stubBin 'invoked.log'
         Set-Content (Join-Path $stubBin 'chmod.cmd') "@echo off`r`necho called %* >> `"$log`"`r`nexit /b 0"
+        # Issue #151: a stub built only as `chmod.cmd` is invisible on Linux. PowerShell's
+        # non-Windows command resolution matches a literal filename, never PATHEXT, so `Get-Command
+        # chmod` skips straight past it to the real chmod further down PATH, which then does the
+        # real chmod for real and never touches $log. A second stub under the bare name `chmod`,
+        # marked executable, answers on Linux the same way `chmod.cmd` answers on Windows --
+        # Install-Harness.Tests.ps1's own chmod shim already uses this technique.
+        $chmodPosix = Join-Path $stubBin 'chmod'
+        Set-Content -LiteralPath $chmodPosix -Value "#!/bin/sh`necho called `$@ >> '$log'`nexit 0`n" -NoNewline
+        if (-not $IsWindows) { & /bin/chmod +x $chmodPosix }
         $savedPath = $env:PATH
         $logContent = $null
         try {
-            $env:PATH = "$stubBin;$savedPath"
+            # Issue #151: a hardcoded `;` join only works as a PATH separator on Windows. On
+            # Linux the whole string becomes one bogus directory name, so PATH resolution finds
+            # neither the stub nor anything real. [System.IO.Path]::PathSeparator picks the
+            # separator the running platform actually uses.
+            $env:PATH = $stubBin + [System.IO.Path]::PathSeparator + $savedPath
             & $script:install -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -TargetIsWindows:$false | Out-Null
             if (Test-Path -LiteralPath $log) { $logContent = Get-Content -Raw $log }
@@ -900,10 +981,23 @@ Describe "Install-Account" {
         New-Item -ItemType Directory -Path $stubBin -Force | Out-Null
         $log = Join-Path $stubBin 'invoked.log'
         Set-Content (Join-Path $stubBin 'chmod.cmd') "@echo off`r`necho called %* >> `"$log`"`r`nexit /b 0"
+        # Issue #151: a stub built only as `chmod.cmd` is invisible on Linux. PowerShell's
+        # non-Windows command resolution matches a literal filename, never PATHEXT, so `Get-Command
+        # chmod` skips straight past it to the real chmod further down PATH, which then does the
+        # real chmod for real and never touches $log. A second stub under the bare name `chmod`,
+        # marked executable, answers on Linux the same way `chmod.cmd` answers on Windows --
+        # Install-Harness.Tests.ps1's own chmod shim already uses this technique.
+        $chmodPosix = Join-Path $stubBin 'chmod'
+        Set-Content -LiteralPath $chmodPosix -Value "#!/bin/sh`necho called `$@ >> '$log'`nexit 0`n" -NoNewline
+        if (-not $IsWindows) { & /bin/chmod +x $chmodPosix }
         $savedPath = $env:PATH
         $logContent = ''
         try {
-            $env:PATH = "$stubBin;$savedPath"
+            # Issue #151: a hardcoded `;` join only works as a PATH separator on Windows. On
+            # Linux the whole string becomes one bogus directory name, so PATH resolution finds
+            # neither the stub nor anything real. [System.IO.Path]::PathSeparator picks the
+            # separator the running platform actually uses.
+            $env:PATH = $stubBin + [System.IO.Path]::PathSeparator + $savedPath
             & $script:install -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -TargetIsWindows:$false | Out-Null
             if (Test-Path -LiteralPath $log) { $logContent = Get-Content -Raw $log }
