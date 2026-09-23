@@ -7,3 +7,19 @@
 core/claude/hooks/pre-commit text eol=lf
 core/claude/hooks/pre-push text eol=lf
 core/claude/hooks/commit-msg text eol=lf
+
+# The exported account payload is always written with LF by
+# install/Export-Account.ps1. Without an eol rule for the tree,
+# core.autocrlf's default checkout behavior writes CRLF on Windows, and a
+# re-export into that checkout then lists every rewritten payload file as
+# modified even though the content did not really change. This rule is
+# scoped to account/claude/** rather than the whole repo on purpose: it
+# exists for checkout ergonomics on a generated payload, not to make a
+# failing test pass by coupling its correctness to this file. Uses
+# text=auto rather than a bare text: the exporter ships binaries by design
+# (see Export-Account.ps1's NUL-byte handling and its PNG payload test),
+# and a bare text forces line-ending conversion on binary content too,
+# corrupting it. text=auto lets git skip that conversion on files it
+# detects as binary, while still giving text files the same eol=lf the
+# rules above already give *.sh and the hook filenames under it.
+account/claude/** text=auto eol=lf
