@@ -1319,6 +1319,69 @@ describe("identity gate — building the pattern set spawns no process per decla
 });
 
 // ---------------------------------------------------------------------------
+// #172. identity_regex_escape returned non-zero when its sed crashed but left
+// $identity_escaped holding sed's partial stdout rather than clearing it.
+// Nothing reads the value today -- the only caller (identity_load) checks
+// the status and refuses -- so this pins the producer directly instead of
+// through a caller that already fails closed on the status alone, and
+// asserts the VALUE, not just the exit code: a fix that only cleared some
+// other variable, or that only changed the status, would still pass a test
+// that checked rc alone.
+// ---------------------------------------------------------------------------
+
+/** Test double for `sed`: writes partial output to stdout -- the shape of a
+ * sed that crashes mid-substitution, per #172's "ESCAPE_RC=1, VALUE=[partial]"
+ * -- then exits 1, so identity_regex_escape's `&& printf X` sentinel never
+ * runs and the pre-fix code captured this partial text verbatim into
+ * $identity_escaped. */
+function installPartialOutputCrashingSedStub(): string {
+  const stubDir = mkdtempSync(join(tmpdir(), "identity-escapecrash-"));
+  tempDirs.push(stubDir);
+  const stubPath = join(stubDir, "sed");
+  writeFileSync(stubPath, ["#!/bin/sh", "printf 'partial'", "exit 1", ""].join("\n"));
+  chmodSync(stubPath, 0o755);
+  return stubDir;
+}
+
+describe("identity gate — identity_regex_escape clears identity_escaped on a crashed sed (#172)", () => {
+  test("a crashed escape sed leaves identity_escaped empty, not sed's partial output", () => {
+    const dir = mkdtempSync(join(tmpdir(), "identity-escapecrash-run-"));
+    tempDirs.push(dir);
+    const outDir = join(dir, "out");
+    mkdirSync(outDir, { recursive: true });
+    const stubDir = installPartialOutputCrashingSedStub();
+
+    const driver = [
+      "#!/bin/sh",
+      '. "$1"',
+      "identity_escaped=PRESET",
+      'identity_regex_escape "a declared entry"',
+      "RC=$?",
+      'printf "%s" "$RC" > "$2/rc"',
+      'printf "%s" "$identity_escaped" > "$2/value"',
+      "",
+    ].join("\n");
+    const driverPath = join(dir, "driver.sh");
+    writeFileSync(driverPath, driver);
+
+    const sh = posixSh();
+    const shDir = posixShDir();
+    const basePath = shDir ? `${process.env.PATH ?? ""}${delimiter}${shDir}` : (process.env.PATH ?? "");
+    const env = { ...process.env, PATH: `${stubDir}${delimiter}${basePath}` };
+
+    const run = Bun.spawnSync([sh, driverPath, LIB_SRC, outDir], { cwd: dir, env, stdout: "pipe", stderr: "pipe" });
+    if (run.exitCode !== 0) {
+      throw new Error(`driver exited ${run.exitCode}: ${run.stderr.toString()}`);
+    }
+
+    const rc = readFileSync(join(outDir, "rc"), "utf8");
+    const value = readFileSync(join(outDir, "value"), "utf8");
+    expect(rc).not.toBe("0");
+    expect(value).toBe("");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // #113 follow-up. The first #113 patch replaced identity_regex_escape's
 // `printf | sed` pipeline with a per-character parameter-expansion loop that
 // peeled one character at a time. That loop is not byte-transparent: the
