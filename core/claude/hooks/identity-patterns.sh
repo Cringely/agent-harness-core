@@ -588,31 +588,29 @@ identity_json_array() {
 # one, the one #113 actually asked for, so the reason was undocumented
 # until #169 flagged the gap.
 #
-# The rejection is that a single pass over the raw array text is the same
-# shape that produced #91c (a declared entry's own `]`, matched by an
-# earlier single-regex extractor that took the first `]` it saw as the
-# array's close) and #135's F1, F2, and F7 (a non-ASCII entry carrying its
-# own `]`, an array truncated right after its `[`, a stray value after the
-# real closing `]`). Every one of those bugs came from treating the array
-# boundary as something a regex or a short awk pattern could find in one
-# step, rather than consuming it token by token the way identity_json_token
-# does above. A batched awk/sed program folding parse, escape and
-# pattern-build into one pass would still need that same token-by-token
-# care to avoid the identical bugs -- it is not a simpler version of
-# identity_json_token, it is the same walk rewritten in a language this
-# file does not otherwise use for it, on the function that four review
-# rounds (#91, #135) already hardened.
+# personal_terms_parse below already runs exactly this: a single batched
+# awk pass over this same flat {"key": ["..."]} shape, token by token, with
+# the same \uXXXX policy (its own COST note, #113). This file already does
+# the walk a batched pass here would need, in the language #113 asked for
+# -- so the hold-off is not that this file avoids awk/sed for that shape.
+#
+# The hold-off is what a rewrite would put at risk. identity_json_array is
+# the parser #91 and #135 took four review rounds to harden, proved
+# against the 26-row ARRAY_MATRIX in test/identity-gate.test.ts, and
+# folding it into one pass means re-proving that matrix byte for byte on
+# new code.
 #
 # What IS batched already: identity_regex_escape below takes one sed call
 # for the whole newline-joined entry list rather than one per entry (see
 # its own "ONE CALL FOR THE WHOLE ENTRY LIST" note), and identity_json_array
-# above takes one sed call per key to find where that key's array starts.
-# The remaining win a full single-pass rewrite would buy is those two
-# key-extraction sed calls collapsing toward one call total -- on a
-# control that already dropped from per-entry to fixed-cost. Reopening
-# #91c/#135's regression surface for that is the same trade #163's PR body
-# already declined for batching identity_control's per-canary grep, applied
-# to the parsing side instead of the verification side.
+# above takes one tr call plus one sed call per key to find where that
+# key's array starts. Moving identity_json_array onto a
+# personal_terms_parse-style pass would save that fixed tr plus sed per
+# key per run -- a real but small win on a control that already dropped
+# from per-entry to fixed cost, against re-proving a parser #91 and #135
+# already had to repair twice. Recorded here as a follow-up worth
+# reconsidering if that cost is ever paid for another reason, not as a
+# rejected idea.
 #
 # Resolves the identity file, derives the workstation username and machine
 # hostname, and builds IDENTITY_PATTERN (one grep -iE alternation covering
