@@ -22,8 +22,7 @@
 // missing the fields classification needs, or the hook itself errors. A
 // control that blocks every dispatch gets disabled within a day, and then
 // nothing is gated at all, so an unparseable payload passes unchecked rather
-// than taking the gate down. See test/agent-worktree-gate.test.ts:199-203 and
-// :409 for the payload shapes this trade covers.
+// than taking the gate down.
 //
 // Classification is DERIVED, not hand-listed: the ground truth for "which
 // roles can write the repo" already lives in `.claude/agents/<type>.md`
