@@ -136,6 +136,9 @@ describe("computeVerification()", () => {
     // a run line in the synthetic WORKFLOW fixture above, so the declared-mapping lookup finds no
     // covered entry and this stays incomplete under this fixture even after #152's fix.
     "install/AccountShared.ps1",
+    // Its declared suite (Account-Hooks.Tests.ps1) is on a run line in the real workflow, not
+    // the synthetic WORKFLOW fixture above, so this stays incomplete under this fixture even
+    // after #209's fix. The real-workflow case is covered separately below.
     "account/claude/hooks/Scan-MemorySecrets.PS1",
     // Lowercase "tests": a case-insensitive rewrite would collide with the real, differently-cased
     // covered suite name and read this as covered. It is not the suite CI actually runs (m1).
@@ -164,6 +167,14 @@ describe("computeVerification()", () => {
       "        run: pwsh -NoProfile -File install/Export-Account.Tests.ps1",
     ].join("\r\n");
     expect(verify(green(), ["install/AccountShared.ps1"], onlyExport).state).toBe("passed");
+  });
+
+  // #209: account/claude/hooks/*.ps1 has no sibling suite, but install/Account-Hooks.Tests.ps1
+  // exercises it and runs on a line in the real workflow (#207), so the declared mapping in
+  // SHARED_MODULE_SUITES must read the file as covered. Case-insensitive on the extension only
+  // (m1, same as the incomplete case above): "PS1" still resolves to the declared entry.
+  test("account/claude/hooks/Scan-MemorySecrets.PS1 is covered by its declared suite on the real workflow", () => {
+    expect(verify(green(), ["account/claude/hooks/Scan-MemorySecrets.PS1"], REAL_WORKFLOW).state).toBe("passed");
   });
 
   test("no workflow file at the base commit: incomplete", () => {
