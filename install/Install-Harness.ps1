@@ -209,6 +209,12 @@ $ceremonyCommandPattern = 'wave-close-handoff\.sh'
 $ceremonyKeys = @($ceremonyAgentNames | ForEach-Object { "agents/$_" }) +
     @($ceremonyHookNames | ForEach-Object { "hooks/$_" })
 
+# The three hooks git itself invokes (no extension, unlike the Claude Code PostToolUse hooks
+# also shipped from this directory as .ts/.sh files). Named once and reused by the chmod loop
+# and by -Audit's reachability check (#136/#126) rather than repeated as two literal arrays
+# that could name a different set after one of them is edited.
+$gitHookNames = @('pre-commit', 'pre-push', 'commit-msg')
+
 function Get-FileHashHex {
     param([string]$Path)
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
@@ -643,6 +649,70 @@ function Test-GitAnswersForTarget {
     $indexOwn = $own[$own.Count - 1]
     if ($IsWindows) { return $indexAsRun -ieq $indexOwn }
     return $indexAsRun -ceq $indexOwn
+}
+
+# Whether core.hooksPath, as git currently answers for this target, actually routes to the
+# harness's own hooks directory. #136/#126: a git hook file can be present, tracked and
+# byte-identical to core while git never invokes it, because git reads hooks from exactly one
+# directory and core.hooksPath names it -- a fact no per-file hash comparison can see. Used by
+# -Audit's reachability check below.
+#
+# Not shared with the install-time wiring section further down, which computes a related but
+# not identical answer (it also needs $gitHooksDir and $existingHookFiles, to decide whether
+# writing core.hooksPath now would replace someone else's un-pathed hooks). Duplicating the
+# git-answers-for-this-target lookup here, rather than refactoring both call sites onto one
+# function, keeps this audit-only fix from touching the wiring section's already-tested
+# behavior -- #136/#126 scope is the audit report and the install message, not a redesign of
+# hooksPath detection.
+#
+# Returns a hashtable: GitAnswers (bool, Test-GitAnswersForTarget's #145 foreign-repository
+# guard passed), Reachable (bool, core.hooksPath resolves to $HooksDstAbs) and Display (the raw
+# core.hooksPath value for messages, or $null when unset).
+function Get-HooksPathReachability {
+    param([string]$AbsTarget, [string]$HooksDstAbs)
+
+    $gitDirRaw = $null
+    $gitCheck = & git -C $AbsTarget rev-parse --git-dir 2>$null
+    if ($LASTEXITCODE -eq 0) { $gitDirRaw = $gitCheck }
+
+    if (-not $gitDirRaw -or -not (Test-GitAnswersForTarget -AbsTarget $AbsTarget -IgnoreIndex)) {
+        return @{ GitAnswers = $false; Reachable = $false; Display = $null }
+    }
+
+    # config --get is kept only for the display string in the audit note (the raw
+    # core.hooksPath value, or $null when unset). It is not used to resolve reachability: a
+    # relative core.hooksPath is resolved by git against the worktree TOPLEVEL, never against
+    # $AbsTarget, and Join-Path-ing it onto $AbsTarget gave the right answer only when
+    # $AbsTarget already was the toplevel. With a subdirectory target and a relative
+    # core.hooksPath, that produced a path underneath the subdirectory that happened to match
+    # $HooksDstAbs when the subdirectory's own .claude/hooks existed, reporting reachable while
+    # git actually read the hooks directory at the toplevel (verified live: a commit from a
+    # subdirectory target fired the toplevel's hook, not the subdirectory's).
+    $currentHooksPath = $null
+    $chpCheck = & git -C $AbsTarget config --get core.hooksPath 2>$null
+    if ($LASTEXITCODE -eq 0) { $currentHooksPath = $chpCheck }
+
+    # `rev-parse --git-path hooks` asks git for the same directory it would actually read: it
+    # honours core.hooksPath when set (resolved the way git resolves it, toplevel-relative, not
+    # $AbsTarget-relative) and falls back to <git-dir>/hooks when unset. Normalised the same way
+    # Get-GitLocation normalises --git-common-dir and --git-path index above: join onto
+    # $AbsTarget only when the printed path is not already rooted (git prints it relative to the
+    # -C directory when the repository was discovered rather than named by an environment
+    # variable), then GetFullPath and trim trailing separators before comparing.
+    $reachable = $false
+    $hooksPathRaw = $null
+    $hpCheck = & git -C $AbsTarget rev-parse --git-path hooks 2>$null
+    if ($LASTEXITCODE -eq 0) { $hooksPathRaw = $hpCheck }
+    if ($hooksPathRaw) {
+        $resolved = [string]$hooksPathRaw
+        if ($IsWindows) { $resolved = $resolved.Replace('/', '\') }
+        if (-not [System.IO.Path]::IsPathRooted($resolved)) { $resolved = Join-Path $AbsTarget $resolved }
+        $resolved = [System.IO.Path]::GetFullPath($resolved).TrimEnd([char[]]@('\', '/'))
+        $d = $HooksDstAbs.TrimEnd([char[]]@('\', '/'))
+        $reachable = if ($IsWindows) { $resolved -ieq $d } else { $resolved -ceq $d }
+    }
+
+    return @{ GitAnswers = $true; Reachable = $reachable; Display = $currentHooksPath }
 }
 
 # Decision step. Reads on-disk presence, the tracked answer and the ignored answer, applies the
@@ -1145,6 +1215,29 @@ if ($Audit) {
         $results.Add([pscustomobject]@{ File = $key; Status = $status })
     }
 
+    # Reachability (#136/#126). Computed once per run, not once per hook key: it depends on the
+    # target's current core.hooksPath, not on any individual file's content, and re-checking it
+    # per key would just ask git the same question three times. Content status (in-sync,
+    # core-updated, ...) still needs its own per-key hash comparison above -- reachability and
+    # drift are different facts about the same file, so this appends to the status the loop
+    # already computed rather than replacing it.
+    $hooksDstAbsForAudit = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($hooksDst)
+    $hooksWiring = Get-HooksPathReachability -AbsTarget (Resolve-Path -LiteralPath $Target).Path -HooksDstAbs $hooksDstAbsForAudit
+    if ($hooksWiring.GitAnswers -and -not $hooksWiring.Reachable) {
+        $hooksPathNote = if ($hooksWiring.Display) { $hooksWiring.Display } else { '(unset -- git default .git/hooks)' }
+        foreach ($gitHookName in $gitHookNames) {
+            $hookKey = "hooks/$gitHookName"
+            # Only a row for a hook file actually present on disk gets the annotation: 'missing'
+            # and 'not-installed' rows already say there is nothing for git to run, and layering
+            # an unreachability note on top of "there is no file" would misstate the finding.
+            if (-not (Test-Path -LiteralPath (Join-Path $claudeDir $hookKey) -PathType Leaf)) { continue }
+            $hookRow = $results | Where-Object { $_.File -eq $hookKey } | Select-Object -First 1
+            if ($hookRow) {
+                $hookRow.Status = "$($hookRow.Status) (unreachable: core.hooksPath -> $hooksPathNote)"
+            }
+        }
+    }
+
     if (-not $Quiet) { $results | Format-Table -AutoSize | Out-String | Write-Host }
 
     # 'overlay (accepted)' is silent by design: the pin exists precisely so a deliberate fork
@@ -1388,7 +1481,7 @@ Get-ChildItem -LiteralPath $hooksSrc -File | Where-Object { $_.Name -ne '.gitkee
 # sourced function library, never executed directly by git or anything
 # else, so it needs no executable bit at all.
 if (-not $IsWindows) {
-    foreach ($gitHookName in @('pre-commit', 'pre-push', 'commit-msg')) {
+    foreach ($gitHookName in $gitHookNames) {
         $gitHookDst = Join-Path $hooksDst $gitHookName
         if (Test-Path -LiteralPath $gitHookDst) {
             & chmod +x $gitHookDst
@@ -1656,12 +1749,12 @@ else {
         $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'unchanged' })
     }
     elseif ($currentHooksPath) {
-        Write-Host "Skipping git hooksPath wiring: core.hooksPath is already set to '$currentHooksPath'. To use the harness pre-commit hook instead, run: git -C `"$Target`" config core.hooksPath `"$hooksDstAbs`""
+        Write-Host "Skipping git hooksPath wiring: core.hooksPath is already set to '$currentHooksPath'. Git reads hooks from exactly one directory, so none of the harness's git hooks (commit-msg, pre-commit, pre-push) will run until this is resolved. See `"core.hooksPath and other hook managers`" in .claude/guardrails.md for how to chain them in by hand, or replace the current wiring: git -C `"$Target`" config core.hooksPath `"$hooksDstAbs`""
         $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'skipped-already-set' })
     }
     elseif ($existingHookFiles.Count -gt 0) {
         $names = ($existingHookFiles | Select-Object -ExpandProperty Name) -join ', '
-        Write-Host "Skipping git hooksPath wiring: $gitHooksDir already has hook(s) ($names) that core.hooksPath would replace. To wire the harness pre-commit hook anyway, run: git -C `"$Target`" config core.hooksPath `"$hooksDstAbs`""
+        Write-Host "Skipping git hooksPath wiring: $gitHooksDir already has hook(s) ($names) that core.hooksPath would replace. Git reads hooks from exactly one directory, so none of the harness's git hooks (commit-msg, pre-commit, pre-push) will run until this is resolved. See `"core.hooksPath and other hook managers`" in .claude/guardrails.md for how to chain them in by hand, or wire the harness hooks anyway: git -C `"$Target`" config core.hooksPath `"$hooksDstAbs`""
         $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'skipped-existing-hooks' })
     }
     else {
