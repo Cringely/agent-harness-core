@@ -35,7 +35,7 @@ Describe "Install-Harness" {
         # verbatim from the issue thread's own plugin-independent restatement.
         $guardrails | Should -Match 'exist as artifacts before implementation starts'
         # Ported from account/claude/rules/fix-quality.md's "Work has to be able to end".
-        $guardrails | Should -Match 'Finding something files it'
+        $guardrails | Should -Match 'never opens an issue of its own'
         # #217: the Docs verdict top-block line, above the session-start-end marker so the
         # SessionStart hook reprints it every session.
         $guardrails | Should -Match 'Docs: README still accurate'
