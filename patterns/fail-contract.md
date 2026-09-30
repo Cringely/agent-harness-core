@@ -83,9 +83,24 @@ input the gate cannot classify is exactly the input least likely to be routine. 
 The unparseable case is disproportionately the new role, the hand-edited definition, the file
 someone is midway through writing, and those are the cases where a wrong exemption costs the most.
 
-One caveat, speculative rather than observed: if a gate ever sits on a path traveled by an agent
-reading untrusted content, prompt injection puts a real adversary back in the picture and the book's
-original justification returns with it.
+One caveat, and it is observed rather than conjectured: where a gate sits on a path traveled by an
+agent reading untrusted content, prompt injection puts a real adversary back in the picture and the
+book's original justification returns with it. Prompt injection through repository and web content
+has happened in production. In Clinejection (disclosed 2026-02-09), the Cline repository's issue
+triage workflow interpolated the issue title into a Claude prompt running with shell access, so an
+attacker's title had the runner install a package whose preinstall script poisoned the Actions cache
+shared with the nightly release workflow, and the release run then leaked its npm, VS Code Marketplace
+and OpenVSX publish tokens. Eight days later an unauthorised `cline@2.3.0` was published with the npm
+token a rotation had missed. Researcher write-up:
+<https://adnanthekhan.com/posts/clinejection/>. Vendor post-mortem:
+<https://cline.bot/blog/post-mortem-unauthorized-cline-cli-npm>. GitInject (Isbarov, Suleymanov,
+Shumailov and Kantarcioglu, 2026) ran injection payloads through real GitHub Actions workflow runs in
+ephemeral repositories against the review and triage agents of four providers, and every provider was
+susceptible to at least one attack class in its default configuration, among them token exfiltration
+into pull request comments and approval of code carrying a planted defect. Paper:
+<https://arxiv.org/abs/2606.09935>. This repository's own instance of the separation: the pull
+request reviewer model reads the diff with no tools, and the code holding the App key computes the
+verdict from its structured output (`tools/pr-review`, #120).
 
 ## Related
 
