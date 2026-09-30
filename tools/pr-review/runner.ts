@@ -20,7 +20,8 @@
 // output_style. memory_paths is the primary check below: no clean account configuration can make
 // that key appear at all, where plugins and output_style are also clean on an account that has no
 // plugins and uses the default style. plugins and output_style stay checked too, as a second signal
-// for the same failure, not because either closes a gap the memory_paths check leaves open.
+// for that failure. Since #238 the plugins check is also the only signal for CLI built-in plugins,
+// which load with memory_paths absent, so it must not be relaxed.
 //
 // That capture no longer holds on its own (#238). From claude 2.1.283 the CLI registers built-in
 // plugins in every session, headless included, and --safe-mode, --setting-sources "", --bare and an
@@ -108,7 +109,7 @@ function killProcessTree(pid: number): void {
 }
 
 // Built-in plugins switched off through --settings (#238). The current names, then the 2.1.283-2.1.284
-// names; a name the running CLI does not know is ignored.
+// names. A name the running CLI does not know is ignored.
 export const BUILTIN_PLUGINS: readonly string[] = [
   "cc-plugin-agents-md@builtin",
   "cc-plugin-telemetry@builtin",
@@ -219,9 +220,8 @@ export function parseStreamJson(stdout: string, exitCode: number | null): Runner
   if ("memory_paths" in init) {
     return { ok: false, reason: "the reviewer session's init event carried memory_paths, so --setting-sources may not have excluded the operator's configuration" };
   }
-  // Secondary signal for the same failure as the memory_paths check above, not coverage for a gap
-  // it leaves open: an account with no plugins or a default style is clean on both of these while
-  // still failing the memory_paths check if the exclusion did not hold.
+  // A second signal for the memory_paths failure above, and since #238 the ONLY signal for CLI
+  // built-in plugins, which load with memory_paths absent. Keep it strict: an unknown plugin fails closed.
   if (!Array.isArray(init.plugins) || init.plugins.length !== 0) {
     return { ok: false, reason: "the reviewer session loaded plugins, so --setting-sources may not have excluded the operator's configuration" };
   }
