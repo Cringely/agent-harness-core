@@ -31,11 +31,17 @@
 # always (a broken hook must never block a merge).
 
 set -eu
-# No pipeline here yet, but see session-start-drift-check.sh:41-45, "Guarded rather than bare",
+# No pipeline here yet, but see session-start-drift-check.sh:42-46, "Guarded rather than bare",
 # for why this stays guarded.
 if (set -o pipefail) 2>/dev/null; then set -o pipefail; fi
 
 payload="$(cat)"
+
+# Copilot CLI also runs .claude/settings.json hooks (#227). Stand down there, but never while
+# CLAUDECODE is set, so a Claude Code session always runs the rest.
+if [ -n "${COPILOT_CLI:-}" ] && [ -z "${CLAUDECODE:-}" ]; then
+  exit 0
+fi
 
 case "$payload" in
   *"gh pr merge"*) ;;

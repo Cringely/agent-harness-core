@@ -35,6 +35,8 @@ function makeRepo() {
   git(dir, "config", "user.email", "fixture@example.test");
   git(dir, "config", "core.autocrlf", "false");
   write(dir, "CONTRIBUTING.md", "BASE CONTRIBUTING\n");
+  write(dir, "README.md", "BASE README\n");
+  write(dir, "tools/pr-review/README.md", "BASE PR-REVIEW README\n");
   write(dir, ".github/workflows/test.yml", "jobs:\n");
   write(dir, "src/a.ts", "export const a = 1;\n");
   write(dir, "src/removed.ts", "gone\n");
@@ -42,6 +44,9 @@ function makeRepo() {
   git(dir, "commit", "-q", "-m", "base");
   const base = git(dir, "rev-parse", "HEAD");
   write(dir, "CONTRIBUTING.md", "HEAD CONTRIBUTING\n");
+  // Written so base and head copies differ: a living-docs test that read HEAD instead of BASE
+  // would still pass if this file only had one version across both commits.
+  write(dir, "README.md", "HEAD README\n");
   write(dir, "src/a.ts", "export const a = 2;\n");
   write(dir, "big.txt", "x".repeat(MAX_HEAD_FILE_BYTES + 1));
   write(dir, "blob.bin", Buffer.from([0x00, 0x01, 0x02]));
@@ -68,9 +73,9 @@ describe("LocalGitSource.snapshot()", () => {
     expect(snap.linkedIssues).toEqual(issues);
     expect(snap.diff).toContain("-export const a = 1;");
     expect(snap.diff).toContain("+export const a = 2;");
-    expect(snap.changedFiles).toEqual(["CONTRIBUTING.md", "big.txt", "blob.bin", "src/a.ts", "src/removed.ts"]);
+    expect(snap.changedFiles).toEqual(["CONTRIBUTING.md", "README.md", "big.txt", "blob.bin", "src/a.ts", "src/removed.ts"]);
     expect(snap.commitMessages).toEqual(["feat: change a\n\nsecond paragraph"]);
-    expect(snap.headFiles.map((f) => f.path)).toEqual(["CONTRIBUTING.md", "src/a.ts"]);
+    expect(snap.headFiles.map((f) => f.path)).toEqual(["CONTRIBUTING.md", "README.md", "src/a.ts"]);
     expect(snap.omittedFiles).toEqual(["big.txt", "blob.bin"]);
     expect(snap.workflowText).toBe("jobs:\n");
     expect(snap.changedFilesComplete).toBe(true);
@@ -81,6 +86,16 @@ describe("LocalGitSource.snapshot()", () => {
     const snap = await new LocalGitSource({ repoDir: dir, base: "HEAD~1", head: "HEAD", checks: "passed" }).snapshot();
     expect(snap.trustedContext).toEqual([{ path: "CONTRIBUTING.md", content: "BASE CONTRIBUTING\n" }]);
     expect(snap.headFiles.find((f) => f.path === "CONTRIBUTING.md")?.content).toBe("HEAD CONTRIBUTING\n");
+  });
+
+  // #217: same base-commit mechanism as trusted context above.
+  test("living documents are the base commit's copy", async () => {
+    const { dir } = makeRepo();
+    const snap = await new LocalGitSource({ repoDir: dir, base: "HEAD~1", head: "HEAD", checks: "passed" }).snapshot();
+    expect(snap.livingDocs).toEqual([
+      { path: "README.md", content: "BASE README\n" },
+      { path: "tools/pr-review/README.md", content: "BASE PR-REVIEW README\n" },
+    ]);
   });
 
   test("an unknown revision rejects rather than reviewing something else", async () => {

@@ -447,7 +447,7 @@ const expectedSegments = (extras: string[]): string[] =>
 // makes it padding rather than a guard.
 describe("prose-lint exemption — the three mechanisms carry one segment set", () => {
   test.each(AGENT_TRAFFIC_SEGMENTS)("lint-doc-prose.ts matches %s/ as a segment", (segment) => {
-    const wanted = `(^|\\/)${segment.replace(/\./g, "\\.")}\\/`;
+    const wanted = `(^|\\/)${segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\/`;
     expect(tsSkipSources().some((src) => src.startsWith(wanted))).toBe(true);
   });
 

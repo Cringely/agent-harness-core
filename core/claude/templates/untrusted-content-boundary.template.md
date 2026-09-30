@@ -11,8 +11,9 @@ for this repo, not copied from either file.
 This file is the source of record for the untrusted-input block that every core agent def
 carries. It is reference material for whoever edits those defs, not an installed artifact:
 `Install-Harness.ps1` copies templates by explicit name (guardrails, scratch.gitignore,
-ceremony-ledger, settings.hooks.json) and this file is not among them. Agent defs install as a
-directory glob instead, so a def pointing at this path would dangle in every installed project.
+manifest-local.gitignore, ceremony-ledger, settings.hooks.json) and this file is not among them.
+Agent defs install as a directory glob instead, so a def pointing at this path would dangle in
+every installed project.
 The block below is inlined into the defs rather than referenced from them.
 
 ## Editing contract

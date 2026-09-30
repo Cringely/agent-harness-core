@@ -63,6 +63,18 @@ Write "entry needed here, source: [what should be cited]" instead and leave the 
 owns the doc. A claim that sounds plausible is not the same as a claim that's true, and an uncited
 one is visible in review even when it reads fine.
 
+## Your output is not self-certifying
+
+Citing sources as you write does not make this pass its own proof. A separate fact-check stage, run
+against the diffs, the tracker and the event history rather than against your draft, is expected to
+find real errors in what you wrote. Thirteen recorded incidents in one project found false claims
+in status, milestone and lessons prose that had every mechanical gate green: activity that never
+happened ("harvested" when nothing was harvested), a just-fixed bug described as still live, content
+deleted and described as moved, and a duplicate entry justified by misquoting the entry it
+duplicated. Treat a correction from that stage as normal, not as a sign the source discipline above
+can be skipped. It is the second layer, and the "No invented narrative" rule above is the first. The core repository's
+`patterns/narrative-fact-check-stage.md` has the shape and the receipts.
+
 ## Checklist, run in order
 
 1. **Status doc** (`STATE.md` or whatever the project calls its current-state summary).
@@ -72,8 +84,10 @@ one is visible in review even when it reads fine.
    narrative aside, falls under the no-invented-narrative rule above. A milestone or gate counts
    as done only when every item in its own definition is closed, checked against the actual
    tracker, not against how finished the batch feels.
-3. **README's status or progress section.** Update it when the milestone doc moved. Keep it a
-   short summary that points to the fuller doc, not a duplicate of it.
+3. **Each declared living doc's status or progress section.** README.md by default, plus any doc
+   the project names in guardrails.md's Project-specific rules section. Update whichever one no
+   longer matches what merged. Keep each a short summary that points to the fuller doc, not a
+   duplicate of it.
 4. **Generated views** (`docs/backlog.md`, a roadmap, or similar). If the project
    regenerates one of these from a script, run that script rather than hand-editing the output,
    and treat the generated file as read-only otherwise. Nothing to do here if the project has no

@@ -61,6 +61,7 @@ const input = (overrides: Partial<RenderInput> = {}): RenderInput => ({
   toolRevision: TOOL_SHA,
   toolDirty: false,
   changedFiles: ["docs/@octocat.md"],
+  docsVerdictLine: "Docs: README still accurate: touches only test fixtures.",
   ...overrides,
 });
 
@@ -211,6 +212,8 @@ describe("renderReviewBody(): refuses malformed code-side values", () => {
     // guard in front of it, so a non-string basis rendered outside a fence unchecked.
     ["a null basis", { basis: null }],
     ["a numeric basis", { basis: 42 }],
+    // #217: docsVerdictLine must be a string or null, never coerced.
+    ["a numeric docsVerdictLine", { docsVerdictLine: 42 }],
     [
       "a basis object whose toString mutates after validation",
       { basis: mutatingToString("ok", "a` @octocat <img src=x>") },
@@ -241,6 +244,30 @@ describe("renderReviewBody(): refuses malformed code-side values", () => {
     const bad = { ...hostileFinding("naming"), severity: "Correctness" } as unknown as Finding;
     const body = { summary: "s", findings: [...valid, bad], observed_instructions: [] };
     expect(() => renderReviewBody(input({ output: body }))).toThrow();
+  });
+});
+
+// #217: the Docs verdict line comes from the pull request body, code-matched rather than model-
+// written, but it is attacker-supplied text like every other pull-request string and renders the
+// same way: quoted verbatim when found, a code-authored notice naming both forms when not.
+describe("renderReviewBody(): the Docs verdict section", () => {
+  test("a matched line is quoted verbatim under its own heading", () => {
+    const body = renderReviewBody(input({ docsVerdictLine: "Docs: README updated: the new flag is documented." }));
+    expect(body).toContain("#### Docs verdict");
+    expect(body).toContain("Docs: README updated: the new flag is documented.");
+  });
+
+  test("no matched line renders the code-authored notice naming both forms", () => {
+    const body = renderReviewBody(input({ docsVerdictLine: null }));
+    expect(body).toContain("#### Docs verdict");
+    expect(body).toContain("No Docs verdict line found");
+    expect(body).toContain("Docs: README still accurate: <what was checked>");
+    expect(body).toContain("Docs: README updated: <what changed>");
+  });
+
+  test("a hostile matched line stays inside its fence", () => {
+    const body = renderReviewBody(input({ docsVerdictLine: `Docs: README updated: ${HOSTILE}` }));
+    expect(outsideFences(body)).not.toContain("octocat");
   });
 });
 

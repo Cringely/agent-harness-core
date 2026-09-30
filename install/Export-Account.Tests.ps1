@@ -1439,7 +1439,14 @@ exit 0
     # catches it, because every other WslHome test passes the parameter explicitly.
     #
     # `wsl -e sh -c 'echo $HOME'` returns that distro's passwd entry. Nothing makes it well-formed.
-    It "judges a RESOLVED WslHome too, not only a supplied one: <label>" -ForEach @(
+    #
+    # Issue #151: -Skip on Linux, not fixed to run there. The stub answers `Get-Command wsl` only
+    # on Windows -- PowerShell's non-Windows command resolution matches a literal filename, never
+    # PATHEXT, so a Linux run finds no `wsl` at all and $WslHome never resolves, which is a gap in
+    # the test double rather than a real difference in what this It is exercising. But the thing
+    # being exercised, a Windows host resolving its own WSL distro's $HOME through `wsl.exe`, has
+    # no Linux analogue to test: a genuine Linux box never has a `wsl` binary, real or simulated.
+    It "judges a RESOLVED WslHome too, not only a supplied one: <label>" -Skip:(-not $IsWindows) -ForEach @(
         @{ Echo = '/home/stubwsl/'; Throws = 'literal';   Label = 'a distro whose $HOME ends in a slash' }
         @{ Echo = '/';              Throws = 'predicate'; Label = 'a distro whose $HOME is a bare slash' }
     ) {
@@ -2219,7 +2226,10 @@ exit 0
         finally { Remove-Item -Recurse -Force $stand, $out, $ident -ErrorAction SilentlyContinue }
     }
 
-    It "resolves -WslHome from wsl when the caller omits the parameter" {
+    # Issue #151: -Skip on Linux, same reason as the RESOLVED-WslHome It above. The `wsl.cmd`
+    # stub only answers Get-Command on Windows, and a real Linux host has no `wsl` binary of its
+    # own for the stub to stand in for.
+    It "resolves -WslHome from wsl when the caller omits the parameter" -Skip:(-not $IsWindows) {
         # Backlog item 24: ablating the default-resolution block left the whole suite green,
         # because every test touching the parameter passed it explicitly -- a populated path in
         # the folding Context above and an empty string in the fail-closed It above it. Neither

@@ -35,7 +35,10 @@ Describe "Install-Harness" {
         # verbatim from the issue thread's own plugin-independent restatement.
         $guardrails | Should -Match 'exist as artifacts before implementation starts'
         # Ported from account/claude/rules/fix-quality.md's "Work has to be able to end".
-        $guardrails | Should -Match 'Finding something files it'
+        $guardrails | Should -Match 'never opens an issue of its own'
+        # #217: the Docs verdict top-block line, above the session-start-end marker so the
+        # SessionStart hook reprints it every session.
+        $guardrails | Should -Match 'Docs: README still accurate'
     }
 
     It "merges hook registrations into existing settings.json without clobbering" {
@@ -552,6 +555,150 @@ Describe "Install-Harness" {
             Should -Be (Resolve-Path -LiteralPath "$script:target/.claude/hooks").Path
     }
 
+    It "install prints a plain warning naming the three git hooks and pointing at guardrails.md when core.hooksPath is already set" {
+        # #136/#126: the pre-fix message only named "the harness pre-commit hook", which
+        # undersold the finding -- commit-msg and pre-push are equally inert, not just pre-commit.
+        & git -C $script:target init -q *>&1 | Out-Null
+        & git -C $script:target config core.hooksPath '.githooks' *>&1 | Out-Null
+        $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500
+        $out | Should -Match 'skipped-already-set'
+        $out | Should -Match 'none of the harness''s git hooks \(commit-msg, pre-commit, pre-push\) will run'
+        $out | Should -Match 'core\.hooksPath and other hook managers.*\.claude/guardrails\.md'
+    }
+
+    It "audit reports an installed git hook as unreachable, naming core.hooksPath, when core.hooksPath already pointed elsewhere at install time" {
+        # #136: the installer still writes the hook files under .claude/hooks/ when wiring is
+        # skipped, and a pre-fix audit compared their content against core and reported
+        # 'in-sync' -- true and misleading, since git never reads that directory here.
+        & git -C $script:target init -q *>&1 | Out-Null
+        & git -C $script:target config core.hooksPath '.githooks' *>&1 | Out-Null
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target | Out-Null
+
+        $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $audit | Should -Match 'hooks/pre-commit\s+in-sync \(unreachable: core\.hooksPath -> \.githooks\)'
+        $audit | Should -Match 'hooks/commit-msg\s+in-sync \(unreachable: core\.hooksPath -> \.githooks\)'
+        $audit | Should -Match 'hooks/pre-push\s+in-sync \(unreachable: core\.hooksPath -> \.githooks\)'
+        # The whole point: an unreachable hook must count as needing attention, not disappear
+        # into the 'in-sync' exclusion the way it did before the reachability note changed the
+        # status string.
+        $audit | Should -Not -Match 'All managed files in sync with core\.'
+    }
+
+    It "audit reports git hooks as unreachable when core.hooksPath is redirected after a clean install" {
+        # #126's point: wiring is decided once, at install time, but core.hooksPath can change
+        # any time afterward (a project adopting husky, or hand-editing config), and only a
+        # live re-check at audit time catches that.
+        & git -C $script:target init -q *>&1 | Out-Null
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target | Out-Null
+        $wiredAudit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $wiredAudit | Should -Match '(?m)hooks/pre-commit\s+in-sync\s*\r?$'
+        $wiredAudit | Should -Not -Match 'unreachable'
+
+        & git -C $script:target config core.hooksPath '.githooks' *>&1 | Out-Null
+        $driftedAudit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $driftedAudit | Should -Match 'hooks/pre-commit\s+in-sync \(unreachable: core\.hooksPath -> \.githooks\)'
+    }
+
+    It "audit resolves a relative core.hooksPath against the worktree toplevel, not against the target, for a subdirectory target" {
+        # #136 round-2: git resolves a relative core.hooksPath against the repository's
+        # toplevel, never against the -C directory it was asked through. A subdirectory
+        # target installs its own .claude/hooks, and the pre-fix Join-Path-onto-$AbsTarget
+        # resolution happened to land on that same directory, so the audit reported
+        # reachable while git actually read the toplevel's .claude/hooks (verified live: a
+        # commit from the subdirectory target fires the toplevel's hook, not the
+        # subdirectory's).
+        & git -C $script:target init -q *>&1 | Out-Null
+        $sub = Join-Path $script:target 'sub'
+        New-Item -ItemType Directory -Path $sub | Out-Null
+        & git -C $script:target config core.hooksPath '.claude/hooks' *>&1 | Out-Null
+
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $sub | Out-Null
+        $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $sub -Audit *>&1 | Out-String -Width 500
+        $audit | Should -Match 'hooks/pre-commit\s+in-sync \(unreachable: core\.hooksPath -> \.claude/hooks\)'
+        $audit | Should -Not -Match 'All managed files in sync with core\.'
+    }
+
+    It "install-time wiring resolves a relative core.hooksPath against the worktree toplevel, not against the target, for a subdirectory target" {
+        # #204: same defect as the audit-time case above (#136 round-2), one level earlier.
+        # The install-time $alreadyWired check joined a relative core.hooksPath onto $Target
+        # instead of asking git to resolve it, and for a subdirectory target that join landed
+        # on the subdirectory's own .claude/hooks -- which this same run had just created a
+        # moment earlier, copying the template files in regardless of wiring -- so the two
+        # paths coincided and the row falsely claimed 'unchanged'. Git itself never reads that
+        # directory here: a relative core.hooksPath resolves against the toplevel, so git
+        # reads the toplevel's .claude/hooks, which this test never creates.
+        & git -C $script:target init -q *>&1 | Out-Null
+        $sub = Join-Path $script:target 'sub'
+        New-Item -ItemType Directory -Path $sub | Out-Null
+        & git -C $script:target config core.hooksPath '.claude/hooks' *>&1 | Out-Null
+
+        $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $sub *>&1 | Out-String -Width 500
+        # The honest answer here is 'skipped-already-set': core.hooksPath is set, so the
+        # installer must not claim it points at the harness's hooks when git resolves it
+        # elsewhere, and must not overwrite it without being told to.
+        $out | Should -Match 'git:core\.hooksPath\s+skipped-already-set'
+        $out | Should -Not -Match 'git:core\.hooksPath\s+unchanged'
+
+        # Cross-check against git's own resolution, the same way the top-level wiring test
+        # above does: the claim in the table has to agree with the repository's actual
+        # behaviour, not just with whichever branch the installer happened to take. git
+        # prints a relative path here (discovered, not named, via -C), so join it onto $sub
+        # before resolving -- Resolve-Path alone would resolve it against the test's own
+        # working directory instead. GetFullPath, not Resolve-Path, because git's real answer
+        # (the toplevel's .claude/hooks) is never created by this test -- that absence is the
+        # point, and Resolve-Path would throw on it.
+        $actualHooksDirRaw = & git -C $sub rev-parse --git-path hooks
+        $LASTEXITCODE | Should -Be 0
+        $actualHooksDirAbs = if ([System.IO.Path]::IsPathRooted($actualHooksDirRaw)) { $actualHooksDirRaw } else { Join-Path $sub $actualHooksDirRaw }
+        $actualHooksDirAbs = [System.IO.Path]::GetFullPath($actualHooksDirAbs).TrimEnd([char[]]@('\', '/'))
+        $topLevelHooksAbs = (Join-Path (Resolve-Path -LiteralPath $script:target).Path '.claude\hooks').TrimEnd([char[]]@('\', '/'))
+        $subHooksDstAbs = (Resolve-Path -LiteralPath (Join-Path $sub '.claude/hooks')).Path.TrimEnd([char[]]@('\', '/'))
+        # git reads the toplevel's .claude/hooks, not the subdirectory's -- the exact
+        # coincidence the buggy Join-Path resolution missed.
+        $actualHooksDirAbs | Should -Be $topLevelHooksAbs
+        $actualHooksDirAbs | Should -Not -Be $subHooksDstAbs
+    }
+
+    It "install-time wiring does not falsely report skipped-already-set for a relative -Target and a relative core.hooksPath when the session location and the process CWD have diverged" {
+        # #222 round-2 repair, the opposite failure from the two tests above: the #204 fix
+        # resolved $currentHooksPath correctly, but still joined the relative
+        # `rev-parse --git-path hooks` output onto the raw, possibly-relative $Target and
+        # called [System.IO.Path]::GetFullPath, which resolves against the .NET process
+        # directory rather than PowerShell's own location (documented above
+        # Resolve-LayerPath, and exercised the same way by the C1/C2 tests in
+        # Export-Account.Tests.ps1: Set-Location from this repo's drive into a stand-in on
+        # another drive is what leaves the two apart in this environment).
+        #
+        # A relative -Target alone does not reach the buggy branch: when core.hooksPath was
+        # set by this installer it is always the absolute $hooksDstAbs, so `rev-parse
+        # --git-path hooks` echoes it back already rooted and the Join-Path/GetFullPath
+        # pair is skipped. The branch needs core.hooksPath itself to be relative too, which
+        # `git rev-parse --git-path hooks` then also prints relative when asked through a
+        # relative -C -- the situation an operator who wired hooks by hand with a relative
+        # value (a Husky-style setup, or an older harness install) leaves behind. Reproduced
+        # live against the pre-fix code before this test was written: the wrongly-joined
+        # path landed on this worktree's own .claude/hooks (wherever the .NET process
+        # directory happened to still point) instead of the stand-in target's, so 'unchanged'
+        # never matched and the row read 'skipped-already-set' for a target that was already
+        # correctly wired.
+        & git -C $script:target init -q *>&1 | Out-Null
+        & git -C $script:target config core.hooksPath '.claude/hooks' *>&1 | Out-Null
+
+        $startLocation = Get-Location
+        try {
+            Set-Location -LiteralPath $script:target
+            # The copy step that installs .claude/hooks's contents runs unconditionally,
+            # ahead of the wiring branch under test, so the relative core.hooksPath set
+            # above already names the directory the harness just populated.
+            $out = & "$PSScriptRoot/Install-Harness.ps1" -Target '.' *>&1 | Out-String -Width 500
+            $out | Should -Match 'git:core\.hooksPath\s+unchanged'
+            $out | Should -Not -Match 'skipped-already-set'
+        }
+        finally {
+            Set-Location -LiteralPath $startLocation
+        }
+    }
+
     It "skips core.hooksPath wiring, and writes into no repository at all, when a foreign GIT_DIR is exported" {
         # Issue #145. Every probe in the wiring block asks git through `-C $Target`, and git
         # exports GIT_DIR into every hook it runs, so an installer launched from a hook in
@@ -784,6 +931,83 @@ Describe "Install-Harness" {
         finally {
             Remove-Item -Recurse -Force $other
         }
+    }
+
+    It "wires core.hooksPath into the target's own local config, not a GIT_CONFIG redirect" {
+        # Issue #191. `git config` with no --file redirects through GIT_CONFIG when that
+        # variable is exported, and GIT_CONFIG is none of the four location variables
+        # Test-GitAnswersForTarget compares (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE,
+        # GIT_COMMON_DIR), so an exported GIT_CONFIG sails through that guard untouched and
+        # reaches the write plain. Without --local the write lands in whatever file
+        # GIT_CONFIG names, the results row still claims "set to $hooksDstAbs", and the
+        # target's own .git/config keeps no core.hooksPath at all.
+        & git -C $script:target init -q *>&1 | Out-Null
+        $redirectFile = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-test-gitconfig-" + [guid]::NewGuid())
+        # Saved and restored, not merely removed (#165): see the foreign-GIT_DIR test above.
+        $savedGitConfig = Get-Item -LiteralPath 'Env:GIT_CONFIG' -ErrorAction SilentlyContinue
+        $env:GIT_CONFIG = $redirectFile
+        try {
+            $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500
+        }
+        finally {
+            if ($savedGitConfig) { Set-Item -LiteralPath 'Env:GIT_CONFIG' -Value $savedGitConfig.Value }
+            else { Remove-Item -LiteralPath 'Env:GIT_CONFIG' -ErrorAction SilentlyContinue }
+        }
+
+        $out | Should -Match 'git:core\.hooksPath'
+        $out | Should -Match 'set to '
+
+        # The defect itself: the write must reach the target's own repository config, not the
+        # file GIT_CONFIG named. --local pins the read to that file regardless of GIT_CONFIG.
+        $actual = & git -C $script:target config --local --get core.hooksPath
+        $LASTEXITCODE | Should -Be 0
+        (Resolve-Path -LiteralPath $actual).Path |
+            Should -Be (Resolve-Path -LiteralPath "$script:target/.claude/hooks").Path
+
+        # And nothing was ever written into the GIT_CONFIG file: it was never created, because
+        # the write never opened it. A row claiming "set to" while this file is what actually
+        # changed would be the exact silent redirect #191 named.
+        Test-Path -LiteralPath $redirectFile | Should -BeFalse
+    }
+
+    It "does not overwrite an existing local core.hooksPath when GIT_CONFIG is exported to an empty or missing file" {
+        # Load-bearing review finding on #218. The first #191 fix cleared GIT_CONFIG only
+        # around the final write, but the `--get core.hooksPath` probe that decides
+        # skipped-already-set still read through it unguarded. Against an exported GIT_CONFIG
+        # naming an empty or missing file, git's `--get` on that file reports unset even
+        # though the target's own local config already has a real core.hooksPath (a
+        # Husky-style .husky setup, here), so the probe hid the existing wiring, the
+        # skipped-already-set branch never fired, and the plain --local write that followed
+        # replaced .husky while still reporting "set to $hooksDstAbs".
+        & git -C $script:target init -q *>&1 | Out-Null
+        & git -C $script:target config --local core.hooksPath '.husky' *>&1 | Out-Null
+        $redirectFile = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-test-gitconfig-empty-" + [guid]::NewGuid())
+        # $redirectFile is deliberately never created: git's `--get` on a GIT_CONFIG file that
+        # does not exist yet exits non-zero the same way it does against a present-but-empty
+        # one, so this exercises the "empty or missing" case the finding names without a
+        # second variant.
+        $savedGitConfig = Get-Item -LiteralPath 'Env:GIT_CONFIG' -ErrorAction SilentlyContinue
+        $env:GIT_CONFIG = $redirectFile
+        try {
+            $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500
+        }
+        finally {
+            if ($savedGitConfig) { Set-Item -LiteralPath 'Env:GIT_CONFIG' -Value $savedGitConfig.Value }
+            else { Remove-Item -LiteralPath 'Env:GIT_CONFIG' -ErrorAction SilentlyContinue }
+        }
+
+        $out | Should -Match 'skipped-already-set'
+        # Not a plain 'set to ' check: the skipped-already-set warning text itself contains
+        # "is already set to '.husky'", so only the results-table row can tell a real write
+        # apart from that message.
+        $out | Should -Not -Match 'git:core\.hooksPath\s+set to '
+
+        # The invariant: .husky survives untouched, in the target's own local config.
+        $actual = & git -C $script:target config --local --get core.hooksPath
+        $LASTEXITCODE | Should -Be 0
+        $actual | Should -Be '.husky'
+
+        Test-Path -LiteralPath $redirectFile | Should -BeFalse
     }
 
     It "installs the pre-commit hook with the owner execute bit actually set" -Skip:$IsWindows {
@@ -1770,5 +1994,175 @@ Describe "Install-Harness" {
         finally {
             Remove-Item -Recurse -Force $fakeRepo
         }
+    }
+
+    # Issue #227. Copilot CLI on Windows runs these command strings through PowerShell, where
+    # "$CLAUDE_PROJECT_DIR" inside double quotes is an empty PowerShell variable rather than the env
+    # var, so the old strings ran sh on /.claude/hooks/... and failed every session start. The
+    # template now hands the expansion to sh. sh is resolved here the way test/posix-sh.ts does it,
+    # and a missing sh throws: a skip would pass on exactly the host this case exists for.
+    It "runs each SessionStart template command through pwsh -Command and reaches its script" {
+        $shCmd = Get-Command sh -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        $shDir = $null
+        if ($shCmd) { $shDir = Split-Path -Parent $shCmd.Source }
+        else {
+            $execPath = (& git --exec-path 2>$null | Out-String).Trim()
+            if ($execPath) {
+                $gitRoot = $execPath -replace '[\\/](?:mingw\d*|usr|clang\d*)[\\/]libexec[\\/]git-core[\\/]?$', ''
+                $candidate = Join-Path $gitRoot 'usr/bin/sh.exe'
+                if (Test-Path -LiteralPath $candidate) { $shDir = Split-Path -Parent $candidate }
+            }
+        }
+        if (-not $shDir) { throw 'no POSIX sh: not on PATH, and none under git --exec-path' }
+
+        # The space is the point: a host that strips the inner double quotes splits this path.
+        $projectDir = Join-Path $script:target 'my project'
+        $claudeDir = Join-Path $projectDir '.claude'
+        New-Item -ItemType Directory -Path (Join-Path $claudeDir 'hooks') -Force | Out-Null
+        $expected = @{
+            'session-start-guardrails.sh'  = '=== Guardrails'
+            'session-start-drift-check.sh' = 'sidecar unavailable'
+        }
+        foreach ($name in $expected.Keys) {
+            Copy-Item "$PSScriptRoot/../core/claude/hooks/$name" (Join-Path $claudeDir "hooks/$name")
+        }
+        "RULE ONE`nguardrails:session-start-end`n" | Set-Content -NoNewline (Join-Path $claudeDir 'guardrails.md')
+        # A committed manifest with no sidecar makes the drift check speak without a core checkout.
+        '{}' | Set-Content (Join-Path $claudeDir '.harness-manifest.json')
+
+        $template = (Get-Content "$PSScriptRoot/../core/claude/templates/settings.hooks.json" -Raw | ConvertFrom-Json).hooks
+        $commands = @($template.SessionStart | ForEach-Object { $_.hooks } | ForEach-Object { $_.command })
+        $commands.Count | Should -Be 2
+
+        $pwsh = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
+        $saved = @{
+            PATH = $env:PATH; CLAUDE_PROJECT_DIR = $env:CLAUDE_PROJECT_DIR
+            CLAUDECODE = $env:CLAUDECODE; COPILOT_CLI = $env:COPILOT_CLI
+        }
+        try {
+            $env:PATH = "$shDir$([System.IO.Path]::PathSeparator)$env:PATH"
+            $env:CLAUDE_PROJECT_DIR = $projectDir
+            $env:CLAUDECODE = '1'
+            $env:COPILOT_CLI = $null
+            foreach ($command in $commands) {
+                $hookName = @($expected.Keys | Where-Object { $command.Contains("/.claude/hooks/$_") })
+                $hookName.Count | Should -Be 1
+                $out = & $pwsh -NoProfile -NonInteractive -Command $command 2>&1 | Out-String
+                $LASTEXITCODE | Should -Be 0 -Because $out
+                $out | Should -Not -Match 'No such file'
+                $out | Should -Match ([regex]::Escape($expected[$hookName[0]]))
+            }
+        }
+        finally {
+            foreach ($k in $saved.Keys) {
+                if ($null -eq $saved[$k]) { Remove-Item -Path "env:$k" -ErrorAction SilentlyContinue }
+                else { Set-Item -Path "env:$k" -Value $saved[$k] }
+            }
+        }
+    }
+
+    It "rewrites the legacy SessionStart strings in place, once each, and keeps a project hook beside them" {
+        New-Item -ItemType Directory -Path "$script:target/.claude" | Out-Null
+        @'
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "sh \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-start-guardrails.sh\"" },
+          { "type": "command", "command": "echo project-session-hook" },
+          { "type": "command", "command": "sh \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-start-drift-check.sh\"" }
+        ]
+      }
+    ]
+  }
+}
+'@ | Set-Content "$script:target/.claude/settings.json"
+
+        $template = (Get-Content "$PSScriptRoot/../core/claude/templates/settings.hooks.json" -Raw | ConvertFrom-Json).hooks
+        $templateCommands = @($template.SessionStart | ForEach-Object { $_.hooks } | ForEach-Object { $_.command })
+        $newGuardrails = @($templateCommands | Where-Object { $_.Contains('/session-start-guardrails.sh') })[0]
+        $newDrift = @($templateCommands | Where-Object { $_.Contains('/session-start-drift-check.sh') })[0]
+        $newGuardrails | Should -Not -Be 'sh "$CLAUDE_PROJECT_DIR/.claude/hooks/session-start-guardrails.sh"'
+        $newDrift | Should -Not -Be 'sh "$CLAUDE_PROJECT_DIR/.claude/hooks/session-start-drift-check.sh"'
+
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $first = Get-Content "$script:target/.claude/settings.json" -Raw
+        $s = $first | ConvertFrom-Json
+        @($s.hooks.SessionStart).Count | Should -Be 1
+        $commands = @($s.hooks.SessionStart[0].hooks | ForEach-Object { $_.command })
+        # In place and in order: the project hook keeps its slot between the two harness hooks.
+        $commands | Should -Be @($newGuardrails, 'echo project-session-hook', $newDrift)
+
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        Get-Content "$script:target/.claude/settings.json" -Raw | Should -Be $first
+    }
+
+    It "migrates a legacy SessionStart entry in place when its replacement sits only in a sibling group with a matcher" {
+        # The sibling fires only on startup. Dropping the matcherless group's legacy entry because
+        # the replacement exists elsewhere in the event would stop the script running on resume.
+        New-Item -ItemType Directory -Path "$script:target/.claude" | Out-Null
+        $template = (Get-Content "$PSScriptRoot/../core/claude/templates/settings.hooks.json" -Raw | ConvertFrom-Json).hooks
+        $templateCommands = @($template.SessionStart | ForEach-Object { $_.hooks } | ForEach-Object { $_.command })
+        $newGuardrails = @($templateCommands | Where-Object { $_.Contains('/session-start-guardrails.sh') })[0]
+        $settings = [ordered]@{
+            hooks = [ordered]@{
+                SessionStart = @(
+                    [ordered]@{ matcher = 'startup'; hooks = @(@{ type = 'command'; command = $newGuardrails }) },
+                    [ordered]@{ hooks = @(@{ type = 'command'; command = 'sh "$CLAUDE_PROJECT_DIR/.claude/hooks/session-start-guardrails.sh"' }) }
+                )
+            }
+        }
+        $settings | ConvertTo-Json -Depth 10 | Set-Content "$script:target/.claude/settings.json"
+
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $s = Get-Content "$script:target/.claude/settings.json" -Raw | ConvertFrom-Json
+        $matcherless = @($s.hooks.SessionStart | Where-Object { -not $_.PSObject.Properties['matcher'] })
+        $matcherless.Count | Should -Be 1
+        @($matcherless[0].hooks | ForEach-Object { $_.command }) | Should -Contain $newGuardrails
+        $startup = @($s.hooks.SessionStart | Where-Object { $_.PSObject.Properties['matcher'] -and $_.matcher -ceq 'startup' })
+        $startup.Count | Should -Be 1
+        @($startup[0].hooks | ForEach-Object { $_.command }) | Should -Be @($newGuardrails)
+    }
+
+    It "rewrites the legacy wave-close string in place, exactly once, on a ceremony install" {
+        # Copilot's shell tool fires the Bash matcher, and under PowerShell the legacy string ran sh
+        # on /.claude/hooks/wave-close-handoff.sh on every shell call (verified live, #227).
+        $legacyWave = 'sh "$CLAUDE_PROJECT_DIR/.claude/hooks/wave-close-handoff.sh"'
+        New-Item -ItemType Directory -Path "$script:target/.claude" | Out-Null
+        $settings = [ordered]@{
+            hooks = [ordered]@{
+                PostToolUse = @(
+                    [ordered]@{
+                        matcher = 'Bash'
+                        hooks   = @(
+                            [ordered]@{ type = 'command'; command = 'echo project-bash-hook' },
+                            [ordered]@{ type = 'command'; command = $legacyWave }
+                        )
+                    }
+                )
+            }
+        }
+        $settings | ConvertTo-Json -Depth 10 | Set-Content "$script:target/.claude/settings.json"
+
+        $template = (Get-Content "$PSScriptRoot/../core/claude/templates/settings.hooks.json" -Raw | ConvertFrom-Json).hooks
+        $newWave = @($template.PostToolUse | ForEach-Object { $_.hooks } | ForEach-Object { $_.command } |
+            Where-Object { $_.Contains('/wave-close-handoff.sh') })
+        $newWave.Count | Should -Be 1
+        $newWave[0] | Should -Not -Be $legacyWave
+
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -IncludeCeremonies
+        $first = Get-Content "$script:target/.claude/settings.json" -Raw
+        $s = $first | ConvertFrom-Json
+        $all = @($s.hooks.PostToolUse | ForEach-Object { @($_.hooks) } | ForEach-Object { $_.command })
+        @($all | Where-Object { $_ -ceq $newWave[0] }).Count | Should -Be 1
+        @($all | Where-Object { $_ -ceq $legacyWave }).Count | Should -Be 0
+        $bash = @($s.hooks.PostToolUse | Where-Object { $_.PSObject.Properties['matcher'] -and $_.matcher -ceq 'Bash' })
+        $bash.Count | Should -Be 1
+        # In place: the project hook keeps its slot ahead of the harness hook.
+        @($bash[0].hooks | ForEach-Object { $_.command }) | Should -Be @('echo project-bash-hook', $newWave[0])
+
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -IncludeCeremonies
+        Get-Content "$script:target/.claude/settings.json" -Raw | Should -Be $first
     }
 }

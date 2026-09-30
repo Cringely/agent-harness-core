@@ -24,15 +24,17 @@
 // two `checkIgnored(false)` assertions restated a precondition rather than testing this code
 // (F10); and tests were not isolated from a developer's global git config (F12).
 //
-// F10 note: `checkIgnored(dir)` is false in states (c) and (e) purely because those fixtures'
-// .claude/.gitignore genuinely does not cover the sidecar -- a fact about git, not about this
-// code, true before AND after every fix in this file. No assertion phrased against those two
-// fixtures alone can discriminate pre-fix from post-fix. `expectSidecarInvariant` below states
-// the real, code-dependent invariant ("if the sidecar exists, it is ignored") and is applied
-// everywhere for consistency; it is vacuously true in (c)/(e) (nothing to check once existence
-// is already asserted false) and genuinely load-bearing in the F1 and F2 cases below, which is
-// where the round-1 code could make it fail: F1's pre-fix repo-detection wrote an unignored
-// sidecar under a git failure, and F2's pre-fix code left an unignored one on disk uncleaned.
+// F10 note: `checkIgnored(dir)` is false in states (c) and (e) purely because those
+// fixtures' .claude/.gitignore genuinely does not cover the sidecar, a fact about git, not
+// about this code, true before AND after every fix in this file. No assertion phrased
+// against those two fixtures alone can discriminate pre-fix from post-fix.
+// `expectSidecarInvariant` below states the real, code-dependent invariant ("if the sidecar
+// exists, it is ignored") and is applied everywhere for consistency, but every current call
+// site is vacuous: each one either follows an `expect(sidecarExists(dir)).toBe(false)` that
+// already forces its guard branch to skip, or follows a `checkIgnored(dir)` assertion that
+// already proved the same fact a few lines earlier. It stands as a regression guard for a
+// future case, not as anything currently discriminating: a case reaching it with the sidecar
+// still on disk and its ignore state unproven is what it exists to catch.
 
 import { afterEach, describe, expect, test } from "bun:test";
 import {
@@ -400,7 +402,7 @@ describe("sidecar gitignore protection — round 2 findings", () => {
       expect(sidecarExists(dir)).toBe(false);
       // No `checkIgnored(dir) === false` assertion here (round-3 fix): git check-ignore's answer
       // in this fixture is a fixed property of .claude/.gitignore's content, which nothing in
-      // this run touches, so it reads the same value whether Save-Sidecar's ownership handling
+      // this run touches, so it reads the same value whether Get-SidecarPlan's ownership handling
       // is correct or broken. It cannot fail on a regression this test exists to catch, only
       // `sidecarExists`/`expectSidecarInvariant` below can. The (F1/R2-2) case right after this
       // one is where a dubious-ownership run interacts with a sidecar already on disk, and it
@@ -498,9 +500,9 @@ describe("sidecar gitignore protection — round 2 findings", () => {
     INSTALL_TIMEOUT_MS,
   );
 
-  // F4: git missing from PATH must fail the sidecar closed without throwing out of Save-Sidecar
-  // -- settings.json and the committed manifest are written by the caller afterward and must
-  // not be lost just because git could not be asked.
+  // F4: git missing from PATH must fail the sidecar closed without throwing out of
+  // Get-SidecarPlan. settings.json and the committed manifest are written by the caller
+  // afterward and must not be lost just because git could not be asked.
   test.skipIf(!pwshPath || !gitTrulyHidden)(
     "(F4) git missing from PATH: sidecar refused cleanly, settings.json and the manifest are still written",
     () => {
@@ -522,8 +524,8 @@ describe("sidecar gitignore protection — round 2 findings", () => {
   );
 
   // F5: -Unaccept and -Prune each persist the sidecar through the same legacy carry-forward
-  // path -Accept uses, and neither had a test that could fail if their own Save-Sidecar call
-  // were reverted to an unconditional write. Seeded with real legacy coreRepo/stackDetected
+  // path -Accept uses, and neither had a test that could fail if their own Invoke-SidecarPlan
+  // call were reverted to an unconditional write. Seeded with real legacy coreRepo/stackDetected
   // content (the pre-#137 embedded shape) so the write each command attempts is non-trivial.
   test.skipIf(!pwshPath)(
     "(F5) -Unaccept in a state-c repo: sidecar stays refused even carrying legacy machine fields",
@@ -1206,6 +1208,56 @@ describe("sidecar gitignore protection — round 5 (targets with no .git on disk
       expect(result.exitCode).not.toBe(0);
       expect(result.stdout.toString() + result.stderr.toString()).toContain("Refusing to touch the machine-specific sidecar");
       expect(readFileSync(join(dir, SIDECAR_REL))).toEqual(sidecarBefore);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+});
+
+// Round 7 (issue #153): two below-floor findings from the #140 App review, re-verified against
+// this file's own head and fixed here.
+describe("sidecar gitignore protection — round 7 findings (issue #153)", () => {
+  // Every other field the installer loads (the manifest, settings.json) is meaningful,
+  // committed data, so a parse failure surfacing there is a real signal. The sidecar holds
+  // only coreRepo and stackDetected, both machine-local and regenerated by every plain
+  // install (see the `$sidecar['coreRepo'] = $repoRoot` refresh near the bottom of the
+  // script), so a malformed copy must not block settings.json, the manifest, or a fresh
+  // sidecar write the way an unhandled ConvertFrom-Json exception otherwise would.
+  test.skipIf(!pwshPath)(
+    "(R7-1) malformed sidecar JSON does not block the install: treated as absent, run completes",
+    () => {
+      const dir = freshRepo();
+      expect(runInstall(dir).exitCode).toBe(0);
+      expect(sidecarExists(dir)).toBe(true);
+
+      writeFileSync(join(dir, SIDECAR_REL), "{ this is not valid json");
+
+      const result = runInstall(dir);
+      expect(result.exitCode).toBe(0);
+      expect(existsSync(join(dir, ".claude", "settings.json"))).toBe(true);
+      expect(existsSync(join(dir, MANIFEST_REL))).toBe(true);
+      const sidecar = JSON.parse(readFileSync(join(dir, SIDECAR_REL), "utf8"));
+      expect(sidecar.coreRepo).toBeTruthy();
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  // (F2) above already proves the file gets deleted and the operator is warned. What it does
+  // not check is the summary table's own Action column, which named every non-write outcome
+  // 'skipped-unprotected', including this one -- so a run that just deleted a stale, unignored
+  // copy read as though nothing had happened to it.
+  test.skipIf(!pwshPath)(
+    "(R7-2) a sidecar removed for lost ignore coverage is reported 'removed' in the summary table, not 'skipped-unprotected'",
+    () => {
+      const dir = freshRepo();
+      expect(runInstall(dir).exitCode).toBe(0);
+      expect(sidecarExists(dir)).toBe(true);
+      writeFileSync(join(dir, GITIGNORE_REL), "# operator trimmed it\nother-line\n");
+
+      const result = runInstall(dir);
+      expect(result.exitCode).toBe(0);
+      expect(sidecarExists(dir)).toBe(false);
+      expect(result.stdout.toString()).toMatch(/\.harness-manifest\.local\.json\s+removed\b/);
+      expect(result.stdout.toString()).not.toMatch(/\.harness-manifest\.local\.json\s+skipped-unprotected\b/);
     },
     INSTALL_TIMEOUT_MS,
   );

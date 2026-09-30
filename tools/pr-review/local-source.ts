@@ -7,7 +7,16 @@
 // and syntheticCheckRuns() turns that statement into check runs with the real required names.
 
 import { selectHeadFiles } from "./snapshot";
-import { TRUSTED_CONTEXT_PATHS, WORKFLOW_PATH, type CheckRun, type FileText, type IssueText, type PrSnapshot, type PrSource } from "./types";
+import {
+  LIVING_DOC_PATHS,
+  TRUSTED_CONTEXT_PATHS,
+  WORKFLOW_PATH,
+  type CheckRun,
+  type FileText,
+  type IssueText,
+  type PrSnapshot,
+  type PrSource,
+} from "./types";
 import { REQUIRED_CHECKS } from "./verdict";
 
 export type SyntheticChecks = "passed" | "failed" | "incomplete";
@@ -71,6 +80,11 @@ export class LocalGitSource implements PrSource {
       const content = gitOrNull(repoDir, ["show", `${baseSha}:${path}`]);
       if (content !== null) trustedContext.push({ path, content });
     }
+    const livingDocs: FileText[] = [];
+    for (const path of LIVING_DOC_PATHS) {
+      const content = gitOrNull(repoDir, ["show", `${baseSha}:${path}`]);
+      if (content !== null) livingDocs.push({ path, content });
+    }
 
     return {
       repo: "local",
@@ -89,6 +103,7 @@ export class LocalGitSource implements PrSource {
       omittedFiles,
       linkedIssues: this.options.issues ?? [],
       trustedContext,
+      livingDocs,
       workflowText: gitOrNull(repoDir, ["show", `${baseSha}:${WORKFLOW_PATH}`]),
       checkRuns: syntheticCheckRuns(this.options.checks),
     };

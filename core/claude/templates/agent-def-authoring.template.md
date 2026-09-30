@@ -11,9 +11,9 @@ See the "What changed from RPI" section at the bottom for the specific calls mad
 
 This file is reference material for whoever authors a core agent def, not an installed artifact:
 `Install-Harness.ps1` copies templates by explicit name (guardrails, scratch.gitignore,
-ceremony-ledger, settings.hooks.json) and this file is not among them. Nothing in an installed
-project points at this path. The def produced from it installs on its own, as one file in the
-`core/claude/agents/` glob.
+manifest-local.gitignore, ceremony-ledger, settings.hooks.json) and this file is not among
+them. Nothing in an installed project points at this path. The def produced from it installs on
+its own, as one file in the `core/claude/agents/` glob.
 
 Copy this file to `core/claude/agents/<name>.md`, fill every `{{...}}` slot, delete the paragraph
 above, this comment block and the "What changed from RPI" section, delete any part below marked
