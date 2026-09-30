@@ -42,6 +42,25 @@ skip, never a blocked write. `session-start-drift-check.sh` also wants `sed`, `t
 (Git Bash ships all three) plus a reachable core checkout. Missing any of them makes it print
 nothing, which is also what it does when the project has no drift.
 
+The Claude Code hooks act only under Claude Code. GitHub Copilot CLI also reads hooks from
+`.claude/settings.json` and treats a failing `preToolUse` hook as a deny, so every hook here exits 0
+with no output when `COPILOT_CLI` is set and `CLAUDECODE` is not. That stand-down happens inside
+each script, so it holds once Copilot reaches the script. Copilot's shell tool fires the `Bash`
+matcher (verified live), so `wave-close-handoff.sh` runs after every Copilot shell call and stands
+down there. A dispatch also went through with the `bun` gates installed when Copilot was launched
+from a subdirectory of the project (verified live). Under Copilot, enforcement comes from written
+policy and the git hooks below, which run on every commit and push whatever made them. A third
+harness that sets neither variable gets the hooks acting as they do under Claude Code.
+The three `sh` hook commands run through `sh -c` so a PowerShell host passes `$CLAUDE_PROJECT_DIR`
+to `sh` unexpanded. They need `sh` on the PATH of the Copilot process, so launch Copilot from Git
+Bash or put Git's `usr\bin` on PATH first. Without `sh` each of them logs an error and blocks
+nothing. The `sh -c` form works on PowerShell 7.3 and later. Windows PowerShell 5.1 and PowerShell
+6.x through 7.2 use legacy native argument passing, which strips the inner double quotes, so a
+project path containing a space splits into two arguments and the hook misses its script. For a
+project not yet re-installed, Copilot's documented stopgap is
+`{ "disableAllHooks": true }` in the repository's `.github/copilot/settings.local.json`, which also
+turns off that repository's own Copilot hooks.
+
 Recommended, not required: the `code-context` MCP server (`@infino-ai/code-context`) gives agents
 ranked hybrid search over a repo instead of grep-crawling it, and its `sql` tool answers counting
 and ranking questions that file tools cannot express. It indexes locally, with local embeddings.

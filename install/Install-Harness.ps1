@@ -1603,6 +1603,51 @@ foreach ($eventType in $hooksTemplate.PSObject.Properties.Name) {
     $existingGroups = New-Object System.Collections.Generic.List[pscustomobject]
     foreach ($g in @($settings.hooks.$eventType)) { $existingGroups.Add($g) }
 
+    # Issue #227: these three strings were the template's two SessionStart commands and its
+    # PostToolUse wave-close command before the sh -c form replaced them. Without this the new
+    # strings append beside the old ones and each script runs twice per event. The wave-close row
+    # only finds a replacement on a ceremony install. Without -IncludeCeremonies its template entry
+    # is filtered out above, so a legacy wave-close entry is left alone. Matched exactly, so a
+    # variant the project edited by hand is left alone like any other project hook. Ordinal
+    # because a @{} hashtable compares keys
+    # case-insensitively, and a differently-cased string is a project edit. A legacy entry is
+    # dropped rather than rewritten only when its own group already holds the replacement. A
+    # replacement in a sibling group does not count: that group can carry a matcher (startup
+    # only, say), and dropping the entry would stop the script firing on the other sources.
+    $legacyCommands = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    foreach ($name in 'session-start-guardrails.sh', 'session-start-drift-check.sh', 'wave-close-handoff.sh') {
+        $legacyCommands.Add("sh `"`$CLAUDE_PROJECT_DIR/.claude/hooks/$name`"", $name)
+    }
+    $allTemplateCommands = @($filteredGroups | ForEach-Object { @($_.hooks) } | ForEach-Object { $_.command })
+    $emptiedGroups = New-Object System.Collections.Generic.List[object]
+    foreach ($eg in $existingGroups) {
+        if (-not $eg.PSObject.Properties['hooks'] -or $null -eq $eg.hooks) { continue }
+        $heldCommands = @(@($eg.hooks) | Where-Object { $_ } | ForEach-Object { $_.command })
+        $migrated = New-Object System.Collections.Generic.List[object]
+        $touched = $false
+        foreach ($h in @($eg.hooks)) {
+            $legacyName = $null
+            $replacement = $null
+            if ($null -ne $h -and $h.command -is [string] -and
+                $legacyCommands.TryGetValue($h.command, [ref]$legacyName)) {
+                $replacement = @($allTemplateCommands | Where-Object { $_.Contains("/.claude/hooks/$legacyName") })[0]
+            }
+            if (-not $replacement) { $migrated.Add($h); continue }
+            $touched = $true
+            if ($heldCommands -ccontains $replacement) { continue }
+            $h.command = $replacement
+            $heldCommands += $replacement
+            $migrated.Add($h)
+        }
+        if ($touched) {
+            $eg.hooks = $migrated.ToArray()
+            if ($migrated.Count -eq 0) { $emptiedGroups.Add($eg) }
+            $results.Add([pscustomobject]@{ File = "settings.json:$eventType"; Action = 'migrated' })
+        }
+    }
+    # A group the migration emptied goes, rather than staying behind as "hooks": [].
+    foreach ($eg in $emptiedGroups) { [void]$existingGroups.Remove($eg) }
+
     $existingCommands = New-Object System.Collections.Generic.List[string]
     foreach ($g in $existingGroups) {
         foreach ($h in @($g.hooks)) { $existingCommands.Add($h.command) }
