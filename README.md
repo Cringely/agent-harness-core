@@ -194,6 +194,11 @@ This is the mechanical half of the findings flow in CONTRIBUTING.md.
 Run it periodically per project (SpaceMolt wires it into a `core_harvest` ceremony, see that
 project's `docs/wiki/team-ceremonies.md`).
 
+The same `pre-commit` hook also refuses staged content that carries a provider-shaped token or a
+private key. That check needs no configuration and is on from the first commit. It fails closed: when
+`grep` cannot run, or a built-in canary is not found, the commit is refused rather than passed. On a
+refusal it names the file and never prints the matched value.
+
 ### This repo runs the harness on itself
 
 Core installs into this repo's own `.claude/`, so the hooks and agent definitions it distributes
