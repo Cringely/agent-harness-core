@@ -78,6 +78,26 @@ Any code accepting external input (CLI args, files, env vars, network) must vali
 - In SQL: parameterized queries only
 - Validate and canonicalize file paths. Reject `..` traversal
 
+## Untrusted Content and Credentials
+
+An agent step that reads pull request or issue text, fetched web pages, or files from a third-party
+repository holds no write, publish or approve credential. Prompt injection through repository and web
+content is observed in production incidents, not only in demonstrations, so text from those sources
+is attacker-controlled input to whatever reads it.
+
+A credential is anything that can push, merge, approve, publish or deploy. That includes a shell from
+which such a token can be read, such as `gh auth token`, a configured credential helper, or an
+environment variable carrying the token. A step whose shell can run `gh auth token` holds the
+credential whether or not it ever runs the command.
+
+Where reading and acting cannot be separated, a human or a deterministic check sits between them,
+and the reading step hands over data, not instructions. Its output is a structured result the acting
+step inspects and decides on, never a command list the acting step runs.
+
+In the reference shape, the model that reads the untrusted input has no tools, and code holding the
+credential decides the action from that model's structured output. The reader cannot act, and the
+actor never treats the untrusted text as instructions.
+
 ## Supply Chain
 
 - Docker images: pin to specific version (`image:1.2.3`), prefer digest (`@sha256:...`). Never `:latest` in production
