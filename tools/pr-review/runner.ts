@@ -115,6 +115,8 @@ export const BUILTIN_PLUGINS: readonly string[] = [
   "cc-plugin-telemetry@builtin",
   "agents-md@builtin",
   "telemetry@builtin",
+  // Arrived on 2026-09-30 under an unchanged 2.1.285 binary, so the built-in set can change server-side (#247).
+  "cc-plugin-diff@builtin",
 ];
 
 export function claudeArgs(systemPromptFile: string): string[] {

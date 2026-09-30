@@ -170,6 +170,7 @@ describe("claudeArgs()", () => {
         "cc-plugin-telemetry@builtin": false,
         "agents-md@builtin": false,
         "telemetry@builtin": false,
+        "cc-plugin-diff@builtin": false,
       },
     });
   });
