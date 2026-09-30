@@ -2124,4 +2124,45 @@ Describe "Install-Harness" {
         $startup.Count | Should -Be 1
         @($startup[0].hooks | ForEach-Object { $_.command }) | Should -Be @($newGuardrails)
     }
+
+    It "rewrites the legacy wave-close string in place, exactly once, on a ceremony install" {
+        # Copilot's shell tool fires the Bash matcher, and under PowerShell the legacy string ran sh
+        # on /.claude/hooks/wave-close-handoff.sh on every shell call (verified live, #227).
+        $legacyWave = 'sh "$CLAUDE_PROJECT_DIR/.claude/hooks/wave-close-handoff.sh"'
+        New-Item -ItemType Directory -Path "$script:target/.claude" | Out-Null
+        $settings = [ordered]@{
+            hooks = [ordered]@{
+                PostToolUse = @(
+                    [ordered]@{
+                        matcher = 'Bash'
+                        hooks   = @(
+                            [ordered]@{ type = 'command'; command = 'echo project-bash-hook' },
+                            [ordered]@{ type = 'command'; command = $legacyWave }
+                        )
+                    }
+                )
+            }
+        }
+        $settings | ConvertTo-Json -Depth 10 | Set-Content "$script:target/.claude/settings.json"
+
+        $template = (Get-Content "$PSScriptRoot/../core/claude/templates/settings.hooks.json" -Raw | ConvertFrom-Json).hooks
+        $newWave = @($template.PostToolUse | ForEach-Object { $_.hooks } | ForEach-Object { $_.command } |
+            Where-Object { $_.Contains('/wave-close-handoff.sh') })
+        $newWave.Count | Should -Be 1
+        $newWave[0] | Should -Not -Be $legacyWave
+
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -IncludeCeremonies
+        $first = Get-Content "$script:target/.claude/settings.json" -Raw
+        $s = $first | ConvertFrom-Json
+        $all = @($s.hooks.PostToolUse | ForEach-Object { @($_.hooks) } | ForEach-Object { $_.command })
+        @($all | Where-Object { $_ -ceq $newWave[0] }).Count | Should -Be 1
+        @($all | Where-Object { $_ -ceq $legacyWave }).Count | Should -Be 0
+        $bash = @($s.hooks.PostToolUse | Where-Object { $_.PSObject.Properties['matcher'] -and $_.matcher -ceq 'Bash' })
+        $bash.Count | Should -Be 1
+        # In place: the project hook keeps its slot ahead of the harness hook.
+        @($bash[0].hooks | ForEach-Object { $_.command }) | Should -Be @('echo project-bash-hook', $newWave[0])
+
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -IncludeCeremonies
+        Get-Content "$script:target/.claude/settings.json" -Raw | Should -Be $first
+    }
 }

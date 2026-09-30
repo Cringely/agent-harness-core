@@ -368,3 +368,85 @@ describe("pin: new SessionStart strings match the legacy ones under bash with CL
     expect(current.exitCode).toBe(legacy.exitCode);
   });
 });
+
+// --- PostToolUse wave-close command string ------------------------------------------------------
+//
+// Copilot's shell tool fires the Bash matcher (verified live, #227), and under PowerShell the legacy
+// string ran sh on /.claude/hooks/wave-close-handoff.sh on every shell call, before the script's own
+// stand-down was reached. The template moved it to the same sh -c form as SessionStart. Under a
+// POSIX shell the two must behave identically, for the silent no-op payload every non-merge Bash
+// call sends and for a merge. The installer migrates this legacy string in place.
+
+const LEGACY_WAVE_CLOSE = 'sh "$CLAUDE_PROJECT_DIR/.claude/hooks/wave-close-handoff.sh"';
+
+function templateWaveCloseCommand(): string {
+  const tpl = JSON.parse(readFileSync(TEMPLATE, "utf8"));
+  const commands: string[] = tpl.hooks.PostToolUse.flatMap((g: { hooks: { command: string }[] }) =>
+    g.hooks.map((h) => h.command),
+  );
+  const hit = commands.filter((c) => c.includes("/.claude/hooks/wave-close-handoff.sh"));
+  expect(hit.length).toBe(1);
+  return hit[0];
+}
+
+function waveCloseProject(): { dir: string; env: Env } {
+  // The space is the point: a form that drops the inner double quotes splits this path.
+  const dir = tempDir("standdown wave-");
+  git(["init", "-q"], dir);
+  git(["config", "user.email", "t@example.com"], dir);
+  git(["config", "user.name", "t"], dir);
+  git(["config", "commit.gpgsign", "false"], dir);
+  writeFileSync(join(dir, "seed.txt"), "seed\n");
+  git(["add", "seed.txt"], dir);
+  git(["commit", "-q", "-m", "seed"], dir);
+  mkdirSync(join(dir, ".claude", "hooks"), { recursive: true });
+  copyFileSync(join(HOOKS, "wave-close-handoff.sh"), join(dir, ".claude", "hooks", "wave-close-handoff.sh"));
+  const shDir = (posixSh(), posixShDir());
+  const basePath = process.env.PATH ?? "";
+  const env: Env = {
+    ...process.env,
+    PATH: shDir ? `${shDir}${delimiter}${basePath}` : basePath,
+    CLAUDE_PROJECT_DIR: dir,
+    CLAUDECODE: "1",
+    GH_PROMPT_DISABLED: "1",
+  };
+  delete env.COPILOT_CLI;
+  return { dir, env };
+}
+
+describe("pin: new wave-close string matches the legacy one under bash with CLAUDECODE=1", () => {
+  test("non-merge payload: identical silent exit", () => {
+    const { dir, env } = waveCloseProject();
+    const payload = JSON.stringify({ tool_name: "Bash", tool_input: { command: "git status" } });
+    const bash = posixBash();
+    const legacy = spawn([bash, "-c", LEGACY_WAVE_CLOSE], dir, env, payload);
+    const current = spawn([bash, "-c", templateWaveCloseCommand()], dir, env, payload);
+
+    expect(legacy.exitCode).toBe(0);
+    expect(legacy.stderr).toBe("");
+    expect(current.stdout).toBe(legacy.stdout);
+    expect(current.stderr).toBe(legacy.stderr);
+    expect(current.exitCode).toBe(legacy.exitCode);
+    expect(existsSync(join(dir, ".claude", "wave-state.md"))).toBe(false);
+  });
+
+  test(
+    "merge payload: identical handoff output and exit code",
+    () => {
+      const { dir, env } = waveCloseProject();
+      const payload = JSON.stringify({ tool_name: "Bash", tool_input: { command: "gh pr merge 42 --squash" } });
+      const bash = posixBash();
+      const legacy = spawn([bash, "-c", LEGACY_WAVE_CLOSE], dir, env, payload);
+      // Not vacuous: the legacy string reaches the script, which reads the payload from stdin.
+      expect(legacy.exitCode).toBe(0);
+      expect(legacy.stdout).toContain("WAVE HANDOFF");
+      rmSync(join(dir, ".claude", "wave-state.md"));
+
+      const current = spawn([bash, "-c", templateWaveCloseCommand()], dir, env, payload);
+      expect(current.stdout).toBe(legacy.stdout);
+      expect(current.exitCode).toBe(legacy.exitCode);
+      expect(existsSync(join(dir, ".claude", "wave-state.md"))).toBe(true);
+    },
+    ROW_TIMEOUT_MS,
+  );
+});
