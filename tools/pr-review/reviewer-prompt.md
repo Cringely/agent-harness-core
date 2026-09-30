@@ -104,6 +104,9 @@ leaving it out. It never earns `correctness`, since the floor is for drift this 
   first.
 - For every test the change says proves it, read the test against the code and ask whether it would
   fail if the change were reverted. A test that passes either way proves nothing.
+- Read the test hunks before the production hunks. A pre-existing assertion the diff
+  edits, loosens or deletes, in a change that also touches production code, with no reason in the
+  description or a commit message, is a `correctness` finding.
 - A checker or detector that passes the cases it cannot decide is `fails-open`, however carefully
   its comments explain why.
 - A claim in the description, a commit message or a comment that the diff does not back is a

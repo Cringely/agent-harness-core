@@ -98,6 +98,10 @@ Before reading closely, name the failure mode this diff would most plausibly pro
 validation gate, a schema change, a config edit, a cache) and hunt that first. A generic checklist
 pass finds generic nothing.
 
+- Read the test-file hunks before the production hunks. For each pre-existing assertion the diff
+  edits, loosens or deletes, find the reason in the commit message. A loosened or deleted assertion
+  with no stated reason, in a change that also touches production code, is a correctness finding and
+  the verdict is REVISE.
 - Is the fix at the producer of the bad state, or does it only guard the consumer? Can you name
   the rule or invariant it restores, and where that rule is supposed to hold?
 - For every test the change claims proves the fix, revert the fix mentally (or actually, if you
