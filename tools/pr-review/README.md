@@ -43,7 +43,7 @@ Exit codes: 0 reviewed or snapshotted, 2 refused with nothing posted, 1 usage or
 
 ## What each event means
 
-`APPROVE`: no finding at or above the floor, and both required checks (the `bun test` and Pester jobs in `.github/workflows/test.yml`) completed as successes on the head commit with nothing discounting them. Merge with `gh pr merge <n> --merge` or `--rebase`.
+`APPROVE`: no finding at or above the floor, and both required checks (the `bun test` and Pester jobs in `.github/workflows/test.yml`) completed as successes on the head commit with nothing discounting them. Merge with `gh pr merge <n> --merge` or `--rebase`. That merges on its own only outside the paths `.github/CODEOWNERS` assigns. On an owned path the default ruleset also requires a code-owner review, which the App cannot supply, and the operator merges through the administrator bypass with a comment saying why (see CONTRIBUTING.md).
 
 `REQUEST_CHANGES`: at least one finding at or above the floor, or a required check concluded a failure or a timeout on the head commit. Fix and push, then review again. The earlier review keeps blocking until the App approves on a later run or someone with write access dismisses it.
 
