@@ -1,0 +1,14 @@
+# Enforcement paths (#235). With require_code_owner_review on the default ruleset, the App's
+# APPROVE does not merge a change here alone. Skills and patterns are deliberately not owned.
+# Last match wins. No entry below overlaps another.
+/.github/                                   @Cringely
+/core/claude/hooks/                         @Cringely
+/core/claude/agents/                        @Cringely
+/core/claude/templates/                     @Cringely
+/install/                                   @Cringely
+/tools/pr-review/                           @Cringely
+/account/claude/rules/                      @Cringely
+/account/claude/agents/                     @Cringely
+/account/claude/hooks/                      @Cringely
+/account/claude/settings.account.json       @Cringely
+/test/                                      @Cringely
