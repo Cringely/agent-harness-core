@@ -7,6 +7,7 @@
 // Nothing here reads a model-written string except to hand it to the renderer, which fences it, to
 // scan it for identifying strings, and to return the validated findings in the outcome.
 
+import { findDocsVerdictLine } from "./docs-verdict";
 import { validateReviewerOutput } from "./findings";
 import { findIdentityHits, type IdentityDecl } from "./identity";
 import { buildPrompt } from "./prompt";
@@ -155,6 +156,8 @@ export async function runReview(deps: ReviewDeps, options: ReviewOptions): Promi
     toolRevision: deps.toolRevision,
     toolDirty: deps.toolDirty,
     changedFiles: snapshot.changedFiles,
+    // #217: read straight from the snapshot's own body text, never from anything the model wrote.
+    docsVerdictLine: findDocsVerdictLine(snapshot.body),
   });
 
   const observedInstructionCount = output?.observed_instructions.length ?? 0;

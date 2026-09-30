@@ -785,7 +785,11 @@ export function readAllTranscriptEntries(transcriptPath: string): TranscriptEvid
 
 if (import.meta.main) {
   try {
-    const payload = JSON.parse(await Bun.stdin.text()) as Record<string, unknown>;
+    const raw = await Bun.stdin.text();
+    // Copilot CLI also runs .claude/settings.json hooks and fails closed on them (#227). Stand
+    // down there, but never while CLAUDECODE is set, so a Claude Code session always runs the rest.
+    if (process.env.COPILOT_CLI && !process.env.CLAUDECODE) process.exit(0);
+    const payload = JSON.parse(raw) as Record<string, unknown>;
 
     // Defense in depth: only judge Bash calls, whatever the matcher (mirrors agent-worktree-gate.ts).
     if (typeof payload.tool_name === "string" && payload.tool_name !== "Bash") {

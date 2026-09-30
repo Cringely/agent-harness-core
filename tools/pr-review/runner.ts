@@ -20,7 +20,18 @@
 // output_style. memory_paths is the primary check below: no clean account configuration can make
 // that key appear at all, where plugins and output_style are also clean on an account that has no
 // plugins and uses the default style. plugins and output_style stay checked too, as a second signal
-// for the same failure, not because either closes a gap the memory_paths check leaves open.
+// for that failure. Since #238 the plugins check is also the only signal for CLI built-in plugins,
+// which load with memory_paths absent, so it must not be relaxed.
+//
+// That capture no longer holds on its own (#238). From claude 2.1.283 the CLI registers built-in
+// plugins in every session, headless included, and --safe-mode, --setting-sources "", --bare and an
+// empty CLAUDE_CONFIG_DIR all leave them loaded. A 2.1.285 run with the flags above carried
+// cc-plugin-agents-md@builtin and cc-plugin-telemetry@builtin in init.plugins (on 2.1.283 and
+// 2.1.284 the names were agents-md@builtin and telemetry@builtin), and 2.1.269 showed none. So
+// claudeArgs() passes --settings with an inline enabledPlugins object setting all four names to false,
+// which left init.plugins empty on 2.1.285. The plugins check is deliberately not narrowed to admit
+// @builtin sources: agents-md injects AGENTS.md instructions, and the next built-in should fail closed
+// until its name is added to BUILTIN_PLUGINS rather than pass because of where it came from.
 //
 // The flags are not the control. parseStreamJson() reads the session's stream and rejects the run
 // unless: the init event lists exactly ["StructuredOutput"] (the tool --json-schema adds), no MCP
@@ -97,7 +108,17 @@ function killProcessTree(pid: number): void {
   }
 }
 
+// Built-in plugins switched off through --settings (#238). The current names, then the 2.1.283-2.1.284
+// names. A name the running CLI does not know is ignored.
+export const BUILTIN_PLUGINS: readonly string[] = [
+  "cc-plugin-agents-md@builtin",
+  "cc-plugin-telemetry@builtin",
+  "agents-md@builtin",
+  "telemetry@builtin",
+];
+
 export function claudeArgs(systemPromptFile: string): string[] {
+  const enabledPlugins = Object.fromEntries(BUILTIN_PLUGINS.map((name) => [name, false]));
   return [
     "-p",
     "--model", REVIEWER_MODEL,
@@ -106,6 +127,7 @@ export function claudeArgs(systemPromptFile: string): string[] {
     "--strict-mcp-config",
     "--safe-mode",
     "--setting-sources", "",
+    "--settings", JSON.stringify({ enabledPlugins }),
     "--disable-slash-commands",
     "--no-session-persistence",
     "--system-prompt-file", systemPromptFile,
@@ -198,9 +220,8 @@ export function parseStreamJson(stdout: string, exitCode: number | null): Runner
   if ("memory_paths" in init) {
     return { ok: false, reason: "the reviewer session's init event carried memory_paths, so --setting-sources may not have excluded the operator's configuration" };
   }
-  // Secondary signal for the same failure as the memory_paths check above, not coverage for a gap
-  // it leaves open: an account with no plugins or a default style is clean on both of these while
-  // still failing the memory_paths check if the exclusion did not hold.
+  // A second signal for the memory_paths failure above, and since #238 the ONLY signal for CLI
+  // built-in plugins, which load with memory_paths absent. Keep it strict: an unknown plugin fails closed.
   if (!Array.isArray(init.plugins) || init.plugins.length !== 0) {
     return { ok: false, reason: "the reviewer session loaded plugins, so --setting-sources may not have excluded the operator's configuration" };
   }

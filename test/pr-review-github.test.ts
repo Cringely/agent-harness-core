@@ -88,6 +88,8 @@ function fakeGitHub(options: FakeOptions = {}) {
       const file = path.slice(`${prefix}/contents/`.length).split("/").map(decodeURIComponent).join("/");
       const ref = url.searchParams.get("ref");
       if (ref === BASE && file === "CONTRIBUTING.md") return new Response("BASE CONTRIBUTING");
+      if (ref === BASE && file === "README.md") return new Response("BASE README");
+      if (ref === BASE && file === "tools/pr-review/README.md") return new Response("BASE PR-REVIEW README");
       if (ref === BASE && file === ".github/workflows/test.yml") return new Response("jobs:\n");
       if (ref === HEAD && file !== "docs/old.md") return new Response(`HEAD ${file}`);
       return json({ message: "Not Found" }, 404);
@@ -184,6 +186,16 @@ describe("GitHubClient.snapshot()", () => {
     const snap = await client(fakeGitHub()).snapshot();
     expect(snap.trustedContext).toEqual([{ path: "CONTRIBUTING.md", content: "BASE CONTRIBUTING" }]);
     expect(snap.workflowText).toBe("jobs:\n");
+  });
+
+  // #217: same mechanism as trusted context, read at the base SHA so a pull request that edits
+  // README.md is reviewed against the copy it is trying to replace.
+  test("reads living documents at the base SHA", async () => {
+    const snap = await client(fakeGitHub()).snapshot();
+    expect(snap.livingDocs).toEqual([
+      { path: "README.md", content: "BASE README" },
+      { path: "tools/pr-review/README.md", content: "BASE PR-REVIEW README" },
+    ]);
   });
 
   test("reads post-change content at the head SHA, skips removed files, and stops at the fetch cap", async () => {

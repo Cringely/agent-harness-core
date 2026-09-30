@@ -680,13 +680,11 @@ function Test-GitAnswersForTarget {
 # directory and core.hooksPath names it -- a fact no per-file hash comparison can see. Used by
 # -Audit's reachability check below.
 #
-# Not shared with the install-time wiring section further down, which computes a related but
-# not identical answer (it also needs $gitHooksDir and $existingHookFiles, to decide whether
-# writing core.hooksPath now would replace someone else's un-pathed hooks). Duplicating the
-# git-answers-for-this-target lookup here, rather than refactoring both call sites onto one
-# function, keeps this audit-only fix from touching the wiring section's already-tested
-# behavior -- #136/#126 scope is the audit report and the install message, not a redesign of
-# hooksPath detection.
+# Shared with the install-time wiring section further down (#222): both call sites need the
+# same "does core.hooksPath, as git actually resolves it, land on our hooks directory"
+# answer, and only the wiring section additionally needs $gitHooksDir and
+# $existingHookFiles to decide whether writing core.hooksPath now would replace someone
+# else's un-pathed hooks.
 #
 # Returns a hashtable: GitAnswers (bool, Test-GitAnswersForTarget's #145 foreign-repository
 # guard passed), Reachable (bool, core.hooksPath resolves to $HooksDstAbs) and Display (the raw
@@ -1605,6 +1603,51 @@ foreach ($eventType in $hooksTemplate.PSObject.Properties.Name) {
     $existingGroups = New-Object System.Collections.Generic.List[pscustomobject]
     foreach ($g in @($settings.hooks.$eventType)) { $existingGroups.Add($g) }
 
+    # Issue #227: these three strings were the template's two SessionStart commands and its
+    # PostToolUse wave-close command before the sh -c form replaced them. Without this the new
+    # strings append beside the old ones and each script runs twice per event. The wave-close row
+    # only finds a replacement on a ceremony install. Without -IncludeCeremonies its template entry
+    # is filtered out above, so a legacy wave-close entry is left alone. Matched exactly, so a
+    # variant the project edited by hand is left alone like any other project hook. Ordinal
+    # because a @{} hashtable compares keys
+    # case-insensitively, and a differently-cased string is a project edit. A legacy entry is
+    # dropped rather than rewritten only when its own group already holds the replacement. A
+    # replacement in a sibling group does not count: that group can carry a matcher (startup
+    # only, say), and dropping the entry would stop the script firing on the other sources.
+    $legacyCommands = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    foreach ($name in 'session-start-guardrails.sh', 'session-start-drift-check.sh', 'wave-close-handoff.sh') {
+        $legacyCommands.Add("sh `"`$CLAUDE_PROJECT_DIR/.claude/hooks/$name`"", $name)
+    }
+    $allTemplateCommands = @($filteredGroups | ForEach-Object { @($_.hooks) } | ForEach-Object { $_.command })
+    $emptiedGroups = New-Object System.Collections.Generic.List[object]
+    foreach ($eg in $existingGroups) {
+        if (-not $eg.PSObject.Properties['hooks'] -or $null -eq $eg.hooks) { continue }
+        $heldCommands = @(@($eg.hooks) | Where-Object { $_ } | ForEach-Object { $_.command })
+        $migrated = New-Object System.Collections.Generic.List[object]
+        $touched = $false
+        foreach ($h in @($eg.hooks)) {
+            $legacyName = $null
+            $replacement = $null
+            if ($null -ne $h -and $h.command -is [string] -and
+                $legacyCommands.TryGetValue($h.command, [ref]$legacyName)) {
+                $replacement = @($allTemplateCommands | Where-Object { $_.Contains("/.claude/hooks/$legacyName") })[0]
+            }
+            if (-not $replacement) { $migrated.Add($h); continue }
+            $touched = $true
+            if ($heldCommands -ccontains $replacement) { continue }
+            $h.command = $replacement
+            $heldCommands += $replacement
+            $migrated.Add($h)
+        }
+        if ($touched) {
+            $eg.hooks = $migrated.ToArray()
+            if ($migrated.Count -eq 0) { $emptiedGroups.Add($eg) }
+            $results.Add([pscustomobject]@{ File = "settings.json:$eventType"; Action = 'migrated' })
+        }
+    }
+    # A group the migration emptied goes, rather than staying behind as "hooks": [].
+    foreach ($eg in $emptiedGroups) { [void]$existingGroups.Remove($eg) }
+
     $existingCommands = New-Object System.Collections.Generic.List[string]
     foreach ($g in $existingGroups) {
         foreach ($h in @($g.hooks)) { $existingCommands.Add($h.command) }
@@ -1751,51 +1794,76 @@ elseif (-not (Test-GitAnswersForTarget -AbsTarget (Resolve-Path -LiteralPath $Ta
     $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'skipped-foreign-git' })
 }
 else {
-    $gitDir = if ([System.IO.Path]::IsPathRooted($gitDirRaw)) { $gitDirRaw } else { Join-Path $Target $gitDirRaw }
-    $gitDir = (Resolve-Path -LiteralPath $gitDir).Path
-    $gitHooksDir = Join-Path $gitDir 'hooks'
+    # Load-bearing review finding on #218: the fix first shipped for #191 cleared GIT_CONFIG
+    # only around the final write, but the `--get core.hooksPath` probe just below reads
+    # through GIT_CONFIG the exact same way the write used to. An exported GIT_CONFIG naming
+    # an empty or missing file made that probe report "unset" even when the target's own
+    # local config already carried a real core.hooksPath (a Husky-style .husky setup, say).
+    # That hid the existing wiring from the skipped-already-set branch below and let the
+    # write that follows replace the target's real hooks wiring while still reporting
+    # "set to ...". Clearing GIT_CONFIG once for the whole branch, probe and write both,
+    # makes them agree on the same file: the target's own local config, every time. Same
+    # save/remove/restore idiom Test-GitAnswersForTarget uses for its four location
+    # variables above, so an operator who set GIT_CONFIG on purpose still has it back for
+    # whatever ran the installer.
+    $savedGitConfig = Get-Item -LiteralPath 'Env:GIT_CONFIG' -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath 'Env:GIT_CONFIG' -ErrorAction SilentlyContinue
+    try {
+        $gitDir = if ([System.IO.Path]::IsPathRooted($gitDirRaw)) { $gitDirRaw } else { Join-Path $Target $gitDirRaw }
+        $gitDir = (Resolve-Path -LiteralPath $gitDir).Path
+        $gitHooksDir = Join-Path $gitDir 'hooks'
 
-    $currentHooksPath = $null
-    $chpCheck = & git -C $Target config --get core.hooksPath 2>$null
-    if ($LASTEXITCODE -eq 0) { $currentHooksPath = $chpCheck }
+        # #204/#222: a relative core.hooksPath is resolved by git against the worktree
+        # TOPLEVEL, never against $Target, so a naive Join-Path onto the raw $Target only
+        # gave the right answer when $Target already was the toplevel (or, worse, onto a
+        # $Target that was itself still relative, which GetFullPath then resolved against
+        # the process's own working directory instead of either). Get-HooksPathReachability
+        # already carries the correct resolution -- ask git directly with
+        # `rev-parse --git-path hooks`, joined onto a Resolve-Path'd absolute target -- and
+        # is reused here rather than duplicated a second time. $currentHooksPath still comes
+        # from its Display field for the messages below, and $alreadyWired from Reachable.
+        $reach = Get-HooksPathReachability -AbsTarget (Resolve-Path -LiteralPath $Target).Path -HooksDstAbs $hooksDstAbs
+        $currentHooksPath = $reach.Display
+        $alreadyWired = $reach.Reachable
 
-    $alreadyWired = $false
-    if ($currentHooksPath) {
-        $currentResolved = if ([System.IO.Path]::IsPathRooted($currentHooksPath)) { $currentHooksPath } else { Join-Path $Target $currentHooksPath }
-        if (Test-Path -LiteralPath $currentResolved) {
-            $alreadyWired = (Resolve-Path -LiteralPath $currentResolved).Path -ieq $hooksDstAbs
+        $existingHookFiles = @()
+        if (Test-Path -LiteralPath $gitHooksDir) {
+            $existingHookFiles = @(Get-ChildItem -LiteralPath $gitHooksDir -File | Where-Object { $_.Extension -ne '.sample' })
         }
-    }
 
-    $existingHookFiles = @()
-    if (Test-Path -LiteralPath $gitHooksDir) {
-        $existingHookFiles = @(Get-ChildItem -LiteralPath $gitHooksDir -File | Where-Object { $_.Extension -ne '.sample' })
-    }
-
-    if ($alreadyWired) {
-        $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'unchanged' })
-    }
-    elseif ($currentHooksPath) {
-        Write-Host "Skipping git hooksPath wiring: core.hooksPath is already set to '$currentHooksPath'. Git reads hooks from exactly one directory, so none of the harness's git hooks (commit-msg, pre-commit, pre-push) will run until this is resolved. See `"core.hooksPath and other hook managers`" in .claude/guardrails.md for how to chain them in by hand, or replace the current wiring: git -C `"$Target`" config core.hooksPath `"$hooksDstAbs`""
-        $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'skipped-already-set' })
-    }
-    elseif ($existingHookFiles.Count -gt 0) {
-        $names = ($existingHookFiles | Select-Object -ExpandProperty Name) -join ', '
-        Write-Host "Skipping git hooksPath wiring: $gitHooksDir already has hook(s) ($names) that core.hooksPath would replace. Git reads hooks from exactly one directory, so none of the harness's git hooks (commit-msg, pre-commit, pre-push) will run until this is resolved. See `"core.hooksPath and other hook managers`" in .claude/guardrails.md for how to chain them in by hand, or wire the harness hooks anyway: git -C `"$Target`" config core.hooksPath `"$hooksDstAbs`""
-        $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'skipped-existing-hooks' })
-    }
-    else {
-        & git -C $Target config core.hooksPath $hooksDstAbs
-        # A native command's non-zero exit does not trip $ErrorActionPreference = 'Stop',
-        # so this write needs the same explicit check as the rev-parse and config --get
-        # probes above. Without it the row below claims a wiring that never happened, and
-        # that table is the only signal the operator gets.
-        if ($LASTEXITCODE -eq 0) {
-            $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = "set to $hooksDstAbs" })
+        if ($alreadyWired) {
+            $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'unchanged' })
+        }
+        elseif ($currentHooksPath) {
+            Write-Host "Skipping git hooksPath wiring: core.hooksPath is already set to '$currentHooksPath'. Git reads hooks from exactly one directory, so none of the harness's git hooks (commit-msg, pre-commit, pre-push) will run until this is resolved. See `"core.hooksPath and other hook managers`" in .claude/guardrails.md for how to chain them in by hand, or replace the current wiring: git -C `"$Target`" config core.hooksPath `"$hooksDstAbs`""
+            $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'skipped-already-set' })
+        }
+        elseif ($existingHookFiles.Count -gt 0) {
+            $names = ($existingHookFiles | Select-Object -ExpandProperty Name) -join ', '
+            Write-Host "Skipping git hooksPath wiring: $gitHooksDir already has hook(s) ($names) that core.hooksPath would replace. Git reads hooks from exactly one directory, so none of the harness's git hooks (commit-msg, pre-commit, pre-push) will run until this is resolved. See `"core.hooksPath and other hook managers`" in .claude/guardrails.md for how to chain them in by hand, or wire the harness hooks anyway: git -C `"$Target`" config core.hooksPath `"$hooksDstAbs`""
+            $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'skipped-existing-hooks' })
         }
         else {
-            $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = "FAILED (git exit $LASTEXITCODE) - hook not wired" })
+            # --local (#191): with GIT_CONFIG cleared for the whole branch above, this write
+            # already lands in the target's own local config the same way an unqualified
+            # `git config` write would. --local is kept anyway so the write still names its
+            # target explicitly rather than relying on GIT_CONFIG staying cleared, and so it
+            # can never again combine with a GIT_CONFIG this branch forgot to clear.
+            & git -C $Target config --local core.hooksPath $hooksDstAbs
+            # A native command's non-zero exit does not trip $ErrorActionPreference = 'Stop',
+            # so this write needs the same explicit check as the rev-parse and config --get
+            # probes above. Without it the row below claims a wiring that never happened, and
+            # that table is the only signal the operator gets.
+            if ($LASTEXITCODE -eq 0) {
+                $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = "set to $hooksDstAbs" })
+            }
+            else {
+                $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = "FAILED (git exit $LASTEXITCODE) - hook not wired" })
+            }
         }
+    }
+    finally {
+        if ($savedGitConfig) { Set-Item -LiteralPath 'Env:GIT_CONFIG' -Value $savedGitConfig.Value }
     }
 }
 

@@ -46,6 +46,12 @@ set -eu
 # line 2 on such a host and take the session start with it. The subshell absorbs that abort.
 if (set -o pipefail) 2>/dev/null; then set -o pipefail; fi
 
+# Copilot CLI also runs .claude/settings.json hooks (#227). Stand down there, but never while
+# CLAUDECODE is set, so a Claude Code session always runs the rest.
+if [ -n "${COPILOT_CLI:-}" ] && [ -z "${CLAUDECODE:-}" ]; then
+    exit 0
+fi
+
 # Every external command below carries `2>/dev/null || exit 0`, uniformly and without
 # exception. Under `set -e` a command that is missing from PATH aborts the hook at 127 with
 # "command not found" on stderr, which is the single output a SessionStart hook must never

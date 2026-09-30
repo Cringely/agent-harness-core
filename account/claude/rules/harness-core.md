@@ -53,6 +53,10 @@ it. Fix the source under `~/.claude/` and export again.
 1. Capture findings as memory notes during work (cheap, always).
 2. Second occurrence of a failure class or useful pattern across projects: promote it — commit to the core repo (pattern doc, agent def, hook, or template edit), push, shrink notes to pointers. Never blind-edit installed copies in a project. Change core, re-run installer.
 
+## Portable methodology
+
+`skills/engineering-method/SKILL.md` is the tool-neutral distillation of these rules for harnesses other than Claude Code (Copilot CLI, Squad). The rules stay authoritative. A change to a principle in agent-usage, fix-quality, no-overclaim, challenge-mandate or change-management updates that skill in the same change.
+
 ## Architecture reuse
 
 Building an agent system in any language: start from `patterns/INDEX.md` in the core repo. Stage-2 TS code extraction is deferred. Propose it when a second TypeScript project needs the store/planner/dashboard code.

@@ -4,20 +4,14 @@
 // images, HTML, mentions or issue references. What renders outside a fence is template text plus
 // values this file checks itself: event names, validated enums, counts, SHAs and plain identifiers.
 
-import { CONFIDENCE_SET, LOAD_BEARING_SET, SEVERITY_SET, SHA_RE, type Finding, type ReviewEvent, type ReviewerOutput, type Verification } from "./types";
+import { DOCS_VERDICT_FORMS } from "./docs-verdict";
+import { CONFIDENCE_SET, LOAD_BEARING_SET, SEVERITY_SET, SHA_RE, UNSAFE_CHARS, type Finding, type ReviewEvent, type ReviewerOutput, type Verification } from "./types";
 
 export const MAX_FIELD_CHARS = 1_500;
 export const MAX_RENDERED_FINDINGS = 25;
 // GitHub caps a review body at 65,536 characters; the margin absorbs template text.
 export const MAX_BODY_CHARS = 60_000;
 
-// #120's plan D5 list (docs/superpowers/plans/2026-09-11-pr-review-app.md) exactly: C0 controls
-// other than tab and newline, DEL, the Arabic letter mark, zero-width and directional marks, line
-// and paragraph separators, the bidirectional overrides and isolates, invisible operators, and the
-// byte-order mark. Not every character that can make displayed text differ from its bytes: other
-// confusables (soft hyphen, Mongolian vowel separator, variation selectors, tag characters) are a
-// known gap the plan does not close here, tracked outside this task rather than widened on sight.
-const UNSAFE_CHARS = /[\u0000-\u0008\u000B-\u001F\u007F\u061C\u200B-\u200F\u2028-\u202E\u2060-\u2069\uFEFF]/g;
 const IDENTIFIER_RE = /^[A-Za-z0-9._\-\[\]]+$/;
 // The three literals ReviewEvent allows (types.ts:34) and the three Verification.state allows
 // (types.ts:37), restated at runtime because a type annotation enforces nothing once bun skips
@@ -43,6 +37,10 @@ export interface RenderInput {
   toolRevision: string;
   toolDirty: boolean;
   changedFiles: readonly string[];
+  // The pull request body's Docs verdict line (docs-verdict.ts), exactly as matched, or null when
+  // none qualified. Attacker-supplied text like every other pull-request string, so it renders
+  // through fenced() below rather than outside a fence.
+  docsVerdictLine: string | null;
 }
 
 export function sanitize(text: string, maxChars: number = MAX_FIELD_CHARS): string {
@@ -115,6 +113,9 @@ export function renderReviewBody(input: RenderInput): string {
   if (typeof input.basis !== "string" || !BASIS_RE.test(input.basis)) {
     throw new Error("basis contains a character outside computeEvent's output set");
   }
+  if (input.docsVerdictLine !== null && typeof input.docsVerdictLine !== "string") {
+    throw new Error("docsVerdictLine must be a string or null");
+  }
   if (input.output !== null) {
     for (const finding of input.output.findings) {
       if (!SEVERITY_SET.has(finding.severity) || !CONFIDENCE_SET.has(finding.confidence)) {
@@ -138,7 +139,15 @@ export function renderReviewBody(input: RenderInput): string {
   const verification = [`#### Verification: ${input.verification.state}`];
   if (input.verification.reasons.length > 0) verification.push("", fenced(input.verification.reasons.join("\n")));
 
-  const required: string[] = [header.join("\n"), verification.join("\n")];
+  // #217: code-authored, never the model. The matched line is quoted verbatim so a later body
+  // edit cannot change what this review evaluated (body edits do not dismiss an approval); a
+  // missing line renders a code-authored notice naming the two forms it looked for.
+  const docsVerdict =
+    input.docsVerdictLine === null
+      ? ["#### Docs verdict", "", "No Docs verdict line found. Expected one of:", "", fenced(DOCS_VERDICT_FORMS.join("\n"))].join("\n")
+      : ["#### Docs verdict", "", fenced(input.docsVerdictLine)].join("\n");
+
+  const required: string[] = [header.join("\n"), verification.join("\n"), docsVerdict];
   const optional: Array<{ name: string; text: string }> = [];
 
   if (input.output === null) {

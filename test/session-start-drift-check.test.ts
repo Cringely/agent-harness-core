@@ -41,7 +41,7 @@ const INSTALL_TIMEOUT_MS = 120_000;
 const pwshPath = Bun.which("pwsh");
 
 // Every case here drives the real hook, and the hook exits 0 before printing anything when
-// pwsh is absent (session-start-drift-check.sh:137). The cases that install a project need
+// pwsh is absent (session-start-drift-check.sh:143). The cases that install a project need
 // it a second time, so a host without PowerShell runs a fraction of this file. Bun prints
 // the skip count, but a total read off the last line of a run does not carry that caveat
 // with it, and a raw pass count from one host has already been quoted more than once as
