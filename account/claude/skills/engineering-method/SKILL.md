@@ -31,7 +31,7 @@ Every dispatch, or the role definition it lands on, names its model tier. Mechan
 
 ## Plan, then execute through subagents
 
-Development work starts with a written spec and a written plan, both existing before implementation begins. A plan's correctness lives in exact paths, signatures that match across tasks, assertions that can fail, and commands that run verbatim.
+A change that fits in one sentence and touches one subsystem needs no spec. Its plan is the commit message and the test that pins it. Anything more than one step, any change crossing subsystems, and anything security-bearing starts with a written spec and a written plan, both existing before implementation begins. Security-bearing work needs the spec whatever its size. The failure to watch for is real work classified as trivial to skip the spec. A plan's correctness lives in exact paths, signatures that match across tasks, assertions that can fail, and commands that run verbatim.
 
 Plan execution is always subagent-driven, a fresh subagent per task with review between tasks. The coordinator never executes plan tasks inline and never offers that as an option.
 
