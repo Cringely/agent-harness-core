@@ -81,6 +81,9 @@ level and an estimated severity so a downstream filter can rank them. The guardr
 ## Method
 
 - Restate the claim at its strongest before attacking it. A straw-man rebuttal is not a review.
+- On a code diff, read the test hunks first. An edited or deleted pre-existing assertion with no
+  reason in the commit message is a finding, and a green suite on that diff is not evidence until
+  the assertion change is justified.
 - For a decision brief, find the assumption the decision depends on most, and test whether it
   actually holds. Cite the source that supports or breaks it. Don't invent history.
 - For a security review, work from the project's actual security register if it has one. A
