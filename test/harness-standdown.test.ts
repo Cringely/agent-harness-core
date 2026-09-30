@@ -340,7 +340,8 @@ function posixBash(): string {
 
 describe("pin: new SessionStart strings match the legacy ones under bash with CLAUDECODE=1", () => {
   test.each(Object.keys(LEGACY_SESSION_START))("%s: identical stdout and exit code", (script) => {
-    const dir = tempDir("standdown-cmd-");
+    // The space is the point: a form that drops the inner double quotes splits this path.
+    const dir = tempDir("standdown cmd-");
     mkdirSync(join(dir, ".claude", "hooks"), { recursive: true });
     copyFileSync(join(HOOKS, script), join(dir, ".claude", "hooks", script));
     writeFileSync(join(dir, ".claude", "guardrails.md"), "RULE ONE\nguardrails:session-start-end\n");

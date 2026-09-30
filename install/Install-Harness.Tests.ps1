@@ -2015,7 +2015,9 @@ Describe "Install-Harness" {
         }
         if (-not $shDir) { throw 'no POSIX sh: not on PATH, and none under git --exec-path' }
 
-        $claudeDir = Join-Path $script:target '.claude'
+        # The space is the point: a host that strips the inner double quotes splits this path.
+        $projectDir = Join-Path $script:target 'my project'
+        $claudeDir = Join-Path $projectDir '.claude'
         New-Item -ItemType Directory -Path (Join-Path $claudeDir 'hooks') -Force | Out-Null
         $expected = @{
             'session-start-guardrails.sh'  = '=== Guardrails'
@@ -2039,7 +2041,7 @@ Describe "Install-Harness" {
         }
         try {
             $env:PATH = "$shDir$([System.IO.Path]::PathSeparator)$env:PATH"
-            $env:CLAUDE_PROJECT_DIR = $script:target
+            $env:CLAUDE_PROJECT_DIR = $projectDir
             $env:CLAUDECODE = '1'
             $env:COPILOT_CLI = $null
             foreach ($command in $commands) {
@@ -2094,5 +2096,32 @@ Describe "Install-Harness" {
 
         & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
         Get-Content "$script:target/.claude/settings.json" -Raw | Should -Be $first
+    }
+
+    It "migrates a legacy SessionStart entry in place when its replacement sits only in a sibling group with a matcher" {
+        # The sibling fires only on startup. Dropping the matcherless group's legacy entry because
+        # the replacement exists elsewhere in the event would stop the script running on resume.
+        New-Item -ItemType Directory -Path "$script:target/.claude" | Out-Null
+        $template = (Get-Content "$PSScriptRoot/../core/claude/templates/settings.hooks.json" -Raw | ConvertFrom-Json).hooks
+        $templateCommands = @($template.SessionStart | ForEach-Object { $_.hooks } | ForEach-Object { $_.command })
+        $newGuardrails = @($templateCommands | Where-Object { $_.Contains('/session-start-guardrails.sh') })[0]
+        $settings = [ordered]@{
+            hooks = [ordered]@{
+                SessionStart = @(
+                    [ordered]@{ matcher = 'startup'; hooks = @(@{ type = 'command'; command = $newGuardrails }) },
+                    [ordered]@{ hooks = @(@{ type = 'command'; command = 'sh "$CLAUDE_PROJECT_DIR/.claude/hooks/session-start-guardrails.sh"' }) }
+                )
+            }
+        }
+        $settings | ConvertTo-Json -Depth 10 | Set-Content "$script:target/.claude/settings.json"
+
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $s = Get-Content "$script:target/.claude/settings.json" -Raw | ConvertFrom-Json
+        $matcherless = @($s.hooks.SessionStart | Where-Object { -not $_.PSObject.Properties['matcher'] })
+        $matcherless.Count | Should -Be 1
+        @($matcherless[0].hooks | ForEach-Object { $_.command }) | Should -Contain $newGuardrails
+        $startup = @($s.hooks.SessionStart | Where-Object { $_.PSObject.Properties['matcher'] -and $_.matcher -ceq 'startup' })
+        $startup.Count | Should -Be 1
+        @($startup[0].hooks | ForEach-Object { $_.command }) | Should -Be @($newGuardrails)
     }
 }

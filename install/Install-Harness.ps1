@@ -1608,15 +1608,18 @@ foreach ($eventType in $hooksTemplate.PSObject.Properties.Name) {
     # runs twice per session start. Matched exactly, so a variant the project edited by hand is
     # left alone like any other project hook. Ordinal because a @{} hashtable compares keys
     # case-insensitively, and a differently-cased string is a project edit. A legacy entry is
-    # dropped rather than rewritten when the event already holds its replacement anywhere.
+    # dropped rather than rewritten only when its own group already holds the replacement. A
+    # replacement in a sibling group does not count: that group can carry a matcher (startup
+    # only, say), and dropping the entry would stop the script firing on the other sources.
     $legacySessionStartCommands = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
     foreach ($name in 'session-start-guardrails.sh', 'session-start-drift-check.sh') {
         $legacySessionStartCommands.Add("sh `"`$CLAUDE_PROJECT_DIR/.claude/hooks/$name`"", $name)
     }
     $allTemplateCommands = @($filteredGroups | ForEach-Object { @($_.hooks) } | ForEach-Object { $_.command })
-    $heldCommands = @($existingGroups | ForEach-Object { @($_.hooks) } | Where-Object { $_ } | ForEach-Object { $_.command })
+    $emptiedGroups = New-Object System.Collections.Generic.List[object]
     foreach ($eg in $existingGroups) {
         if (-not $eg.PSObject.Properties['hooks'] -or $null -eq $eg.hooks) { continue }
+        $heldCommands = @(@($eg.hooks) | Where-Object { $_ } | ForEach-Object { $_.command })
         $migrated = New-Object System.Collections.Generic.List[object]
         $touched = $false
         foreach ($h in @($eg.hooks)) {
@@ -1635,9 +1638,12 @@ foreach ($eventType in $hooksTemplate.PSObject.Properties.Name) {
         }
         if ($touched) {
             $eg.hooks = $migrated.ToArray()
+            if ($migrated.Count -eq 0) { $emptiedGroups.Add($eg) }
             $results.Add([pscustomobject]@{ File = "settings.json:$eventType"; Action = 'migrated' })
         }
     }
+    # A group the migration emptied goes, rather than staying behind as "hooks": [].
+    foreach ($eg in $emptiedGroups) { [void]$existingGroups.Remove($eg) }
 
     $existingCommands = New-Object System.Collections.Generic.List[string]
     foreach ($g in $existingGroups) {
