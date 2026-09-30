@@ -155,9 +155,23 @@ describe("claudeArgs()", () => {
     "--permission-mode",
     "--agents",
     "--plugin-dir",
-    "--settings",
   ])("never includes %s", (flag) => {
     expect(args).not.toContain(flag);
+  });
+
+  // #238: claude 2.1.283 and later load built-in plugins in every session, headless included, and
+  // no other flag here unloads them. The one --settings value may only switch those plugins off: a
+  // settings path, or any other key, would hand the session configuration the checks never see.
+  test("passes exactly one --settings, whose JSON only disables the built-in plugins", () => {
+    expect(args.filter((a) => a === "--settings")).toHaveLength(1);
+    expect(JSON.parse(after("--settings"))).toEqual({
+      enabledPlugins: {
+        "cc-plugin-agents-md@builtin": false,
+        "cc-plugin-telemetry@builtin": false,
+        "agents-md@builtin": false,
+        "telemetry@builtin": false,
+      },
+    });
   });
 });
 
@@ -190,6 +204,24 @@ describe("parseStreamJson()", () => {
     // Secondary signal for the same failure as memory_paths, kept for accounts where the leak also
     // shows up here.
     ["a run that loaded plugins", stream(init({ plugins: [{ name: "x" }] }), result()), 0, "plugins"],
+    // #238: the init shape captured live on claude 2.1.285 without the --settings override. Built-in
+    // plugins are rejected like any other: agents-md injects AGENTS.md instructions, and a future
+    // built-in must fail closed rather than pass because of where it came from.
+    [
+      "a run that loaded the built-in plugins",
+      stream(
+        init({
+          plugins: [
+            { name: "cc-plugin-agents-md", path: "builtin", source: "cc-plugin-agents-md@builtin" },
+            { name: "cc-plugin-telemetry", path: "builtin", source: "cc-plugin-telemetry@builtin" },
+          ],
+        }),
+        assistant({ type: "tool_use", name: "StructuredOutput" }),
+        result(),
+      ),
+      0,
+      "plugins",
+    ],
     ["a run with a configured output style", stream(init({ output_style: "Explanatory" }), result()), 0, "output style"],
     // I1: plan-audit-t4-t11.md's cwd clause. init.cwd is the CLI's own report of where it ran.
     ["a foreign working directory", stream(init({ cwd: "X:/Users/someone/work" }), result()), 0, "directory"],
