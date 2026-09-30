@@ -668,4 +668,62 @@ describe("pre-commit hook — token-pattern secret scan", () => {
     const log = existsSync(logPath) ? readFileSync(logPath, "utf8") : "";
     expect(log.split("\n").filter((l) => l.length > 0).length).toBe(1);
   }, SCAN_TIMEOUT_MS);
+
+  /** Stages `body` under `relPath` straight into the index, with no working-tree
+   * file: hash-object plus update-index --cacheinfo, under core.protectNTFS=false
+   * so Windows accepts a name NTFS could not hold. */
+  function stageBlob(dir: string, relPath: string, body: string, mode = "100644") {
+    const sha = Bun.spawnSync(["git", "hash-object", "-w", "--stdin"], {
+      cwd: dir,
+      stdin: Buffer.from(body),
+      stdout: "pipe",
+      stderr: "pipe",
+    }).stdout.toString().trim();
+    const res = git(["-c", "core.protectNTFS=false", "update-index", "--add", "--cacheinfo", `${mode},${sha},${relPath}`], dir);
+    expect(res.exitCode).toBe(0);
+  }
+
+  // git quotes a name carrying a double quote, a backslash, a tab or another
+  // control character even under core.quotePath=false, so the hook's path list
+  // holds the quoted form, `git show` on it fails, and the blob used to be
+  // skipped unscanned (T232.4 review).
+  test("token under a name git quotes: refused as unscannable, value not printed", () => {
+    const dir = initRepo();
+    stageBlob(dir, 'we"ird.txt', `token ${GITHUB_CLASSIC}\n`);
+
+    const result = runHook(dir, { ...process.env, PATH: pathWithoutVale() });
+    expect(result.exitCode).toBe(1);
+    const stderr = result.stderr.toString();
+    expect(stderr).toMatch(/cannot be scanned/i);
+    expect(stderr).not.toContain(GITHUB_CLASSIC);
+  }, SCAN_TIMEOUT_MS);
+
+  // `git show ":2:x"` reads index stage 2, not the path "2:x". The hook reads
+  // stage 0 explicitly, so such a name is scanned like any other. Skipped on
+  // Windows, where Git for Windows refuses to index a top-level name of that
+  // shape at all (update-index: "Invalid path"), even under
+  // core.protectNTFS=false. It runs on Linux, where the review reproduced it.
+  test.skipIf(process.platform === "win32")("token under a name starting with a digit and a colon: refused, file named", () => {
+    const dir = initRepo();
+    stageBlob(dir, "2:token.txt", `token ${GITHUB_CLASSIC}\n`);
+
+    const result = runHook(dir, { ...process.env, PATH: pathWithoutVale() });
+    expect(result.exitCode).toBe(1);
+    const stderr = result.stderr.toString();
+    expect(stderr).toContain("2:token.txt");
+    expect(stderr).not.toContain(GITHUB_CLASSIC);
+  }, SCAN_TIMEOUT_MS);
+
+  // A gitlink's `git show` fails legitimately (the commit is not in this
+  // repository), so it is the one unreadable entry the hook still passes over.
+  // Refusing every unreadable entry would block every submodule commit.
+  test("a staged gitlink beside clean content: exit 0", () => {
+    const dir = initRepo();
+    stage(dir, "notes.txt", "nothing secret in here\n");
+    const res = git(["update-index", "--add", "--cacheinfo", `160000,${"0123456789abcdef".repeat(2)}01234567,sub`], dir);
+    expect(res.exitCode).toBe(0);
+
+    const result = runHook(dir, { ...process.env, PATH: pathWithoutVale() });
+    expect(result.exitCode).toBe(0);
+  }, SCAN_TIMEOUT_MS);
 });

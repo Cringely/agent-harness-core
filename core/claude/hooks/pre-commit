@@ -157,6 +157,17 @@ identity_staged=$(git -c core.quotePath=false diff --cached --name-only --diff-f
 if [ -n "$identity_staged" ]; then
   while IFS= read -r f; do
     [ -n "$f" ] || continue
+    # git quotes a name carrying a double quote, a backslash, a tab or another
+    # control character even under core.quotePath=false, so $f holds a C-style
+    # literal that `git show` cannot read. Skipping it would let its blob past
+    # every content channel below unscanned. Only a quoted name begins with a
+    # double quote here (a name holding one is itself quoted), so refuse.
+    case "$f" in
+      '"'*)
+        echo "pre-commit: refused. A staged path needs quoting (double quote, backslash, tab or control character), so its content cannot be scanned. Rename it, then re-stage." >&2
+        exit 1
+        ;;
+    esac
     [ "$personal_terms_state" -eq 0 ] && personal_terms_paths="${personal_terms_paths}${f}${personal_terms_nl}"
     # Path channel first, and its own refusal never echoes $f -- if the path
     # itself is the identifying string, printing it back would be the leak
@@ -182,7 +193,21 @@ if [ -n "$identity_staged" ]; then
     # a bracket in one staged filename could make the numstat check answer
     # for a DIFFERENT staged file. Reading every staged blob unconditionally
     # removes the pathspec argument entirely along with the skip it gated.
-    identity_body=$(git show ":$f" 2>/dev/null) || continue
+    #
+    # ":0:$f", stage 0 spelled out: a bare ":$f" reads a name like "2:x" as
+    # index stage 2 of path "x" and fails. A read that fails is refused, since
+    # skipping it would pass the blob unscanned through this channel, the
+    # personal-term channel and the secret scan alike. The one exception is a
+    # gitlink, whose commit is not in this repository, so `git show` fails on
+    # it legitimately and there is no blob to scan. The ls-files check runs
+    # only on that failure path, never on a readable blob.
+    if ! identity_body=$(git show ":0:$f" 2>/dev/null); then
+      case "$(git ls-files --stage -- ":(literal)$f")" in
+        "160000 "*) continue ;;
+      esac
+      echo "pre-commit: refused. A staged blob could not be read, so its content cannot be scanned." >&2
+      exit 1
+    fi
     [ -n "$identity_body" ] || continue
     secret_bodies="${secret_bodies}${identity_body}${secret_nl}"
     [ "$personal_terms_state" -eq 0 ] && personal_terms_bodies="${personal_terms_bodies}${identity_body}${personal_terms_nl}"
@@ -232,7 +257,7 @@ if [ "$personal_terms_state" -eq 0 ]; then
       personal_term_refuse pre-commit "A staged file's path"
     while IFS= read -r f; do
       [ -n "$f" ] || continue
-      personal_terms_body=$(git show ":$f" 2>/dev/null) || continue
+      personal_terms_body=$(git show ":0:$f" 2>/dev/null) || continue
       personal_term_match "$personal_terms_body" &&
         personal_term_refuse pre-commit "'$f'"
     done <<EOF
@@ -317,7 +342,7 @@ if printf '%s\n' "$secret_hits" | secret_unallowed_hit; then
   # it finds, so a second look that fails cannot read as clean.
   while IFS= read -r f; do
     [ -n "$f" ] || continue
-    secret_body=$(git show ":$f" 2>/dev/null) || continue
+    secret_body=$(git show ":0:$f" 2>/dev/null) || continue
     secret_file_hits=$(printf '%s\n' "$secret_body" | LC_ALL=C grep -o -E "$secret_pattern") || continue
     printf '%s\n' "$secret_file_hits" | secret_unallowed_hit && secret_refuse "'$f'"
   done <<EOF
