@@ -636,22 +636,14 @@ function fixtureSnapshot(headSha: string): PrSnapshot {
     headSha,
     isOpen: true,
     // #195: null rather than a real diff string. pipeline.ts refuses to call deps.runner.run() at
-    // all once snapshot.diff === null ("the pull request diff was unavailable"), before deciding
-    // whether the diff is small enough to send. Every case below reaches main() with a real
-    // ClaudeCliRunner (cli.ts constructs one unconditionally, it is not on this seam), so if the
-    // expectHead wiring this file's #167 tests pin ever regressed, a truthy diff here would let the
-    // dry run reach a live `claude` process under the account's own login -- confirmed live on this
-    // machine while writing this fix, where reverting this line to a real diff string let a "review"
-    // run with no --expect-head start a real reviewer process that bun's test timeout had to kill.
-    // A null diff closes that regardless of whether the check around it still holds. A separate
-    // test asserting the resulting dry-run reviewerFailure message was tried and dropped (review
-    // finding on #216, 2026-09-23): with no --expect-head, that assertion reaches a real,
-    // unmocked ClaudeCliRunner (cli.ts constructs one unconditionally, it is not on the CliIo
-    // seam) whenever this diff:null guard alone regresses, confirmed live with a PATH-first stub
-    // claude that recorded a start -- a real model call under the account's own login is exactly
-    // what #195 exists to prevent. This line is the guard. The #167 tests above already prove the
-    // --expect-head wiring separately, each behind a mismatched --expect-head that refuses before
-    // deps.runner.run() could ever be reached.
+    // all once snapshot.diff === null, before any size check. Every "review" case below reaches
+    // main() with a real ClaudeCliRunner (cli.ts constructs one unconditionally, it is not on the
+    // CliIo seam), so the null diff keeps a regression in the --expect-head wiring the #167 tests
+    // pin from reaching a live claude process under the account's own login. Do not add a review
+    // case without --expect-head to prove this line: with the runner off the seam, such a case
+    // starts claude the moment this line regresses. Checked during review of #216 with a stub claude
+    // placed first on PATH when bun launched (Bun.which ignores a later change to process.env.PATH,
+    // so a stub added at runtime proves nothing).
     diff: null,
     changedFiles: ["a.ts"],
     changedFilesComplete: true,
