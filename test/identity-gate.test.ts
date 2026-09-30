@@ -1922,51 +1922,159 @@ describe("identity gate — the encoding probe refuses when its own tools fail (
     expect(result.stderr.toString()).toContain("od printed no bytes");
   });
 
-  // The grep stubs target only the NUL count (its arguments end in "x 00"
-  // in both the old `grep -qx 00` and the new count), so the load-time
-  // canary and every scan keep the real grep. The file has no BOM, because
-  // a file with one is refused on its first bytes before the NUL count
-  // runs, and a stub there could not tell the old probe from the new one.
-  test.skipIf(!realGrep)("a grep that prints a count and then exits 2 on the NUL count refuses", () => {
-    const stubDir = installToolStub("grep", [
-      'case "$*" in',
-      "    *'x 00')",
-      "        echo 0",
-      "        exit 2",
-      "        ;;",
-      "esac",
-      'exec "$REAL_GREP" "$@"',
-    ]);
+  // The grep stubs target only the NUL count the probe used to run (its
+  // arguments ended in "x 00" in both the round-2 `grep -qx 00` and the
+  // round-3 `grep -c -x 00`), so the load-time canary and every scan keep
+  // the real grep. The file has no BOM, because a file with one is refused
+  // on its first bytes before any NUL count runs. Round 4 took grep out of
+  // the probe, so none of these lies reaches it any more and the file is
+  // refused on its NUL byte. The first two are the round-3 review's
+  // findings: a printed count and an exit status that disagree (a zero
+  // count with exit 0, which means grep matched), and a grep that lies
+  // consistently (a zero count with exit 1), which no cross-check of count
+  // against status could catch. The last two were round 3's own crash
+  // stubs, kept so a probe that brings grep back is tested against them.
+  const GREP_LIES: Array<[string, string[]]> = [
+    ["prints a zero count and exits 0", ["echo 0", "exit 0"]],
+    ["prints a zero count and exits 1", ["echo 0", "exit 1"]],
+    ["prints a zero count and then exits 2", ["echo 0", "exit 2"]],
+    ["exits 1 without printing a count", ["exit 1"]],
+  ];
+  for (const [label, lie] of GREP_LIES) {
+    test.skipIf(!realGrep)(`a grep that ${label} on the NUL count cannot make a UTF-16LE file load`, () => {
+      const stubDir = installToolStub("grep", [
+        'case "$*" in',
+        "    *'x 00')",
+        ...lie.map((line) => `        ${line}`),
+        "        ;;",
+        "esac",
+        'exec "$REAL_GREP" "$@"',
+      ]);
+      const home = utf16leNonAsciiHome(false);
+      const dir = initPreCommitRepo();
+      stageNonAsciiName(dir);
+      const result = runPreCommit(
+        dir,
+        hookLocaleEnv({ USERPROFILE: home, HOME: home, PATH: pathWithStubFirst(stubDir), REAL_GREP: realGrep! }),
+      );
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr.toString()).toContain("contains a NUL byte");
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Issue #91, round 4. The review of the round-3 head found that the probe
+// still took whatever od printed as a hex-byte measurement without checking
+// that it was one, that it read a grep count without checking it against
+// grep's exit status, and that its byte split depended on the caller's IFS
+// and on globbing being live. Each case below is a tool that exits 0 while
+// lying, or a calling shell that changes what the split produces. Every one
+// of them made the round-3 probe return "clean" for a UTF-16LE file, and the
+// file then loaded with its NULs dropped and the declared name went through.
+// The probe now walks every word od printed in the shell itself: 00 is a NUL,
+// any other two hex digits pass, and anything else refuses as a measurement
+// that cannot be read. It runs in a subshell with globbing off, so the caller
+// keeps its own glob state. All of these run under LC_CTYPE=C.UTF-8, the
+// locale Git for Windows gives every hook.
+// ---------------------------------------------------------------------------
+
+const realOd = Bun.which("od");
+if (!realOd) {
+  console.warn("identity-gate.test.ts: no real od on PATH, tests needing a real od binary are skipped.");
+}
+
+/** envWith, plus the locale Git for Windows sets for every hook it runs. */
+function hookLocaleEnv(extra: Record<string, string | undefined>): Record<string, string | undefined> {
+  return envWith({ LC_ALL: "C.UTF-8", LC_CTYPE: "C.UTF-8", ...extra });
+}
+
+/** Stub body: run the real od on the file (the last argument) with other flags, exit 0. */
+function odRerun(flags: string): string[] {
+  return ["for last; do :; done", `exec "$REAL_OD" ${flags} "$last"`];
+}
+
+describe("identity gate — the encoding probe refuses a lying tool or an unusual calling shell (#91 round 4)", () => {
+  const OD_LIES: Array<[string, string[]]> = [
+    ["prints two-byte hex words (-tx2) instead of bytes", odRerun("-An -tx2 -v")],
+    ["prints its default octal words", odRerun("-An -v")],
+    ["prints a line of prose", ["echo 'od: this is not a hex dump'", "exit 0"]],
+  ];
+  for (const [label, lie] of OD_LIES) {
+    test.skipIf(!realOd)(`an od that ${label} and exits 0 refuses on a UTF-16LE file with no BOM`, () => {
+      const stubDir = installToolStub("od", lie);
+      const home = utf16leNonAsciiHome(false);
+      const dir = initPreCommitRepo();
+      stageNonAsciiName(dir);
+      const result = runPreCommit(
+        dir,
+        hookLocaleEnv({ USERPROFILE: home, HOME: home, PATH: pathWithStubFirst(stubDir), REAL_OD: realOd! }),
+      );
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr.toString()).toContain("not one two-digit hex byte per word");
+    });
+  }
+
+  // A glob character in od's output. With globbing live, the unquoted split
+  // expands "7?" against the hook's working directory, and a file named 7b
+  // there turns it into a valid-looking byte with no NUL beside it. Only a
+  // lying od prints a glob character, but globbing off makes the word reach
+  // the loop as the "7?" od printed, which is not a hex byte.
+  test("an od that prints a glob character cannot have it expanded into a hex byte", () => {
+    const stubDir = installToolStub("od", ["echo '7?'", "exit 0"]);
     const home = utf16leNonAsciiHome(false);
     const dir = initPreCommitRepo();
+    writeFileSync(join(dir, "7b"), "");
     stageNonAsciiName(dir);
-    const result = runPreCommit(
-      dir,
-      envWith({ USERPROFILE: home, HOME: home, PATH: pathWithStubFirst(stubDir), REAL_GREP: realGrep! }),
-    );
+    const result = runPreCommit(dir, hookLocaleEnv({ USERPROFILE: home, HOME: home, PATH: pathWithStubFirst(stubDir) }));
     expect(result.exitCode).not.toBe(0);
-    expect(result.stderr.toString()).toContain("NUL-byte scan");
-    expect(result.stderr.toString()).toContain("did not run cleanly");
+    expect(result.stderr.toString()).toContain("not one two-digit hex byte per word");
   });
 
-  // 2026-09-05's incident shape: a matcher that fails as "no match", exit
-  // 1, printing nothing. grep -c prints its count even when that count is
-  // 0, so a missing count is a failed measurement, not a clean one.
-  test.skipIf(!realGrep)("a grep that exits 1 on the NUL count without printing a count refuses", () => {
-    const stubDir = installToolStub("grep", [
-      'case "$*" in',
-      "    *'x 00') exit 1 ;;",
-      "esac",
-      'exec "$REAL_GREP" "$@"',
-    ]);
-    const home = utf16leNonAsciiHome(false);
-    const dir = initPreCommitRepo();
-    stageNonAsciiName(dir);
-    const result = runPreCommit(
-      dir,
-      envWith({ USERPROFILE: home, HOME: home, PATH: pathWithStubFirst(stubDir), REAL_GREP: realGrep! }),
-    );
-    expect(result.exitCode).not.toBe(0);
-    expect(result.stderr.toString()).toContain("printed no count");
-  });
+  // The shipped hooks never change IFS for the probe, and Git Bash's sh
+  // ignores IFS from the environment, so this sources the library and sets
+  // IFS in the calling shell directly. The round-3 split followed the
+  // caller's IFS: empty, newline and colon each turned od's output into
+  // words that were not bytes, the NUL count found no line reading 00, and
+  // the probe returned 0. The driver also reports whether the probe left
+  // globbing off in its caller.
+  const IFS_VALUES = ["empty", "newline", "colon"];
+  for (const withBom of [false, true]) {
+    for (const ifs of IFS_VALUES) {
+      test(`IFS set to ${ifs} in the caller cannot make the probe pass a UTF-16LE file ${withBom ? "with" : "without"} a BOM`, () => {
+        const home = utf16leNonAsciiHome(withBom);
+        const file = join(home, ".claude-account-identity.json");
+        const dir = mkdtempSync(join(tmpdir(), "identity-enc-ifs-"));
+        tempDirs.push(dir);
+        const driverPath = join(dir, "driver.sh");
+        writeFileSync(
+          driverPath,
+          [
+            "#!/bin/sh",
+            '. "$1"',
+            "nl='",
+            "'",
+            'case $3 in',
+            "    empty) IFS= ;;",
+            "    newline) IFS=$nl ;;",
+            "    colon) IFS=: ;;",
+            "esac",
+            'identity_check_encoding "$2" 2>/dev/null',
+            "rc=$?",
+            "case $- in *f*) glob=off ;; *) glob=on ;; esac",
+            'printf "%s %s" "$rc" "$glob"',
+            "",
+          ].join("\n"),
+        );
+        const sh = posixSh();
+        const shDir = posixShDir();
+        const base = hookLocaleEnv({});
+        const env = shDir ? { ...base, PATH: `${base.PATH ?? ""}${delimiter}${shDir}` } : base;
+        const run = Bun.spawnSync([sh, driverPath, LIB_SRC, file, ifs], { cwd: dir, env, stdout: "pipe", stderr: "pipe" });
+        const [rc, glob] = run.stdout.toString().split(" ");
+        expect(["1", "3"]).toContain(rc);
+        expect(glob).toBe("on");
+      });
+    }
+  }
 });

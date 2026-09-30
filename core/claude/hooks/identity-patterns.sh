@@ -695,24 +695,39 @@ EOF
 # to carry through a variable. `-v` disables od's repeated-line elision so
 # a long run of NUL bytes cannot hide the first one. The shell's own word
 # splitting then turns that output into one positional parameter per byte,
-# and the NUL count sees one two-digit hex byte per line rather than a
-# concatenated hex string. That matters because two ordinary, non-NUL
-# neighbouring bytes (0xd0 then 0x0f) concatenate to "d00f", and a bare
-# substring search for "00" would misread that as a NUL that was never
-# there.
+# and the loop below reads each one whole. That matters because two
+# ordinary, non-NUL neighbouring bytes (0xd0 then 0x0f) concatenate to
+# "d00f", and a bare substring search for "00" would misread that as a NUL
+# that was never there.
 #
-# EVERY TOOL HERE IS CHECKED, AND "NO EVIDENCE" IS NEVER "CLEAN" (issue
-# #91, round 3). Until round 3 this function split od's output with a
+# NO TOOL'S OUTPUT IS TRUSTED UNREAD, AND "NO EVIDENCE" IS NEVER "CLEAN"
+# (issue #91, rounds 2 to 4). The round-2 probe split od's output with a
 # `tr | sed` stage whose exit status nothing read, then asked
-# `grep -qx 00`, where a crash reads the same as "no match". The review of
-# the round-2 head put a sed on PATH that exits 1 on that stage: the byte
-# list came back empty, the BOM check saw no BOM, the NUL check saw no
-# NUL, and a UTF-16LE file with a non-ASCII name loaded with rc 0, the
-# name going straight through. So the split is now the shell's own, with
-# no tool to fail, and the one tool call left (the NUL count) is refused
-# on a crash (grep exit above 1) and on a missing count. An od that
-# printed nothing for a file that is not empty is refused as well, since
-# that is a failed measurement, not a file with no bytes in it.
+# `grep -qx 00`, where a crash reads the same as "no match": a sed stub
+# that exited 1 emptied the byte list, and a UTF-16LE file loaded with its
+# NULs dropped and its non-ASCII name unmatched. Round 3 checked every
+# tool's exit status, and its review then showed that a tool which exits 0
+# while lying still got through: an od printing two-byte words, octal or
+# prose, a grep whose printed count and exit status disagree, and a split
+# that followed the caller's IFS or expanded a glob. So grep is gone from
+# the probe, and every word od printed is read in the shell itself. 00 is
+# a NUL, any other two hex digits are a byte, and anything else refuses
+# (3), because output this loop cannot read as bytes is not a measurement.
+# An od that exits 0 with a dump in some other format therefore refuses,
+# and so does a caller whose IFS splits od's output into words that are not
+# bytes. IFS is not pinned here. No shipped hook changes it, and refusing
+# under an unusual one is the fail-closed answer.
+#
+# The body runs in a subshell, ( ) rather than { }, so the `set -f` it
+# needs never reaches the caller's shell: a glob character in od's output
+# (only a lying od prints one) would otherwise be expanded against the
+# working directory, and a file there named like a hex byte would turn it
+# into a clean-looking one. Inside the subshell, `exit` ends the probe with
+# its status. That costs one fork per identity_load.
+#
+# What no check here can catch: an od that exits 0 with well-formed hex
+# bytes that are not the file's bytes (a dump truncated or fabricated at
+# read time). Nothing in od's output alone tells that from the real thing.
 #
 # Returns:
 #   0  clean -- no BOM, no NUL byte anywhere in the file
@@ -734,29 +749,32 @@ EOF
 #      behind it) returns 1, not 2.
 #   3  the probe itself failed: od could not be run (missing, or the file
 #      vanished between the readability check above and here), od printed
-#      no bytes for a file that is not empty, or the NUL count crashed or
-#      printed no count -- the caller refuses rather than reading a file
+#      no bytes for a file that is not empty, or od printed a word that is
+#      not one two-digit hex byte (a lying od, or an unusual IFS in the
+#      calling shell) -- the caller refuses rather than reading a file
 #      that might not be UTF-8 as though it were
-identity_check_encoding() {
+identity_check_encoding() (
     identity_enc_file=$1
     identity_enc_out=$(od -An -tx1 -v "$identity_enc_file" 2>/dev/null) || {
         echo "identity gate: could not read '$identity_enc_file' byte-by-byte to check its encoding (od failed or is unavailable). Refusing rather than reading a file that might not be UTF-8 as if it were." >&2
-        return 3
+        exit 3
     }
-    # Unquoted on purpose: one positional parameter per hex byte. With -v,
-    # od prints only hex digits and whitespace, so nothing here can glob.
+    # Unquoted on purpose: one positional parameter per hex byte. Globbing
+    # is off first, so a glob character reaches the loop below as the word
+    # od printed and is refused there.
+    set -f
     set -- $identity_enc_out
     if [ "$#" -eq 0 ]; then
         # A genuinely empty file is identity_load's to report, below.
-        [ -s "$identity_enc_file" ] || return 0
+        [ -s "$identity_enc_file" ] || exit 0
         echo "identity gate: od printed no bytes for '$identity_enc_file', which is not empty. Refusing rather than reading an empty measurement as a clean file." >&2
-        return 3
+        exit 3
     fi
     identity_enc_head=$1${2-}${3-}
     case $identity_enc_head in
         fffe*|feff*)
             echo "identity gate: '$identity_enc_file' starts with a UTF-16 byte-order mark. This parser reads bytes, not UTF-16 code units, and cannot decode it correctly -- silently misreading it would build a pattern that looks fine and does not match real content (issue #91: this is exactly what a UTF-16LE file with a non-ASCII declared name did). Re-save the file as UTF-8 and retry." >&2
-            return 1
+            exit 1
             ;;
     esac
     # #91/round-2 review: the efbbbf case used to `return 2` right here,
@@ -773,25 +791,24 @@ identity_check_encoding() {
     case $identity_enc_head in
         efbbbf*) identity_enc_utf8_bom=1 ;;
     esac
-    identity_enc_nuls=$(printf '%s\n' "$@" | grep -c -x 00)
-    identity_enc_nul_rc=$?
-    if [ "$identity_enc_nul_rc" -gt 1 ]; then
-        echo "identity gate: the NUL-byte scan of '$identity_enc_file' did not run cleanly (grep exited $identity_enc_nul_rc). Refusing rather than reading a crashed scan as a file with no NUL in it." >&2
-        return 3
-    fi
-    case $identity_enc_nuls in
-        ''|*[!0-9]*)
-            echo "identity gate: the NUL-byte scan of '$identity_enc_file' printed no count (grep exited $identity_enc_nul_rc). grep -c prints a count even when it is 0, so this is a failed scan. Refusing rather than reading it as a file with no NUL in it." >&2
-            return 3
-            ;;
-    esac
-    if [ "$identity_enc_nuls" -gt 0 ]; then
-        echo "identity gate: '$identity_enc_file' contains a NUL byte, which no valid UTF-8 JSON document does. This is very likely UTF-16 without a byte-order mark, which this parser cannot decode correctly -- silently misreading it would build a pattern that looks fine and does not match real content. Re-save the file as UTF-8 and retry." >&2
-        return 1
-    fi
-    [ "$identity_enc_utf8_bom" = 1 ] && return 2
-    return 0
-}
+    # The digits are listed rather than written as ranges, so what counts
+    # as a hex digit never depends on the locale's collation order.
+    for identity_enc_byte do
+        case $identity_enc_byte in
+            00)
+                echo "identity gate: '$identity_enc_file' contains a NUL byte, which no valid UTF-8 JSON document does. This is very likely UTF-16 without a byte-order mark, which this parser cannot decode correctly -- silently misreading it would build a pattern that looks fine and does not match real content. Re-save the file as UTF-8 and retry." >&2
+                exit 1
+                ;;
+            [0123456789abcdef][0123456789abcdef]) : ;;
+            *)
+                echo "identity gate: od's output for '$identity_enc_file' is not one two-digit hex byte per word, so it is not a byte measurement this probe can read (an od printing some other format, or an unusual IFS in the calling shell). Refusing rather than reading it as a clean file." >&2
+                exit 3
+                ;;
+        esac
+    done
+    [ "$identity_enc_utf8_bom" = 1 ] && exit 2
+    exit 0
+)
 
 # Resolves the identity file, derives the workstation username and machine
 # hostname, and builds IDENTITY_PATTERN (one grep -iE alternation covering
