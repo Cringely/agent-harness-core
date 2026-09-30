@@ -14,7 +14,7 @@
 // wording) runs against the real binary and is skipped without it.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { posixSh, posixShDir } from "./posix-sh";
@@ -497,4 +497,175 @@ describe("pre-commit hook — Vale findings never leak an identifying string", (
     expect(stderr).toContain("Stub.Finding");
     expect(stderr).not.toContain("withheld");
   }, HOOK_TIMEOUT_MS);
+});
+
+// #232: a staged blob carrying a provider-shaped token or a private key must
+// not become a commit, and a scanner that cannot run refuses rather than
+// passes. Every token below is assembled at runtime from split parts, never
+// written whole: GitHub push protection scans this repository, and the
+// whole-tree false-positive probe runs the finished hook over this very file.
+//
+// The shim cases (fail closed, canary, spawn pin) put a `grep` of their own
+// first on PATH. Each shim reacts only to an invocation whose arguments carry
+// "PRIVATE KEY", which only the secret scan's pattern does, and hands every
+// other call to the real grep, so the identity gate runs exactly as it does
+// in production.
+//
+// Its own timeout, not HOOK_TIMEOUT_MS. These cases stage up to five files,
+// and the identity gate's per-file subprocesses (#113) scale with that, while
+// the shim cases add an sh spawn in front of every grep the hook runs.
+// Measured 2026-09-30 on a loaded workstation, red run: single-file cases
+// 17s-27s without a shim and 46s-55s with one, the four-file near-miss case
+// 38s, the five-file shim case 82s. Five of the eight ran past
+// HOOK_TIMEOUT_MS. A second red run the same day, under heavier load, took
+// 52s-76s per single-file case and 111s for the five-file shim case. 240s
+// leaves about 2x over the slowest seen.
+const SCAN_TIMEOUT_MS = 240_000;
+describe("pre-commit hook — token-pattern secret scan", () => {
+  const PEM_HEADER = ["-----BEGIN", "RSA", "PRIVATE", "KEY-----"].join(" ");
+  const PEM_FOOTER = ["-----END", "RSA", "PRIVATE", "KEY-----"].join(" ");
+  const PKCS8_HEADER = ["-----BEGIN", "PRIVATE", "KEY-----"].join(" ");
+  const BACKSLASH_N = String.fromCharCode(92) + "n";
+  const GITHUB_CLASSIC = "gh" + "p_" + "a".repeat(36);
+
+  /** The real grep, as a path an MSYS or POSIX sh can exec. */
+  function realGrep(): string {
+    const found = Bun.which("grep") ?? join(dirname(posixSh()), "grep");
+    return toForwardSlashes(found);
+  }
+
+  /** Backslashes to forward slashes, so a Windows path survives inside an sh script. */
+  function toForwardSlashes(p: string): string {
+    return p.split(String.fromCharCode(92)).join("/");
+  }
+
+  /** A `grep` shim in a fresh directory. `onSecretScan` is the sh fragment run
+   * when any argument contains "PRIVATE KEY". Every other call execs the real
+   * grep untouched. */
+  function installGrepShim(onSecretScan: string): string {
+    const shimDir = mkdtempSync(join(tmpdir(), "precommit-grepshim-"));
+    tempDirs.push(shimDir);
+    const shimPath = join(shimDir, "grep");
+    writeFileSync(
+      shimPath,
+      [
+        "#!/bin/sh",
+        'for a in "$@"; do',
+        '  case "$a" in',
+        `    *"PRIVATE KEY"*) ${onSecretScan} ;;`,
+        "  esac",
+        "done",
+        `exec "${realGrep()}" "$@"`,
+        "",
+      ].join("\n"),
+    );
+    chmodSync(shimPath, 0o755);
+    return shimDir;
+  }
+
+  function envWithShim(shimDir: string) {
+    const sep = process.platform === "win32" ? ";" : ":";
+    return { ...process.env, PATH: [shimDir, pathWithoutVale()].join(sep) };
+  }
+
+  function stage(dir: string, relPath: string, body: string) {
+    writeFileSync(join(dir, relPath), body);
+    git(["add", "--", relPath], dir);
+  }
+
+  /** A CR case is only a CR case if the staged blob kept its CR. */
+  function expectBlobHasCR(dir: string, relPath: string) {
+    const blob = git(["cat-file", "-p", `:${relPath}`], dir).stdout.toString();
+    expect(blob.includes(String.fromCharCode(13))).toBe(true);
+  }
+
+  test("GitHub classic token in a staged .txt: refused, file named, value not printed", () => {
+    const dir = initRepo();
+    stage(dir, "token.txt", `config for the deploy\ntoken ${GITHUB_CLASSIC}\n`);
+
+    const result = runHook(dir, { ...process.env, PATH: pathWithoutVale() });
+    expect(result.exitCode).toBe(1);
+    const stderr = result.stderr.toString();
+    expect(stderr).toContain("token.txt");
+    expect(stderr).not.toContain(GITHUB_CLASSIC);
+  }, SCAN_TIMEOUT_MS);
+
+  test("same token with CRLF line endings: refused", () => {
+    const dir = initRepo();
+    git(["config", "core.autocrlf", "false"], dir);
+    stage(dir, "token.txt", `config for the deploy\r\ntoken ${GITHUB_CLASSIC}\r\n`);
+    expectBlobHasCR(dir, "token.txt");
+
+    const result = runHook(dir, { ...process.env, PATH: pathWithoutVale() });
+    expect(result.exitCode).toBe(1);
+  }, SCAN_TIMEOUT_MS);
+
+  test("PEM private key with CRLF line endings, header on its own line: refused", () => {
+    const dir = initRepo();
+    git(["config", "core.autocrlf", "false"], dir);
+    const body = [PEM_HEADER, "M".repeat(64), "A".repeat(64), PEM_FOOTER, ""].join("\r\n");
+    stage(dir, "server.pem", body);
+    expectBlobHasCR(dir, "server.pem");
+
+    const result = runHook(dir, { ...process.env, PATH: pathWithoutVale() });
+    expect(result.exitCode).toBe(1);
+  }, SCAN_TIMEOUT_MS);
+
+  test("service-account JSON with a one-line private_key value: refused", () => {
+    const dir = initRepo();
+    const keyValue = PKCS8_HEADER + BACKSLASH_N + "MIIE" + "vQIB".repeat(9);
+    stage(dir, "sa.json", `{"type": "service_account", "private_key": "${keyValue}"}\n`);
+
+    const result = runHook(dir, { ...process.env, PATH: pathWithoutVale() });
+    expect(result.exitCode).toBe(1);
+  }, SCAN_TIMEOUT_MS);
+
+  test("near misses in one commit: exit 0", () => {
+    const dir = initRepo();
+    // The shape test/pr-review-app-auth.test.ts uses for a garbage PEM.
+    stage(dir, "garbage-pem.txt", `${PEM_HEADER}${BACKSLASH_N}not a key${BACKSLASH_N}${PEM_FOOTER}\n`);
+    // A header quoted inside prose.
+    stage(dir, "prose.txt", `The file starts with \`${PKCS8_HEADER}\` and then the key body.\n`);
+    // AWS's documented example key, the one allowlisted literal.
+    stage(dir, "aws-example.txt", `aws_access_key_id = ${"AKIA" + "IOSFODNN7EXAMPLE"}\n`);
+    stage(dir, "shas.txt", `commit ${"0123456789abcdef".repeat(2)}01234567\nsha256 ${"89abcdef01234567".repeat(4)}\n`);
+
+    const result = runHook(dir, { ...process.env, PATH: pathWithoutVale() });
+    expect(result.exitCode).toBe(0);
+  }, SCAN_TIMEOUT_MS);
+
+  test("fails closed when the scan's grep errors: refused, says the scan could not run", () => {
+    const dir = initRepo();
+    const shimDir = installGrepShim("exit 2");
+    stage(dir, "notes.txt", "nothing secret in here\n");
+
+    const result = runHook(dir, envWithShim(shimDir));
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toMatch(/could not run/i);
+  }, SCAN_TIMEOUT_MS);
+
+  test("canary: a grep that answers no-match to everything is refused, not read as clean", () => {
+    const dir = initRepo();
+    const shimDir = installGrepShim("exit 1");
+    stage(dir, "notes.txt", "nothing secret in here\n");
+
+    const result = runHook(dir, envWithShim(shimDir));
+    expect(result.exitCode).toBe(1);
+  }, SCAN_TIMEOUT_MS);
+
+  // #113: the hook's subprocess count lands on every real commit. The scan
+  // must cost one grep spawn for the whole commit, not one per staged file.
+  test("spawn pin: a clean commit of five files runs the secret-scan grep exactly once", () => {
+    const dir = initRepo();
+    const logDir = mkdtempSync(join(tmpdir(), "precommit-grepshim-log-"));
+    tempDirs.push(logDir);
+    const logPath = toForwardSlashes(join(logDir, "scan.log"));
+    const shimDir = installGrepShim(`echo scan >> "${logPath}"; break`);
+    for (let i = 1; i <= 5; i++) stage(dir, `file${i}.txt`, `plain content number ${i}\n`);
+
+    const result = runHook(dir, envWithShim(shimDir));
+    expect(result.exitCode).toBe(0);
+    const log = existsSync(logPath) ? readFileSync(logPath, "utf8") : "";
+    expect(log.split("\n").filter((l) => l.length > 0).length).toBe(1);
+  }, SCAN_TIMEOUT_MS);
 });
