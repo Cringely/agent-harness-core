@@ -1995,4 +1995,104 @@ Describe "Install-Harness" {
             Remove-Item -Recurse -Force $fakeRepo
         }
     }
+
+    # Issue #227. Copilot CLI on Windows runs these command strings through PowerShell, where
+    # "$CLAUDE_PROJECT_DIR" inside double quotes is an empty PowerShell variable rather than the env
+    # var, so the old strings ran sh on /.claude/hooks/... and failed every session start. The
+    # template now hands the expansion to sh. sh is resolved here the way test/posix-sh.ts does it,
+    # and a missing sh throws: a skip would pass on exactly the host this case exists for.
+    It "runs each SessionStart template command through pwsh -Command and reaches its script" {
+        $shCmd = Get-Command sh -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        $shDir = $null
+        if ($shCmd) { $shDir = Split-Path -Parent $shCmd.Source }
+        else {
+            $execPath = (& git --exec-path 2>$null | Out-String).Trim()
+            if ($execPath) {
+                $gitRoot = $execPath -replace '[\\/](?:mingw\d*|usr|clang\d*)[\\/]libexec[\\/]git-core[\\/]?$', ''
+                $candidate = Join-Path $gitRoot 'usr/bin/sh.exe'
+                if (Test-Path -LiteralPath $candidate) { $shDir = Split-Path -Parent $candidate }
+            }
+        }
+        if (-not $shDir) { throw 'no POSIX sh: not on PATH, and none under git --exec-path' }
+
+        $claudeDir = Join-Path $script:target '.claude'
+        New-Item -ItemType Directory -Path (Join-Path $claudeDir 'hooks') -Force | Out-Null
+        $expected = @{
+            'session-start-guardrails.sh'  = '=== Guardrails'
+            'session-start-drift-check.sh' = 'sidecar unavailable'
+        }
+        foreach ($name in $expected.Keys) {
+            Copy-Item "$PSScriptRoot/../core/claude/hooks/$name" (Join-Path $claudeDir "hooks/$name")
+        }
+        "RULE ONE`nguardrails:session-start-end`n" | Set-Content -NoNewline (Join-Path $claudeDir 'guardrails.md')
+        # A committed manifest with no sidecar makes the drift check speak without a core checkout.
+        '{}' | Set-Content (Join-Path $claudeDir '.harness-manifest.json')
+
+        $template = (Get-Content "$PSScriptRoot/../core/claude/templates/settings.hooks.json" -Raw | ConvertFrom-Json).hooks
+        $commands = @($template.SessionStart | ForEach-Object { $_.hooks } | ForEach-Object { $_.command })
+        $commands.Count | Should -Be 2
+
+        $pwsh = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
+        $saved = @{
+            PATH = $env:PATH; CLAUDE_PROJECT_DIR = $env:CLAUDE_PROJECT_DIR
+            CLAUDECODE = $env:CLAUDECODE; COPILOT_CLI = $env:COPILOT_CLI
+        }
+        try {
+            $env:PATH = "$shDir$([System.IO.Path]::PathSeparator)$env:PATH"
+            $env:CLAUDE_PROJECT_DIR = $script:target
+            $env:CLAUDECODE = '1'
+            $env:COPILOT_CLI = $null
+            foreach ($command in $commands) {
+                $hookName = @($expected.Keys | Where-Object { $command.Contains("/.claude/hooks/$_") })
+                $hookName.Count | Should -Be 1
+                $out = & $pwsh -NoProfile -NonInteractive -Command $command 2>&1 | Out-String
+                $LASTEXITCODE | Should -Be 0 -Because $out
+                $out | Should -Not -Match 'No such file'
+                $out | Should -Match ([regex]::Escape($expected[$hookName[0]]))
+            }
+        }
+        finally {
+            foreach ($k in $saved.Keys) {
+                if ($null -eq $saved[$k]) { Remove-Item -Path "env:$k" -ErrorAction SilentlyContinue }
+                else { Set-Item -Path "env:$k" -Value $saved[$k] }
+            }
+        }
+    }
+
+    It "rewrites the legacy SessionStart strings in place, once each, and keeps a project hook beside them" {
+        New-Item -ItemType Directory -Path "$script:target/.claude" | Out-Null
+        @'
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "sh \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-start-guardrails.sh\"" },
+          { "type": "command", "command": "echo project-session-hook" },
+          { "type": "command", "command": "sh \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-start-drift-check.sh\"" }
+        ]
+      }
+    ]
+  }
+}
+'@ | Set-Content "$script:target/.claude/settings.json"
+
+        $template = (Get-Content "$PSScriptRoot/../core/claude/templates/settings.hooks.json" -Raw | ConvertFrom-Json).hooks
+        $templateCommands = @($template.SessionStart | ForEach-Object { $_.hooks } | ForEach-Object { $_.command })
+        $newGuardrails = @($templateCommands | Where-Object { $_.Contains('/session-start-guardrails.sh') })[0]
+        $newDrift = @($templateCommands | Where-Object { $_.Contains('/session-start-drift-check.sh') })[0]
+        $newGuardrails | Should -Not -Be 'sh "$CLAUDE_PROJECT_DIR/.claude/hooks/session-start-guardrails.sh"'
+        $newDrift | Should -Not -Be 'sh "$CLAUDE_PROJECT_DIR/.claude/hooks/session-start-drift-check.sh"'
+
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        $first = Get-Content "$script:target/.claude/settings.json" -Raw
+        $s = $first | ConvertFrom-Json
+        @($s.hooks.SessionStart).Count | Should -Be 1
+        $commands = @($s.hooks.SessionStart[0].hooks | ForEach-Object { $_.command })
+        # In place and in order: the project hook keeps its slot between the two harness hooks.
+        $commands | Should -Be @($newGuardrails, 'echo project-session-hook', $newDrift)
+
+        & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target
+        Get-Content "$script:target/.claude/settings.json" -Raw | Should -Be $first
+    }
 }

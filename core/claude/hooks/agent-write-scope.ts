@@ -129,7 +129,7 @@ export function readWriteScope(agentType: string, projectDir: string): string | 
  * What it does need is to be a string. `join(42, …)` and `resolve({}, …)` throw, the throw is
  * caught by the outermost handler below, and the hook then exits 0 with no stdout — so a
  * malformed cwd used to convert a deny this gate would have made into silence. Falling back keeps
- * the gate deciding. Mirrors review-gate.ts:803's `payload.cwd !== ""` narrowing of the same field.
+ * the gate deciding. Mirrors review-gate.ts:807's `payload.cwd !== ""` narrowing of the same field.
  */
 export function readSessionCwd(payload: unknown): string {
   const value = (payload as Record<string, unknown> | null | undefined)?.cwd;
@@ -161,7 +161,11 @@ export function decide(
 
 if (import.meta.main) {
   try {
-    const payload = JSON.parse(await Bun.stdin.text());
+    const raw = await Bun.stdin.text();
+    // Copilot CLI also runs .claude/settings.json hooks and fails closed on them (#227). Stand
+    // down there, but never while CLAUDECODE is set, so a Claude Code session always runs the rest.
+    if (process.env.COPILOT_CLI && !process.env.CLAUDECODE) process.exit(0);
+    const payload = JSON.parse(raw);
     const cwd = readSessionCwd(payload);
     const scope = readWriteScope(
       payload.agent_type ?? "",

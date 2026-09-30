@@ -42,6 +42,17 @@ skip, never a blocked write. `session-start-drift-check.sh` also wants `sed`, `t
 (Git Bash ships all three) plus a reachable core checkout. Missing any of them makes it print
 nothing, which is also what it does when the project has no drift.
 
+The Claude Code hooks act only under Claude Code. GitHub Copilot CLI also reads hooks from
+`.claude/settings.json` and treats a failing `preToolUse` hook as a deny, so every hook here exits 0
+with no output when `COPILOT_CLI` is set and `CLAUDECODE` is not. Under Copilot, enforcement comes
+from written policy and the git hooks below, which run on every commit and push whatever made them.
+A third harness that sets neither variable gets the hooks acting as they do under Claude Code. The
+two SessionStart commands run through `sh -c` so a PowerShell host passes `$CLAUDE_PROJECT_DIR` to
+`sh` unexpanded, which holds on PowerShell 7 and not on Windows PowerShell 5.1 when the project path
+contains a space. For a project not yet re-installed, Copilot's documented stopgap is
+`{ "disableAllHooks": true }` in the repository's `.github/copilot/settings.local.json`, which also
+turns off that repository's own Copilot hooks.
+
 Recommended, not required: the `code-context` MCP server (`@infino-ai/code-context`) gives agents
 ranked hybrid search over a repo instead of grep-crawling it, and its `sql` tool answers counting
 and ranking questions that file tools cannot express. It indexes locally, with local embeddings.

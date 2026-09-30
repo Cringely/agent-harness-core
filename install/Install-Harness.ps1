@@ -1603,6 +1603,42 @@ foreach ($eventType in $hooksTemplate.PSObject.Properties.Name) {
     $existingGroups = New-Object System.Collections.Generic.List[pscustomobject]
     foreach ($g in @($settings.hooks.$eventType)) { $existingGroups.Add($g) }
 
+    # Issue #227: these two strings were the template's SessionStart commands before the sh -c
+    # form replaced them. Without this the new strings append beside the old ones and each script
+    # runs twice per session start. Matched exactly, so a variant the project edited by hand is
+    # left alone like any other project hook. Ordinal because a @{} hashtable compares keys
+    # case-insensitively, and a differently-cased string is a project edit. A legacy entry is
+    # dropped rather than rewritten when the event already holds its replacement anywhere.
+    $legacySessionStartCommands = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    foreach ($name in 'session-start-guardrails.sh', 'session-start-drift-check.sh') {
+        $legacySessionStartCommands.Add("sh `"`$CLAUDE_PROJECT_DIR/.claude/hooks/$name`"", $name)
+    }
+    $allTemplateCommands = @($filteredGroups | ForEach-Object { @($_.hooks) } | ForEach-Object { $_.command })
+    $heldCommands = @($existingGroups | ForEach-Object { @($_.hooks) } | Where-Object { $_ } | ForEach-Object { $_.command })
+    foreach ($eg in $existingGroups) {
+        if (-not $eg.PSObject.Properties['hooks'] -or $null -eq $eg.hooks) { continue }
+        $migrated = New-Object System.Collections.Generic.List[object]
+        $touched = $false
+        foreach ($h in @($eg.hooks)) {
+            $legacyName = $null
+            $replacement = $null
+            if ($null -ne $h -and $h.command -is [string] -and
+                $legacySessionStartCommands.TryGetValue($h.command, [ref]$legacyName)) {
+                $replacement = @($allTemplateCommands | Where-Object { $_.Contains("/.claude/hooks/$legacyName") })[0]
+            }
+            if (-not $replacement) { $migrated.Add($h); continue }
+            $touched = $true
+            if ($heldCommands -ccontains $replacement) { continue }
+            $h.command = $replacement
+            $heldCommands += $replacement
+            $migrated.Add($h)
+        }
+        if ($touched) {
+            $eg.hooks = $migrated.ToArray()
+            $results.Add([pscustomobject]@{ File = "settings.json:$eventType"; Action = 'migrated' })
+        }
+    }
+
     $existingCommands = New-Object System.Collections.Generic.List[string]
     foreach ($g in $existingGroups) {
         foreach ($h in @($g.hooks)) { $existingCommands.Add($h.command) }

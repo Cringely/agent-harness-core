@@ -175,7 +175,11 @@ export function buildContext(file: string, findings: string): string {
 
 if (import.meta.main) {
   try {
-    const payload = JSON.parse(await Bun.stdin.text()) as {
+    const raw = await Bun.stdin.text();
+    // Copilot CLI also runs .claude/settings.json hooks and fails closed on them (#227). Stand
+    // down there, but never while CLAUDECODE is set, so a Claude Code session always runs the rest.
+    if (process.env.COPILOT_CLI && !process.env.CLAUDECODE) process.exit(0);
+    const payload = JSON.parse(raw) as {
       tool_input?: { file_path?: string };
     };
     const file = payload?.tool_input?.file_path;

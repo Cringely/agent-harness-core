@@ -16,6 +16,12 @@ set -eu
 # for why this stays guarded.
 if (set -o pipefail) 2>/dev/null; then set -o pipefail; fi
 
+# Copilot CLI also runs .claude/settings.json hooks (#227). Stand down there, but never while
+# CLAUDECODE is set, so a Claude Code session always runs the rest.
+if [ -n "${COPILOT_CLI:-}" ] && [ -z "${CLAUDECODE:-}" ]; then
+    exit 0
+fi
+
 root="${CLAUDE_PROJECT_DIR:-.}"
 catalog="$root/.claude/guardrails.md"
 
