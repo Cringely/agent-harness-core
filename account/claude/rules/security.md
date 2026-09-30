@@ -60,6 +60,7 @@ Never hardcode credentials, tokens, keys, or sensitive IPs in any file. Applies 
 - `.env` files: non-sensitive config only (UIDs, paths, domains). Passwords and tokens go in `secrets/`
 - Logging: never write credential values. Log `token=loaded` not `token=abc1234...`
 - Backup files: delete `.bak.*` once the change is confirmed stable
+- Staged content passes a token-pattern secret scan before commit. The installed pre-commit hook refuses on a match and on a scanner error, and never prints the matched value.
 
 ## Secure Configuration
 
@@ -103,6 +104,7 @@ actor never treats the untrusted text as instructions.
 - Docker images: pin to specific version (`image:1.2.3`), prefer digest (`@sha256:...`). Never `:latest` in production
 - Never pipe curl to bash. Verify checksums before executing downloaded scripts
 - Keep build/deploy scripts in version control. Production state must be reproducible from git
+- Check any dependency an agent adds before commit: it exists on its registry under that exact name, its first release is at least 30 days old unless the operator signs off, and the lockfile pins it by integrity hash. A name that does not resolve is a hallucination, and a near miss of a popular name is a typosquat until shown otherwise.
 
 ## Defense in Depth
 
