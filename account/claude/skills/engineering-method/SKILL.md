@@ -55,6 +55,8 @@ An instrument that cannot come out two ways measures nothing. Before building a 
 
 A test that passes after a fix proves only that it does not currently fail. Remove the fix and watch it fail. Then delete the new assertion and remove the fix again. A suite that still fails was being caught by something else, and the new assertion pins nothing. A test can be structurally unable to fail, through a matcher blind to the defect or a fixture that never reaches the guarded case. Before a suite's green is first cited as merge-gate evidence, and again after the suite's shape changes, run a mutation pass: make one small change to the code under test at a time, rerun, and read each surviving mutant as a finding about the suite, not as a score. The pass is per suite, not per pull request. The method and its cost are in `patterns/test-falsifiability.md` at github.com/Cringely/agent-harness-core.
 
+A change that edits or deletes an existing assertion alongside a fix says why in the commit message. Reviewers read the test diff before the code diff, so a loosened assertion is judged on its own before the fix can explain it away.
+
 A gate that cannot evaluate must fail closed, and a scope filter that resolves empty must fail closed rather than widen to the full population. Never run a state-changing command (merge, push, deploy) downstream of a pipe that can swallow the exit code of the step meant to stop it.
 
 ## Change safely
