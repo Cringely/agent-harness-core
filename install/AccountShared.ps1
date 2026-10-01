@@ -77,6 +77,14 @@ $script:AccountSkipFiles = @(
 # a stale copy an older export left in account/claude/ cannot be committed either.
 $script:AccountSkipDirs = @('skills/appsec-kpi-deck', 'skills/wiring-diagram/examples', 'skills/synced')
 
+# Trees in which any dot-prefixed directory is skipped, at any depth (#255). Claude Code keeps
+# deleted skills in skills/.trash/<id>/, and one held a synced proprietary skill. A shape rule
+# rather than a `.trash` entry in AccountSkipDirs, because that list is a prefix match anchored at
+# the tree root and cannot name "any hidden directory". A dot-directory is never an authored skill
+# or a skill's own content, so nothing legitimate is lost. Dot-prefixed FILES are not skipped:
+# .gitignore-style files inside a skill can be real. Case does not matter, since a dot has none.
+$script:AccountSkipDotDirTrees = @('skills')
+
 # Model-read text carrying machine paths. A hook derives its paths at run time and is fixed at
 # source; these cannot be, because a placeholder written into the live file is read literally by
 # the model on this box. Export folds, install expands. The table is an allowlist for the same

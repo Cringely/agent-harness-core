@@ -305,7 +305,8 @@ Some things never travel at all. A plugin marketplace registered from a local so
 or `file` source, or any absolute path) is dropped from `settings.account.json`, along with every
 `enabledPlugins` entry that names it, and the run reports how many without naming them. A
 `github`-sourced marketplace stays. `skills/synced/`, where plugins sync third-party skills, is
-excluded from the payload and ignored by git. If a dropped marketplace's path still turns up in any
+excluded from the payload and ignored by git, and so is any dot-prefixed directory under `skills/`
+(Claude Code's deleted-skills bin, `skills/.trash/`, among them). If a dropped marketplace's path still turns up in any
 payload file, or an absolute local path is left in `settings.account.json`, the export refuses the
 same way it does for an identifying string. In `settings.account.json` that check covers drive
 paths, UNC roots in either slash direction, Claude Code's `//` permission-path form, the Git Bash
