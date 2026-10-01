@@ -377,7 +377,8 @@ $identityChecks = @(New-IdentityCheck -Class 'workstation username' -Value $Acco
 # A path that exists only on this machine is identifying (security.md lists absolute paths and
 # machine names) and is not portable either. The same gate below refuses one, in two arms added to
 # $identityChecks rather than a second scan: a literal arm for each local path the settings pass
-# drops (any file), and a shape arm for settings.account.json (any absolute path in any key). The
+# drops (any file), and a shape arm for settings.account.json (the absolute-path forms enumerated
+# where it is defined, in any key, but not a POSIX root outside a home). The
 # shape arm cannot run over the whole payload: prose-lint calibration comments and skill examples
 # name drive paths on purpose, so a whole-tree shape scan fails on documentation.
 function Test-AccountLocalPath {
@@ -882,15 +883,28 @@ $script:PosixHomeShape =
     '(?<![A-Za-z]:)(?:/mnt/[A-Za-z]/Users/[^/"''\s]+|/home/[^/"''\s]+|/Users/[^/"''\s]+|/root(?![^/"''\s]))'
 
 # #252, the shape arm of the absolute-local-path gate, scoped to settings.account.json. Matched
-# against that file's JSON text: a drive path in either separator (a JSON backslash is doubled, so
-# one is enough to match), a UNC root (four backslashes once JSON-escaped), a file: URI, or any
-# POSIX home shape above. Measured against the latest real export before shipping: the only
-# absolute path in settings.account.json was the local marketplace the settings pass now drops.
+# against that file's JSON text, it covers six forms:
+#
+#   C:\ or C:/            a drive path (a JSON backslash is doubled, so one is enough to match)
+#   \\host                a backslash UNC root (four backslashes once JSON-escaped)
+#   //e/x or //host/x     Claude Code's absolute permission-path form, and a forward-slash UNC
+#                         root, which is the same shape. The lookbehind keeps https:// out.
+#   /d/x                  the Git Bash drive form, a single letter between slashes. Requiring
+#                         the second slash keeps a cmd switch such as `cmd /c` out.
+#   file:/                a file: URI
+#   a POSIX home          any shape $script:PosixHomeShape above enumerates
+#
+# NOT covered: a POSIX root outside a home, such as /srv, /opt or /tmp. A generic root shape would
+# match /dev/null in hook commands, so those still export. That residual is recorded on #252.
+# Measured against the latest real export before shipping: the only absolute path in
+# settings.account.json was the local marketplace the settings pass now drops, and the two
+# slash forms had zero hits there and in the live settings.json, so neither refuses today.
 # Not applied to mcp-servers.json, which ships a redacted Windows path today.
 $identityChecks += [pscustomobject]@{
     Class = 'absolute local path'
     Scope = 'settings.account.json'
-    Regex = '(?<![A-Za-z0-9])[A-Za-z]:[\\/]|\\\\\\\\[A-Za-z0-9]|(?<![A-Za-z])file:/|' + $script:PosixHomeShape
+    Regex = '(?<![A-Za-z0-9])[A-Za-z]:[\\/]|\\\\\\\\[A-Za-z0-9]|(?<![A-Za-z])file:/|' +
+        '(?<![A-Za-z0-9:/])//[A-Za-z0-9._~-]|(?<![A-Za-z0-9._~/-])/[A-Za-z]/|' + $script:PosixHomeShape
 }
 
 # --- mcpServers --------------------------------------------------------------

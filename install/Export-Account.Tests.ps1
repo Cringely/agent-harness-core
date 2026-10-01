@@ -1675,8 +1675,8 @@ exit 0
         # and ":744-749", was never same-file -- checked against f47563e, the commit that wrote it,
         # both ranges landed on Export-Account.ps1's own boundary comments at those exact line
         # numbers, so the filename prefix was dropped by mistake, not drift. Repointed below.)
-        # Export-Account.ps1:1164-1166 ("a bare `/root` at end of line still fire") and
-        # Export-Account.ps1:1168-1173 ("the negated class now also excludes those") are the two
+        # Export-Account.ps1:1178-1180 ("a bare `/root` at end of line still fire") and
+        # Export-Account.ps1:1182-1187 ("the negated class now also excludes those") are the two
         # comments that assert ablation is caught; this It is what makes that true.
         $stand = New-StandInHome
         $out = New-OutputRoot
@@ -2312,6 +2312,33 @@ exit 0
                 hooks       = @{}
                 permissions = @{ allow = @('Read(D:/zzprivate/notes/**)') }
             } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $ch 'settings.json')
+
+            $msg = $null
+            try {
+                & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipMcp -AccountUser $script:fixtureUser | Out-Null
+            }
+            catch { $msg = $_.Exception.Message }
+            $msg | Should -BeLike '*settings.account.json*local path*'
+            ($msg -like '*zzprivate*') | Should -BeFalse
+            Test-Path -LiteralPath (Join-Path $out '.export-account-marker') | Should -BeFalse
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    # PR #253 review: the shape arm matched drive letters, backslash UNC, file URIs and POSIX
+    # homes only, so these exported to completion. The double-slash case is Claude Code's own
+    # absolute permission-path form, and the same arm covers a forward-slash UNC root.
+    It "refuses the <form> form in settings.account.json" -ForEach @(
+        @{ form = 'double-slash absolute'; settings = @{ hooks = @{}; permissions = @{ allow = @('Read(//e/zzprivate/notes/**)') } } }
+        @{ form = 'Git Bash drive'; settings = @{ hooks = @{}; env = @{ ZZ_NOTES = '/d/zzprivate/notes' } } }
+    ) {
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            $settings | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $ch 'settings.json')
 
             $msg = $null
             try {
