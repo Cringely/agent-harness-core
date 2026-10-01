@@ -109,8 +109,8 @@ function killProcessTree(pid: number): void {
   }
 }
 
-// Built-in plugins switched off through --settings (#238, #247). The 2.1.285 names, then the 2.1.283-2.1.284
-// names, then names added server-side later. A name the running CLI does not know is ignored.
+// Built-in plugins switched off through --settings (#238, #247). The names #238 found, then their
+// 2.1.283-2.1.284 forms, then names that arrived server-side since. A name the CLI does not know is ignored.
 export const BUILTIN_PLUGINS: readonly string[] = [
   "cc-plugin-agents-md@builtin",
   "cc-plugin-telemetry@builtin",
