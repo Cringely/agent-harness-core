@@ -15,8 +15,10 @@ import { tmpdir, userInfo } from "node:os";
 import { basename, delimiter, dirname, join, parse, resolve } from "node:path";
 import { FINDINGS_JSON_SCHEMA } from "../tools/pr-review/findings";
 import {
+  BUILTIN_PLUGINS,
   ClaudeCliRunner,
   EXPECTED_TOOLS,
+  MAX_ATTEMPTS,
   REVIEWER_MODEL,
   claudeArgs,
   neutralWorkingDirectory,
@@ -171,8 +173,23 @@ describe("claudeArgs()", () => {
         "agents-md@builtin": false,
         "telemetry@builtin": false,
         "cc-plugin-diff@builtin": false,
+        "cc-plugin-plugin-authoring@builtin": false,
       },
     });
+  });
+
+  // #250: a relaunch adds the built-ins the previous attempt's init event named to the seed list.
+  test("adds learned built-in names to the seed list, once each", () => {
+    const relaunch = claudeArgs("/tmp/system-prompt.md", ["cc-plugin-new@builtin", "cc-plugin-diff@builtin"]);
+    const settings = JSON.parse(relaunch[relaunch.indexOf("--settings") + 1]!);
+    expect(Object.keys(settings)).toEqual(["enabledPlugins"]);
+    expect(settings.enabledPlugins).toEqual({
+      ...Object.fromEntries(BUILTIN_PLUGINS.map((name) => [name, false])),
+      "cc-plugin-new@builtin": false,
+    });
+    expect(relaunch.filter((a) => a !== relaunch[relaunch.indexOf("--settings") + 1])).toEqual(
+      args.filter((a) => a !== after("--settings")),
+    );
   });
 });
 
@@ -361,5 +378,106 @@ describe("ClaudeCliRunner against a fake claude", () => {
       if (!run.ok) expect(run.reason).toContain("time limit");
       expect(Date.now() - started).toBeLessThan(8_000);
     });
+  }, 20_000);
+});
+
+// #250: the CLI's built-in plugin set varies per session, server-side, and enabledPlugins takes no
+// wildcard. So the runner reads the init event as it arrives, kills a session whose plugins are all
+// built-ins before the model runs, and relaunches with those names disabled too. This fake models
+// that: it loads every plugin in its spec that --settings does not set to false, logs each launch's
+// arguments, and, when it loaded any plugin, waits a second before writing a marker file that stands
+// for the model having run, then prints a result that names its attempt.
+describe("ClaudeCliRunner relaunch on built-in plugins (#250)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pr-review-fake-plugins-"));
+  const fake = join(dir, "fake-claude-plugins.ts");
+  writeFileSync(
+    fake,
+    [
+      'import { appendFileSync, readFileSync, writeFileSync } from "node:fs";',
+      'const spec = JSON.parse(Buffer.from(process.argv[2]!.slice("--fake-spec=".length), "base64url").toString("utf8"));',
+      "const args = process.argv.slice(3);",
+      "await new Response(Bun.stdin.stream()).text();",
+      'const NL = String.fromCharCode(10);',
+      'const settings = JSON.parse(args[args.indexOf("--settings") + 1]!);',
+      'appendFileSync(spec.log, JSON.stringify({ args, settings }) + NL);',
+      'const attempt = readFileSync(spec.log, "utf8").trim().split(NL).length;',
+      "const candidates = spec.fresh ? [{ name: `cc-plugin-fresh-${attempt}`, path: \"builtin\", source: `cc-plugin-fresh-${attempt}@builtin` }] : spec.loaded;",
+      "const plugins = candidates.filter((p: { source: string }) => settings.enabledPlugins[p.source] !== false);",
+      'console.log(JSON.stringify({ type: "system", subtype: "init", tools: ["StructuredOutput"], mcp_servers: [], plugins, output_style: "default", cwd: process.cwd(), model: "claude-opus-5" }));',
+      "if (plugins.length > 0) {",
+      "  await Bun.sleep(1_000);",
+      '  writeFileSync(`${spec.marker}-${attempt}`, "model ran");',
+      "}",
+      'console.log(JSON.stringify({ type: "assistant", message: { model: "claude-opus-5", content: [{ type: "tool_use", name: "StructuredOutput" }] } }));',
+      'console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, structured_output: { attempt } }));',
+    ].join("\n"),
+  );
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  const builtin = (name: string) => ({ name, path: "builtin", source: `${name}@builtin` });
+  const PLUGINS_REASON = "the reviewer session loaded plugins, so --setting-sources may not have excluded the operator's configuration";
+
+  let caseNo = 0;
+  async function runCase(spec: { loaded?: unknown[]; fresh?: boolean }) {
+    caseNo += 1;
+    const log = join(dir, `launches-${caseNo}.jsonl`);
+    const marker = join(dir, `model-ran-${caseNo}`);
+    const encoded = Buffer.from(JSON.stringify({ ...spec, log, marker }), "utf8").toString("base64url");
+    const run = await new ClaudeCliRunner({ command: [process.execPath, fake, `--fake-spec=${encoded}`] }).run({ systemPrompt: "s", userPrompt: "u" });
+    // Past the fake's one-second wait, so a session that was not killed has written its marker.
+    await Bun.sleep(1_500);
+    const launches = existsSync(log)
+      ? (await Bun.file(log).text()).trim().split(/\r?\n/).map((line) => JSON.parse(line) as { args: string[]; settings: { enabledPlugins: Record<string, boolean> } })
+      : [];
+    const modelRan = [1, 2, 3, 4].filter((n) => existsSync(`${marker}-${n}`));
+    return { run, launches, modelRan };
+  }
+
+  test("built-ins on attempt 1, then clean on attempt 2, is accepted from attempt 2", async () => {
+    const { run, launches, modelRan } = await runCase({ loaded: [builtin("cc-plugin-unseen")] });
+    expect(run.ok).toBe(true);
+    if (run.ok) expect(run.output).toEqual({ attempt: 2 });
+    expect(launches).toHaveLength(2);
+    // The killed attempt never reached its model turn, so its output never reached acceptance.
+    expect(modelRan).toEqual([]);
+  }, 20_000);
+
+  test("the relaunch carries the learned names beside the seed list and changes nothing else", async () => {
+    const { launches } = await runCase({ loaded: [builtin("cc-plugin-unseen-a"), builtin("cc-plugin-unseen-b")] });
+    expect(launches).toHaveLength(2);
+    const [first, second] = launches as [(typeof launches)[0], (typeof launches)[0]];
+    expect(first.settings.enabledPlugins["cc-plugin-unseen-a@builtin"]).toBeUndefined();
+    expect(second.settings.enabledPlugins).toEqual({
+      ...Object.fromEntries(BUILTIN_PLUGINS.map((name) => [name, false])),
+      "cc-plugin-unseen-a@builtin": false,
+      "cc-plugin-unseen-b@builtin": false,
+    });
+    const systemPromptFile = second.args[second.args.indexOf("--system-prompt-file") + 1]!;
+    expect(second.args).toEqual(claudeArgs(systemPromptFile, ["cc-plugin-unseen-a@builtin", "cc-plugin-unseen-b@builtin"]));
+  }, 20_000);
+
+  test.each([
+    ["a non-built-in plugin", [{ name: "x", path: "X:/plugins/x", source: "x@some-marketplace" }]],
+    ["a mix of built-in and non-built-in plugins", [builtin("cc-plugin-unseen"), { name: "x", path: "X:/plugins/x", source: "x@some-marketplace" }]],
+    ["a built-in source whose path is not builtin", [{ name: "cc-plugin-z", path: "X:/plugins/z", source: "cc-plugin-z@builtin" }]],
+    ["a builtin path whose source does not end in @builtin", [{ name: "cc-plugin-z", path: "builtin", source: "cc-plugin-z@builtin-ish" }]],
+    ["a plugin entry that is not an object", ["cc-plugin-z@builtin"]],
+  ])("%s is refused at init, with no relaunch and before the model runs", async (_label, loaded) => {
+    const { run, launches, modelRan } = await runCase({ loaded });
+    expect(run.ok).toBe(false);
+    if (!run.ok) expect(run.reason).toBe(PLUGINS_REASON);
+    expect(launches).toHaveLength(1);
+    expect(modelRan).toEqual([]);
+  }, 20_000);
+
+  test("built-ins on every attempt are refused at the attempt cap", async () => {
+    const { run, launches, modelRan } = await runCase({ fresh: true });
+    expect(run.ok).toBe(false);
+    if (!run.ok) {
+      expect(run.reason).toContain("built-in plugins");
+      expect(run.reason).toContain(`${MAX_ATTEMPTS} attempts`);
+    }
+    expect(launches).toHaveLength(MAX_ATTEMPTS);
+    expect(modelRan).toEqual([]);
   }, 20_000);
 });

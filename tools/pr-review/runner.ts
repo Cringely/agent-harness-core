@@ -30,9 +30,20 @@
 // 2.1.284 the names were agents-md@builtin and telemetry@builtin), and 2.1.269 showed none. So
 // claudeArgs() passes --settings with an inline enabledPlugins object setting every BUILTIN_PLUGINS
 // name to false, which left init.plugins empty on 2.1.285. The set also changes server-side under an
-// unchanged binary: cc-plugin-diff@builtin arrived on 2.1.285 on 2026-09-30 (#247). The plugins check is deliberately not narrowed to admit
-// @builtin sources: agents-md injects AGENTS.md instructions, and the next built-in should fail closed
-// until its name is added to BUILTIN_PLUGINS rather than pass because of where it came from.
+// unchanged binary, and varies from one session to the next: cc-plugin-diff@builtin arrived on
+// 2026-09-30 (#247), and a session on 2026-10-01 carried cc-plugin-plugin-authoring@builtin
+// instead. enabledPlugins takes no wildcard ("*@builtin" and "@builtin" were both ignored), so no
+// static list can keep up.
+//
+// So run() adapts (#250). It reads the session's stream as it arrives. The init event comes first,
+// before the model does any work. When init.plugins is non-empty and EVERY entry is a CLI built-in
+// (path exactly "builtin", source ending exactly "@builtin"), run() kills that session at once and
+// relaunches with those sources added to the disable set, which starts from BUILTIN_PLUGINS, up to
+// MAX_ATTEMPTS launches in all. Any other non-empty plugin list is killed at init and rejected
+// with no relaunch. The killed session's stream is discarded, and the accepted session still has to
+// pass parseStreamJson()'s plugins check unchanged. That check is deliberately not narrowed to admit
+// @builtin sources: agents-md injects AGENTS.md instructions, and a built-in is only tolerated by
+// being switched off, never by passing because of where it came from.
 //
 // The flags are not the control. parseStreamJson() reads the session's stream and rejects the run
 // unless: the init event lists exactly ["StructuredOutput"] (the tool --json-schema adds), no MCP
@@ -61,6 +72,10 @@ export const EXPECTED_TOOLS: readonly string[] = ["StructuredOutput"];
 // A premium-model review of a large diff at high effort can take several minutes; twenty is a ceiling
 // on a hung process, not an estimate.
 export const RUN_TIMEOUT_MS = 20 * 60 * 1000;
+// #250: launches per run, counting the first. A killed launch never reaches the model, so the cost of
+// a relaunch is one CLI start. Three covers one round of newly seen built-ins with a launch to spare.
+// A session still loading built-ins after that is refused rather than chased.
+export const MAX_ATTEMPTS = 3;
 
 // The root of the filesystem holding the temp directory: the drive root on Windows, "/" elsewhere.
 // A6.3: os.tmpdir() returns TMPDIR/TMP/TEMP verbatim, unresolved. A relative value (e.g. a test, or
@@ -109,8 +124,10 @@ function killProcessTree(pid: number): void {
   }
 }
 
-// Built-in plugins switched off through --settings (#238, #247). The names #238 found, then their
-// 2.1.283-2.1.284 forms, then names that arrived server-side since. A name the CLI does not know is ignored.
+// Built-in plugins switched off through --settings on every launch (#238, #247), the seed of the
+// disable set run() grows (#250). The names #238 found, then their 2.1.283-2.1.284 forms, then names
+// seen server-side since. A name the CLI does not know is ignored. Adding a name seen in a live run
+// saves a relaunch whenever that built-in turns up again.
 export const BUILTIN_PLUGINS: readonly string[] = [
   "cc-plugin-agents-md@builtin",
   "cc-plugin-telemetry@builtin",
@@ -118,10 +135,22 @@ export const BUILTIN_PLUGINS: readonly string[] = [
   "telemetry@builtin",
   // Arrived on 2026-09-30 under an unchanged 2.1.285 binary, so the built-in set can change server-side (#247).
   "cc-plugin-diff@builtin",
+  // Seen on 2.1.287 on 2026-10-01, in a session that did not carry cc-plugin-diff (#250).
+  "cc-plugin-plugin-authoring@builtin",
 ];
 
-export function claudeArgs(systemPromptFile: string): string[] {
-  const enabledPlugins = Object.fromEntries(BUILTIN_PLUGINS.map((name) => [name, false]));
+// #250: an init.plugins entry counts as a CLI built-in only when both fields say so exactly. Anything
+// else, including an entry that is not an object, is treated as a plugin from somewhere else.
+function isBuiltinPlugin(entry: unknown): entry is { source: string } {
+  if (typeof entry !== "object" || entry === null) return false;
+  const { path, source } = entry as Record<string, unknown>;
+  return path === "builtin" && typeof source === "string" && source.endsWith("@builtin");
+}
+
+// learnedBuiltins: sources earlier launches of this run reported in init.plugins (#250).
+export function claudeArgs(systemPromptFile: string, learnedBuiltins: readonly string[] = []): string[] {
+  const disabled = new Set([...BUILTIN_PLUGINS, ...learnedBuiltins]);
+  const enabledPlugins = Object.fromEntries([...disabled].map((name) => [name, false]));
   return [
     "-p",
     "--model", REVIEWER_MODEL,
@@ -251,6 +280,88 @@ export function parseStreamJson(stdout: string, exitCode: number | null): Runner
   return { ok: true, output: result.structured_output, model: REVIEWER_MODEL, tools: [...EXPECTED_TOOLS] };
 }
 
+type AttemptOutcome = { kind: "finished"; result: RunnerResult } | { kind: "relaunch"; sources: string[] };
+
+// #250: one launch. stdout is read as it arrives and scanned line by line only until the init event.
+// - init.plugins empty: read on to the end and judge the whole stream with parseStreamJson().
+// - init is the first event and every plugin is a built-in: kill now, before the model runs, and
+//   hand the sources back for a relaunch. This launch's stream is discarded.
+// - anything else non-empty, or a plugins field that is not an array: kill now and reject. The
+//   reason comes from parseStreamJson() over the stream so far, which always rejects here because
+//   init.plugins is not empty, so the existing rejection reasons are the ones reported.
+// An init event preceded by any other event is never relaunched, so a hook event, which
+// parseStreamJson() rejects, cannot be dropped by discarding the launch that showed it.
+async function runAttempt(proc: Bun.Subprocess<"pipe", "pipe", "pipe">, userPrompt: string): Promise<AttemptOutcome> {
+  const stderrText = new Response(proc.stderr).text().catch(() => "");
+  const fed = (async () => {
+    try {
+      proc.stdin.write(userPrompt);
+      await proc.stdin.end();
+    } catch {
+      // A process that exits before reading its input is judged by its exit code and stream below.
+    }
+  })();
+  const reader = proc.stdout.getReader();
+  const kill = async (): Promise<void> => {
+    killProcessTree(proc.pid);
+    reader.cancel().catch(() => {});
+    try {
+      await proc.exited;
+    } catch {
+      // Already gone.
+    }
+  };
+
+  const decoder = new TextDecoder();
+  let stdout = "";
+  let scanned = 0;
+  let sawEvent = false;
+  let scanning = true;
+  for (;;) {
+    const { done, value } = await reader.read();
+    stdout += done ? decoder.decode() : decoder.decode(value, { stream: true });
+    while (scanning) {
+      const newline = stdout.indexOf("\n", scanned);
+      if (newline === -1) break;
+      const line = stdout.slice(scanned, newline);
+      scanned = newline + 1;
+      if (line.trim() === "") continue;
+      let event: unknown;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        event = null;
+      }
+      const isInit = typeof event === "object" && event !== null && (event as Record<string, unknown>).type === "system" && (event as Record<string, unknown>).subtype === "init";
+      if (!isInit) {
+        sawEvent = true;
+        continue;
+      }
+      scanning = false;
+      const plugins = (event as Record<string, unknown>).plugins;
+      if (Array.isArray(plugins) && plugins.length === 0) break;
+      await kill();
+      if (!sawEvent && Array.isArray(plugins) && plugins.every(isBuiltinPlugin)) {
+        return { kind: "relaunch", sources: plugins.map((p) => p.source) };
+      }
+      const rejected = parseStreamJson(stdout.slice(0, scanned), null);
+      return { kind: "finished", result: rejected.ok ? { ok: false, reason: "the reviewer session loaded plugins" } : rejected };
+    }
+    if (done) break;
+  }
+
+  let exitCode: number | null;
+  try {
+    exitCode = await proc.exited;
+  } catch (err) {
+    return { kind: "finished", result: { ok: false, reason: "the reviewer process ended unexpectedly", diagnostic: err instanceof Error ? err.message : String(err) } };
+  }
+  await fed;
+  const stderr = await stderrText;
+  const parsed = parseStreamJson(stdout, exitCode);
+  return { kind: "finished", result: parsed.ok ? parsed : { ...parsed, diagnostic: stderr.slice(0, 2_000) } };
+}
+
 export class ClaudeCliRunner implements ReviewerRunner {
   private readonly command: string[];
   private readonly timeoutMs: number;
@@ -279,60 +390,62 @@ export class ClaudeCliRunner implements ReviewerRunner {
       const systemPromptFile = join(promptDir, "system-prompt.md");
       writeFileSync(systemPromptFile, prompt.systemPrompt);
 
-      // I3 (Q1): Bun.spawn throws synchronously when the command does not resolve (for example the
-      // claude binary removed between the Bun.which() lookup in the constructor and this call).
-      // That is caught here instead of escaping run() as a rejected promise. The thrown message can
-      // carry a path, so it stays in diagnostic, never reason (types.ts: reason may be rendered
-      // publicly).
-      let proc: ReturnType<typeof Bun.spawn>;
-      try {
-        proc = Bun.spawn([...this.command, ...claudeArgs(systemPromptFile)], {
-          cwd,
-          // I5: without this, the child gets Bun's own startup environment, not this process's live
-          // process.env. identity.ts reads process.env at run time; passing it explicitly here is
-          // what keeps the reviewer process and the identity scan reading the same source.
-          env: process.env,
-          stdin: "pipe",
-          stdout: "pipe",
-          stderr: "pipe",
-          // I4: on POSIX this makes the child the leader of its own new process group (setsid), so
-          // a group-kill on timeout below reaches any descendant it spawns, whether or not the
-          // child itself has already exited by then. See killProcessTree.
-          detached: process.platform !== "win32",
-        });
-      } catch (err) {
-        return { ok: false, reason: "the reviewer process could not be started", diagnostic: err instanceof Error ? err.message : String(err) };
-      }
-
+      // #250: each launch whose init event lists only built-ins is killed there, and the next one
+      // disables those too. `current` is the launch the deadline below kills, and `expired` stops a
+      // relaunch from starting after the deadline has already fired.
+      let current: Bun.Subprocess<"pipe", "pipe", "pipe"> | undefined;
+      let expired = false;
+      const learned: string[] = [];
       const runToCompletion = (async (): Promise<RunnerResult> => {
-        const stdoutText = new Response(proc.stdout).text();
-        const stderrText = new Response(proc.stderr).text();
-        try {
-          proc.stdin.write(prompt.userPrompt);
-          await proc.stdin.end();
-        } catch {
-          // A process that exits before reading its input is judged by its exit code and stream below.
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS && !expired; attempt++) {
+          // I3 (Q1): Bun.spawn throws synchronously when the command does not resolve (for example
+          // the claude binary removed between the Bun.which() lookup in the constructor and this
+          // call). That is caught here instead of escaping run() as a rejected promise. The thrown
+          // message can carry a path, so it stays in diagnostic, never reason (types.ts: reason may
+          // be rendered publicly).
+          let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
+          try {
+            proc = Bun.spawn([...this.command, ...claudeArgs(systemPromptFile, learned)], {
+              cwd,
+              // I5: without this, the child gets Bun's own startup environment, not this process's
+              // live process.env. identity.ts reads process.env at run time; passing it explicitly
+              // here is what keeps the reviewer process and the identity scan reading the same source.
+              env: process.env,
+              stdin: "pipe",
+              stdout: "pipe",
+              stderr: "pipe",
+              // I4: on POSIX this makes the child the leader of its own new process group (setsid),
+              // so a group-kill on timeout below reaches any descendant it spawns, whether or not
+              // the child itself has already exited by then. See killProcessTree.
+              detached: process.platform !== "win32",
+            });
+          } catch (err) {
+            return { ok: false, reason: "the reviewer process could not be started", diagnostic: err instanceof Error ? err.message : String(err) };
+          }
+          current = proc;
+          const outcome = await runAttempt(proc, prompt.userPrompt);
+          if (outcome.kind === "finished") return outcome.result;
+          for (const source of outcome.sources) if (!learned.includes(source)) learned.push(source);
         }
-        let exitCode: number | null;
-        try {
-          exitCode = await proc.exited;
-        } catch (err) {
-          return { ok: false, reason: "the reviewer process ended unexpectedly", diagnostic: err instanceof Error ? err.message : String(err) };
-        }
-        const [stdout, stderr] = await Promise.all([stdoutText, stderrText]);
-        const parsed = parseStreamJson(stdout, exitCode);
-        return parsed.ok ? parsed : { ...parsed, diagnostic: stderr.slice(0, 2_000) };
+        // Built-in plugin names carry no account data, so they can go in the diagnostic, which the
+        // operator reads to extend BUILTIN_PLUGINS.
+        return {
+          ok: false,
+          reason: `the reviewer session still loaded built-in plugins after ${MAX_ATTEMPTS} attempts`,
+          diagnostic: `built-in plugins disabled beyond BUILTIN_PLUGINS: ${learned.join(", ")}`,
+        };
       })();
 
       // I4: the previous version cleared this deadline as soon as proc.exited resolved, so a
       // process that exited quickly but left a descendant holding stdout or stderr open (a hook, an
       // MCP helper) made this call wait for that descendant with no bound at all (Q2, Q3, Q3b). The
       // deadline below instead covers the whole run, through both pipes fully read, by racing the
-      // drain itself rather than only the child's own exit.
+      // drain itself rather than only the child's own exit. Since #250 it covers every launch.
       let timer!: ReturnType<typeof setTimeout>;
       const timedOut = new Promise<RunnerResult>((resolve) => {
         timer = setTimeout(() => {
-          killProcessTree(proc.pid);
+          expired = true;
+          if (current) killProcessTree(current.pid);
           resolve({ ok: false, reason: "the reviewer run exceeded its time limit" });
         }, this.timeoutMs);
       });
