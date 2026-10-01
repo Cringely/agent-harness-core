@@ -1675,8 +1675,8 @@ exit 0
         # and ":744-749", was never same-file -- checked against f47563e, the commit that wrote it,
         # both ranges landed on Export-Account.ps1's own boundary comments at those exact line
         # numbers, so the filename prefix was dropped by mistake, not drift. Repointed below.)
-        # Export-Account.ps1:1089-1091 ("a bare `/root` at end of line still fire") and
-        # Export-Account.ps1:1093-1098 ("the negated class now also excludes those") are the two
+        # Export-Account.ps1:1164-1166 ("a bare `/root` at end of line still fire") and
+        # Export-Account.ps1:1168-1173 ("the negated class now also excludes those") are the two
         # comments that assert ablation is caught; this It is what makes that true.
         $stand = New-StandInHome
         $out = New-OutputRoot
