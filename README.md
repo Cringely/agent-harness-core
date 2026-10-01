@@ -301,6 +301,14 @@ refuses before writing anything when the file is missing, empty, malformed or de
 nothing about a project name can be derived from the environment the way the username can, so an
 absent list would mean checking nothing.
 
+Some things never travel at all. A plugin marketplace registered from a local source (a `directory`
+or `file` source, or any absolute path) is dropped from `settings.account.json`, along with every
+`enabledPlugins` entry that names it, and the run reports how many without naming them. A
+`github`-sourced marketplace stays. `skills/synced/`, where plugins sync third-party skills, is
+excluded from the payload and ignored by git. If a dropped marketplace's path still turns up in any
+payload file, or any absolute local path is left in `settings.account.json`, the export refuses the
+same way it does for an identifying string.
+
 Install, on any machine, after a `git pull`:
 
 ```
