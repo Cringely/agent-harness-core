@@ -540,6 +540,10 @@ function Copy-AccountTree {
         # under an allowlisted directory is dropped. Compiled output is also reproducible from the
         # source beside it, so nothing is lost by never shipping it.
         if (@($rel -split '/') -contains '__pycache__') { continue }
+        # #255: a dot-prefixed directory at any depth under a tree in AccountSkipDotDirTrees. The
+        # leaf is a file, so only the directory segments are tested.
+        if ($script:AccountSkipDotDirTrees -contains $Relative -and
+            @(@($rel -split '/') | Select-Object -SkipLast 1 | Where-Object { $_.StartsWith('.') })) { continue }
         # *.bak.* is change-management.md's timestamped convention. *.bak on its own catches
         # older, untimestamped backups (e.g. hooks/Scan-MemorySecrets.ps1.bak) that predate it
         # and would otherwise ship a machine path in the payload.

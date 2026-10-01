@@ -33,6 +33,11 @@ node_modules/
 # left behind cannot be committed.
 account/claude/skills/synced/
 
+# Claude Code's deleted-skills bin (#255), which can hold a proprietary synced skill. The exporter
+# skips dot-prefixed directories under skills; this entry is the second half, so a copy an older
+# export left behind cannot be committed.
+account/claude/skills/.trash/
+
 # Python bytecode. The exporter already excludes __pycache__ from the payload at the
 # producer; this catches the other producer, an interpreter run from inside the repo.
 # A .pyc embeds its compile-time source path, which on this workstation is a username.

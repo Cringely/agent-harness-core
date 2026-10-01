@@ -1675,8 +1675,8 @@ exit 0
         # and ":744-749", was never same-file -- checked against f47563e, the commit that wrote it,
         # both ranges landed on Export-Account.ps1's own boundary comments at those exact line
         # numbers, so the filename prefix was dropped by mistake, not drift. Repointed below.)
-        # Export-Account.ps1:1178-1180 ("a bare `/root` at end of line still fire") and
-        # Export-Account.ps1:1182-1187 ("the negated class now also excludes those") are the two
+        # Export-Account.ps1:1182-1184 ("a bare `/root` at end of line still fire") and
+        # Export-Account.ps1:1186-1191 ("the negated class now also excludes those") are the two
         # comments that assert ablation is caught; this It is what makes that true.
         $stand = New-StandInHome
         $out = New-OutputRoot
@@ -2263,6 +2263,31 @@ exit 0
                     -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
                     -VaultPath 'C:/vault' -SkipSettings -SkipMcp -AccountUser $script:fixtureUser | Out-Null
                 Test-Path -LiteralPath (Join-Path $out 'skills/synced') | Should -BeFalse -Because "pass $pass"
+                Test-Path -LiteralPath (Join-Path $out 'skills/cloned-skill/SKILL.md') | Should -BeTrue
+            }
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "never exports a dot-prefixed directory under skills, .trash and .Hidden included" {
+        # #255: Claude Code keeps deleted skills in skills/.trash/<id>/, which can hold a synced
+        # proprietary skill. Any dot-prefixed directory under the skills tree is skipped, whatever
+        # its name or case, so the next hidden directory a tool invents needs no new entry.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            New-Item -ItemType Directory -Path (Join-Path $ch 'skills/.trash/docs-1/docs') -Force | Out-Null
+            'trashed skill' | Set-Content (Join-Path $ch 'skills/.trash/docs-1/docs/SKILL.md')
+            New-Item -ItemType Directory -Path (Join-Path $ch 'skills/.Hidden/sub') -Force | Out-Null
+            'hidden file' | Set-Content (Join-Path $ch 'skills/.Hidden/sub/x.md')
+
+            foreach ($pass in 1, 2) {
+                & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp -AccountUser $script:fixtureUser | Out-Null
+                Test-Path -LiteralPath (Join-Path $out 'skills/.trash') | Should -BeFalse -Because "pass $pass"
+                Test-Path -LiteralPath (Join-Path $out 'skills/.Hidden') | Should -BeFalse -Because "pass $pass"
                 Test-Path -LiteralPath (Join-Path $out 'skills/cloned-skill/SKILL.md') | Should -BeTrue
             }
         }
