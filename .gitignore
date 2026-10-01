@@ -28,6 +28,11 @@ node_modules/
 # project that installs the harness cannot commit one either.
 *.local.md
 
+# Plugin-synced third-party skills (#252), some of them proprietary. install/AccountShared.ps1
+# excludes skills/synced from the export; this entry is the second half, so a copy an older export
+# left behind cannot be committed.
+account/claude/skills/synced/
+
 # Python bytecode. The exporter already excludes __pycache__ from the payload at the
 # producer; this catches the other producer, an interpreter run from inside the repo.
 # A .pyc embeds its compile-time source path, which on this workstation is a username.
