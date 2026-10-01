@@ -70,7 +70,12 @@ $script:AccountSkipFiles = @(
 # skills/wiring-diagram/examples (#147): worked examples drawn from the operator's own builds. The
 # skill itself ships; only its examples stay local. A subdirectory entry, so the skillOverrides
 # scrub in Export-Account.ps1 (which keys on the whole skill name) leaves the skill's entry alone.
-$script:AccountSkipDirs = @('skills/appsec-kpi-deck', 'skills/wiring-diagram/examples')
+#
+# skills/synced (#252): plugin-synced copies of third-party skills, Anthropic's proprietary document
+# skills among them. They are not the operator's to publish, and the plugin that synced them installs
+# them again on any receiver that wants them. .gitignore carries the same path as a second guard, so
+# a stale copy an older export left in account/claude/ cannot be committed either.
+$script:AccountSkipDirs = @('skills/appsec-kpi-deck', 'skills/wiring-diagram/examples', 'skills/synced')
 
 # Model-read text carrying machine paths. A hook derives its paths at run time and is fixed at
 # source; these cannot be, because a placeholder written into the live file is read literally by

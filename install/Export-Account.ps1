@@ -373,6 +373,34 @@ $identityChecks = @(New-IdentityCheck -Class 'workstation username' -Value $Acco
     @(New-IdentityCheck -Class 'declared name' -Value $declaredNames) +
     @(New-IdentityCheck -Class 'declared email' -Value $declaredEmails)
 
+# --- absolute local paths (#252) -----------------------------------------------
+# A path that exists only on this machine is identifying (security.md lists absolute paths and
+# machine names) and is not portable either. The same gate below refuses one, in two arms added to
+# $identityChecks rather than a second scan: a literal arm for each local path the settings pass
+# drops (any file), and a shape arm for settings.account.json (any absolute path in any key). The
+# shape arm cannot run over the whole payload: prose-lint calibration comments and skill examples
+# name drive paths on purpose, so a whole-tree shape scan fails on documentation.
+function Test-AccountLocalPath {
+    param([string]$Text)
+    # Drive letter, UNC or POSIX root, a home-relative ~/, or a file: URI.
+    return [bool]($Text -match '^\s*(?:[A-Za-z]:[\\/]|[\\/]|~[\\/]|file:)')
+}
+
+# The literal arm. Both separator spellings and JSON's doubled backslash, as the redaction pattern
+# below allows. The username inside the literal is redacted first, because the gate reads bodies
+# AFTER redaction: a path under the profile directory would otherwise never match its own redacted
+# copy and would ship as C:\Users\user\....
+function New-LocalPathCheck {
+    param([string]$Path)
+    $p = (($Path.Trim() -replace '(?i)^file:/*', '') -replace '/', '\').TrimEnd('\')
+    if (-not $p) { return }
+    $p = [regex]::Replace($p, $userRedactPattern, $userPlaceholder, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    [pscustomobject]@{
+        Class = 'absolute local path'
+        Regex = '(?<![A-Za-z0-9])' + ([regex]::Escape($p) -replace '\\\\', '[\\/]{1,2}') + '(?![A-Za-z0-9])'
+    }
+}
+
 # --- personal terms (#147) ---------------------------------------------------
 # Terms the operator wants kept out of the public payload that are not identity strings, and MCP
 # servers to leave out whole. Loaded before the first copy for the same reason the identity file
@@ -681,6 +709,40 @@ if (-not $SkipSettings) {
             }
         }
 
+        # #252: a marketplace registered from a local source names a private repo and a path that
+        # exists on no other machine, so it never travels, and neither does any enabledPlugins
+        # entry (`<plugin>@<marketplace>`) that names it. Local means a directory or file source
+        # type, or any string in the source that is an absolute path; a github source stays. The
+        # dropped paths join the gate below, so the same path reaching the payload through any
+        # other file still refuses the export. Reported as counts: names and paths are what leaks.
+        $droppedMarketplaces = @()
+        $droppedPlugins = 0
+        if ($settings.extraKnownMarketplaces) {
+            foreach ($mp in @($settings.extraKnownMarketplaces.PSObject.Properties)) {
+                $src = $mp.Value.source
+                $type = if ($src -is [string]) { '' } else { [string]$src.source }
+                $values = if ($src -is [string]) { @($src) }
+                else { @(@($src.PSObject.Properties) | ForEach-Object { $_.Value } | Where-Object { $_ -is [string] }) }
+                $localPaths = @($values | Where-Object { Test-AccountLocalPath $_ })
+                if ($type -in 'directory', 'file' -or $localPaths.Count -gt 0) {
+                    $droppedMarketplaces += $mp.Name
+                    foreach ($p in $localPaths) { $identityChecks += @(New-LocalPathCheck -Path $p) }
+                    $settings.extraKnownMarketplaces.PSObject.Properties.Remove($mp.Name)
+                }
+            }
+        }
+        if ($droppedMarketplaces.Count -gt 0 -and $settings.enabledPlugins) {
+            foreach ($key in @($settings.enabledPlugins.PSObject.Properties.Name | Where-Object { $_ })) {
+                if ($key -match '@([^@]+)$' -and $droppedMarketplaces -contains $Matches[1]) {
+                    $settings.enabledPlugins.PSObject.Properties.Remove($key)
+                    $droppedPlugins++
+                }
+            }
+        }
+        if ($droppedMarketplaces.Count -gt 0) {
+            Write-Host "  settings.account.json: dropped $($droppedMarketplaces.Count) local-path marketplace(s) and $droppedPlugins enabledPlugins entries"
+        }
+
         # #147: dropping a server from mcp-servers.json below still leaves its name in every
         # `mcp__<name>...` permission string, the same name-shaped leak skillOverrides had above.
         # Every array under permissions, not only allow/ask/deny by name, so a new list key is
@@ -818,6 +880,18 @@ if ($PSCmdlet.ShouldProcess($OutputRoot, 'fold model-read machine paths')) {
 # invariant records, so the enumeration is the fix and this comment is the enumeration.
 $script:PosixHomeShape =
     '(?<![A-Za-z]:)(?:/mnt/[A-Za-z]/Users/[^/"''\s]+|/home/[^/"''\s]+|/Users/[^/"''\s]+|/root(?![^/"''\s]))'
+
+# #252, the shape arm of the absolute-local-path gate, scoped to settings.account.json. Matched
+# against that file's JSON text: a drive path in either separator (a JSON backslash is doubled, so
+# one is enough to match), a UNC root (four backslashes once JSON-escaped), a file: URI, or any
+# POSIX home shape above. Measured against the latest real export before shipping: the only
+# absolute path in settings.account.json was the local marketplace the settings pass now drops.
+# Not applied to mcp-servers.json, which ships a redacted Windows path today.
+$identityChecks += [pscustomobject]@{
+    Class = 'absolute local path'
+    Scope = 'settings.account.json'
+    Regex = '(?<![A-Za-z0-9])[A-Za-z]:[\\/]|\\\\\\\\[A-Za-z0-9]|(?<![A-Za-z])file:/|' + $script:PosixHomeShape
+}
 
 # --- mcpServers --------------------------------------------------------------
 # The pattern table is read out of the live secret scanner rather than copied, so the gate here
@@ -1265,6 +1339,8 @@ if (-not $WhatIfPreference) {
         }
 
         foreach ($check in $identityChecks) {
+            # A Scope names the one file an arm applies to (#252's settings shape arm).
+            if ($check.Scope -and $check.Scope -ne $rel) { continue }
             if ([regex]::IsMatch($body, $check.Regex, $ignoreCase)) {
                 # Names the file and the CLASS, never the matched value. Printing it would put the
                 # string this gate exists to contain into console output, CI logs and any transcript

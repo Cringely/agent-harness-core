@@ -2178,6 +2178,155 @@ exit 0
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
     }
 
+    # --- #252: local-path marketplaces and synced skills --------------------------------------
+    # A marketplace registered from a local directory names a private repo and a path that exists
+    # on no other machine. Synthetic names and paths throughout: zzlocalmkt and D:\zzprivate match
+    # nothing real, so a failure here prints nothing of the operator's.
+    It "drops local-path marketplaces and their enabledPlugins entries, keeping a github-sourced one" {
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            @{
+                hooks                  = @{}
+                extraKnownMarketplaces = @{
+                    zzlocalmkt = @{ source = @{ source = 'directory'; path = 'D:\zzprivate\local-repo' } }
+                    zzfilemkt  = @{ source = @{ source = 'file'; path = 'D:/zzprivate/marketplace.json' } }
+                    # Neither directory nor file, but its source is still an absolute local path.
+                    zzgitmkt   = @{ source = @{ source = 'git'; url = '/srv/zzprivate/repo.git' } }
+                    zzghmkt    = @{ source = @{ source = 'github'; repo = 'example-owner/example-repo' } }
+                }
+                enabledPlugins         = @{
+                    'one@zzlocalmkt'                 = $true
+                    'two@zzfilemkt'                  = $true
+                    'three@zzgitmkt'                 = $false
+                    'four@zzghmkt'                   = $true
+                    'five@claude-plugins-official'   = $true
+                }
+            } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $ch 'settings.json')
+
+            & $script:export -ClaudeHome $ch -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipMcp -AccountUser $script:fixtureUser | Out-Null
+
+            $raw = Get-Content (Join-Path $out 'settings.account.json') -Raw
+            $s = $raw | ConvertFrom-Json
+            @($s.extraKnownMarketplaces.PSObject.Properties.Name) | Should -Be @('zzghmkt')
+            @($s.enabledPlugins.PSObject.Properties.Name | Sort-Object) |
+                Should -Be @('five@claude-plugins-official', 'four@zzghmkt')
+            ($raw -like '*zzprivate*') | Should -BeFalse -Because 'no local path survives in the payload'
+            Test-Path -LiteralPath (Join-Path $out '.export-account-marker') | Should -BeTrue
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "reports dropped marketplaces and plugins as counts, never as names or paths" {
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            @{
+                hooks                  = @{}
+                extraKnownMarketplaces = @{
+                    zzlocalmkt = @{ source = @{ source = 'directory'; path = 'D:\zzprivate\local-repo' } }
+                    zzghmkt    = @{ source = @{ source = 'github'; repo = 'example-owner/example-repo' } }
+                }
+                enabledPlugins         = @{ 'one@zzlocalmkt' = $true; 'two@zzlocalmkt' = $true; 'four@zzghmkt' = $true }
+            } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $ch 'settings.json')
+
+            & $script:export -ClaudeHome $ch -OutputRoot $out `
+                -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                -VaultPath 'C:/vault' -SkipMcp -AccountUser $script:fixtureUser `
+                -InformationVariable info -InformationAction SilentlyContinue | Out-Null
+
+            $text = @($info) -join "`n"
+            $text | Should -Match 'settings\.account\.json: dropped 1 local-path marketplace\(s\) and 2 enabledPlugins entr'
+            ($text -like '*zzlocalmkt*') | Should -BeFalse -Because 'the report names no marketplace'
+            ($text -like '*zzprivate*') | Should -BeFalse -Because 'the report names no path'
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "never exports skills/synced, on a first export or a repeat one" {
+        # Plugin-synced copies of third-party skills, some of them proprietary. A prefix exclusion,
+        # so a skill added under synced/ later needs no new entry.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            New-Item -ItemType Directory -Path (Join-Path $ch 'skills/synced/docx/scripts') -Force | Out-Null
+            'synced skill'  | Set-Content (Join-Path $ch 'skills/synced/docx/SKILL.md')
+            'synced script' | Set-Content (Join-Path $ch 'skills/synced/docx/scripts/x.py')
+
+            foreach ($pass in 1, 2) {
+                & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp -AccountUser $script:fixtureUser | Out-Null
+                Test-Path -LiteralPath (Join-Path $out 'skills/synced') | Should -BeFalse -Because "pass $pass"
+                Test-Path -LiteralPath (Join-Path $out 'skills/cloned-skill/SKILL.md') | Should -BeTrue
+            }
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "refuses when a copied file carries a dropped marketplace's local path, never printing it" {
+        # Dropping the marketplace from settings does not stop its path reaching the payload some
+        # other way. Written here with forward slashes while settings.json spells it with
+        # backslashes, so the gate has to match either spelling.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            @{
+                hooks                  = @{}
+                extraKnownMarketplaces = @{
+                    zzlocalmkt = @{ source = @{ source = 'directory'; path = 'D:\zzprivate\local-repo' } }
+                }
+            } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $ch 'settings.json')
+            'Build it from D:/zzprivate/local-repo/skills first.' |
+                Set-Content (Join-Path $ch 'skills/cloned-skill/SKILL.md')
+
+            $msg = $null
+            try {
+                & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipMcp -AccountUser $script:fixtureUser | Out-Null
+            }
+            catch { $msg = $_.Exception.Message }
+            $msg | Should -Not -BeNullOrEmpty -Because 'the export must refuse'
+            $msg | Should -BeLike '*skills/cloned-skill/SKILL.md*local path*'
+            ($msg -like '*zzprivate*') | Should -BeFalse -Because 'the gate names the file, never the path'
+            Test-Path -LiteralPath (Join-Path $out '.export-account-marker') | Should -BeFalse
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    It "refuses when settings.account.json still carries an absolute local path in any key" {
+        # Fail closed on the generated config, not only on marketplaces: a path the drop has no
+        # rule for (here a permission rule) is just as non-portable.
+        $stand = New-StandInHome
+        $out = New-OutputRoot
+        try {
+            $ch = (Join-Path $stand '.claude')
+            @{
+                hooks       = @{}
+                permissions = @{ allow = @('Read(D:/zzprivate/notes/**)') }
+            } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $ch 'settings.json')
+
+            $msg = $null
+            try {
+                & $script:export -ClaudeHome $ch -OutputRoot $out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipMcp -AccountUser $script:fixtureUser | Out-Null
+            }
+            catch { $msg = $_.Exception.Message }
+            $msg | Should -BeLike '*settings.account.json*local path*'
+            ($msg -like '*zzprivate*') | Should -BeFalse
+            Test-Path -LiteralPath (Join-Path $out '.export-account-marker') | Should -BeFalse
+        }
+        finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
     It "derives the workstation username from `$HOME when the caller omits -AccountUser" {
         # The same gap backlog item 24 found on -WslHome: every other It in this group passes
         # -AccountUser explicitly, so deleting the default-resolution line leaves all of them green
