@@ -106,8 +106,8 @@ jobs:
     # job's check name stays exactly "Pester (fixture-built installer suites)" -- the App
     # reviewer's REQUIRED_CHECKS (tools/pr-review/verdict.ts) matches on that literal name, and a
     # matrix suffixes each leg's check name with the runner value instead of keeping it stable.
-    # Not added to REQUIRED_CHECKS here, so it is excluded only from the App reviewer's verification
-    # state. The CI required ruleset requires this job on every merge.
+    # Not added to REQUIRED_CHECKS here: whether this job becomes a required status check is a
+    # branch-protection policy choice, left to the operator.
     #
     # Pinned to ubuntu-24.04, not ubuntu-latest, for the same reason as bun-test above: a fixed
     # image so the suites fail loudly on a deliberate version bump instead of quietly on GitHub's
