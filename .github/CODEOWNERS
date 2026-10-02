@@ -1,7 +1,12 @@
-# Enforcement paths (#235). With require_code_owner_review on the default ruleset, the App's
-# APPROVE does not merge a change here alone. Skills and patterns are deliberately not owned.
+# Enforcement paths (#235). The default ruleset has require_code_owner_review on, so a change to
+# a path below needs a code-owner review and the App's APPROVE does not merge it alone. The only
+# owner is the operator, who authors these pull requests and cannot approve them, so these merges
+# go through the administrator bypass. That bypass skips only the default ruleset. The "CI
+# required" ruleset has no bypass list, so its checks, code scanning, force-push and deletion
+# rules still hold. Skills and patterns are deliberately not owned.
 # Last match wins. No entry below overlaps another.
 /.github/                                   @Cringely
+/.gitattributes                             @Cringely
 /core/claude/hooks/                         @Cringely
 /core/claude/agents/                        @Cringely
 /core/claude/templates/                     @Cringely
@@ -10,5 +15,6 @@
 /account/claude/rules/                      @Cringely
 /account/claude/agents/                     @Cringely
 /account/claude/hooks/                      @Cringely
+/account/claude/tools/                      @Cringely
 /account/claude/settings.account.json       @Cringely
 /test/                                      @Cringely

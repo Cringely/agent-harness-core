@@ -358,20 +358,24 @@ state. The Linux Pester job is deliberately left out of that list (see the comme
 names it on a `run:` line, and takes its verification state from what `REQUIRED_CHECKS` reported
 for the head commit.
 
-`master` takes changes by pull request and requires one approving review. Outside the paths
-`.github/CODEOWNERS` assigns, the `tools/pr-review/` App's approval supplies it. On an owned path
-(hooks, agent definitions, rules, `install/`, `tools/pr-review/`, `test/` and the rest of that
-file's list) the default ruleset also requires a code-owner review. The App cannot give one, and
-neither can the operator, who authors these pull requests and whom GitHub bars from approving
-them. Those merges go through the administrator bypass the operator orders, which GitHub records
-as a rule-suite bypass, and each one carries a comment in the pull request saying why. A second
-ruleset requires the `bun test` and Pester checks on every merge to `master`, the bypass included,
-and has no bypass list of its own, so a CI outage blocks every merge until the operator edits it.
-The bypass is policy, not enforcement. Any agent shell that can mint the operator's token can run
-`gh pr merge --admin` on any pull request, and the rulesets do not stop it. What the code-owner
-rule does is stop the App's approval from merging an enforcement path on its own. The default
-ruleset also blocks a merge on code scanning results: a CodeQL alert at high severity or higher,
-or any error-level alert, fails the check on its own. A push after approval dismisses it, and the
+`master` takes changes by pull request under two rulesets. The default ruleset requires one
+approving review, a fresh one after any push, and a code-owner review on the paths
+`.github/CODEOWNERS` assigns. Outside those paths the `tools/pr-review/` App's approval supplies
+the review. On an owned path (hooks, agent definitions, rules, `install/`, `tools/pr-review/`,
+`test/` and the rest of that file's list) it is not enough. A code-owner review is also needed, and
+the only code owner is the operator, who authors these pull requests and whom GitHub bars from
+approving them. Those merges go through the administrator bypass the operator orders, which GitHub
+records as a rule-suite bypass, and each one carries a comment in the pull request saying why. The
+bypass skips only the default ruleset: its review rule (the approval, the code-owner review and the
+last-push approval), its code quality rule and its Copilot review. It cannot skip the second
+ruleset, "CI required", which has no bypass list. That ruleset requires the `bun test` job and the
+Pester jobs on Windows and on Linux to pass (unlike `REQUIRED_CHECKS`, it includes the Linux one),
+blocks a merge on a CodeQL error-level alert or a security alert at high severity or higher, and
+forbids force-pushing to or deleting `master`. It holds for every merge, the operator's included,
+so a CI outage blocks every merge until the operator edits the ruleset. The bypass is policy, not
+enforcement. Any agent shell that can mint the operator's token can run `gh pr merge --admin` and
+skip the review rule, and no ruleset stops that. What the code-owner rule does is stop the App's
+approval from merging an enforcement path on its own. A push after approval dismisses it, and the
 `tools/pr-review/` reviewer runs by hand rather than on a trigger, so a new push needs a fresh
 manual run before the PR can merge again. CONTRIBUTING.md carries the flow, and says when the
 administrator bypass is used instead.

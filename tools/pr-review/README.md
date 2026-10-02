@@ -49,7 +49,7 @@ Exit codes: 0 reviewed or snapshotted, 2 refused with nothing posted, 1 usage or
 
 `COMMENT`: the tool could not vouch either way, and the body's basis line and verification section say why. The reasons are CI still pending or with no run on the head commit; CI unable to vouch because the pull request edits `.github/workflows/`, changes a `.ps1` file whose suite CI does not run, or has a changed-file listing the tool could not read whole; a reviewer run that failed, was rejected, produced output that did not validate, or was skipped because the diff was unavailable or over the size cap; or a `--comment-only` run. Resolve the reason and review again.
 
-Whatever the event, the body lists findings below the floor under their own heading. They do not withhold approval and the App cannot file them, so the operator files each one as an issue.
+Whatever the event, the body lists findings below the floor under their own heading. They do not withhold approval and stay in the review comment. One becomes an issue only when it is a correctness or security gap outside the pull request's scope, or a decision that belongs to the operator, and the operator files it, because the App cannot.
 
 ## Refusals
 
