@@ -13,9 +13,10 @@
 // into a visible choice someone can argue with in review.
 //
 // Two checks:
-//   1. An Agent/Task dispatch with no `model` denies. `subagent_type: "fork"` is exempt, because a
-//      fork inherits the parent model by design and ignores a model override, so demanding the
-//      field would be asking for a value with no effect.
+//   1. An Agent/Task dispatch with no `model` denies, unless the definition it names pins an exact
+//      model ID listed in this machine's tier map (see DEFINITION PIN below).
+//      `subagent_type: "fork"` is exempt, because a fork inherits the parent model by design and
+//      ignores a model override, so demanding the field would be asking for a value with no effect.
 //   2. A Workflow whose script contains `agent()` calls with no `model`, or with a model that is
 //      not one of the accepted tiers, denies and names the offending call sites by line and label.
 //      The scanner reads template literals properly: template text is data, `${ }` contents are
@@ -55,6 +56,56 @@
 // real tool name differs, the Workflow branch below is inert rather than wrong: an unrecognised
 // tool falls through to allow, so nothing breaks and nothing is protected. Treat that branch as
 // untested against a live payload, not as precedent for a name anyone has seen.
+//
+// DEFINITION PIN (#258). The Agent tool's `model` parameter takes only the four aliases, and Claude
+// Code resolves each alias through a table that can lag the current models. Managed settings can
+// pin that table: on the account behind #258 `sonnet` ran claude-sonnet-4-6 and `opus` ran
+// claude-opus-4-8, and user ANTHROPIC_DEFAULT_*_MODEL overrides were ignored. A definition's `model:`
+// frontmatter does take an exact ID, and Claude Code honors it, but only when the dispatch passes no
+// `model`, because a passed parameter outranks the frontmatter. So a model-less dispatch is allowed
+// when the definition it names pins an exact ID that this machine's tier map lists. The dispatch
+// still names its model. It is written in the definition instead of the call, and nothing inherits
+// the session model. Rejected: keeping the deny and waiting for the alias table, which leaves every
+// subagent on the previous generation with no harness-side route out. The alias-only parameter
+// cannot carry an ID.
+//
+// The tier map is `~/.claude/tier-map.local.json`, `{"tiers": {"sonnet": "<exact id>", ...}}`, one
+// per machine and never exported. Keys are the four tiers and values match EXACT_MODEL_ID. Any other
+// key inside `tiers`, a bad value, or a file that does not parse voids the whole map, so a typo
+// shows up as a deny rather than as a silently narrower allowlist. Top-level keys other than `tiers`
+// are ignored, so the billing-aware role map #249 asks for can share the file. Why a map rather
+// than any exact ID: an ID can be well formed and still not be served to this account, and an
+// unserved pin falls back silently to the PARENT session model, measured on #258 with
+// claude-sonnet-5-5. The org's `availableModels` list does not predict it: claude-opus-5-5 was
+// served while absent from that list. So probe an ID before pinning it, and treat an arbitrary pin
+// as the inherited default this gate exists to stop. The map is the operator's statement of which
+// IDs this account is served, and a pin outside it denies.
+// Shared definitions keep their aliases, since an exact ID breaks on other providers and on orgs
+// without that model. A machine's pinned definitions are `*.local.md` files, which the account
+// exporter already never publishes.
+//
+// The lookup mirrors Claude Code's own resolution as far as files can show it: every
+// `.claude/agents/` from the payload's cwd up to the repository root, closest first, then
+// `~/.claude/agents/`. In each directory `<subagent_type>.md` and `<subagent_type>.local.md` are
+// read. The first directory holding one is the definition, both in one directory is ambiguous, and
+// the definition must declare `name:` equal to the dispatched type, since Claude Code keys on that
+// field and not the filename. The exemption fails closed: an alias, `inherit`, no `model:`, an ID
+// the map does not list, no map, a duplicated key, unparseable frontmatter, a missing file, any read
+// error, a name that is not a plain identifier (a plugin's `x:y` included), or a payload with no
+// absolute cwd all leave today's deny in place. That is not a departure from the FAIL-OPEN CONTRACT
+// below: a failed lookup denies only what was denied before.
+//
+// What files cannot show, stated so nobody mistakes the lookup for complete:
+//   - Definitions from the `--agents` flag and from managed settings. Both outrank project defs,
+//     so a same-named one there shadows the file this gate read. Plugin definitions rank last,
+//     below user defs, so they never shadow a file the gate read.
+//   - A higher-priority def for the same name under some other filename. The gate reads the two
+//     names above and does not scan a directory for `name:` fields.
+//   - Whether the map is right. A map entry the org does not serve passes here and falls back to
+//     the parent model at dispatch. Catching that takes a model call, which a per-dispatch hook must
+//     not spend, so it belongs to an on-demand check that reads the model a subagent actually ran.
+//   - Managed settings can set `allowManagedHooksOnly`, and then no user or project hook runs,
+//     this one included. There the definitions and the briefs are the only enforcement.
 //
 // ESCAPE HATCH. `MODEL-OVERRIDE: <reason>` in the agent prompt, or anywhere in a workflow script,
 // allows unconditionally. The reason text is required to be non-empty but is not judged, matching
@@ -118,10 +169,29 @@
 // reads as no opinion, so a gate that has stopped working is visible to an operator rather than
 // invisibly absent.
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join } from "node:path";
 
 /** Tiers this project accepts as an answer to "which model". */
 export const VALID_TIERS = ["haiku", "sonnet", "opus", "fable"];
+
+/**
+ * The shape of an exact model ID, in a tier map value and in a definition's `model:`. Anything else
+ * there, an alias or `inherit` or nothing, resolves through the session or the alias table and pins
+ * nothing. See DEFINITION PIN.
+ */
+export const EXACT_MODEL_ID = /^claude-[a-z0-9]+(-[a-z0-9]+)*$/;
+
+/** The machine-local tier map, under `~/.claude`. Never exported. See DEFINITION PIN. */
+export const TIER_MAP_FILE = "tier-map.local.json";
+
+/**
+ * Names the definition lookup will build a path from. Claude Code forbids a leading `-` and the
+ * `:` of a plugin scope, and a dot or a separator could leave the agents directory, so the
+ * allowlist is narrower than any of those rules and a name outside it is never looked up.
+ */
+const AGENT_NAME = /^[A-Za-z0-9_][A-Za-z0-9_-]*$/;
 
 /** Conscious in-band bypass. See the header's ESCAPE HATCH note. */
 export const OVERRIDE_TOKEN = "MODEL-OVERRIDE:";
@@ -561,11 +631,158 @@ export function scanAgentCalls(src: string): AgentCall[] {
 }
 
 // ---------------------------------------------------------------------------
+// Definition pins. See the header's DEFINITION PIN note.
+// ---------------------------------------------------------------------------
+
+/** Filesystem access for the definition lookup, injected so tests can lay out a tree off disk. */
+export interface DefSource {
+  /** The user's home directory. `~/.claude/agents` is searched last. */
+  home: string;
+  /** The file's text, or null when it does not exist. Throws on any other failure. */
+  read: (path: string) => string | null;
+  /** Whether a path exists. Used only to find the repository root the project search stops at. */
+  exists: (path: string) => boolean;
+}
+
+/**
+ * Agents directories in Claude Code's precedence order: every `.claude/agents/` from `cwd` up to
+ * and including the repository root (the first ancestor holding a `.git`), closest first, then the
+ * user's. Outside any repository the walk runs to the filesystem root.
+ *
+ * The walk rather than `<cwd>/.claude/agents` alone, because from a subdirectory the single
+ * lookup misses the repo-root def Claude Code actually runs and reads the user def behind it,
+ * which is an allow on a def that was shadowed.
+ */
+export function agentDefDirs(cwd: string, home: string, exists: (path: string) => boolean): string[] {
+  const dirs: string[] = [];
+  for (let dir = cwd; ; dir = dirname(dir)) {
+    dirs.push(join(dir, ".claude", "agents"));
+    if (exists(join(dir, ".git")) || dirname(dir) === dir) break;
+  }
+  dirs.push(join(home, ".claude", "agents"));
+  return dirs;
+}
+
+/**
+ * The exact model ID a definition pins for a dispatch of `name`, or null when it pins none. Null
+ * covers an alias, `inherit`, an absent or empty `model:`, a `name:` other than `name`, a duplicated
+ * key, and any frontmatter this reader cannot parse with certainty.
+ *
+ * Keys are read at column 0 only, so an indented key belongs to a nested value and is skipped. A
+ * key's colon must be followed by a space or the end of the line, as YAML requires. Lines split on
+ * CRLF, LF and a lone CR, which are YAML's three line breaks. Splitting on LF alone would hide a
+ * second `model:` behind a lone CR inside some other key's value, and the real `model:` line would
+ * then read as the only one. The value is the whole rest of the line, so any other stray character
+ * in it fails the exact-ID test instead of being cut off.
+ */
+export function pinnedModel(text: string, name: string): string | null {
+  // A UTF-8 byte order mark reaches here as one leading U+FEFF, and YAML ignores it.
+  const body = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  const fm = body.match(/^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/)?.[1];
+  if (fm === undefined) return null;
+  const values = (key: string) =>
+    fm
+      .split(/\r\n|\r|\n/)
+      .map((line) => line.match(/^([A-Za-z0-9_-]+)[ \t]*:(?=[ \t]|$)([\s\S]*)/))
+      .filter((m): m is RegExpMatchArray => m !== null && m[1] === key)
+      .map((m) => unquote(m[2].trim()));
+  const names = values("name");
+  const models = values("model");
+  if (names.length !== 1 || names[0] !== name || models.length !== 1) return null;
+  return EXACT_MODEL_ID.test(models[0]) ? models[0] : null;
+}
+
+/** Strip one pair of matching surrounding quotes, which YAML removes from a scalar. */
+function unquote(v: string): string {
+  return /^(["']).*\1$/.test(v) ? v.slice(1, -1) : v;
+}
+
+/**
+ * The exact IDs a tier map lists, or null when the map is void. Void covers text that is not JSON,
+ * a document without a `tiers` object, a key in `tiers` that is not one of VALID_TIERS, and a value
+ * that is not an exact ID. Top-level keys other than `tiers` are ignored.
+ */
+export function parseTierMap(text: string): Set<string> | null {
+  let doc: unknown;
+  try {
+    doc = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (typeof doc !== "object" || doc === null || Array.isArray(doc)) return null;
+  const tiers = (doc as Record<string, unknown>).tiers;
+  if (typeof tiers !== "object" || tiers === null || Array.isArray(tiers)) return null;
+  const ids = new Set<string>();
+  for (const [tier, id] of Object.entries(tiers)) {
+    if (!VALID_TIERS.includes(tier) || typeof id !== "string" || !EXACT_MODEL_ID.test(id)) return null;
+    ids.add(id);
+  }
+  return ids;
+}
+
+/**
+ * The IDs this machine's tier map lists. Empty when there is no map, it is void, or it cannot be
+ * read, so every one of those leaves no definition able to earn the exemption.
+ */
+function tierMapIds(defs: DefSource): Set<string> {
+  try {
+    const text = defs.read(join(defs.home, ".claude", TIER_MAP_FILE));
+    return (text === null ? null : parseTierMap(text)) ?? new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * The definition text for `name` from the first directory, in precedence order, holding
+ * `<name>.md` or `<name>.local.md`. Null when none does. Both in one directory throws: both would
+ * declare the same name, and which one Claude Code loads is not something a file shows.
+ */
+function findAgentDef(name: string, dirs: string[], read: DefSource["read"]): string | null {
+  for (const dir of dirs) {
+    const shared = read(join(dir, `${name}.md`));
+    const local = read(join(dir, `${name}.local.md`));
+    if (shared !== null && local !== null) throw new Error(`${name}.md and ${name}.local.md both in ${dir}`);
+    if (shared !== null || local !== null) return shared ?? local;
+  }
+  return null;
+}
+
+/**
+ * Does the definition named by `subagentType` pin an exact model ID that `mapIds` lists? `lookup`
+ * returns the definition's text, or null when there is none, and may throw. Any throw answers no,
+ * so an unreadable def keeps the deny instead of escaping to the entrypoint's fail-open catch.
+ */
+function pinnedByDefinition(
+  subagentType: unknown,
+  lookup: (name: string) => string | null,
+  mapIds: ReadonlySet<string>,
+): boolean {
+  if (typeof subagentType !== "string" || !AGENT_NAME.test(subagentType)) return false;
+  try {
+    const text = lookup(subagentType);
+    const pin = text === null ? null : pinnedModel(text, subagentType);
+    return pin !== null && mapIds.has(pin);
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Decisions
 // ---------------------------------------------------------------------------
 
-/** Pure decision over an Agent/Task dispatch's `tool_input`. Unrecognizable input allows. */
-export function checkAgent(input: unknown): GateDecision {
+/**
+ * Pure decision over an Agent/Task dispatch's `tool_input`. Unrecognizable input allows. `lookup`
+ * returns the text of the definition a model-less dispatch would run, or null, and `mapIds` holds
+ * the exact IDs this machine's tier map lists. The defaults find nothing and list nothing, so
+ * without them this denies a model-less dispatch exactly as it did before #258.
+ */
+export function checkAgent(
+  input: unknown,
+  lookup: (name: string) => string | null = () => null,
+  mapIds: ReadonlySet<string> = new Set(),
+): GateDecision {
   if (typeof input !== "object" || input === null) return ALLOW;
   const t = input as Record<string, unknown>;
 
@@ -593,6 +810,8 @@ export function checkAgent(input: unknown): GateDecision {
 
   if (hasOverride(t.prompt)) return ALLOW;
 
+  if (pinnedByDefinition(t.subagent_type, lookup, mapIds)) return ALLOW;
+
   return {
     action: "deny",
     reason: [
@@ -602,6 +821,9 @@ export function checkAgent(input: unknown): GateDecision {
       "",
       'Add model: "haiku" (or sonnet/opus/fable) to the dispatch.',
       "If the session model really is the right tier, say so explicitly by passing it.",
+      "Or omit model and name a subagent_type whose definition pins an exact model ID that this",
+      `machine's ~/.claude/${TIER_MAP_FILE} lists. An alias, inherit, or an ID the map does not list`,
+      "does not count. Machine-local pinned definitions are <name>.local.md files, never shared ones.",
       `To dispatch without choosing, put \`${OVERRIDE_TOKEN} <reason>\` in the prompt. The reason is required.`,
     ].join("\n"),
   };
@@ -678,12 +900,16 @@ export function checkWorkflow(
 }
 
 /**
- * The gate's whole policy over a PreToolUse stdin payload, pure apart from the injected reader.
- * Unrecognizable input and any tool this gate does not judge both allow.
+ * The gate's whole policy over a PreToolUse stdin payload, pure apart from the injected readers.
+ * Unrecognizable input and any tool this gate does not judge both allow. `defs` serves the tier map
+ * and the definition lookup for a model-less Agent/Task dispatch, searched from the payload's
+ * `cwd`. With no `defs`, or no absolute `cwd` to search from, nothing is found and such a dispatch
+ * denies.
  */
 export function decide(
   payload: unknown,
   readFile: (p: string) => string | null = () => null,
+  defs: DefSource | null = null,
 ): GateDecision {
   if (typeof payload !== "object" || payload === null) return ALLOW;
   const p = payload as Record<string, unknown>;
@@ -691,7 +917,13 @@ export function decide(
   // Defense in depth: only judge the dispatch tools, whatever the matcher says. See the header's
   // MATCHER NOTE for which of these names is observed and which is inferred.
   const tool = p.tool_name;
-  if (tool === "Agent" || tool === "Task") return checkAgent(p.tool_input);
+  if (tool === "Agent" || tool === "Task") {
+    const cwd = typeof p.cwd === "string" && isAbsolute(p.cwd) ? p.cwd : null;
+    if (!defs || !cwd) return checkAgent(p.tool_input);
+    const lookup = (name: string): string | null =>
+      findAgentDef(name, agentDefDirs(cwd, defs.home, defs.exists), defs.read);
+    return checkAgent(p.tool_input, lookup, tierMapIds(defs));
+  }
   if (tool === "Workflow") return checkWorkflow(p.tool_input, readFile);
   return ALLOW;
 }
@@ -708,7 +940,24 @@ if (import.meta.main) {
       try { return readFileSync(path, "utf8"); } catch { return null; }
     };
 
-    const decision = decide(JSON.parse(raw), readFile);
+    // Unlike readFile above, a missing file and a failed read are different answers here. Missing
+    // means look further down the precedence order. Anything else throws, and checkAgent turns
+    // the throw into a deny. ENOTDIR is missing too: a path component that is a file holds no def.
+    const defs: DefSource = {
+      home: homedir(),
+      read: (path) => {
+        try {
+          return readFileSync(path, "utf8");
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code === "ENOENT" || code === "ENOTDIR") return null;
+          throw err;
+        }
+      },
+      exists: existsSync,
+    };
+
+    const decision = decide(JSON.parse(raw), readFile, defs);
     if (decision.action === "deny") {
       console.error(decision.reason);
       process.exit(2);

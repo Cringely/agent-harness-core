@@ -15,15 +15,20 @@
 // hook as garbage and comes back as exit 0, which reads as a pass.
 
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
+  agentDefDirs,
   checkAgent,
   checkWorkflow,
   decide,
+  type DefSource,
   OVERRIDE_TOKEN,
+  parseTierMap,
+  pinnedModel,
   scanAgentCalls,
+  TIER_MAP_FILE,
   VALID_TIERS,
 } from "../core/claude/hooks/model-tier-gate";
 
@@ -655,6 +660,442 @@ describe("checkAgent() — effort is not judged", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Definition pins (#258). A dispatch with no `model` parameter is allowed when the definition it
+// names pins an exact model ID that this machine's tier map lists, because Claude Code then runs it
+// on that ID rather than on the session model. Everything short of that keeps the deny.
+// ---------------------------------------------------------------------------
+
+/** A definition file with the given frontmatter lines between the fences. */
+function defText(...lines: string[]): string {
+  return ["---", ...lines, "---", "Body text.", ""].join("\n");
+}
+
+/** A typical def: name, description, and a model line unless `model` is null. */
+function def(name: string, model: string | null): string {
+  return defText(`name: ${name}`, "description: d", ...(model === null ? [] : [`model: ${model}`]));
+}
+
+/** checkAgent's lookup over an in-memory map from agent name to definition text. */
+function lookupFrom(defs: Record<string, string>) {
+  return (name: string) => defs[name] ?? null;
+}
+
+/** The IDs the tier map on the machine behind #258 lists. */
+const MAP_IDS: ReadonlySet<string> = new Set(["claude-sonnet-5", "claude-opus-5-5", "claude-haiku-4-5-20251001"]);
+
+/** That machine's tier map, as the file holds it. */
+const MAP_TEXT = JSON.stringify({
+  tiers: { sonnet: "claude-sonnet-5", opus: "claude-opus-5-5", haiku: "claude-haiku-4-5-20251001" },
+});
+
+describe("parseTierMap() — the machine-local allowlist of pinnable IDs", () => {
+  test("a map lists its values", () => {
+    expect(parseTierMap(MAP_TEXT)).toEqual(new Set(MAP_IDS));
+  });
+
+  test("an empty tiers object lists nothing", () => {
+    expect(parseTierMap('{"tiers":{}}')).toEqual(new Set());
+  });
+
+  // Room for the billing-aware role map #249 asks for, in the same file.
+  test("top-level keys other than tiers are ignored", () => {
+    expect(parseTierMap('{"tiers":{"opus":"claude-opus-5"},"roles":{"coordinator":"opus"}}'))
+      .toEqual(new Set(["claude-opus-5"]));
+  });
+
+  // One bad entry voids the whole map, so a typo shows up as a deny rather than as a narrower
+  // allowlist nobody notices.
+  test("a key that is not a tier voids the map", () => {
+    expect(parseTierMap('{"tiers":{"sonnet":"claude-sonnet-5","sonet":"claude-sonnet-5"}}')).toBeNull();
+  });
+
+  test("a value that is not an exact ID voids the map", () => {
+    for (const v of ['"sonnet"', '"inherit"', '""', "5", "null", '["claude-sonnet-5"]', '"claude-opus-4-8[1m]"']) {
+      expect(parseTierMap(`{"tiers":{"sonnet":"claude-sonnet-5","opus":${v}}}`)).toBeNull();
+    }
+  });
+
+  test("a document that is not a map with a tiers object is void", () => {
+    for (const text of ["", "not json", "[]", "null", '"x"', "{}", '{"tiers":[]}', '{"tiers":null}', '{"tiers":"x"}']) {
+      expect(parseTierMap(text)).toBeNull();
+    }
+  });
+
+  test("the map's file name is the one the .local convention keeps out of exports", () => {
+    expect(TIER_MAP_FILE).toBe("tier-map.local.json");
+  });
+});
+
+describe("pinnedModel() — what counts as an exact pin", () => {
+  test("an exact model ID is a pin", () => {
+    expect(pinnedModel(def("w", "claude-sonnet-5"), "w")).toBe("claude-sonnet-5");
+    expect(pinnedModel(def("w", "claude-opus-5"), "w")).toBe("claude-opus-5");
+    expect(pinnedModel(def("w", "claude-haiku-4-5-20251001"), "w")).toBe("claude-haiku-4-5-20251001");
+  });
+
+  test("a quoted exact ID is the same pin, since YAML strips the quotes", () => {
+    expect(pinnedModel(def("w", '"claude-sonnet-5"'), "w")).toBe("claude-sonnet-5");
+    expect(pinnedModel(def("w", "'claude-sonnet-5'"), "w")).toBe("claude-sonnet-5");
+  });
+
+  test("CRLF line endings read the same as LF", () => {
+    expect(pinnedModel(def("w", "claude-sonnet-5").replace(/\n/g, "\r\n"), "w")).toBe("claude-sonnet-5");
+  });
+
+  test("a leading byte order mark is ignored, as YAML ignores it", () => {
+    expect(pinnedModel(String.fromCharCode(0xfeff) + def("w", "claude-sonnet-5"), "w")).toBe("claude-sonnet-5");
+  });
+
+  // The aliases resolve through the same table the Agent tool's parameter does, which is the table
+  // #258 found stuck on the previous generation. A def naming one pins nothing.
+  test.each(["sonnet", "opus", "haiku", "fable"])("the alias %s is not a pin", (alias) => {
+    expect(pinnedModel(def("w", alias), "w")).toBeNull();
+  });
+
+  test("inherit is not a pin", () => {
+    expect(pinnedModel(def("w", "inherit"), "w")).toBeNull();
+  });
+
+  test("an absent or empty model is not a pin", () => {
+    expect(pinnedModel(def("w", null), "w")).toBeNull();
+    expect(pinnedModel(def("w", ""), "w")).toBeNull();
+    expect(pinnedModel(def("w", '""'), "w")).toBeNull();
+  });
+
+  test("a value outside the exact-ID shape is not a pin", () => {
+    for (const v of ["Claude-Sonnet-5", "claude-", "claude--5", "claude-sonnet-5-", "gpt-5", "claude-opus-4-8[1m]",
+      "claude-sonnet-5 # pinned", "claude_sonnet_5"]) {
+      expect(pinnedModel(def("w", v), "w")).toBeNull();
+    }
+  });
+
+  // YAML needs a space after a mapping key's colon. Without one the line is a plain scalar, not a
+  // model key, and reading it as one would invent a pin the platform never sees.
+  test("a key whose colon has no space after it is not a key", () => {
+    expect(pinnedModel(defText("name: w", "model:claude-sonnet-5"), "w")).toBeNull();
+  });
+
+  // Claude Code identifies a def by its `name:` field, not its filename. A file found at w.md that
+  // declares another name is not the def a dispatch of "w" runs.
+  test("a def whose name field is not the dispatched type is not a pin", () => {
+    expect(pinnedModel(def("other", "claude-sonnet-5"), "w")).toBeNull();
+    expect(pinnedModel(defText("description: d", "model: claude-sonnet-5"), "w")).toBeNull();
+  });
+
+  // Ambiguous to this reader, and a YAML parser may resolve it either way, so it fails closed.
+  test("a duplicated model or name key is not a pin", () => {
+    expect(pinnedModel(defText("name: w", "model: claude-sonnet-5", "model: inherit"), "w")).toBeNull();
+    expect(pinnedModel(defText("name: w", "name: x", "model: claude-sonnet-5"), "w")).toBeNull();
+  });
+
+  // A lone CR is a YAML line break. Splitting on LF alone would leave a second model key hidden
+  // inside the description's value, so the clean model line below would read as the only one.
+  test("a lone CR is a line break, so a key hidden behind one still counts", () => {
+    const text = "---\nname: w\ndescription: d\rmodel: inherit\nmodel: claude-sonnet-5\n---\n";
+    expect(pinnedModel(text, "w")).toBeNull();
+  });
+
+  test("malformed frontmatter is not a pin", () => {
+    expect(pinnedModel("name: w\nmodel: claude-sonnet-5\n", "w")).toBeNull(); // no fences
+    expect(pinnedModel("---\nname: w\nmodel: claude-sonnet-5\n", "w")).toBeNull(); // unclosed
+    expect(pinnedModel("", "w")).toBeNull();
+    expect(pinnedModel("\n---\nname: w\nmodel: claude-sonnet-5\n---\n", "w")).toBeNull(); // not at byte 0
+  });
+
+  test("an indented model key belongs to something nested and is not the def's model", () => {
+    expect(pinnedModel(defText("name: w", "meta:", "  model: claude-sonnet-5"), "w")).toBeNull();
+  });
+
+  // pinnedModel reads shape only. Whether the account is served the ID is the tier map's question,
+  // which is why checkAgent below denies this same pin when the map does not list it.
+  test("an ID of the right shape reads as a pin whether or not it is served", () => {
+    expect(pinnedModel(def("w", "claude-sonnet-5-5"), "w")).toBe("claude-sonnet-5-5");
+  });
+});
+
+describe("checkAgent() — a definition that pins an exact model ID", () => {
+  test("no model parameter, def pins an ID the map lists: allowed", () => {
+    const lookup = lookupFrom({ sonnet5: def("sonnet5", "claude-sonnet-5") });
+    expect(checkAgent({ prompt: "go", subagent_type: "sonnet5" }, lookup, MAP_IDS)).toEqual(ALLOW);
+  });
+
+  // The constraint from #258's review: an arbitrary exact pin must still deny. claude-sonnet-5-5 is
+  // the measured case, well formed and not served to that account, where it falls back silently to
+  // the parent session model. Probe an ID before pinning it.
+  test("no model parameter, def pins an exact ID the map does not list: denied", () => {
+    const lookup = lookupFrom({ w: def("w", "claude-sonnet-5-5") });
+    const verdict = checkAgent({ prompt: "go", subagent_type: "w" }, lookup, MAP_IDS);
+    expect(verdict.action).toBe("deny");
+    if (verdict.action === "deny") expect(verdict.reason).toContain(TIER_MAP_FILE);
+  });
+
+  test("no model parameter, exact-ID def, but no map: denied", () => {
+    const lookup = lookupFrom({ sonnet5: def("sonnet5", "claude-sonnet-5") });
+    expect(checkAgent({ prompt: "go", subagent_type: "sonnet5" }, lookup, new Set()).action).toBe("deny");
+    expect(checkAgent({ prompt: "go", subagent_type: "sonnet5" }, lookup).action).toBe("deny");
+  });
+
+  test("no model parameter, alias def: denied, and the reason names the definition option", () => {
+    const lookup = lookupFrom({ worker: def("worker", "sonnet") });
+    const verdict = checkAgent({ prompt: "go", subagent_type: "worker" }, lookup, MAP_IDS);
+    expect(verdict.action).toBe("deny");
+    if (verdict.action === "deny") {
+      expect(verdict.reason).toContain("inherits the session model");
+      expect(verdict.reason).toContain("exact model ID");
+      expect(verdict.reason).toContain(".local.md");
+    }
+  });
+
+  test("no model parameter, inherit def: denied", () => {
+    const lookup = lookupFrom({ worker: def("worker", "inherit") });
+    expect(checkAgent({ prompt: "go", subagent_type: "worker" }, lookup, MAP_IDS).action).toBe("deny");
+  });
+
+  test("no model parameter, no def found: denied", () => {
+    expect(checkAgent({ prompt: "go", subagent_type: "nowhere" }, lookupFrom({}), MAP_IDS).action).toBe("deny");
+  });
+
+  test("no subagent_type at all: denied without a lookup", () => {
+    let looked = false;
+    const verdict = checkAgent(
+      { prompt: "go" },
+      () => { looked = true; return def("x", "claude-sonnet-5"); },
+      MAP_IDS,
+    );
+    expect(verdict.action).toBe("deny");
+    expect(looked).toBe(false);
+  });
+
+  // The exemption fails closed. A lookup that throws must leave today's deny in place, never fall
+  // through to the entrypoint's fail-open catch, which would turn an unreadable def into an allow.
+  test("a lookup that throws, as an unreadable file does: denied", () => {
+    const verdict = checkAgent(
+      { prompt: "go", subagent_type: "sonnet5" },
+      () => { throw new Error("EACCES: permission denied"); },
+      MAP_IDS,
+    );
+    expect(verdict.action).toBe("deny");
+  });
+
+  test("malformed frontmatter in the def: denied", () => {
+    const lookup = lookupFrom({ sonnet5: "---\nname: sonnet5\nmodel: claude-sonnet-5\n" });
+    expect(checkAgent({ prompt: "go", subagent_type: "sonnet5" }, lookup, MAP_IDS).action).toBe("deny");
+  });
+
+  // Plugin-scoped names carry a colon and resolve outside .claude/agents, and anything that is not
+  // a plain name could walk out of the agents directory. Neither is ever handed to the lookup.
+  test.each(["plugin:worker", "../sonnet5", "a/b", "a\\b", "-x", "", "."])(
+    "the name %p is denied without a lookup",
+    (name) => {
+      let looked = false;
+      const verdict = checkAgent(
+        { prompt: "go", subagent_type: name },
+        () => { looked = true; return def(name, "claude-sonnet-5"); },
+        MAP_IDS,
+      );
+      expect(verdict.action).toBe("deny");
+      expect(looked).toBe(false);
+    },
+  );
+
+  // Unchanged behavior, restated beside the new path because a passed parameter outranks the def.
+  test("an explicit tier still allows, whatever the def says", () => {
+    const lookup = lookupFrom({ worker: def("worker", "inherit") });
+    expect(checkAgent({ prompt: "go", subagent_type: "worker", model: "haiku" }, lookup, MAP_IDS)).toEqual(ALLOW);
+  });
+
+  test("an explicit non-tier is still denied, even when the map lists it", () => {
+    const lookup = lookupFrom({ sonnet5: def("sonnet5", "claude-sonnet-5") });
+    const verdict = checkAgent({ prompt: "go", subagent_type: "sonnet5", model: "claude-sonnet-5" }, lookup, MAP_IDS);
+    expect(verdict.action).toBe("deny");
+    if (verdict.action === "deny") expect(verdict.reason).toContain("not a tier this project accepts");
+  });
+
+  test("fork is still exempt and is never looked up", () => {
+    let looked = false;
+    const verdict = checkAgent({ prompt: "go", subagent_type: "fork" }, () => { looked = true; return null; }, MAP_IDS);
+    expect(verdict).toEqual(ALLOW);
+    expect(looked).toBe(false);
+  });
+
+  // The escape hatch is untouched. It allows a model-less dispatch whatever its definition holds,
+  // and the bare token still does not.
+  test("a reasoned override still allows beside an alias def, and a bare token still does not", () => {
+    const lookup = lookupFrom({ worker: def("worker", "sonnet") });
+    expect(checkAgent({ prompt: `${OVERRIDE_TOKEN} probe`, subagent_type: "worker" }, lookup, MAP_IDS)).toEqual(ALLOW);
+    expect(checkAgent({ prompt: OVERRIDE_TOKEN, subagent_type: "worker" }, lookup, MAP_IDS).action).toBe("deny");
+  });
+});
+
+// A fake filesystem under two absolute roots. Paths are built with the same join() the gate uses,
+// so the keys match on both Windows and POSIX runners.
+const REPO = resolve("/fake/repo");
+const HOME = resolve("/fake/home");
+const MAP_PATH = join(HOME, ".claude", TIER_MAP_FILE);
+const agentsIn = (dir: string, name: string) => join(dir, ".claude", "agents", `${name}.md`);
+const localIn = (dir: string, name: string) => join(dir, ".claude", "agents", `${name}.local.md`);
+
+/** In-memory files plus the tier map, unless `map` is null. */
+function fakeSource(
+  files: Record<string, string>,
+  map: string | null = MAP_TEXT,
+  markers: string[] = [join(REPO, ".git")],
+): DefSource {
+  const all = map === null ? files : { [MAP_PATH]: map, ...files };
+  return {
+    home: HOME,
+    read: (p) => all[p] ?? null,
+    exists: (p) => p in all || markers.includes(p),
+  };
+}
+
+function agentPayload(cwd: string | undefined, tool_input: Record<string, unknown>) {
+  return { tool_name: "Agent", ...(cwd === undefined ? {} : { cwd }), tool_input };
+}
+
+describe("agentDefDirs() — where a definition is looked for", () => {
+  test("from the repo root: the project agents dir, then the user one", () => {
+    expect(agentDefDirs(REPO, HOME, fakeSource({}).exists)).toEqual([
+      join(REPO, ".claude", "agents"),
+      join(HOME, ".claude", "agents"),
+    ]);
+  });
+
+  // Claude Code walks up from the working directory to the repository root and the closest def wins.
+  test("from a subdirectory: every level up to and including the repo root, closest first", () => {
+    const cwd = join(REPO, "pkg", "sub");
+    expect(agentDefDirs(cwd, HOME, fakeSource({}).exists)).toEqual([
+      join(REPO, "pkg", "sub", ".claude", "agents"),
+      join(REPO, "pkg", ".claude", "agents"),
+      join(REPO, ".claude", "agents"),
+      join(HOME, ".claude", "agents"),
+    ]);
+  });
+});
+
+describe("decide() — the tier map and the definition lookup", () => {
+  const sonnet5 = { prompt: "go", subagent_type: "sonnet5" };
+
+  test("a user .local.md def pinning a mapped ID allows", () => {
+    const src = fakeSource({ [localIn(HOME, "sonnet5")]: def("sonnet5", "claude-sonnet-5") });
+    expect(decide(agentPayload(REPO, sonnet5), noRead, src)).toEqual(ALLOW);
+  });
+
+  test("a project def pinning a mapped ID allows", () => {
+    const src = fakeSource({ [agentsIn(REPO, "sonnet5")]: def("sonnet5", "claude-sonnet-5") });
+    expect(decide(agentPayload(REPO, sonnet5), noRead, src)).toEqual(ALLOW);
+  });
+
+  test("with no tier map, the same def denies", () => {
+    const src = fakeSource({ [localIn(HOME, "sonnet5")]: def("sonnet5", "claude-sonnet-5") }, null);
+    expect(decide(agentPayload(REPO, sonnet5), noRead, src).action).toBe("deny");
+  });
+
+  test("with a void tier map, the same def denies", () => {
+    const src = fakeSource({ [localIn(HOME, "sonnet5")]: def("sonnet5", "claude-sonnet-5") }, "{not json");
+    expect(decide(agentPayload(REPO, sonnet5), noRead, src).action).toBe("deny");
+  });
+
+  test("a map the reader cannot read denies rather than throwing past the gate", () => {
+    const src: DefSource = {
+      home: HOME,
+      read: (p) => {
+        if (p === MAP_PATH) throw new Error("EACCES: permission denied");
+        return p === localIn(HOME, "sonnet5") ? def("sonnet5", "claude-sonnet-5") : null;
+      },
+      exists: (p) => p === join(REPO, ".git"),
+    };
+    expect(decide(agentPayload(REPO, sonnet5), noRead, src).action).toBe("deny");
+  });
+
+  test("a def pinning an ID the map does not list denies", () => {
+    const src = fakeSource({ [localIn(HOME, "sonnet5")]: def("sonnet5", "claude-sonnet-5-5") });
+    expect(decide(agentPayload(REPO, sonnet5), noRead, src).action).toBe("deny");
+  });
+
+  // Both files would declare the same name in one directory, and which one Claude Code loads is
+  // not something the files show. Ambiguous denies, whichever of the two carries the pin.
+  test("a .md and a .local.md for one name in one directory deny", () => {
+    const localPinned = fakeSource({
+      [agentsIn(HOME, "sonnet5")]: def("sonnet5", "sonnet"),
+      [localIn(HOME, "sonnet5")]: def("sonnet5", "claude-sonnet-5"),
+    });
+    expect(decide(agentPayload(REPO, sonnet5), noRead, localPinned).action).toBe("deny");
+    const sharedPinned = fakeSource({
+      [agentsIn(HOME, "sonnet5")]: def("sonnet5", "claude-sonnet-5"),
+      [localIn(HOME, "sonnet5")]: def("sonnet5", "inherit"),
+    });
+    expect(decide(agentPayload(REPO, sonnet5), noRead, sharedPinned).action).toBe("deny");
+  });
+
+  // Shadowing, in both directions. The project def is the one Claude Code runs, so it decides.
+  test("a project alias def shadows a user def pinning a mapped ID: denied", () => {
+    const src = fakeSource({
+      [agentsIn(REPO, "sonnet5")]: def("sonnet5", "sonnet"),
+      [localIn(HOME, "sonnet5")]: def("sonnet5", "claude-sonnet-5"),
+    });
+    expect(decide(agentPayload(REPO, sonnet5), noRead, src).action).toBe("deny");
+  });
+
+  test("a project def pinning a mapped ID shadows a user alias def: allowed", () => {
+    const src = fakeSource({
+      [agentsIn(REPO, "sonnet5")]: def("sonnet5", "claude-sonnet-5"),
+      [agentsIn(HOME, "sonnet5")]: def("sonnet5", "inherit"),
+    });
+    expect(decide(agentPayload(REPO, sonnet5), noRead, src)).toEqual(ALLOW);
+  });
+
+  // The case a cwd-only lookup gets wrong in the dangerous direction: from a subdirectory it misses
+  // the repo-root def Claude Code actually runs and allows on the user def behind it.
+  test("from a subdirectory, a repo-root inherit def still shadows a user def pinning a mapped ID", () => {
+    const src = fakeSource({
+      [agentsIn(REPO, "sonnet5")]: def("sonnet5", "inherit"),
+      [localIn(HOME, "sonnet5")]: def("sonnet5", "claude-sonnet-5"),
+    });
+    expect(decide(agentPayload(join(REPO, "pkg"), sonnet5), noRead, src).action).toBe("deny");
+  });
+
+  test("a def above the repo root is outside the project search", () => {
+    const src = fakeSource({ [agentsIn(resolve("/fake"), "sonnet5")]: def("sonnet5", "claude-sonnet-5") });
+    expect(decide(agentPayload(REPO, sonnet5), noRead, src).action).toBe("deny");
+  });
+
+  test("no def anywhere: denied", () => {
+    expect(decide(agentPayload(REPO, sonnet5), noRead, fakeSource({})).action).toBe("deny");
+  });
+
+  test("a read error on the project def denies rather than falling through to the user def", () => {
+    const src: DefSource = {
+      home: HOME,
+      read: (p) => {
+        if (p === MAP_PATH) return MAP_TEXT;
+        if (p === agentsIn(REPO, "sonnet5")) throw new Error("EACCES: permission denied");
+        return p === localIn(HOME, "sonnet5") ? def("sonnet5", "claude-sonnet-5") : null;
+      },
+      exists: (p) => p === join(REPO, ".git"),
+    };
+    expect(decide(agentPayload(REPO, sonnet5), noRead, src).action).toBe("deny");
+  });
+
+  // Without a working directory the project search cannot run, so whether a project def shadows
+  // the user one is unknown. Unknown denies.
+  test("a payload with no cwd, or a relative one, denies", () => {
+    const src = fakeSource({ [localIn(HOME, "sonnet5")]: def("sonnet5", "claude-sonnet-5") });
+    expect(decide(agentPayload(undefined, sonnet5), noRead, src).action).toBe("deny");
+    expect(decide(agentPayload("relative/dir", sonnet5), noRead, src).action).toBe("deny");
+  });
+
+  test("with no definition source supplied, decide denies a model-less dispatch as before", () => {
+    expect(decide(agentPayload(REPO, sonnet5)).action).toBe("deny");
+  });
+
+  test("Task routes through the same lookup", () => {
+    const src = fakeSource({ [localIn(HOME, "sonnet5")]: def("sonnet5", "claude-sonnet-5") });
+    expect(decide({ tool_name: "Task", cwd: REPO, tool_input: sonnet5 }, noRead, src)).toEqual(ALLOW);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Workflow decisions
 // ---------------------------------------------------------------------------
 
@@ -850,12 +1291,13 @@ describe("decide() — which tools this gate judges", () => {
 const HOOK = join(import.meta.dir, "..", "core", "claude", "hooks", "model-tier-gate.ts");
 
 /** Runs the hook as a real process with `stdinText` on stdin. Never goes through a shell. */
-function runHook(stdinText: string) {
+function runHook(stdinText: string, env?: Record<string, string | undefined>) {
   const proc = Bun.spawnSync({
     cmd: [process.execPath, HOOK],
     stdin: new TextEncoder().encode(stdinText),
     stdout: "pipe",
     stderr: "pipe",
+    ...(env ? { env } : {}),
   });
   return {
     exitCode: proc.exitCode,
@@ -902,6 +1344,77 @@ describe("spawned process — the deny path is observable", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe("");
     expect(result.stderr).toBe("");
+  });
+
+  // The definition lookup reads real files from the payload's cwd and from the home directory, and
+  // the pure cases above inject both. These run the entrypoint against a real tree, with HOME and
+  // USERPROFILE pointed at a temp dir so the runner's own ~/.claude is never read. `userDefs` keys
+  // are file names under the temp home's .claude/agents.
+  describe("against agent definitions on disk", () => {
+    function withTree(
+      userDefs: Record<string, string>,
+      map: string | null,
+      body: (cwd: string, env: Record<string, string>) => void,
+    ) {
+      const root = mkdtempSync(join(tmpdir(), "model-tier-gate-defs-"));
+      try {
+        const home = join(root, "home");
+        const project = join(root, "project");
+        mkdirSync(join(home, ".claude", "agents"), { recursive: true });
+        mkdirSync(join(project, ".git"), { recursive: true });
+        if (map !== null) writeFileSync(join(home, ".claude", TIER_MAP_FILE), map);
+        for (const [file, text] of Object.entries(userDefs)) {
+          writeFileSync(join(home, ".claude", "agents", file), text);
+        }
+        const env: Record<string, string> = {};
+        for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
+        env.HOME = home;
+        env.USERPROFILE = home;
+        body(project, env);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+
+    const dispatch = (cwd: string, subagent_type: string) =>
+      JSON.stringify({ tool_name: "Agent", cwd, tool_input: { description: "d", prompt: "go", subagent_type } });
+
+    test("a model-less dispatch of a .local.md def pinning a mapped ID exits 0 and says nothing", () => {
+      withTree({ "sonnet5.local.md": def("sonnet5", "claude-sonnet-5") }, MAP_TEXT, (cwd, env) => {
+        const result = runHook(dispatch(cwd, "sonnet5"), env);
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toBe("");
+      });
+    });
+
+    test("the same def with no tier map on disk exits 2", () => {
+      withTree({ "sonnet5.local.md": def("sonnet5", "claude-sonnet-5") }, null, (cwd, env) => {
+        const result = runHook(dispatch(cwd, "sonnet5"), env);
+        expect(result.exitCode).toBe(2);
+        expect(result.stderr).toContain("does not state a model tier");
+      });
+    });
+
+    test("a def pinning an exact ID the map does not list exits 2", () => {
+      withTree({ "w.local.md": def("w", "claude-sonnet-5-5") }, MAP_TEXT, (cwd, env) => {
+        const result = runHook(dispatch(cwd, "w"), env);
+        expect(result.exitCode).toBe(2);
+        expect(result.stderr).toContain(TIER_MAP_FILE);
+      });
+    });
+
+    test("a model-less dispatch of a user def naming an alias exits 2 and names the option", () => {
+      withTree({ "aliased.md": def("aliased", "sonnet") }, MAP_TEXT, (cwd, env) => {
+        const result = runHook(
+          JSON.stringify({ tool_name: "Agent", cwd, tool_input: { description: "d", prompt: "go", subagent_type: "aliased" } }),
+          env,
+        );
+        expect(result.exitCode).toBe(2);
+        expect(result.stderr).toContain("does not state a model tier");
+        expect(result.stderr).toContain("exact model ID");
+      });
+    });
   });
 
   test("a Workflow payload with a bare agent() call exits 2 and names the call site", () => {
