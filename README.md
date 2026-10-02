@@ -65,8 +65,10 @@ To keep a Copilot session from running uncapped, launch it through
 `pwsh -NoProfile -File install/Start-CappedCopilot.ps1 [-MaxAiCredits <n>] <copilot arguments>`. It
 passes `--max-ai-credits` (500 unless `-MaxAiCredits` says otherwise, never below the CLI's minimum
 of 30) and writes the CLI's `--usage-output-file` JSON under the per-user local application data
-folder, outside any repository. Every other argument reaches `copilot` unchanged. The cap is soft
-and covers one process. Whether subagents and `/fleet` workers count toward it is not settled, and
+folder, outside any repository. Every other argument reaches `copilot` as PowerShell binds it. From
+bash, `--model:gpt` arrives split in two and a bare `--%` is dropped. The cap is a launch default
+and not enforcement, since Copilot's in-session `/limits set max-ai-credits` command can raise it.
+It is also soft and covers one process. Whether subagents and `/fleet` workers count toward it is not settled, and
 the script's help records what is and is not known.
 
 Recommended, not required: the `code-context` MCP server (`@infino-ai/code-context`) gives agents

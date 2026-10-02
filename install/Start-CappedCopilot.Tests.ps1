@@ -123,15 +123,23 @@ exit ([int]$env:STUB_EXIT)
     }
 
     It "defaults the usage directory to a per-user location outside this repo" {
-        $r = Invoke-Wrapper @('-p', 'x')
+        # The wrapper reads LOCALAPPDATA first, so point it at TestDrive: the run must not create
+        # agent-harness/copilot-usage under the real local application data folder.
+        $fakeBase = Join-Path $TestDrive 'localappdata'
+        $saved = $env:LOCALAPPDATA
+        try {
+            $env:LOCALAPPDATA = $fakeBase
+            $r = Invoke-Wrapper @('-p', 'x')
+        } finally {
+            if ($null -eq $saved) { Remove-Item Env:LOCALAPPDATA -ErrorAction SilentlyContinue } else { $env:LOCALAPPDATA = $saved }
+        }
         $r.Exit | Should -Be 0
         $usage = $r.Argv[3]
         $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
         $usage.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase) | Should -BeFalse
-        $base = [Environment]::GetFolderPath('LocalApplicationData')
-        if (-not $base) { $base = $HOME }
-        $usage.StartsWith((Join-Path $base 'agent-harness'), [System.StringComparison]::OrdinalIgnoreCase) |
+        $usage.StartsWith((Join-Path $fakeBase 'agent-harness'), [System.StringComparison]::OrdinalIgnoreCase) |
             Should -BeTrue
+        (Split-Path -Parent $usage) | Should -Be (Join-Path (Join-Path $fakeBase 'agent-harness') 'copilot-usage')
     }
 
     It "launches capped without a usage file when the CLI lacks --usage-output-file" {

@@ -5,7 +5,10 @@
 .DESCRIPTION
     Starts `copilot` with `--max-ai-credits` set, so no session runs uncapped by default, and with
     `--usage-output-file` pointed at a per-user directory outside any repository. Every argument
-    the wrapper does not own goes to `copilot` unchanged and in order.
+    the wrapper does not own goes to `copilot` in order, as PowerShell binds it (see NOTES).
+
+    The cap is a launch default, not enforcement. Copilot's in-session `/limits set
+    max-ai-credits` command can override it, and so can raise it.
 
     What the cap does, per GitHub's documentation and changelog (issue #249, investigation 5):
 
@@ -45,9 +48,10 @@
     positionally. Passing `--max-ai-credits` or `--usage-output-file` through is refused, since
     the CLI would receive two values and which one wins is undocumented.
 
-    Two quirks belong to the calling shell, not to this script. Launched with `&` from PowerShell,
-    a bare `--` is consumed by the caller's parser, and `-x:y` arrives split in two. Launched with
-    `pwsh -File`, both arrive intact.
+    Arguments reach `copilot` as PowerShell binds them, which is not always verbatim. Launched
+    with `&` from PowerShell, a bare `--` is consumed by the caller's parser, and `-x:y` arrives
+    split in two. Launched with `pwsh -File` from bash, `--model:gpt` arrives split in two and a
+    bare `--%` is dropped.
 
 .EXAMPLE
     pwsh -NoProfile -File install/Start-CappedCopilot.ps1 -MaxAiCredits 200 --model claude-sonnet-5
@@ -115,7 +119,9 @@ $launchArgs.Add("$cap")
 
 if ($help -match '--usage-output-file\b') {
     if (-not $usageDir) {
-        $base = [Environment]::GetFolderPath('LocalApplicationData')
+        # LOCALAPPDATA first: on Windows GetFolderPath ignores the variable, so a test cannot redirect it.
+        $base = $env:LOCALAPPDATA
+        if (-not $base) { $base = [Environment]::GetFolderPath('LocalApplicationData') }
         if (-not $base) { $base = $HOME }
         $usageDir = Join-Path (Join-Path $base 'agent-harness') 'copilot-usage'
     }
