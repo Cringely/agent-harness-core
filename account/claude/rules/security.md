@@ -84,12 +84,14 @@ Any code accepting external input (CLI args, files, env vars, network) must vali
 An agent step that reads pull request or issue text, fetched web pages, or files from a third-party
 repository holds no write, publish or approve credential. Prompt injection through repository and web
 content is observed in production incidents, not only in demonstrations, so text from those sources
-is attacker-controlled input to whatever reads it.
+is attacker-controlled input to whatever reads it. Directory text from a client tenant, such as
+display names, app names and policy descriptions, belongs on the same list.
 
 A credential is anything that can push, merge, approve, publish or deploy. That includes a shell from
 which such a token can be read, such as `gh auth token`, a configured credential helper, or an
 environment variable carrying the token. A step whose shell can run `gh auth token` holds the
-credential whether or not it ever runs the command.
+credential whether or not it ever runs the command. A write role in a client tenant is a credential
+too, and so is any action that reads secrets there, such as function keys or app settings.
 
 Where reading and acting cannot be separated, a human or a deterministic check sits between them,
 and the reading step hands over data, not instructions. Its output is a structured result the acting
@@ -98,6 +100,25 @@ step inspects and decides on, never a command list the acting step runs.
 In the reference shape, the model that reads the untrusted input has no tools, and code holding the
 credential decides the action from that model's structured output. The reader cannot act, and the
 actor never treats the untrusted text as instructions.
+
+### Client Tenant Assessments
+
+Anyone with a low-privilege account in a tenant can set its display names, app names and policy
+descriptions. An agent that reads them is a reading step under the section above.
+
+- Assessment work uses read-only tenant roles: Global Reader, Security Reader and Reports Reader.
+  Reports Reader matters only for delegated access, since app-only access follows the application
+  permissions granted. These three roles do not cover the full scope of every assessment scanner.
+  Where a tool needs more, grant the permissions in that tool's own allowlist and name each exception.
+  The check is that the permissions actually granted match the allowlist, not that the identity
+  holds reader roles.
+- No write credential sits beside a reading agent. The credential definition above applies without
+  change, which includes tenant write roles and secret reads. A scope that writes, or that lists
+  keys and settings, counts as one even when the tool's vendor says it never writes.
+- Client consent for processing tenant data through a model service is PENDING the retention
+  statement. Retention and training terms have not been read against the client's contract. Until
+  they are, treat consent as not yet given and keep tenant data off any model tier whose terms are
+  unread.
 
 ## Supply Chain
 
