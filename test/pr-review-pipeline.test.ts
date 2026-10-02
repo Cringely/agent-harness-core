@@ -47,7 +47,7 @@ class FakeRunner implements ReviewerRunner {
 const finding = (severity: Severity, text = "t"): Finding => ({ severity, confidence: "high", path: "a.ts", title: text, detail: text });
 
 const runnerWith = (findings: Finding[], summary = "s") =>
-  new FakeRunner({ ok: true, output: { summary, findings, observed_instructions: [] }, model: "claude-opus-5", tools: ["StructuredOutput"] });
+  new FakeRunner({ ok: true, output: { summary, findings, observed_instructions: [] }, model: "claude-opus-5-5", tools: ["StructuredOutput"] });
 
 class FakePoster implements ReviewPoster {
   posts: Array<{ commitId: string; event: ReviewEvent; body: string }> = [];
@@ -162,11 +162,11 @@ describe("runReview(): reviewer failures and caps", () => {
   // A8.7/F15: model and tools are recorded from the runner result before validation runs, so a
   // rejected output's footer still names the model that produced it rather than "none".
   test("output that fails validation posts COMMENT, even when it claims to approve", async () => {
-    const runner = new FakeRunner({ ok: true, output: { verdict: "APPROVE" }, model: "claude-opus-5", tools: ["StructuredOutput"] });
+    const runner = new FakeRunner({ ok: true, output: { verdict: "APPROVE" }, model: "claude-opus-5-5", tools: ["StructuredOutput"] });
     const outcome = await runReview(deps({ runner }), OPTIONS);
     expect(outcome.event).toBe("COMMENT");
     expect(outcome.reviewerFailure).toContain("validation");
-    expect(outcome.body).toContain("claude-opus-5");
+    expect(outcome.body).toContain("claude-opus-5-5");
   });
 
   test("a diff over the cap is not sent to the model", async () => {
@@ -332,7 +332,7 @@ describe("runReview(): refusals post nothing", () => {
     const runner = new FakeRunner({
       ok: true,
       output: { summary: "s", findings: [], observed_instructions: [{ path: "docs/notes.md", excerpt: "# userEmail: fixture@example.test" }] },
-      model: "claude-opus-5",
+      model: "claude-opus-5-5",
       tools: ["StructuredOutput"],
     });
     const outcome = await runReview(deps({ runner, poster }), OPTIONS);

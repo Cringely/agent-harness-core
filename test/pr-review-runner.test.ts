@@ -53,12 +53,12 @@ const init = (patch: Record<string, unknown> = {}) =>
     plugins: [],
     output_style: "default",
     cwd: neutralWorkingDirectory(),
-    model: "claude-opus-5",
+    model: "claude-opus-5-5",
     ...patch,
   });
 const assistantFrom = (model: string | undefined, ...blocks: Array<Record<string, unknown>>) =>
   JSON.stringify({ type: "assistant", message: { model, content: blocks } });
-const assistant = (...blocks: Array<Record<string, unknown>>) => assistantFrom("claude-opus-5", ...blocks);
+const assistant = (...blocks: Array<Record<string, unknown>>) => assistantFrom("claude-opus-5-5", ...blocks);
 const result = (patch: Record<string, unknown> = {}) =>
   JSON.stringify({ type: "result", subtype: "success", is_error: false, structured_output: { summary: "s", findings: [], observed_instructions: [] }, ...patch });
 const stream = (...lines: string[]) => lines.join("\n") + "\n";
@@ -205,7 +205,7 @@ describe("parseStreamJson()", () => {
     expect(parseStreamJson(text, 0)).toEqual({
       ok: true,
       output: { summary: "s", findings: [], observed_instructions: [] },
-      model: "claude-opus-5",
+      model: "claude-opus-5-5",
       tools: [...EXPECTED_TOOLS],
     });
   });
@@ -252,7 +252,7 @@ describe("parseStreamJson()", () => {
     ["an MCP tool call beside StructuredOutput", stream(init(), assistant({ type: "mcp_tool_use", name: "x" }), result()), 0, "tool other"],
     ["a tool_use block whose name is not a string", stream(init(), assistant({ type: "tool_use", name: ["StructuredOutput"] }), result()), 0, "tool other"],
     // I3 (P8): a null content block would throw reading `.type` off it instead of being rejected.
-    ["an assistant content block that is not an object", stream(init(), JSON.stringify({ type: "assistant", message: { model: "claude-opus-5", content: [null] } }), result()), 0, "tool other"],
+    ["an assistant content block that is not an object", stream(init(), JSON.stringify({ type: "assistant", message: { model: "claude-opus-5-5", content: [null] } }), result()), 0, "tool other"],
     // Captured 2026-09-11: a run emitted this event, and its modelUsage listed claude-opus-4-8, while
     // its init event still named claude-opus-5. A trivial prompt did not fall back.
     ["a model_refusal_fallback event", stream(init(), JSON.stringify({ type: "system", subtype: "model_refusal_fallback" }), assistant({ type: "tool_use", name: "StructuredOutput" }), result()), 0, "model_refusal_fallback"],
@@ -297,8 +297,8 @@ describe("ClaudeCliRunner against a fake claude", () => {
       "const systemPrompt = await Bun.file(systemPromptFile).text();",
       'if (mode === "sleep") await Bun.sleep(10_000);',
       'const tools = mode === "extra-tool" ? ["StructuredOutput", "Bash"] : ["StructuredOutput"];',
-      'console.log(JSON.stringify({ type: "system", subtype: "init", tools, mcp_servers: [], plugins: [], output_style: "default", cwd: process.cwd(), model: "claude-opus-5" }));',
-      'console.log(JSON.stringify({ type: "assistant", message: { model: "claude-opus-5", content: [{ type: "tool_use", name: "StructuredOutput" }] } }));',
+      'console.log(JSON.stringify({ type: "system", subtype: "init", tools, mcp_servers: [], plugins: [], output_style: "default", cwd: process.cwd(), model: "claude-opus-5-5" }));',
+      'console.log(JSON.stringify({ type: "assistant", message: { model: "claude-opus-5-5", content: [{ type: "tool_use", name: "StructuredOutput" }] } }));',
       'console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, structured_output: { stdin, systemPrompt, systemPromptFile, cwd: process.cwd(), args } }));',
       'if (mode === "exit-1") process.exit(1);',
     ].join("\n"),
@@ -403,12 +403,12 @@ describe("ClaudeCliRunner relaunch on built-in plugins (#250)", () => {
       'const attempt = readFileSync(spec.log, "utf8").trim().split(NL).length;',
       "const candidates = spec.fresh ? [{ name: `cc-plugin-fresh-${attempt}`, path: \"builtin\", source: `cc-plugin-fresh-${attempt}@builtin` }] : spec.loaded;",
       "const plugins = candidates.filter((p: { source: string }) => settings.enabledPlugins[p.source] !== false);",
-      'console.log(JSON.stringify({ type: "system", subtype: "init", tools: ["StructuredOutput"], mcp_servers: [], plugins, output_style: "default", cwd: process.cwd(), model: "claude-opus-5" }));',
+      'console.log(JSON.stringify({ type: "system", subtype: "init", tools: ["StructuredOutput"], mcp_servers: [], plugins, output_style: "default", cwd: process.cwd(), model: "claude-opus-5-5" }));',
       "if (plugins.length > 0) {",
       "  await Bun.sleep(1_000);",
       '  writeFileSync(`${spec.marker}-${attempt}`, "model ran");',
       "}",
-      'console.log(JSON.stringify({ type: "assistant", message: { model: "claude-opus-5", content: [{ type: "tool_use", name: "StructuredOutput" }] } }));',
+      'console.log(JSON.stringify({ type: "assistant", message: { model: "claude-opus-5-5", content: [{ type: "tool_use", name: "StructuredOutput" }] } }));',
       'console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, structured_output: { attempt } }));',
     ].join("\n"),
   );
