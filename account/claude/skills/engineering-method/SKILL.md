@@ -31,7 +31,7 @@ Every dispatch, or the role definition it lands on, names its model tier. Mechan
 
 ## Plan, then execute through subagents
 
-Development work starts with a written spec and a written plan, both existing before implementation begins. A plan's correctness lives in exact paths, signatures that match across tasks, assertions that can fail, and commands that run verbatim.
+A change that fits in one sentence and touches one subsystem needs no spec. Its plan is the commit message and the test that pins it. Anything more than one step, any change crossing subsystems, and anything security-bearing starts with a written spec and a written plan, both existing before implementation begins. Security-bearing work needs the spec whatever its size. The failure to watch for is real work classified as trivial to skip the spec. A spec lists its acceptance criteria as Given/When/Then or EARS lines in plain markdown (EARS: "When [trigger], the [system] shall [response]"), each naming the test or command that checks it, and it ends with one end-to-end verification step. No Cucumber bindings. Each criterion then has a check that can be removed and watched to fail. A plan's correctness lives in exact paths, signatures that match across tasks, assertions that can fail, and commands that run verbatim.
 
 Plan execution is always subagent-driven, a fresh subagent per task with review between tasks. The coordinator never executes plan tasks inline and never offers that as an option.
 
@@ -53,7 +53,9 @@ An instrument that cannot come out two ways measures nothing. Before building a 
 
 ## Tests and gates
 
-A test that passes after a fix proves only that it does not currently fail. Remove the fix and watch it fail. Then delete the new assertion and remove the fix again. A suite that still fails was being caught by something else, and the new assertion pins nothing. A test can be structurally unable to fail, through a matcher blind to the defect or a fixture that never reaches the guarded case.
+A test that passes after a fix proves only that it does not currently fail. Remove the fix and watch it fail. Then delete the new assertion and remove the fix again. A suite that still fails was being caught by something else, and the new assertion pins nothing. A test can be structurally unable to fail, through a matcher blind to the defect or a fixture that never reaches the guarded case. Before a suite's green is first cited as merge-gate evidence, and again after the suite's shape changes, run a mutation pass: make one small change to the code under test at a time, rerun, and read each surviving mutant as a finding about the suite, not as a score. The pass is per suite, not per pull request. The method and its cost are in `patterns/test-falsifiability.md` at github.com/Cringely/agent-harness-core.
+
+A change that edits or deletes an existing assertion alongside a fix says why in the commit message. Reviewers read the test diff before the code diff, so a loosened assertion is judged on its own before the fix can explain it away.
 
 A gate that cannot evaluate must fail closed, and a scope filter that resolves empty must fail closed rather than widen to the full population. Never run a state-changing command (merge, push, deploy) downstream of a pipe that can swallow the exit code of the step meant to stop it.
 
