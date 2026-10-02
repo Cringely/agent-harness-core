@@ -66,7 +66,7 @@ import { isAbsolute, join, parse } from "node:path";
 import { FINDINGS_JSON_SCHEMA } from "./findings";
 import type { PromptPair, ReviewerRunner, RunnerResult } from "./types";
 
-export const REVIEWER_MODEL = "claude-opus-5";
+export const REVIEWER_MODEL = "claude-opus-5-5";
 export const REVIEWER_EFFORT = "xhigh";
 export const EXPECTED_TOOLS: readonly string[] = ["StructuredOutput"];
 // A premium-model review of a large diff at high effort can take several minutes; twenty is a ceiling

@@ -56,7 +56,7 @@ const input = (overrides: Partial<RenderInput> = {}): RenderInput => ({
   reviewerFailure: null,
   verification: { state: "incomplete", reasons: [`CI runs no Pester suite for: install/@octocat ${HOSTILE}.ps1`] },
   headSha: SHA,
-  reviewerModel: "claude-opus-5",
+  reviewerModel: "claude-opus-5-5",
   reviewerTools: ["StructuredOutput"],
   toolRevision: TOOL_SHA,
   toolDirty: false,
@@ -206,7 +206,7 @@ describe("renderReviewBody(): refuses malformed code-side values", () => {
     ["a tool list containing a hole", { reviewerTools: [, "Bash"] }],
     [
       "a model id object whose toString mutates after validation",
-      { reviewerModel: mutatingToString("claude-opus-5", "@octocat <img src=x>") },
+      { reviewerModel: mutatingToString("claude-opus-5-5", "@octocat <img src=x>") },
     ],
     // Important 1 residual (re-review round 1): basis got a character allowlist but no typeof
     // guard in front of it, so a non-string basis rendered outside a fence unchecked.
