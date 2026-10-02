@@ -3,7 +3,8 @@
 # owner is the operator, who authors these pull requests and cannot approve them, so these merges
 # go through the administrator bypass. That bypass skips only the default ruleset. The "CI
 # required" ruleset has no bypass list, so its checks, code scanning, force-push and deletion
-# rules still hold. Skills and patterns are deliberately not owned.
+# rules still hold. Skills and patterns are deliberately not owned. Root Bun config is owned
+# before it exists, because adding one would change what the required bun test check runs.
 # Last match wins. No entry below overlaps another.
 /.github/                                   @Cringely
 /.gitattributes                             @Cringely
@@ -18,3 +19,9 @@
 /account/claude/tools/                      @Cringely
 /account/claude/settings.account.json       @Cringely
 /test/                                      @Cringely
+/CONTRIBUTING.md                            @Cringely
+/bunfig.toml                                @Cringely
+/package.json                               @Cringely
+/bun.lock                                   @Cringely
+/bun.lockb                                  @Cringely
+/account/claude/mcp-servers.json            @Cringely
