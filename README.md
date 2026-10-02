@@ -341,6 +341,37 @@ install into an empty home are both exercised by the Pester suites beside the sc
 homes. Whether either script has yet been run for real on a second machine is not recorded in this
 repository.
 
+### Pinning exact model IDs on one machine
+
+The Agent tool's `model` parameter takes only the tier aliases, and Claude Code resolves each alias
+through a table the account controls. Managed settings can pin that table to an older generation,
+and then a user `ANTHROPIC_DEFAULT_*_MODEL` override has no effect (#258). A definition's `model:`
+frontmatter accepts an exact ID and takes effect when the dispatch passes no `model`, so the route
+to a current model is a definition that pins one.
+
+Shared definitions keep their aliases, because an exact ID breaks on another provider or on an org
+without that model. The pins live on the one machine, in two places the exporter never reads:
+
+```
+~/.claude/tier-map.local.json       {"tiers": {"sonnet": "claude-sonnet-5", "opus": "claude-opus-5-5"}}
+~/.claude/agents/sonnet5.local.md   name: sonnet5, model: claude-sonnet-5
+```
+
+The map is the operator's statement of which IDs this account is served, and it matters because a
+pin to an ID the account is not served is not refused. The subagent falls back silently to the
+parent session's model. The org's `availableModels` list does not predict which IDs are served, so
+probe an ID before pinning it. The model-tier gate lets a dispatch omit `model` only when the
+definition it names pins an ID the map lists. An alias, `inherit`, an unlisted ID or a missing
+map keeps the usual deny. Keys under `tiers` are the four tier names and each value has to be shaped
+like an exact ID. One bad entry voids the whole map, so a typo shows up as a denied dispatch rather
+than a quietly shorter list.
+
+Nothing generates the pinned definitions yet, and nothing checks the map against the models
+subagents actually ran. Write the `.local.md` files by hand and confirm a pin from the `model` field
+in the subagent's transcript under `~/.claude/projects/`. Where managed settings set
+`allowManagedHooksOnly`, no user hook runs and the gate is inert, so the definitions are the only
+enforcement on that machine.
+
 ## Testing and merging
 
 Two suites, and the invocation of the second matters. The TypeScript hook tests run with `bun test`
