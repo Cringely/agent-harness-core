@@ -216,3 +216,75 @@ describe("secret-scan range handling fails closed", () => {
     }
   });
 });
+
+// A config read from the pull request head lets the pull request allowlist its own secret, and the
+// scan then reports clean. The rules must come from the base commit. Invariant: the config the scan
+// runs under is established at BASE_SHA, never from the checkout's working tree.
+describe("secret-scan reads its config from the base commit", () => {
+  const STEP = "Load the scanner config from the base commit";
+
+  test("every gitleaks invocation uses the base-derived file, none the checkout's copy", () => {
+    const job = loadJob();
+    const scanning = job.steps.filter((s) => s.run?.includes('/gitleaks" '));
+    expect(scanning.length).toBeGreaterThanOrEqual(3);
+    for (const s of scanning) {
+      expect(s.run).toContain('--config "$RUNNER_TEMP/gitleaks.toml"');
+      expect(s.run).not.toMatch(/--config \.gitleaks\.toml/);
+    }
+    const names = job.steps.map((s) => s.name);
+    expect(names.indexOf(STEP)).toBeGreaterThan(-1);
+    expect(names.indexOf(STEP)).toBeLessThan(names.indexOf("Scanner canary"));
+  });
+
+  // Base holds one config, then the head commit replaces it with one that allowlists a value.
+  function withConfigs(baseToml: string | null) {
+    const s = scratch(0);
+    const repo = join(s.dir, "repo");
+    const g = (...a: string[]) => {
+      const r = Bun.spawnSync(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", ...a], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+      if (!r.success) throw new Error(`git ${a.join(" ")}: ${new TextDecoder().decode(r.stderr)}`);
+      return new TextDecoder().decode(r.stdout).trim();
+    };
+    if (baseToml !== null) {
+      writeFileSync(join(repo, ".gitleaks.toml"), baseToml);
+      g("add", ".gitleaks.toml");
+      g("commit", "-q", "-m", "base config");
+    } else {
+      rmSync(join(repo, ".gitleaks.toml"));
+    }
+    const base = g("rev-parse", "HEAD");
+    writeFileSync(join(repo, ".gitleaks.toml"), '[allowlist]\nregexes = ["HEADONLY"]\n');
+    g("add", ".gitleaks.toml");
+    g("commit", "-q", "-m", "head config");
+    return { s, base, head: g("rev-parse", "HEAD"), out: join(s.dir, "rt", "gitleaks.toml") };
+  }
+
+  test("a config the head adds or changes never reaches the scan", () => {
+    const script = runOf(loadJob(), STEP);
+    const baseToml = '[extend]\nuseDefault = true\n# BASEONLY\n';
+    const a = withConfigs(baseToml);
+    const b = withConfigs(null);
+    try {
+      expect(a.s.run(script, a.base, a.head)).toBe(0);
+      expect(readFileSync(a.out, "utf8")).toContain("BASEONLY");
+      expect(readFileSync(a.out, "utf8")).not.toContain("HEADONLY");
+      // No config at base (the pull request that introduces it): built-in defaults, never the head's.
+      expect(b.s.run(script, b.base, b.head)).toBe(0);
+      const fallback = readFileSync(b.out, "utf8");
+      expect(fallback).toContain("useDefault = true");
+      expect(fallback).not.toContain("HEADONLY");
+    } finally {
+      rmSync(a.s.dir, { recursive: true, force: true });
+      rmSync(b.s.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an unreadable base tree fails the job instead of falling back", () => {
+    const w = withConfigs(null);
+    try {
+      expect(w.s.run(runOf(loadJob(), STEP), BOGUS, w.head)).not.toBe(0);
+    } finally {
+      rmSync(w.s.dir, { recursive: true, force: true });
+    }
+  });
+});

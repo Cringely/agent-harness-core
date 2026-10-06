@@ -177,6 +177,20 @@ jobs:
           echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tgz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP" gitleaks
 
+      # The rules come from the base commit, never the pull request head. A config read from the
+      # head lets a change allowlist its own secret and scan clean. When the base has no
+      # .gitleaks.toml (the pull request that introduces it) the built-in defaults apply, written
+      # to an explicit file because gitleaks would otherwise discover the head's copy in the
+      # checkout. Any failure to read the base tree refuses the job.
+      - name: Load the scanner config from the base commit
+        run: |
+          entry=$(git ls-tree "${BASE_SHA}" -- .gitleaks.toml) || { echo "::error::cannot read the base tree ${BASE_SHA}"; exit 1; }
+          if [ -z "$entry" ]; then
+            printf '[extend]\nuseDefault = true\n' > "$RUNNER_TEMP/gitleaks.toml"
+          else
+            git show "${BASE_SHA}:.gitleaks.toml" > "$RUNNER_TEMP/gitleaks.toml" || { echo "::error::cannot read .gitleaks.toml at ${BASE_SHA}"; exit 1; }
+          fi
+
       # A scanner that cannot detect anything passes every pull request. The planted value is
       # assembled at run time, so this file never holds a string a scan would flag, and the
       # check must see it in both a file and a piece of piped text (the commit message path).
@@ -187,9 +201,9 @@ jobs:
           canary_dir="$RUNNER_TEMP/canary"
           mkdir -p "$canary_dir"
           printf 'api_%s = "%s"\n' key "$canary_value" > "$canary_dir/planted.txt"
-          rc=0; "$RUNNER_TEMP/gitleaks" dir --no-banner --redact --log-level fatal --config .gitleaks.toml "$canary_dir" || rc=$?
+          rc=0; "$RUNNER_TEMP/gitleaks" dir --no-banner --redact --log-level fatal --config "$RUNNER_TEMP/gitleaks.toml" "$canary_dir" || rc=$?
           [ "$rc" -eq 1 ] || { echo "::error::canary file was not detected (gitleaks exit $rc)"; exit 1; }
-          rc=0; printf 'api_%s = "%s"\n' key "$canary_value" | "$RUNNER_TEMP/gitleaks" stdin --no-banner --redact --log-level fatal --config .gitleaks.toml || rc=$?
+          rc=0; printf 'api_%s = "%s"\n' key "$canary_value" | "$RUNNER_TEMP/gitleaks" stdin --no-banner --redact --log-level fatal --config "$RUNNER_TEMP/gitleaks.toml" || rc=$?
           [ "$rc" -eq 1 ] || { echo "::error::canary text was not detected (gitleaks exit $rc)"; exit 1; }
 
       # gitleaks exits 0 when its own `git log` fails on a bad range, and an empty commit list
@@ -207,7 +221,7 @@ jobs:
       - name: Scan the pull request's commits
         run: |
           report="$RUNNER_TEMP/files.json"
-          rc=0; "$RUNNER_TEMP/gitleaks" git --no-banner --redact --log-level warn --config .gitleaks.toml --log-opts "--diff-merges=first-parent ${BASE_SHA}..${HEAD_SHA}" --report-format json --report-path "$report" . || rc=$?
+          rc=0; "$RUNNER_TEMP/gitleaks" git --no-banner --redact --log-level warn --config "$RUNNER_TEMP/gitleaks.toml" --log-opts "--diff-merges=first-parent ${BASE_SHA}..${HEAD_SHA}" --report-format json --report-path "$report" . || rc=$?
           if [ "$rc" -eq 0 ]; then exit 0; fi
           if [ "$rc" -eq 1 ] && jq -r '.[] | "::error file=\(.File),line=\(.StartLine)::\(.RuleID) in commit \(.Commit[0:7])"' "$report"; then exit 1; fi
           echo "::error::gitleaks could not complete (exit $rc)"
@@ -222,7 +236,7 @@ jobs:
           for c in $commits; do
             report="$RUNNER_TEMP/msg.json"
             text=$(git log -1 --diff-merges=first-parent --name-only --format=%B "$c") || { echo "::error::cannot read commit ${c:0:7}"; exit 1; }
-            rc=0; printf '%s\n' "$text" | "$RUNNER_TEMP/gitleaks" stdin --no-banner --redact --log-level fatal --config .gitleaks.toml --report-format json --report-path "$report" || rc=$?
+            rc=0; printf '%s\n' "$text" | "$RUNNER_TEMP/gitleaks" stdin --no-banner --redact --log-level fatal --config "$RUNNER_TEMP/gitleaks.toml" --report-format json --report-path "$report" || rc=$?
             if [ "$rc" -eq 0 ]; then continue; fi
             fail=1
             if [ "$rc" -eq 1 ] && jq -r --arg c "$c" '.[] | "::error::\(.RuleID) in the message or paths of commit \($c[0:7])"' "$report"; then continue; fi

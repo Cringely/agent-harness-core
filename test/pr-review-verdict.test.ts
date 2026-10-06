@@ -122,6 +122,30 @@ describe("computeVerification()", () => {
     expect(result.reasons.join("\n")).toContain(".github/workflows/test.yml");
   });
 
+  // #251: the secret scan gates the verdict like the two suites do. Index looked up by name so the
+  // test does not depend on list order.
+  const SCAN = REQUIRED_CHECKS.findIndex((c) => c.name === "secret scan (Gitleaks)");
+
+  test("the secret scan is a required check", () => {
+    expect(SCAN).toBeGreaterThan(-1);
+  });
+
+  test("a failing secret scan: failed", () => {
+    const result = verify(withRun(SCAN, { conclusion: "failure" }));
+    expect(result.state).toBe("failed");
+    expect(result.reasons.join(" | ")).toContain("secret scan (Gitleaks)");
+  });
+
+  test("a secret scan that never ran: incomplete", () => {
+    expect(verify(green().filter((_, i) => i !== SCAN)).state).toBe("incomplete");
+  });
+
+  test("a pull request that edits the scanner config: incomplete even when every check is green", () => {
+    const result = verify(green(), [".gitleaks.toml"]);
+    expect(result.state).toBe("incomplete");
+    expect(result.reasons.join(" | ")).toContain(".gitleaks.toml");
+  });
+
   test.each(["install/Restore-ClaudeProject.ps1", "install/Restore-ClaudeProject.Tests.ps1"])(
     "%s has its suite on a run line: passed",
     (path) => {

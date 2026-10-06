@@ -25,6 +25,7 @@ import {
 export const REQUIRED_CHECKS: ReadonlyArray<{ name: string; appSlug: string }> = [
   { name: "bun test (TypeScript hook suite)", appSlug: "github-actions" },
   { name: "Pester (fixture-built installer suites)", appSlug: "github-actions" },
+  { name: "secret scan (Gitleaks)", appSlug: "github-actions" },
 ];
 
 const FAILED_CONCLUSIONS: ReadonlySet<string> = new Set(["failure", "timed_out"]);
@@ -134,6 +135,13 @@ export function computeVerification(input: {
   const workflowEdits = input.changedFiles.filter((path) => path.startsWith(".github/workflows/"));
   if (workflowEdits.length > 0) {
     incomplete.push(`the pull request edits CI definitions, so its own checks cannot vouch for it: ${workflowEdits.join(", ")}`);
+  }
+
+  // The secret scan reads .gitleaks.toml from the base commit, but a change to it still alters what
+  // the next scan allows. The scan cannot vouch for a pull request that rewrites its own rules.
+  const scannerEdits = input.changedFiles.filter((path) => path === ".gitleaks.toml");
+  if (scannerEdits.length > 0) {
+    incomplete.push(`the pull request edits the secret scan configuration, so its own scan cannot vouch for it: ${scannerEdits.join(", ")}`);
   }
 
   if (input.workflowText === null) {
