@@ -424,6 +424,37 @@ function Get-CoreCommit {
     }
 }
 
+# Registers this core checkout in the per-user allowlist that session-start-drift-check.sh
+# requires before it runs anything from the sidecar's coreRepo (issue #265). Running the
+# installer from a checkout is the operator's own act, so it is the one place that can vouch
+# for the path: the sidecar and the repo cannot. One absolute path per line, appended once.
+# A failed write warns and never fails the install, since the cost of a missed registration is
+# a visible "not on the allowlist" line at session start, not a broken project.
+function Register-CoreCheckout {
+    param([string]$Path)
+    try {
+        $allowlist = if ($env:HARNESS_CORE_ALLOWLIST) { $env:HARNESS_CORE_ALLOWLIST } else {
+            $homeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
+            Join-Path $homeDir '.claude/harness-core-checkouts'
+        }
+        $existing = ''
+        if (Test-Path -LiteralPath $allowlist -PathType Leaf) {
+            $existing = Get-Content -LiteralPath $allowlist -Raw
+            if ($null -eq $existing) { $existing = '' }
+            $lines = @($existing -split '\r?\n' | Where-Object { $_ })
+            if ($lines -ccontains $Path) { return }
+        }
+        $parent = Split-Path -Parent $allowlist
+        if ($parent -and -not (Test-Path -LiteralPath $parent -PathType Container)) {
+            New-Item -ItemType Directory -Path $parent -Force | Out-Null
+        }
+        $lead = if ($existing -and -not $existing.EndsWith("`n")) { "`n" } else { '' }
+        [System.IO.File]::AppendAllText($allowlist, "$lead$Path`n", (New-Object System.Text.UTF8Encoding($false)))
+    } catch {
+        Write-Warning "Could not register this core checkout in the drift-check allowlist: $($_.Exception.Message). session-start-drift-check.sh will skip the drift check until it is registered."
+    }
+}
+
 # Manifest v2. v1 was a flat map of relative path to SHA256 (plus the stackDetected record).
 # v2 moves that map under `files` and adds two siblings: `accepted`, which pins deliberate
 # project forks at their own hash, and `coreCommit`. Every load migrates, so the rest of the
@@ -1714,6 +1745,7 @@ foreach ($eventType in $hooksTemplate.PSObject.Properties.Name) {
 $manifest['coreCommit'] = Get-CoreCommit
 
 $sidecar['coreRepo'] = $repoRoot
+Register-CoreCheckout -Path $repoRoot
 $sidecar['stackDetected'] = [ordered]@{
     scannedAt     = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     plugins       = $detectedPlugins

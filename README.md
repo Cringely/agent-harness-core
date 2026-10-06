@@ -138,7 +138,13 @@ exits non-zero with every managed file, `settings.json`, the manifest and the si
 If none is, it warns that the tracked state is unknown and carries on without writing one. An index
 entry for a sidecar that is no longer on disk gets the `git rm --cached` warning as well, and the
 run continues. `session-start-drift-check.sh` reads `coreRepo` from the sidecar
-to find core without an environment variable. When the sidecar is missing but the committed
+to find core without an environment variable, and runs that checkout's installer only if the
+checkout is also listed in `~/.claude/harness-core-checkouts` (one absolute path per line, in the
+user profile, outside every repo). A sidecar can be written by a project, so the path it names is
+not trusted on its own. A full install appends the checkout it runs from, and a project installed
+before this check needs one re-run of the installer. Until then the hook prints one
+"not on the checkout allowlist" line at session start. `HARNESS_CORE_ALLOWLIST` points both at a
+different file. When the sidecar is missing but the committed
 manifest exists (an install ran, but the write was refused), the hook and `-Audit` each print one
 line saying so instead of going quiet. A project that installed an earlier version of this layer
 has both fields embedded directly in `.harness-manifest.json`, and the next run of any installer
