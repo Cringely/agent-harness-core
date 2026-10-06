@@ -39,6 +39,7 @@ Approved by the operator, 2026-10-06:
 
 1. The deny rules are user level, so they apply in every repository on every machine, the work account's included. In a repository whose owner has no entry in `~/.claude-publish/config.json`, an agent can then neither run raw gh publishing nor use the tool, and publishing there stops until an owner entry is added. That is fail-closed by design, and it may block work repositories. The smallest alternative is a project-level mechanism: teach `Install-Harness.ps1` to merge a `permissions.deny` fragment the way it merges hooks. This plan does not build it.
 2. The "Generated with" gate refuses any body line that opens with those words after punctuation or an emoji. A legitimate line such as "Generated with the exporter, see below" is refused too. Mid-sentence prose passes.
+3. review-merge refuses unless the checkout it runs from is clean, untracked files included, and at its origin's default branch head, because that code holds the token and makes the merge decision. The operator's working clone rarely meets that bar, so Task 12 sets up a dedicated clone at `~/.claude-publish/tool`, used as the reviewer checkout too, and the skill runs review-merge from it. One consequence: `tools/publish/` reaches the default branch only when this branch merges, so this branch's own pull request cannot pass through review-merge and is merged by the existing hand-run flow (Task 12, Step 4).
 
 ## Global Constraints
 
@@ -93,7 +94,7 @@ Five inputs the design implies but does not name, most likely to bite first. Eac
 2. A body with CRLF line endings: template sections and the attribution gate must still match. Tests in Tasks 3 and 4.
 3. A body path in Git Bash form (`/c/Users/...`) on Windows: the tool must read that file, not one at the current drive's root. Test in Task 6.
 4. review-merge run straight after a push, before CI registers any check: refuse with "0 total" and never run the reviewer. Test in Task 8.
-5. A pull request title carrying "Fixes #12": GitHub ignores keywords in titles, so the tool must publish it rather than refuse. Test in Task 6.
+5. A pull request title carrying "Fixes #12": a `--merge` merge commit carries the title in its message, and a closing keyword in any commit message reaching the default branch closes its issue. So the title counts against `--closes` like the body, and an undeclared one refuses. Tests in Tasks 6 and 8.
 
 ---
 
@@ -221,6 +222,14 @@ describe("parsePublishConfig()", () => {
     );
   });
 
+  test("refuses a keyCommandEnv variable named like a secret, without echoing its value", () => {
+    for (const name of ["OP_SERVICE_ACCOUNT_TOKEN", "CLIENT_SECRET", "API_KEY", "DB_PASSWORD"]) {
+      const message = refusal(config({ reviewers: { "fixture-owner/fixture-repo": { ...REVIEWER, keyCommandEnv: { [name]: "zzsecret9" } } } }));
+      expect(message).toContain("marks a secret");
+      expect(message).not.toContain("zzsecret9");
+    }
+  });
+
   test("refuses a relative checkout path", () => {
     expect(refusal(config({ reviewers: { "fixture-owner/fixture-repo": { ...REVIEWER, checkout: "relative/dir" } } }))).toContain("checkout");
   });
@@ -266,7 +275,7 @@ describe("loadPublishConfig()", () => {
 });
 ````
 
-Expected sha256 of the extracted file: `878bfd254d15cac9b99f864aaeb5ab52ac78a5d5bd65ea3178bd2094e82f43b9`
+Expected sha256 of the extracted file: `d960f75024942d47cb3661df1817815087e7f600c57c042898029f288f10ca45`
 
 - [ ] **Step 2: Run it to see it fail**
 
@@ -350,6 +359,10 @@ export interface PublishConfig {
 // (review-merge.ts), so this pattern is also what keeps shell metacharacters out of it.
 export const GH_USER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const ENV_KEY_RE = /^[A-Z_][A-Z0-9_]*$/;
+// keyCommandEnv sits in this file as plain text, so a credential the key command needs must not
+// live there. The key command fetches its own (tools/publish/README.md shows a wrapper that
+// decrypts one into its child's environment), and a variable named like a secret is refused.
+const SECRET_NAME_RE = /TOKEN|SECRET|KEY|PASSWORD/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -415,6 +428,11 @@ export function parsePublishConfig(raw: string): PublishConfig {
           if (!ENV_KEY_RE.test(name) || typeof value !== "string") {
             throw new PublishRefusal("a reviewer entry's keyCommandEnv must map variable names to strings");
           }
+          if (SECRET_NAME_RE.test(name)) {
+            throw new PublishRefusal(
+              "a reviewer entry's keyCommandEnv names a variable that marks a secret (TOKEN, SECRET, KEY or PASSWORD). The key command must fetch its own credential",
+            );
+          }
           keyCommandEnv[name] = value;
         }
       }
@@ -457,16 +475,18 @@ export function reviewerConfig(config: PublishConfig, repo: string): ReviewerCon
 }
 ````
 
-Expected sha256 of the extracted file: `1ae9615bbaa62331365f490d2eab8720020784684ca4db9df30db8bed592c27c`
+Expected sha256 of the extracted file: `f89ecfe5b5275f12d4da9b3605c6909026ca9d514e9bbef170ba4a7b1ee778ae`
 
 - [ ] **Step 4: Run it to see it pass**
 
 Run: `bun test test/publish-config.test.ts`
-Expected: `18 pass`, `0 fail`.
+Expected: `19 pass`, `0 fail`.
 
 - [ ] **Step 5: Ablate**
 
-In `tools/publish/config.ts`, change `if (typeof entry.ghUser !== "string" || !GH_USER_RE.test(entry.ghUser)) {` to `if (typeof entry.ghUser !== "string") {`. Run `bun test test/publish-config.test.ts`. Expected: `refuses a ghUser carrying shell metacharacters` fails. Restore the line and re-run to `18 pass`.
+First, in `tools/publish/config.ts`, change `if (typeof entry.ghUser !== "string" || !GH_USER_RE.test(entry.ghUser)) {` to `if (typeof entry.ghUser !== "string") {`. Run `bun test test/publish-config.test.ts`. Expected: `refuses a ghUser carrying shell metacharacters` fails. Restore.
+
+Second, change `if (SECRET_NAME_RE.test(name)) {` to `if (false) {`. Expected: `refuses a keyCommandEnv variable named like a secret, without echoing its value` fails. Restore the line and re-run to `19 pass`.
 
 - [ ] **Step 6: Own the new path**
 
@@ -495,6 +515,8 @@ key. None of that may be committed, so it lives in
 ~/.claude-publish/config.json and every missing or malformed field is a
 refusal naming the field, never its value. Git config keys were
 rejected because one file has to hold the reviewer entry as well.
+keyCommandEnv refuses a variable named like a secret, because that
+file is plain text: the key command fetches its own credential.
 CODEOWNERS now owns tools/publish/ like tools/pr-review/."
 ```
 
@@ -592,6 +614,20 @@ describe("realRunner.runPiped()", () => {
     expect(result.producerCode).toBe(5);
   });
 
+  // A key command that hangs (an authorization prompt nobody answers) must not hold review-merge
+  // open after the reviewer has been killed at its timeout.
+  test("kills a producer still running when the consumer times out", async () => {
+    const env = childEnv(process.env);
+    const started = Date.now();
+    const result = await realRunner.runPiped(
+      { argv: [BUN, "-e", "await Bun.sleep(6000)"], cwd: process.cwd(), env },
+      { argv: [BUN, "-e", "await Bun.stdin.text()"], cwd: process.cwd(), env, timeoutMs: 500 },
+    );
+    expect(Date.now() - started).toBeLessThan(4000);
+    expect(result.consumer.timedOut).toBe(true);
+    expect(result.producerCode).not.toBe(0);
+  });
+
   test("reports a producer that cannot start", async () => {
     const env = childEnv(process.env);
     const result = await realRunner.runPiped(
@@ -604,7 +640,7 @@ describe("realRunner.runPiped()", () => {
 });
 ````
 
-Expected sha256 of the extracted file: `25eae01d6a4c7ec98065275a9728b8f6526a32547da007b961862590eac9b457`
+Expected sha256 of the extracted file: `ce8aafc268c14bb93883cceec389a4e37b121fade31fc8d806a907312b76e1b3`
 
 - [ ] **Step 2: Run it to see it fail**
 
@@ -720,12 +756,16 @@ export const realRunner: Runner = {
       producerProc.kill();
       return { producerCode: await producerProc.exited, producerSpawnError: false, consumer: { ...NOT_STARTED } };
     }
-    const [stdout, stderr, consumerCode, producerCode] = await Promise.all([
+    const [stdout, stderr, consumerCode] = await Promise.all([
       new Response(consumerProc.stdout as ReadableStream<Uint8Array>).text(),
       new Response(consumerProc.stderr as ReadableStream<Uint8Array>).text(),
       consumerProc.exited,
-      producerProc.exited,
     ]);
+    // The consumer has exited or been killed at its timeout. A producer still running now, such as a
+    // key command stalled on an authorization prompt, would hold this await open with no bound, so
+    // it is killed here. One that already exited keeps its own exit code.
+    producerProc.kill();
+    const producerCode = await producerProc.exited;
     return {
       producerCode,
       producerSpawnError: false,
@@ -735,16 +775,18 @@ export const realRunner: Runner = {
 };
 ````
 
-Expected sha256 of the extracted file: `51f3e458795a33efad1d05f0e3890541e827c2e0c788baa73e35936fa3fee628`
+Expected sha256 of the extracted file: `ab7d4a472ea1a5b7b0c688a84403c981e15a886283fde8c9fba5d600bea88e1d`
 
 - [ ] **Step 4: Run it to see it pass**
 
 Run: `bun test test/publish-exec.test.ts`
-Expected: `11 pass`, `0 fail`. The suite starts real child processes using the running bun binary, measured at under a second.
+Expected: `12 pass`, `0 fail`. The suite starts real child processes using the running bun binary. The timeout test takes about half a second, and the rest under a second together.
 
 - [ ] **Step 5: Ablate**
 
-In `childEnv`, change `if (value === undefined || TOKEN_VARS.has(name.toUpperCase())) continue;` to `if (value === undefined) continue;`. Run the suite. Expected: `drops every GitHub token variable, whatever its case` and `passes only the env it is given` fail. Restore and re-run to `11 pass`.
+First, in `childEnv`, change `if (value === undefined || TOKEN_VARS.has(name.toUpperCase())) continue;` to `if (value === undefined) continue;`. Run the suite. Expected: `drops every GitHub token variable, whatever its case` and `passes only the env it is given` fail. Restore.
+
+Second, in `runPiped`, delete the line `producerProc.kill();` that follows the consumer's `Promise.all`. Expected: `kills a producer still running when the consumer times out` fails at bun's 5-second test timeout (measured 2026-10-06), because the await on the sleeping producer has no bound. Restore and re-run to `12 pass`.
 
 - [ ] **Step 6: Run the whole suite**
 
@@ -761,9 +803,12 @@ Every gh, git, key-command and reviewer process goes through a Runner,
 so the suites script them all. childEnv drops every inherited GitHub
 token variable, which keeps the active gh account out of each call.
 runPiped hands the key command's stdout straight to the reviewer's
-stdin, so the key is never held in a variable here. Bun 1.3.14 throws
-on a missing executable rather than returning a code, measured, so
-run() reports that as spawnError."
+stdin, so the key is never held in a variable here. Once the reviewer
+exits or is killed at its timeout, runPiped kills a key command still
+running, so one stalled on an authorization prompt cannot hold
+review-merge open forever. Bun 1.3.14 throws on a missing executable
+rather than returning a code, measured, so run() reports that as
+spawnError."
 ```
 
 ### Task 3: Text gates and closing keywords
@@ -1290,7 +1335,7 @@ byte-order mark are handled, because Windows PowerShell 5.1 writes one."
 - Produces, from `gh.ts`:
   - `BRANCH_RE: RegExp`
   - `interface CheckEntry { kind: "CheckRun" | "StatusContext"; name: string; status: string; conclusion: string }`
-  - `interface PrState { number; state; isDraft; baseRefName; headRefName; headRefOid; isCrossRepository; mergeStateStatus; body; checks: CheckEntry[] }`
+  - `interface PrState { number; state; isDraft; baseRefName; headRefName; headRefOid; isCrossRepository; mergeStateStatus; title; body; checks: CheckEntry[] }`
   - `class Gh` with `static forUser(runner: Runner, ghUser: string, base: Record<string, string | undefined>): Gh`, `token: string`, `call(args, options?)`, `defaultBranch(repo): string`, `branchHead(repo, branch): string | null`, `fileAt(repo, path, ref): string | null`, `listFiles(repo, dir, ref): string[] | null`, `prTemplate(repo, ref): string | null`, `issueTemplate(repo, ref, name): string`, `blankIssuesDisabled(repo, ref): boolean`, `prView(repo, pr): PrState`, `prCommitMessages(repo, pr): string[]`, `watchChecks(repo, pr, timeoutMs): "finished" | "timed-out"`, `createIssue(repo, title, body): string`, `editIssue(repo, issue, title | null, body | null): void`, `createPr(repo, base, head, title, body, draft): string`, `editPr(repo, pr, title | null, body | null): void`, `commentPr(repo, pr, body): void`, `mergePr(repo, pr, headSha, method: "merge" | "rebase", admin: boolean): void`, `mergedState(repo, pr): { state: string; mergeSha: string | null }`
 - Produces, from `test/publish-fakes.ts`: `REPO`, `HEAD`, `BASE_HEAD`, `NOT_FOUND`, `type Responder`, `on(prefix, result): Responder`, `class FakeRunner` (with `calls`, `piped`, settable `pipedResult`, `publishing(): string[][]`), `healthyRepo(): Responder[]`.
 
@@ -1600,11 +1645,12 @@ export interface PrState {
   headRefOid: string;
   isCrossRepository: boolean;
   mergeStateStatus: string;
+  title: string;
   body: string;
   checks: CheckEntry[];
 }
 
-const PR_FIELDS = "number,state,isDraft,baseRefName,headRefName,headRefOid,isCrossRepository,mergeStateStatus,body,statusCheckRollup";
+const PR_FIELDS = "number,state,isDraft,baseRefName,headRefName,headRefOid,isCrossRepository,mergeStateStatus,title,body,statusCheckRollup";
 const PR_URL_RE = /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+$/;
 const ISSUE_URL_RE = /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/issues\/\d+$/;
 const NOT_FOUND_RE = /HTTP 404/;
@@ -1738,6 +1784,7 @@ export class Gh {
       headRefOid,
       isCrossRepository: raw.isCrossRepository !== false,
       mergeStateStatus: String(raw.mergeStateStatus ?? "UNKNOWN"),
+      title: typeof raw.title === "string" ? raw.title : "",
       body: typeof raw.body === "string" ? raw.body : "",
       checks: rollup.map((entry) =>
         entry.__typename === "StatusContext"
@@ -1824,7 +1871,7 @@ export class Gh {
 }
 ````
 
-Expected sha256 of the extracted file: `971a320c6031c8abe0ed91b8b08d6fcd59db6c84572580bcb2975776311cbf22`
+Expected sha256 of the extracted file: `808f74d6503ae927ddea850b568147ece085fc8c8db656bc5d07a57984a44261`
 
 - [ ] **Step 4: Run it to see it pass**
 
@@ -1869,11 +1916,11 @@ issue on merge."
 **Interfaces:**
 - Consumes: `ownerIdentity`, `OwnerIdentity`, `PublishConfig` (Task 1). `PublishRefusal`, `UsageError` (Task 1). `Runner` (Task 2). `scanText`, `findClosingRefs`, `compareClosing`, `TextField` (Task 3). `templateSections`, `unfilledSections` (Task 4). `Gh` (Task 5). `IdentityDecl`, `IdentityLoad` from `tools/pr-review/identity.ts`.
 - Produces:
-  - `interface PublishContext { runner: Runner; config: PublishConfig; env: Record<string, string | undefined>; loadIdentity: () => IdentityLoad; readBody: (path: string) => string; warn: (line: string) => void }`
+  - `interface PublishContext { runner: Runner; config: PublishConfig; env: Record<string, string | undefined>; loadIdentity: () => IdentityLoad; readBody: (path: string) => string }`
   - `interface IssueCreateArgs { repo; title; bodyFile; template: string | null }`, `IssueEditArgs { repo; issue: number; title: string | null; bodyFile: string | null; template: string | null }`, `PrCreateArgs { repo; base; head; title; bodyFile; closes: number[]; draft: boolean }`, `PrEditArgs { repo; pr: number; base; title: string | null; bodyFile: string | null; closes: number[] }`
   - `nativePath(path: string, platform?: string): string`
   - `loadBody(ctx: Pick<PublishContext, "readBody">, path: string, flag?: string): string`
-  - `assertClean(ctx: Pick<PublishContext, "loadIdentity" | "warn">, fields: TextField[]): void`
+  - `assertClean(ctx: Pick<PublishContext, "loadIdentity">, fields: TextField[]): void` (refuses unless the identity file declares a name and the claude CLI's account email is known)
   - `issueCreate(ctx, args: IssueCreateArgs): string` (URL), `issueEdit(ctx, args): string`, `prCreate(ctx, args: PrCreateArgs): string` (URL), `prEdit(ctx, args): string`
 
 - [ ] **Step 1: Lay down the failing test**
@@ -1894,7 +1941,7 @@ import { FakeRunner, HEAD, healthyRepo, NOT_FOUND, on, REPO, type Responder } fr
 const CONFIG = parsePublishConfig(
   JSON.stringify({ owners: { "fixture-owner": { gitName: "fixture-owner", gitEmail: "fixture-owner@users.noreply.example.test", ghUser: "fixture-owner" } } }),
 );
-const IDENTITY: IdentityLoad = {
+const IDENTITY: Extract<IdentityLoad, { ok: true }> = {
   ok: true,
   declared: true,
   accountEmail: true,
@@ -1912,7 +1959,6 @@ function ctx(runner: FakeRunner, body: string = CLEAN_BODY, overrides: Partial<P
     env: { PATH: "x" },
     loadIdentity: () => IDENTITY,
     readBody: () => body,
-    warn: () => {},
     ...overrides,
   };
 }
@@ -1964,10 +2010,16 @@ describe("pr create", () => {
     expect(seen).toEqual([process.platform === "win32" ? "C:/fixture/body.md" : "/c/fixture/body.md"]);
   });
 
-  // Review Focus 5: GitHub acts on closing keywords in the description and commits, not the title.
-  test("publishes a title that carries a closing keyword, since only the body is read for them", () => {
+  // Review Focus 5: a --merge merge commit carries the title, and a closing keyword in any commit
+  // message reaching the default branch closes its issue, so the title counts against --closes.
+  test("refuses a title that carries an undeclared closing keyword", () => {
     const runner = publishingRepo();
-    expect(prCreate(ctx(runner), { ...PR_ARGS, title: "Fixes #12: wait for checks" })).toBe(PR_URL);
+    refuses(() => prCreate(ctx(runner), { ...PR_ARGS, title: "Fixes #12: wait for checks" }), runner, "undeclared: 1");
+  });
+
+  test("publishes a title keyword that --closes declares", () => {
+    const runner = publishingRepo();
+    expect(prCreate(ctx(runner), { ...PR_ARGS, title: "Fixes #12: wait for checks", closes: [12] })).toBe(PR_URL);
   });
 
   test("refuses a relative body path as a usage error", () => {
@@ -1992,6 +2044,26 @@ describe("pr create", () => {
       runner,
       "identity scan cannot be built",
     );
+  });
+
+  // The scan fails closed on a missing input rather than running narrower. Each case pairs the
+  // missing input with a body the full scan would catch, so a gate that only warned would publish it.
+  test("refuses when no identity file is declared", () => {
+    const runner = publishingRepo();
+    const identity: IdentityLoad = { ...IDENTITY, declared: false, decl: { ...IDENTITY.decl, names: [] } };
+    refuses(() => prCreate(ctx(runner, "Thanks to Fixture Person.\n", { loadIdentity: () => identity }), PR_ARGS), runner, "no declared name");
+  });
+
+  test("refuses when the identity file declares no name", () => {
+    const runner = publishingRepo();
+    const identity: IdentityLoad = { ...IDENTITY, decl: { ...IDENTITY.decl, names: [] } };
+    refuses(() => prCreate(ctx(runner, "Thanks to Fixture Person.\n", { loadIdentity: () => identity }), PR_ARGS), runner, "no declared name");
+  });
+
+  test("refuses when the claude CLI's account email is unknown", () => {
+    const runner = publishingRepo();
+    const identity: IdentityLoad = { ...IDENTITY, accountEmail: false, decl: { ...IDENTITY.decl, emails: [] } };
+    refuses(() => prCreate(ctx(runner, "Mail fixture@example.test.\n", { loadIdentity: () => identity }), PR_ARGS), runner, "no account email");
   });
 
   test("refuses an identifying string in the body, naming only its class", () => {
@@ -2094,6 +2166,11 @@ describe("pr edit", () => {
     refuses(() => prEdit(ctx(runner), { ...EDIT_ARGS, base: "release" }), runner, "--base given");
   });
 
+  test("refuses a closing keyword in a title-only edit, which can declare none", () => {
+    const runner = publishingRepo([on(["gh", "pr", "view"], { stdout: VIEW })]);
+    refuses(() => prEdit(ctx(runner), { ...EDIT_ARGS, title: "Closes #12", bodyFile: null }), runner, "undeclared: 1");
+  });
+
   test("refuses a session link in a new body", () => {
     const link = "https://" + ["claude", "ai"].join(".") + "/code/session_" + "abc";
     const runner = publishingRepo([on(["gh", "pr", "view"], { stdout: VIEW })]);
@@ -2151,7 +2228,7 @@ describe("issue edit", () => {
 });
 ````
 
-Expected sha256 of the extracted file: `5981aee33c60b0d973c92ba4c6d834648501abad6788ff54474a5e4278fd262d`
+Expected sha256 of the extracted file: `b66810d8027ae9943ef411cdbc0af94f9f5552e18091f0bf5ab2787cfdd8f240`
 
 - [ ] **Step 2: Run it to see it fail**
 
@@ -2167,9 +2244,12 @@ Expected: FAIL, `../tools/publish/publish` cannot be found.
 //
 //   1. the body file reads, and is not empty
 //   2. the publish config names an identity for the repository's owner
-//   3. the identity scan loads (tools/pr-review/identity.ts), and title, body and head branch carry
-//      no identifying string, session link or attribution line (scan.ts)
-//   4. the body's closing keywords equal --closes (none for an issue)
+//   3. the identity scan loads with a declared name and the claude CLI's account email
+//      (tools/pr-review/identity.ts), and title, body and head branch carry no identifying string,
+//      session link or attribution line (scan.ts)
+//   4. the closing keywords equal --closes (none for an issue). A pull request's title counts with
+//      its body: a --merge merge commit carries the title, and a keyword in any commit message
+//      reaching the default branch closes its issue
 //   5. gh is present and holds the configured account's token
 //   6. closing keywords only on a pull request into the default branch
 //   7. both branches exist on the remote (pr create), or the pull request's base is the --base
@@ -2193,7 +2273,6 @@ export interface PublishContext {
   env: Record<string, string | undefined>;
   loadIdentity: () => IdentityLoad;
   readBody: (path: string) => string;
-  warn: (line: string) => void;
 }
 
 export interface IssueCreateArgs {
@@ -2251,16 +2330,23 @@ export function loadBody(ctx: Pick<PublishContext, "readBody">, path: string, fl
   return text;
 }
 
-function identityFor(ctx: Pick<PublishContext, "loadIdentity" | "warn">): IdentityDecl {
+// The scan is only as good as what it scans for, so a missing input refuses rather than narrowing
+// the scan: no identity file or one declaring no name leaves the name check empty, and no account
+// email leaves out the address the claude CLI hands every model. Same precondition pr-review's
+// posting run holds (tools/pr-review/pipeline.ts), plus a declared name.
+function identityFor(ctx: Pick<PublishContext, "loadIdentity">): IdentityDecl {
   const identity = ctx.loadIdentity();
   if (!identity.ok) throw new PublishRefusal(`the identity scan cannot be built: ${identity.reason}`);
-  if (!identity.declared) {
-    ctx.warn("warning: ~/.claude-account-identity.json is absent, so only the username, the hostname and the claude CLI's account email are checked");
+  if (!identity.declared || identity.decl.names.length === 0) {
+    throw new PublishRefusal("the identity scan has no declared name to scan for. Declare names in ~/.claude-account-identity.json");
+  }
+  if (identity.accountEmail !== true || identity.decl.emails.length === 0) {
+    throw new PublishRefusal("the identity scan has no account email to scan for. Log in to the claude CLI so its account state names an email address");
   }
   return identity.decl;
 }
 
-export function assertClean(ctx: Pick<PublishContext, "loadIdentity" | "warn">, fields: TextField[]): void {
+export function assertClean(ctx: Pick<PublishContext, "loadIdentity">, fields: TextField[]): void {
   const hits = scanText(fields, identityFor(ctx));
   if (hits.length > 0) throw new PublishRefusal(`refusing to publish (${hits.join(", ")}). Nothing was published`);
 }
@@ -2271,8 +2357,8 @@ function localGates(ctx: PublishContext, repo: string, fields: TextField[]): Own
   return owner;
 }
 
-function closingGate(body: string, declared: number[], repo: string): number {
-  const found = findClosingRefs(body, repo);
+function closingGate(texts: readonly string[], declared: number[], repo: string): number {
+  const found = texts.flatMap((text) => findClosingRefs(text, repo));
   const verdict = compareClosing(found, declared, repo);
   if (!verdict.ok) throw new PublishRefusal(`refusing to publish: ${verdict.reason}`);
   return found.length;
@@ -2303,7 +2389,7 @@ export function issueCreate(ctx: PublishContext, args: IssueCreateArgs): string 
     { label: "title", text: args.title },
     { label: "body", text: body },
   ]);
-  closingGate(body, [], args.repo);
+  closingGate([body], [], args.repo);
   const gh = Gh.forUser(ctx.runner, owner.ghUser, ctx.env);
   const defaultBranch = gh.defaultBranch(args.repo);
   issueTemplateGate(gh, args.repo, defaultBranch, args.template, body, true);
@@ -2316,7 +2402,7 @@ export function issueEdit(ctx: PublishContext, args: IssueEditArgs): string {
   if (args.title !== null) fields.push({ label: "title", text: args.title });
   if (body !== null) fields.push({ label: "body", text: body });
   const owner = localGates(ctx, args.repo, fields);
-  if (body !== null) closingGate(body, [], args.repo);
+  if (body !== null) closingGate([body], [], args.repo);
   const gh = Gh.forUser(ctx.runner, owner.ghUser, ctx.env);
   if (body !== null && args.template !== null) {
     issueTemplateGate(gh, args.repo, gh.defaultBranch(args.repo), args.template, body, false);
@@ -2332,7 +2418,7 @@ export function prCreate(ctx: PublishContext, args: PrCreateArgs): string {
     { label: "body", text: body },
     { label: "head branch", text: args.head },
   ]);
-  const closing = closingGate(body, args.closes, args.repo);
+  const closing = closingGate([args.title, body], args.closes, args.repo);
   const gh = Gh.forUser(ctx.runner, owner.ghUser, ctx.env);
   const defaultBranch = gh.defaultBranch(args.repo);
   if (args.base !== defaultBranch && closing > 0) {
@@ -2351,7 +2437,10 @@ export function prEdit(ctx: PublishContext, args: PrEditArgs): string {
   if (args.title !== null) fields.push({ label: "title", text: args.title });
   if (body !== null) fields.push({ label: "body", text: body });
   const owner = localGates(ctx, args.repo, fields);
-  const closing = body === null ? 0 : closingGate(body, args.closes, args.repo);
+  // Only what this edit publishes is checked here. A title-only edit declares nothing (cli.ts takes
+  // --closes only with --body-file), so a keyword in it refuses. review-merge audits the title,
+  // body and commits as they stand before it merges.
+  const closing = closingGate([args.title, body].filter((text): text is string => text !== null), args.closes, args.repo);
   const gh = Gh.forUser(ctx.runner, owner.ghUser, ctx.env);
   const pr = gh.prView(args.repo, args.pr);
   if (pr.baseRefName !== args.base) throw new PublishRefusal("the pull request's base branch is not the --base given");
@@ -2368,18 +2457,22 @@ export function prEdit(ctx: PublishContext, args: PrEditArgs): string {
 }
 ````
 
-Expected sha256 of the extracted file: `4937918a645458151a3ac5a830576e7c4844642356e2f1e0e1d735fe3717b070`
+Expected sha256 of the extracted file: `80d6cb73981f35689065410141328c952ece7e2a16da4afd49cfe7e07bad5425`
 
 - [ ] **Step 4: Run it to see it pass**
 
 Run: `bun test test/publish-create.test.ts`
-Expected: `29 pass`, `0 fail`.
+Expected: `34 pass`, `0 fail`.
 
-- [ ] **Step 5: Ablate, twice**
+- [ ] **Step 5: Ablate, four times**
 
-First, in `prCreate`, change `const closing = closingGate(body, args.closes, args.repo);` to `const closing = 0;`. Expected: `refuses a closing keyword that was not declared`, `refuses a declared issue the body does not close` and `refuses closing keywords on a pull request into a non-default base` fail, each because a publishing call was made (measured on the prototype, 2026-10-06). Restore.
+First, in `prCreate`, change `const closing = closingGate([args.title, body], args.closes, args.repo);` to `const closing = 0;`. Expected: `refuses a title that carries an undeclared closing keyword`, `refuses a closing keyword that was not declared`, `refuses a declared issue the body does not close` and `refuses closing keywords on a pull request into a non-default base` fail, each because a publishing call was made (measured 2026-10-06). Restore.
 
-Second, in `prCreate`, delete `if (template !== null) templateGate(template, body);`. Expected: `refuses a body that leaves a pull request template section empty` fails. Restore and re-run to `29 pass`.
+Second, in `prCreate`, delete `if (template !== null) templateGate(template, body);`. Expected: `refuses a body that leaves a pull request template section empty` fails. Restore.
+
+Third, in `identityFor`, change `if (!identity.declared || identity.decl.names.length === 0) {` to `if (false) {`. Expected: `refuses when no identity file is declared` and `refuses when the identity file declares no name` fail, because a body naming the fixture person publishes (measured 2026-10-06). Restore.
+
+Fourth, change `if (identity.accountEmail !== true || identity.decl.emails.length === 0) {` to `if (false) {`. Expected: `refuses when the claude CLI's account email is unknown` fails. Restore and re-run to `34 pass`.
 
 - [ ] **Step 6: Run the whole suite**
 
@@ -2397,8 +2490,13 @@ undeclared closing keyword is refused before any token is read. Then
 the default branch decides whether closing keywords may act at all,
 both branches must exist on the remote, and the repository's template
 must be filled. Each refusal test asserts no publishing gh call was
-made. Git Bash's /c/... body paths are translated on Windows, because a
-native process resolves them against the current drive's root."
+made. The identity scan refuses rather than narrowing when the identity
+file declares no name or the claude CLI's account email is unknown, the
+precondition pr-review's posting run holds. A pull request's title
+counts against --closes with its body, because a --merge merge commit
+carries the title. Git Bash's /c/... body paths are translated on
+Windows, because a native process resolves them against the current
+drive's root."
 ```
 
 ### Task 7: The merge decision
@@ -2744,13 +2842,13 @@ floor, and only SUCCESS counts as a passing check."
 - Create: `test/publish-review-merge.test.ts`
 
 **Interfaces:**
-- Consumes: `ownerIdentity`, `reviewerConfig`, `OwnerIdentity`, `PublishConfig`, `ReviewerConfig` (Task 1). `PublishRefusal`, `PublishError` (Task 1). `childEnv`, `Runner`, `RunResult` (Task 2). `compareClosing`, `findClosingRefs` (Task 3). `Gh`, `PrState` (Task 5). `assertClean`, `loadBody` (Task 6). `checksSummary`, `decideMerge`, `enumText`, `parseReviewOutput`, `ReviewResult` (Task 7). `stripControlChars` from `tools/pr-review/cli.ts`. `IdentityLoad` from `tools/pr-review/identity.ts`.
+- Consumes: `ownerIdentity`, `reviewerConfig`, `OwnerIdentity`, `PublishConfig`, `ReviewerConfig` (Task 1). `PublishRefusal`, `PublishError` (Task 1). `childEnv`, `Runner`, `RunResult` (Task 2). `compareClosing`, `findClosingRefs` (Task 3). `Gh`, `PrState` (Task 5). `assertClean`, `loadBody` (Task 6). `checksSummary`, `decideMerge`, `enumText`, `parseReviewOutput`, `ReviewResult` (Task 7). `stripControlChars` from `tools/pr-review/cli.ts`. `IdentityLoad` from `tools/pr-review/identity.ts`. `parseRepo` from `tools/pr-review/types.ts`.
 - Produces:
   - `REVIEWER_TIMEOUT_MS: number`
   - `interface ReviewMergeArgs { repo: string; pr: number; closes: number[]; allowAdmin: boolean; adminReasonFile: string | null; method: "merge" | "rebase"; checksTimeoutMin: number }`
-  - `interface ReviewMergeContext { runner; config; env; workDir: string; bunPath: string; exists: (path: string) => boolean; toolState: (root: string) => { revision: string; dirty: boolean }; sleep: (ms: number) => void; log: (line: string) => void; loadIdentity: () => IdentityLoad; readBody: (path: string) => string }`
+  - `interface ReviewMergeContext { runner; config; env; workDir: string; toolRoot: string; bunPath: string; exists: (path: string) => boolean; toolState: (root: string) => { revision: string; dirty: boolean }; sleep: (ms: number) => void; log: (line: string) => void; loadIdentity: () => IdentityLoad; readBody: (path: string) => string }`
   - `realExists: (path: string) => boolean`
-  - `remoteMatches(url: string, repo: string): boolean`
+  - `remoteRepo(url: string): string | null`, `remoteMatches(url: string, repo: string): boolean`
   - `reviewMerge(ctx: ReviewMergeContext, args: ReviewMergeArgs): Promise<string>`
 
 - [ ] **Step 1: Lay down the failing test**
@@ -2771,6 +2869,7 @@ import { BASE_HEAD, FakeRunner, HEAD, on, REPO, type Responder } from "./publish
 
 const CHECKOUT = process.platform === "win32" ? "C:/fixture/reviewer-checkout" : "/fixture/reviewer-checkout";
 const WORK = process.platform === "win32" ? "C:/fixture/work" : "/fixture/work";
+const TOOL_ROOT = process.platform === "win32" ? "C:/fixture/tool-checkout" : "/fixture/tool-checkout";
 const CONFIG = parsePublishConfig(
   JSON.stringify({
     owners: { "fixture-owner": { gitName: "fixture-owner", gitEmail: "fixture-owner@users.noreply.example.test", ghUser: "fixture-owner" } },
@@ -2793,6 +2892,7 @@ const VIEW = {
   headRefOid: HEAD,
   isCrossRepository: false,
   mergeStateStatus: "CLEAN",
+  title: "fix: wait for checks",
   body: "## Why\n\nBecause.\n",
   statusCheckRollup: GREEN,
 };
@@ -2853,6 +2953,7 @@ function ctx(runner: FakeRunner, overrides: Partial<ReviewMergeContext> = {}): R
     config: CONFIG,
     env: { PATH: "x", GH_TOKEN: "inherited" },
     workDir: WORK,
+    toolRoot: TOOL_ROOT,
     bunPath: "/fixture/bun",
     exists: () => true,
     toolState: () => ({ revision: BASE_HEAD, dirty: false }),
@@ -2927,7 +3028,7 @@ describe("review-merge: merges", () => {
     const runner = withReviewer(scenario(), reviewerSays(APPROVE_OUTPUT));
     await reviewMerge(ctx(runner), ARGS);
     const gitCalls = runner.calls.filter((call) => call.argv[0] === "git");
-    expect(gitCalls.length).toBe(4);
+    expect(gitCalls.length).toBe(5);
     for (const call of gitCalls) {
       expect(call.argv).toContain("user.name=fixture-owner");
       expect(call.argv).toContain("credential.helper=");
@@ -2964,6 +3065,30 @@ describe("review-merge: merges", () => {
 });
 
 describe("review-merge: refuses before the reviewer runs", () => {
+  // The checkout this tool runs from holds the token and the merge rule, so it meets the reviewer
+  // checkout's bar: clean, and at its origin's default branch head.
+  test("this tool's own checkout carrying uncommitted changes", async () => {
+    const runner = scenario();
+    await refusal(
+      reviewMerge(ctx(runner, { toolState: (root) => ({ revision: BASE_HEAD, dirty: root === TOOL_ROOT }) }), ARGS),
+      runner,
+      "own checkout has uncommitted changes",
+      false,
+    );
+    expect(runner.calls.some((call) => call.argv[1] === "pr")).toBe(false);
+  });
+
+  test("this tool's own checkout away from the default branch head", async () => {
+    const runner = scenario();
+    await refusal(
+      reviewMerge(ctx(runner, { toolState: (root) => ({ revision: root === TOOL_ROOT ? "e".repeat(40) : BASE_HEAD, dirty: false }) }), ARGS),
+      runner,
+      "not at its default branch's current head",
+      false,
+    );
+    expect(runner.calls.some((call) => call.argv[1] === "pr")).toBe(false);
+  });
+
   test("no reviewer in the config", async () => {
     const runner = scenario();
     const config = parsePublishConfig(JSON.stringify({ owners: { "fixture-owner": CONFIG.owners["fixture-owner"] } }));
@@ -3000,6 +3125,12 @@ describe("review-merge: refuses before the reviewer runs", () => {
     await refusal(reviewMerge(ctx(runner), ARGS), runner, "default branch", false);
   });
 
+  // Review Focus 5: a --merge merge commit carries the title onto the default branch.
+  test("an undeclared closing keyword in the title", async () => {
+    const runner = scenario({ views: [{ ...VIEW, title: "Fixes #12: wait for checks" }] });
+    await refusal(reviewMerge(ctx(runner), ARGS), runner, "undeclared: 1", false);
+  });
+
   test("an undeclared closing keyword in a commit message", async () => {
     const runner = scenario({ commits: ["feat: x\n\ncloses #4"] });
     await refusal(reviewMerge(ctx(runner), ARGS), runner, "undeclared: 1", false);
@@ -3028,7 +3159,9 @@ describe("review-merge: refuses before the reviewer runs", () => {
   });
 
   test("a reviewer checkout whose origin is another repository", async () => {
-    const runner = scenario({ extra: [(argv) => (gitSub(argv)[0] === "remote" ? { stdout: "https://github.com/someone/else.git\n" } : undefined)] });
+    const runner = scenario({
+      extra: [(argv) => (gitSub(argv)[0] === "remote" && argv.includes(CHECKOUT) ? { stdout: "https://github.com/someone/else.git\n" } : undefined)],
+    });
     await refusal(reviewMerge(ctx(runner), ARGS), runner, "origin is not this repository", false);
   });
 
@@ -3039,7 +3172,12 @@ describe("review-merge: refuses before the reviewer runs", () => {
 
   test("a dirty reviewer checkout", async () => {
     const runner = scenario();
-    await refusal(reviewMerge(ctx(runner, { toolState: () => ({ revision: BASE_HEAD, dirty: true }) }), ARGS), runner, "not a clean copy", false);
+    await refusal(
+      reviewMerge(ctx(runner, { toolState: (root) => ({ revision: BASE_HEAD, dirty: root === CHECKOUT }) }), ARGS),
+      runner,
+      "not a clean copy",
+      false,
+    );
   });
 
   test("git missing from PATH", async () => {
@@ -3096,7 +3234,7 @@ describe("remoteMatches()", () => {
 });
 ````
 
-Expected sha256 of the extracted file: `f80b310be896efac37d2d98efb0abeeca6f6f5a0a4ef44400720a5f9c9ba3370`
+Expected sha256 of the extracted file: `5d9c5e2d5d002e5684b7316a4a2d1439d9bf31c52f5d74975be7b986335549e1`
 
 - [ ] **Step 2: Run it to see it fail**
 
@@ -3110,22 +3248,24 @@ Expected: FAIL, `../tools/publish/review-merge` cannot be found.
 // review-merge (#274): wait for CI, run the App reviewer from a clean default-branch checkout,
 // and merge only on what merge-decision.ts allows. In order:
 //
-//   1. config names an owner identity and a reviewer for the repository. With --allow-admin, the
-//      reason file reads and passes the same text gates as a body. The reviewer checkout holds
-//      tools/pr-review/cli.ts
-//   2. the pull request is open, not a draft, from this repository, and into the default branch.
+//   1. config names an owner identity for the repository. This tool's own checkout is clean and at
+//      its origin's default branch head, the bar the reviewer checkout meets in step 6, because the
+//      code that holds the token and makes the merge decision must be reviewed code too
+//   2. config names a reviewer for the repository. With --allow-admin, the reason file reads and
+//      passes the same text gates as a body. The reviewer checkout holds tools/pr-review/cli.ts
+//   3. the pull request is open, not a draft, from this repository, and into the default branch.
 //      Its head is pinned here as the head to review
-//   3. closing keywords in the body and every commit message equal --closes (early, so a mismatch
-//      costs no model run)
-//   4. `gh pr checks --watch`, bounded by --checks-timeout-min. Then every check must have
+//   4. closing keywords in the title, the body and every commit message equal --closes (early, so
+//      a mismatch costs no model run). The title counts because a --merge merge commit carries it
+//   5. `gh pr checks --watch`, bounded by --checks-timeout-min. Then every check must have
 //      succeeded on the pinned head, which must not have moved
-//   5. the reviewer checkout is fetched and detached at the default branch's current head, and
+//   6. the reviewer checkout is fetched and detached at the default branch's current head, and
 //      must then be clean (tools/pr-review/tool-state.ts) and at exactly that commit
-//   6. the reviewer runs from the work directory, outside every checkout, with the key piped from
+//   7. the reviewer runs from the work directory, outside every checkout, with the key piped from
 //      the configured key command, --expect-head pinned, --post and --json
-//   7. the pull request is read again (waiting out an UNKNOWN merge state), the closing-keyword
+//   8. the pull request is read again (waiting out an UNKNOWN merge state), the closing-keyword
 //      audit repeats, and decideMerge rules
-//   8. for an administrator-bypass merge, the reason is posted as a pull request comment first
+//   9. for an administrator-bypass merge, the reason is posted as a pull request comment first
 //      (CONTRIBUTING.md has every bypass say why). Then gh pr merge with --match-head-commit, and
 //      the merge is confirmed
 //
@@ -3138,6 +3278,7 @@ import { stripControlChars } from "../pr-review/cli";
 import type { IdentityLoad } from "../pr-review/identity";
 import { ownerIdentity, reviewerConfig, type OwnerIdentity, type PublishConfig, type ReviewerConfig } from "./config";
 import { PublishError, PublishRefusal } from "./errors";
+import { parseRepo } from "../pr-review/types";
 import { childEnv, type RunResult, type Runner } from "./exec";
 import { Gh, type PrState } from "./gh";
 import { checksSummary, decideMerge, enumText, parseReviewOutput, type ReviewResult } from "./merge-decision";
@@ -3165,6 +3306,8 @@ export interface ReviewMergeContext {
   config: PublishConfig;
   env: Record<string, string | undefined>;
   workDir: string;
+  // The checkout this tool runs from. cli.ts passes the repository root above tools/publish.
+  toolRoot: string;
   bunPath: string;
   exists: (path: string) => boolean;
   toolState: (root: string) => { revision: string; dirty: boolean };
@@ -3183,19 +3326,24 @@ function assertReviewable(pr: PrState, defaultBranch: string): void {
   if (pr.baseRefName !== defaultBranch) throw new PublishRefusal("the pull request does not target the default branch");
 }
 
-function auditClosing(gh: Gh, repo: string, pr: number, body: string, declared: number[]): void {
-  const texts = [body, ...gh.prCommitMessages(repo, pr)];
+function auditClosing(gh: Gh, repo: string, view: PrState, declared: number[]): void {
+  const texts = [view.title, view.body, ...gh.prCommitMessages(repo, view.number)];
   const verdict = compareClosing(
     texts.flatMap((text) => findClosingRefs(text, repo)),
     declared,
     repo,
   );
-  if (!verdict.ok) throw new PublishRefusal(`not merged: ${verdict.reason} across the body and commit messages`);
+  if (!verdict.ok) throw new PublishRefusal(`not merged: ${verdict.reason} across the title, body and commit messages`);
+}
+
+// owner/name of a GitHub remote URL, or null for anything else.
+export function remoteRepo(url: string): string | null {
+  const match = /github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/i.exec(url.trim());
+  return match !== null && parseRepo(match[1]!) !== null ? match[1]! : null;
 }
 
 export function remoteMatches(url: string, repo: string): boolean {
-  const match = /github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/i.exec(url.trim());
-  return match !== null && match[1]!.toLowerCase() === repo.toLowerCase();
+  return remoteRepo(url)?.toLowerCase() === repo.toLowerCase();
 }
 
 function git(ctx: ReviewMergeContext, owner: OwnerIdentity, token: string, dir: string, args: string[]): RunResult {
@@ -3248,6 +3396,27 @@ function prepareReviewerCheckout(ctx: ReviewMergeContext, gh: Gh, owner: OwnerId
   if (state.dirty || state.revision !== sha) throw new PublishRefusal("the reviewer checkout is not a clean copy of the default branch head");
 }
 
+// The tool's own checkout is often an operator's working clone, on another branch or carrying
+// edits. An edited or stale merge-decision.ts there would decide merges, so that checkout must be
+// clean and at its origin's default branch head before anything else runs.
+function assertToolCurrent(ctx: ReviewMergeContext, gh: Gh, owner: OwnerIdentity): void {
+  let state: { revision: string; dirty: boolean };
+  try {
+    state = ctx.toolState(ctx.toolRoot);
+  } catch {
+    throw new PublishRefusal("this tool is not running from a readable git checkout");
+  }
+  if (state.dirty) {
+    throw new PublishRefusal("this tool's own checkout has uncommitted changes. Run review-merge from a clean checkout of the default branch");
+  }
+  const origin = git(ctx, owner, gh.token, ctx.toolRoot, ["remote", "get-url", "origin"]);
+  const toolRepo = origin.code === 0 ? remoteRepo(origin.stdout) : null;
+  if (toolRepo === null) throw new PublishRefusal("this tool's own checkout has no GitHub origin");
+  if (state.revision !== gh.branchHead(toolRepo, gh.defaultBranch(toolRepo))) {
+    throw new PublishRefusal("this tool's own checkout is not at its default branch's current head. Update it and run again");
+  }
+}
+
 async function runReviewer(ctx: ReviewMergeContext, reviewer: ReviewerConfig, cli: string, repo: string, pr: number, head: string): Promise<ReviewResult> {
   const run = await ctx.runner.runPiped(
     { argv: reviewer.keyCommand, cwd: ctx.workDir, env: childEnv(ctx.env, reviewer.keyCommandEnv) },
@@ -3291,24 +3460,26 @@ function settledView(ctx: ReviewMergeContext, gh: Gh, repo: string, pr: number):
 
 export async function reviewMerge(ctx: ReviewMergeContext, args: ReviewMergeArgs): Promise<string> {
   const owner = ownerIdentity(ctx.config, args.repo);
-  // Read and scanned before anything runs, so a reason that would be refused costs no model run.
+  const gh = Gh.forUser(ctx.runner, owner.ghUser, ctx.env);
+  assertToolCurrent(ctx, gh, owner);
+  // Read and scanned before the pull request is touched, so a reason that would be refused costs
+  // no model run.
   let adminReason: string | null = null;
   if (args.allowAdmin) {
     if (args.adminReasonFile === null) throw new PublishRefusal("--allow-admin needs --admin-reason-file");
     adminReason = loadBody(ctx, args.adminReasonFile, "--admin-reason-file");
-    assertClean({ loadIdentity: ctx.loadIdentity, warn: ctx.log }, [{ label: "admin reason", text: adminReason }]);
+    assertClean(ctx, [{ label: "admin reason", text: adminReason }]);
     if (findClosingRefs(adminReason, args.repo).length > 0) throw new PublishRefusal("the admin reason carries a closing keyword");
   }
   const reviewer = reviewerConfig(ctx.config, args.repo);
   const cli = join(reviewer.checkout, "tools", "pr-review", "cli.ts");
   if (!ctx.exists(cli)) throw new PublishRefusal("the reviewer checkout holds no tools/pr-review/cli.ts");
 
-  const gh = Gh.forUser(ctx.runner, owner.ghUser, ctx.env);
   const defaultBranch = gh.defaultBranch(args.repo);
   const first = gh.prView(args.repo, args.pr);
   assertReviewable(first, defaultBranch);
   const head = first.headRefOid;
-  auditClosing(gh, args.repo, args.pr, first.body, args.closes);
+  auditClosing(gh, args.repo, first, args.closes);
 
   if (gh.watchChecks(args.repo, args.pr, args.checksTimeoutMin * 60_000) === "timed-out") {
     throw new PublishRefusal(`checks did not finish within ${args.checksTimeoutMin} minutes. Nothing was reviewed or merged`);
@@ -3328,7 +3499,7 @@ export async function reviewMerge(ctx: ReviewMergeContext, args: ReviewMergeArgs
 
   const final = settledView(ctx, gh, args.repo, args.pr);
   assertReviewable(final, defaultBranch);
-  auditClosing(gh, args.repo, args.pr, final.body, args.closes);
+  auditClosing(gh, args.repo, final, args.closes);
   const decision = decideMerge({
     review,
     reviewedHead: head,
@@ -3352,12 +3523,12 @@ export async function reviewMerge(ctx: ReviewMergeContext, args: ReviewMergeArgs
 }
 ````
 
-Expected sha256 of the extracted file: `e6d07c2170d5f86a242d9d60f3e87d34c3279eb8ba57c6dafacb5aee30e9c51e`
+Expected sha256 of the extracted file: `057fa12de3f13e368db25b287e97b2b083dd41f166d4eed9166fe57bc603ce63`
 
 - [ ] **Step 4: Run it to see it pass**
 
 Run: `bun test test/publish-review-merge.test.ts`
-Expected: `30 pass`, `0 fail`.
+Expected: `33 pass`, `0 fail`.
 
 - [ ] **Step 5: Ablate, three times**
 
@@ -3365,7 +3536,11 @@ First, delete the block that starts `const checks = checksSummary(afterChecks.ch
 
 Second, delete `gh.commentPr(args.repo, args.pr, adminReason);`. Expected: `uses the administrator bypass for a COMMENT with --allow-admin, posting the reason first` fails. Restore.
 
-Third, in `prepareReviewerCheckout`, change `if (state.dirty || state.revision !== sha)` to `if (state.revision !== sha)`. Expected: `a dirty reviewer checkout` fails. Restore and re-run to `30 pass`.
+Third, in `prepareReviewerCheckout`, change `if (state.dirty || state.revision !== sha)` to `if (state.revision !== sha)`. Expected: `a dirty reviewer checkout` fails. Restore.
+
+Fourth, in `reviewMerge`, delete `assertToolCurrent(ctx, gh, owner);`. Expected: `this tool's own checkout carrying uncommitted changes`, `this tool's own checkout away from the default branch head` and `names the configured identity and token helper on every git call` (which counts five git calls) fail (measured 2026-10-06). Restore.
+
+Fifth, in `auditClosing`, change `const texts = [view.title, view.body, ` to `const texts = [view.body, `. Expected: `an undeclared closing keyword in the title` fails. Restore and re-run to `33 pass`.
 
 - [ ] **Step 6: Run the whole suite**
 
@@ -3382,8 +3557,12 @@ Waits on gh pr checks --watch with a bound, then requires every check to
 have succeeded on the pinned head before spending a model run. The
 reviewer runs from a checkout fetched and detached at the default
 branch's current head, verified clean, with its key piped from the
-configured command and --expect-head pinned. Closing keywords in the
-body and every commit message are audited before and after the review.
+configured command and --expect-head pinned. The checkout this tool
+runs from meets the same bar first, clean and at its origin's default
+branch head, because it holds the token and makes the merge decision.
+Closing keywords in the title, the body and every commit message are
+audited before and after the review. The title counts because a
+--merge merge commit carries it.
 An administrator-bypass merge first posts the operator's reason on the
 pull request, because CONTRIBUTING.md has every bypass say why, and
 every merge passes --match-head-commit."
@@ -3537,6 +3716,7 @@ describe("main()", () => {
       runner: new FakeRunner([NOT_A_REPO]),
       cwd: WORK,
       workDir: WORK,
+      toolRoot: WORK,
       env: {},
       loadConfig: () => parsePublishConfig(JSON.stringify({ owners: { other: { gitName: "o", gitEmail: "o@example.test", ghUser: "other" } } })),
       loadIdentity: () => ({ ok: true, declared: true, accountEmail: true, decl: { names: [], emails: [], username: "fixtureuser", hostname: "fixture-host" } }),
@@ -3594,7 +3774,7 @@ describe("main()", () => {
 });
 ````
 
-Expected sha256 of the extracted file: `be3acc5afdb2e3422ff443252b069b7bf8bbbdb153f4d27b232678001b0221a2`
+Expected sha256 of the extracted file: `02cbacd28f00f8c219d87afbbef9712af0feb59b0c5244050800b673eeb707e8`
 
 - [ ] **Step 2: Run it to see it fail**
 
@@ -3623,6 +3803,7 @@ Expected: FAIL, `../tools/publish/cli` cannot be found.
 // Exit codes: 0 done, 2 refused (nothing new published), 1 usage or runtime error.
 
 import { readFileSync, realpathSync } from "node:fs";
+import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { cwdHasAutoloadFile, stripControlChars } from "../pr-review/cli";
 import { loadIdentity, type IdentityLoad } from "../pr-review/identity";
@@ -3809,6 +3990,7 @@ export interface CliDeps {
   runner: Runner;
   cwd: string;
   workDir: string;
+  toolRoot: string;
   env: Record<string, string | undefined>;
   loadConfig: () => PublishConfig;
   loadIdentity: () => IdentityLoad;
@@ -3826,6 +4008,8 @@ export function realDeps(): CliDeps {
     runner: realRunner,
     cwd: process.cwd(),
     workDir: WORK_DIR,
+    // The checkout holding this file, which review-merge requires to be clean and current.
+    toolRoot: join(import.meta.dir, "..", ".."),
     env: process.env,
     loadConfig: () => loadPublishConfig(),
     loadIdentity: () => loadIdentity(),
@@ -3857,7 +4041,7 @@ export async function main(argv: readonly string[], deps: CliDeps): Promise<numb
   try {
     assertNeutralCwd(deps.cwd, deps.workDir, deps.runner, deps.env);
     const config = deps.loadConfig();
-    const publishCtx = { runner: deps.runner, config, env: deps.env, loadIdentity: deps.loadIdentity, readBody: deps.readBody, warn: deps.err };
+    const publishCtx = { runner: deps.runner, config, env: deps.env, loadIdentity: deps.loadIdentity, readBody: deps.readBody };
     switch (command.kind) {
       case "issue-create":
         deps.out(issueCreate(publishCtx, command));
@@ -3879,6 +4063,7 @@ export async function main(argv: readonly string[], deps: CliDeps): Promise<numb
               config,
               env: deps.env,
               workDir: deps.workDir,
+              toolRoot: deps.toolRoot,
               bunPath: deps.bunPath,
               exists: deps.exists,
               toolState: deps.toolState,
@@ -3918,7 +4103,7 @@ if (import.meta.main) {
 }
 ````
 
-Expected sha256 of the extracted file: `b8847e77be10225b42aa01aa867e2506045d7ec9a671364e9fea6c014fea0fd2`
+Expected sha256 of the extracted file: `5a6fae292bde962cf16315480517425ac8959402253a27d42860c66a30709e0e`
 
 - [ ] **Step 4: Run it to see it pass**
 
@@ -3975,9 +4160,20 @@ It must state each of these, and nothing that contradicts the code laid down in 
 
 - What it is: the route by which agents file issues, open and edit pull requests, and review and merge them. Repository tooling like `tools/pr-review/`, not part of core, and nothing under `install/` copies it.
 - How to run it: `bun --cwd <home>/.claude-publish/work <absolute path>/tools/publish/cli.ts <command>`, and why: the BUN-CWD reason and the 2026-10-06 measurement that `--cwd` moves the bunfig and `.env` load. The work directory must be empty and outside every git work tree, and the tool refuses otherwise.
+- review-merge runs only from a checkout that is clean, untracked files included, and at its origin's default branch head, the bar the reviewer checkout meets, because that code holds the token and makes the merge decision. Keep a dedicated clone for it (`~/.claude-publish/tool` in the operator's setup, which also serves as the reviewer checkout) and bring it to the default branch head before each run: `git -C <clone> fetch origin <default branch>`, then `git -C <clone> checkout --detach origin/<default branch>`.
+- review-merge is a long run: up to `--checks-timeout-min` (30 by default) waiting for checks, then up to 45 minutes for the reviewer. That is longer than a tool shell's foreground limit (10 minutes in Claude Code's Bash tool). Run it in the background with stdout and stderr redirected to a log file and an exit line appended after it (`... > <log> 2>&1; echo "exit=$?" >> <log>`), then poll the log with a bounded wait until the exit line appears. Do not wait on the background task's completion notice instead: it reports on the shell that started the run, and a dispatched agent is not woken by it.
 - Setup: `~/.claude-publish/config.json`, shown with placeholders only:
-  `{ "owners": { "<owner>": { "gitName": "...", "gitEmail": "...", "ghUser": "..." } }, "reviewers": { "<owner>/<name>": { "appId": "<numeric App ID>", "keyCommand": ["op", "read", "<secret reference>"], "keyCommandEnv": { "OP_BIOMETRIC_UNLOCK_ENABLED": "false" }, "checkout": "<absolute path to a dedicated worktree or clone>" } } }`.
+  `{ "owners": { "<owner>": { "gitName": "...", "gitEmail": "...", "ghUser": "..." } }, "reviewers": { "<owner>/<name>": { "appId": "<numeric App ID>", "keyCommand": ["pwsh", "-NoProfile", "-File", "<absolute path>/read-reviewer-key.ps1"], "keyCommandEnv": { "OP_BIOMETRIC_UNLOCK_ENABLED": "false" }, "checkout": "<absolute path to a dedicated clone>" } } }`.
   Every field is validated and a missing one refuses. Values are never printed. The reviewer checkout's origin must be the repository, the tool fetches it and detaches it at the default branch head, and refuses when it is dirty.
+- The key command fetches its own credential. The config file is plain text, so `keyCommandEnv` carries only non-secret settings, and the tool refuses a variable whose name contains TOKEN, SECRET, KEY or PASSWORD. Where the key sits behind a 1Password service account, whose token `op` reads from `OP_SERVICE_ACCOUNT_TOKEN`, the key command is a wrapper script kept outside every repository that decrypts the token into its own environment and runs `op read`, so the token exists only in that process and its `op` child. Show this Windows form, placeholders only, with the token saved once by `Read-Host -AsSecureString | Export-Clixml <token file>` (DPAPI, readable only by the same user on the same machine):
+
+  ```powershell
+  $ErrorActionPreference = 'Stop'
+  $secure = Import-Clixml '<absolute path to the token file>'
+  $env:OP_SERVICE_ACCOUNT_TOKEN = [System.Net.NetworkCredential]::new('', $secure).Password
+  op read '<secret reference>'
+  exit $LASTEXITCODE
+  ```
 - The five commands with their flags, copied from `USAGE` in `tools/publish/cli.ts`.
 - Exit codes: 0 done, 2 refused with nothing new published, 1 usage or runtime error. After a review-merge refusal that follows its `review:` line, the App's review was posted and nothing merged.
 - The create and edit gates in the order `tools/publish/publish.ts`'s header lists them.
@@ -4092,6 +4288,14 @@ Commands:
 
 Write every body to a file in your scratchpad first and pass its absolute path. There is no inline body option. Push the head branch before `pr create`, because the tool never pushes.
 
+review-merge runs from the dedicated clone at `~/.claude-publish/tool` instead, and refuses unless that clone is clean and at its origin's default branch head, because that code holds the token and makes the merge decision. It can also run for over an hour: up to `--checks-timeout-min` (30 by default) for checks, then up to 45 minutes for the reviewer, past a tool shell's 10-minute foreground limit. So bring the clone up to date, start the run in the background with its output in a log file in your scratchpad, and poll that log with a bounded wait until its `exit=` line appears. In Bash, each line its own command, with `<n>` the pull request number:
+
+    git -C "${USERPROFILE:-$HOME}/.claude-publish/tool" fetch --quiet origin master
+    git -C "${USERPROFILE:-$HOME}/.claude-publish/tool" checkout --quiet --detach origin/master
+    bun --cwd "${USERPROFILE:-$HOME}/.claude-publish/work" "${USERPROFILE:-$HOME}/.claude-publish/tool/tools/publish/cli.ts" review-merge --repo <owner/name> --pr <n> ... > <scratchpad>/review-merge-<n>.log 2>&1; echo "exit=$?" >> <scratchpad>/review-merge-<n>.log
+
+Start the third line with the shell tool's background option, and never wait on that option's completion notice: it reports on the shell, and a dispatched agent is not woken by it. Read the log's last lines once the `exit=` line is there.
+
 ## Exit codes
 
 - 0: done. The last line on stdout is the URL or the merge result.
@@ -4158,7 +4362,7 @@ From "Discovery is not commitment, and not a filing either" in fix-quality.md:
 `review-merge` waits for CI, runs the App reviewer from a clean default-branch checkout, and merges only when the App approved, every check succeeded and the head is the one that was reviewed. `--allow-admin` permits the administrator bypass in two cases: the App approved a change on an owned path, or the App could only comment and reported no finding at or above the severity floor. It needs `--admin-reason-file`, and the tool posts that reason on the pull request before it merges. Pass it only when the operator ordered the bypass for that pull request.
 ````
 
-Expected sha256 of the extracted file: `4f4ffab9ca25185fca1dcfd2d1049a1c65759feb4f1c2ce3019b74d433988660`
+Expected sha256 of the extracted file: `c67f274d21368e8d72c21b0cdc31eedce1882c16f6717a28fc83e10d3899500c`
 
 The skill names `E:/projects/agent-harness-core` because that is this workstation's core checkout. The export folds it to `{{CORE_REPO}}` once Step 4's row exists.
 
@@ -4290,7 +4494,7 @@ not a boundary: gh -R x pr create and gh api are not matched."
 
 - [ ] **Step 1: Create the work directory and config**
 
-Create an empty `~/.claude-publish/work` and write `~/.claude-publish/config.json` in the shape `tools/publish/README.md` shows: an `owners` entry for `Cringely` naming the public identity, and a `reviewers` entry for `Cringely/agent-harness-core` holding the App ID, the `op read` key command with `OP_BIOMETRIC_UNLOCK_ENABLED` set to `false`, and the reviewer checkout. The existing reviewer worktree the hand-written helper used is a fit. Never paste the config's values into a chat, an issue or a commit.
+Create an empty `~/.claude-publish/work`. Clone the repository to `~/.claude-publish/tool`, the dedicated clean clone review-merge runs from and the reviewer checkout. Write the key wrapper `~/.claude-publish/read-reviewer-key.ps1` in the form `tools/publish/README.md` shows, reading the service-account token from the DPAPI-protected file the hand-written helper already uses, so the token never enters the config. Then write `~/.claude-publish/config.json` in the shape the README shows: an `owners` entry for `Cringely` naming the public identity, and a `reviewers` entry for `Cringely/agent-harness-core` holding the App ID, the wrapper as `keyCommand` (`pwsh -NoProfile -File <wrapper>`) with `OP_BIOMETRIC_UNLOCK_ENABLED` set to `false` in `keyCommandEnv`, and `~/.claude-publish/tool` as the checkout. Never paste the config's or the wrapper's values into a chat, an issue or a commit.
 
 - [ ] **Step 2: Probe three refusals live, none of which publishes**
 
@@ -4310,4 +4514,6 @@ Expected: each is denied by a permission rule. The second is the live check of t
 
 - [ ] **Step 4: First real use**
 
-Open this branch's pull request with `pr create ... --closes 274` and a body in the skill's shape, then merge it with `review-merge --repo Cringely/agent-harness-core --pr <n> --closes 274 --allow-admin --admin-reason-file <file>`. The branch edits owned paths (`.github/`, `test/`, `install/`, `account/claude/settings.account.json`), so the App's approval alone cannot merge it and the bypass is expected. That is issue #274's "Done when".
+Open this branch's pull request with `pr create ... --closes 274` and a body in the skill's shape. review-merge cannot merge it: the tool refuses to run from a checkout that is not at the default branch head, and `tools/publish/` reaches the default branch only with this merge. So this pull request is reviewed and merged by the existing hand-run flow in CONTRIBUTING.md, with the bypass the owned paths need (`.github/`, `test/`, `install/`, `account/claude/settings.account.json`).
+
+The first review-merge runs on the next pull request after this one merges, from `~/.claude-publish/tool` brought to the new default branch head, in the background form the skill gives. That run completes issue #274's "Done when".
