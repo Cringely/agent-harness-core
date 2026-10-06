@@ -354,7 +354,7 @@ describe("secret-scan does not read a scanner failure as a result", () => {
       "#!/bin/sh",
       'while [ $# -gt 0 ]; do [ "$1" = --report-path ] && rp=$2; shift; done',
       opts.report !== undefined ? `printf '%s' '${opts.report}' > "$rp"` : "",
-      opts.stderr ? `echo '${opts.stderr}' >&2` : "",
+      opts.stderr ? `printf '%b\n' '${opts.stderr}' >&2` : "",
       `exit ${code}`,
     ];
     writeFileSync(join(s.dir, "rt", "gitleaks"), lines.join("\n") + "\n");
@@ -402,5 +402,113 @@ describe("secret-scan does not read a scanner failure as a result", () => {
     } finally {
       for (const [s] of cases) rmSync(s.dir, { recursive: true, force: true });
     }
+  });
+
+  // Verified live against gitleaks 8.30.1: a redirected log carries ESC[31mERRESC[0m, which
+  // `grep -qw ERR` does not match because the "m" before it is a word character. The stub writes
+  // that exact form, so the test fails when the escape strip is removed.
+  test("a scan that exits 0 but logs a coloured ERR fails", () => {
+    const script = runOf(loadJob(), SCAN);
+    const bad = stubbed(0, { stderr: "7:18AM \\033[31mERR\\033[0m \\033[1m[git] fatal: Invalid revision range\\033[0m" });
+    try {
+      expect(withRt(bad)(script)).not.toBe(0);
+    } finally {
+      rmSync(bad.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the job asks gitleaks for plain output", () => {
+    expect(loadJob().env?.NO_COLOR).toBe("1");
+  });
+});
+
+// `gitleaks git` reads `git log -p`, where a blob with a NUL byte in its first 8000 bytes prints as
+// "Binary files differ" and carries no content, so a secret inside one was never scanned and the job
+// passed (verified live on gitleaks 8.30.1: git mode exit 0, stdin mode exit 1 on the same blob).
+// The binary step pipes each such blob through gitleaks stdin. Failing on any binary is rejected: a
+// legitimate image must pass a clean scan.
+describe("secret-scan reads binary blobs the diff scan skips", () => {
+  const STEP = "Scan binary files the diff scan skips";
+
+  // A stub that records stdin to `seen`, writes a finding when asked, and exits `code`.
+  function withBinaryCommit(code: number, files: Record<string, string | Buffer>) {
+    const s = scratch(0);
+    const repo = join(s.dir, "repo");
+    const seen = join(s.dir, "rt", "seen.bin");
+    const fwd = (p: string) => p.replace(/\\/g, "/");
+    writeFileSync(
+      join(s.dir, "rt", "gitleaks"),
+      [
+        "#!/bin/sh",
+        'while [ $# -gt 0 ]; do [ "$1" = --report-path ] && rp=$2; shift; done',
+        `cat >> "${fwd(seen)}"`,
+        `echo x >> "${fwd(seen)}.calls"`,
+        code === 1 ? `printf '[{"RuleID":"generic-api-key"}]' > "$rp"` : "",
+        `exit ${code}`,
+      ].join("\n") + "\n",
+    );
+    const g = (...a: string[]) => {
+      const r = Bun.spawnSync(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", ...a], {
+        cwd: repo,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      if (!r.success) throw new Error(`git ${a.join(" ")}: ${new TextDecoder().decode(r.stderr)}`);
+      return new TextDecoder().decode(r.stdout).trim();
+    };
+    for (const [name, body] of Object.entries(files)) writeFileSync(join(repo, name), body);
+    g("add", "-A");
+    g("commit", "-q", "-m", "add files");
+    const head = g("rev-parse", "HEAD");
+    const calls = () => (existsSync(seen + ".calls") ? readFileSync(seen + ".calls", "utf8").trim().split("\n").length : 0);
+    return { ...s, head, seen, calls, runStep: () => s.run(runOf(loadJob(), STEP), s.base, head) };
+  }
+  const NUL = Buffer.from("x\0\napi_key = PLANTED\n");
+
+  test("a NUL-containing file is handed to the scanner, a path with spaces included", () => {
+    const t = withBinaryCommit(0, { "my blob.dat": NUL });
+    try {
+      expect(t.runStep()).toBe(0);
+      expect(t.calls()).toBe(1);
+      expect(readFileSync(t.seen)).toEqual(NUL);
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a finding in a binary fails the step, and so does a scanner error", () => {
+    for (const code of [1, 2]) {
+      const t = withBinaryCommit(code, { "x.dat": NUL });
+      try {
+        expect(t.runStep()).not.toBe(0);
+      } finally {
+        rmSync(t.dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("a range with no binary file passes without invoking the scanner", () => {
+    const t = withBinaryCommit(1, { "plain.txt": "hello\n" });
+    try {
+      expect(t.runStep()).toBe(0);
+      expect(t.calls()).toBe(0);
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an unresolvable range fails the step", () => {
+    const t = withBinaryCommit(0, { "x.dat": NUL });
+    try {
+      expect(t.run(runOf(loadJob(), STEP), BOGUS, t.head)).not.toBe(0);
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the step runs after the diff scan and is covered by the per-call flag count", () => {
+    const names = loadJob().steps.map((s) => s.name);
+    expect(names.indexOf(STEP)).toBeGreaterThan(names.indexOf("Scan the pull request's commits"));
+    expect(names.indexOf(STEP)).toBeGreaterThan(names.indexOf("Scanner canary"));
   });
 });

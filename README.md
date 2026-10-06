@@ -377,8 +377,10 @@ The workflow also carries a Gitleaks secret scan that runs on pull requests only
 `.gitleaks.toml` at the repo root. The binary is pinned by version and sha256 rather than run through
 a third-party action. A canary step fails the job if the scanner cannot detect a planted secret, and
 a finding is reported as file, line and rule, never the matched value. Gitleaks does not read commit
-messages, so a separate step pipes each message and its touched paths through the same rules. The
-scan reads `.gitleaks.toml` from the pull request's base commit, never its head, and runs with the
+messages, so a separate step pipes each message and its touched paths through the same rules. Git
+prints no content for a binary blob (any file with a NUL byte near its start), so the diff scan
+cannot read one, so a further step pipes each such blob the range adds or modifies through the
+same rules, and a binary that scans clean passes. The scan reads `.gitleaks.toml` from the pull request's base commit, never its head, and runs with the
 working tree detached to the base commit and `--ignore-gitleaks-allow`, so a pull request cannot
 allowlist its own secret through `.gitleaks.toml`, `.gitleaksignore` or an inline `gitleaks:allow`
 comment. When the base has no config file, the built-in rules apply. The job

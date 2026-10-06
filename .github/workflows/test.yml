@@ -163,6 +163,9 @@ jobs:
       GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      # gitleaks logs through a coloured writer, so a redirected log still holds "ESC[31mERRESC[0m"
+      # and `grep -qw ERR` misses it. Plain output here, and the scan step strips escapes anyway.
+      NO_COLOR: "1"
     steps:
       # Full history, because the range base..head needs both ends and their ancestry.
       - name: Check out repo
@@ -237,7 +240,7 @@ jobs:
           cat "$log" >&2
           # gitleaks exits 0 when its own git log fails (bad range, unreadable repo) and logs an ERR
           # line instead. Warnings such as "leaks found" are not errors, so only ERR refuses here.
-          if grep -qw ERR "$log"; then echo "::error::gitleaks logged an error while scanning, so the range may be unread"; exit 1; fi
+          if sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -qw ERR; then echo "::error::gitleaks logged an error while scanning, so the range may be unread"; exit 1; fi
           if [ "$rc" -eq 0 ]; then exit 0; fi
           if [ "$rc" -eq 1 ] && jq -r '.[] | "::error file=\(.File),line=\(.StartLine)::\(.RuleID) in commit \(.Commit[0:7])"' "$report"; then exit 1; fi
           echo "::error::gitleaks could not complete (exit $rc)"
@@ -257,5 +260,32 @@ jobs:
             fail=1
             if [ "$rc" -eq 1 ] && jq -r --arg c "$c" '.[] | "::error::\(.RuleID) in the message or paths of commit \($c[0:7])"' "$report"; then continue; fi
             echo "::error::gitleaks could not complete for commit ${c:0:7} (exit $rc)"
+          done
+          exit "$fail"
+
+      # gitleaks git reads `git log -p`, and git prints "Binary files differ" with no content for any
+      # blob with a NUL byte in its first 8000 bytes (or marked binary in .gitattributes), so the
+      # diff scan never sees a secret in one. Those blobs are found from --numstat, where git shows
+      # them as "-<tab>-", and each is piped through the same rules as stdin. A binary that scans
+      # clean passes: failing on any binary would refuse every image. Deleted paths hold no blob.
+      - name: Scan binary files the diff scan skips
+        run: |
+          fail=0
+          commits=$(git rev-list "${BASE_SHA}..${HEAD_SHA}") || { echo "::error::commit range does not resolve"; exit 1; }
+          for c in $commits; do
+            list="$RUNNER_TEMP/binaries.list"
+            git log -1 --diff-merges=first-parent --numstat -z --no-renames --diff-filter=AM --format= "$c" > "$list" || { echo "::error::cannot read commit ${c:0:7}"; exit 1; }
+            while IFS= read -r -d '' rec; do
+              case "$rec" in "-"$'\t'"-"$'\t'*) ;; *) continue ;; esac
+              path=${rec#-$'\t'-$'\t'}
+              report="$RUNNER_TEMP/bin.json"
+              blob="$RUNNER_TEMP/bin.blob"
+              git show "$c:$path" > "$blob" || { echo "::error::cannot read a binary file of commit ${c:0:7}"; exit 1; }
+              rc=0; "$RUNNER_TEMP/gitleaks" stdin --no-banner --ignore-gitleaks-allow --redact --log-level fatal --config "$RUNNER_TEMP/gitleaks.toml" --report-format json --report-path "$report" < "$blob" || rc=$?
+              if [ "$rc" -eq 0 ]; then continue; fi
+              fail=1
+              if [ "$rc" -eq 1 ] && jq -r --arg c "$c" '.[] | "::error::\(.RuleID) in a binary file of commit \($c[0:7])"' "$report"; then continue; fi
+              echo "::error::gitleaks could not complete for a binary file of commit ${c:0:7} (exit $rc)"
+            done < "$list"
           done
           exit "$fail"
