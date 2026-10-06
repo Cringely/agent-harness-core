@@ -142,8 +142,20 @@ if ($help -match '--usage-output-file\b') {
     # safe.directory, permissions, broken config) means git could not say, so refuse. No git on
     # PATH means the walk is all there is.
     if (Get-Command git -ErrorAction SilentlyContinue) {
-        $gitOut = (& git -C $usageDir rev-parse --is-inside-work-tree 2>&1 | Out-String).Trim()
-        $gitExit = $LASTEXITCODE
+        # Git translates its messages (gettext, LANG/LC_ALL, the Windows display language), so the
+        # "not a git repository" match below only holds in the C locale. Pin it for this one call
+        # and put the caller's values back afterwards.
+        $savedLcAll = $env:LC_ALL
+        $savedLanguage = $env:LANGUAGE
+        try {
+            $env:LC_ALL = 'C'
+            $env:LANGUAGE = ''
+            $gitOut = (& git -C $usageDir rev-parse --is-inside-work-tree 2>&1 | Out-String).Trim()
+            $gitExit = $LASTEXITCODE
+        } finally {
+            $env:LC_ALL = $savedLcAll
+            $env:LANGUAGE = $savedLanguage
+        }
         $outside = ($gitExit -eq 0 -and $gitOut -eq 'false') -or ($gitExit -ne 0 -and $gitOut -match 'not a git repository')
         if (-not $outside) {
             Stop-Wrapper "usage directory '$usageDir' is inside a git work tree, or git could not rule it out (link, separate git dir, or git error: $gitOut). Pick a directory outside any repository."

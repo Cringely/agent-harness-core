@@ -145,6 +145,30 @@ exit ([int]$env:STUB_EXIT)
         $r.Argv | Should -BeNullOrEmpty
     }
 
+    It "allows a usage directory outside any repository when the caller's locale is not English" {
+        # A stub git that answers in English only under LC_ALL=C and in German otherwise, as a
+        # translated git does. The wrapper must pin the locale for its git call.
+        $bin = Join-Path $script:sandbox 'localebin'
+        New-Item -ItemType Directory $bin -Force | Out-Null
+        if ($IsWindows) {
+            Set-Content -LiteralPath (Join-Path $bin 'git.cmd') -Value "@echo off`r`nif `"%LC_ALL%`"==`"C`" (echo fatal: not a git repository 1>&2) else (echo fatal: kein Git-Repository 1>&2)`r`nexit /b 128"
+        } else {
+            $g = Join-Path $bin 'git'
+            Set-Content -LiteralPath $g -Value "#!/bin/sh`nif [ `"`$LC_ALL`" = C ]; then echo 'fatal: not a git repository' >&2; else echo 'fatal: kein Git-Repository' >&2; fi`nexit 128"
+            & chmod +x $g
+        }
+        $savedPath = $env:PATH; $savedAll = $env:LC_ALL; $savedLang = $env:LANGUAGE
+        try {
+            $env:PATH = "$bin$([System.IO.Path]::PathSeparator)$savedPath"
+            $env:LC_ALL = 'de_DE.UTF-8'
+            $env:LANGUAGE = 'de'
+            $r = Invoke-Wrapper @('-UsageDir', $script:usageDir)
+        } finally {
+            $env:PATH = $savedPath; $env:LC_ALL = $savedAll; $env:LANGUAGE = $savedLang
+        }
+        $r.Exit | Should -Be 0
+        $r.Argv | Should -Not -BeNullOrEmpty
+    }
     It "refuses a usage directory reached through a symlink into a git work tree" -Skip:($IsWindows) {
         $repo = Join-Path $script:sandbox 'srepo'
         New-Item -ItemType Directory (Join-Path $repo 'sub') -Force | Out-Null
