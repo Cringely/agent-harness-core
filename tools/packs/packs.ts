@@ -400,13 +400,15 @@ export function buildPlan(root: string): Plan {
       const dir = resolveMember(root, rel, "dir", where);
       const name = posix.basename(rel);
       needTracked(`${rel}/SKILL.md`, where);
-      const skillMd = join(dir, "SKILL.md");
-      if (!lstatSync(skillMd, { throwIfNoEntry: false })?.isFile()) fail(`${where}: no SKILL.md`);
-      const declared = frontmatterName(readFileSync(skillMd, "utf8"));
+      // The listing refuses links and non-regular entries, so membership here stands in for an lstat
+      // before the read. A stat-then-read of one path is a check-then-use race.
+      const files = listFiles(dir, "", where, tracked, rel);
+      if (!files.includes("SKILL.md")) fail(`${where}: no SKILL.md`);
+      const declared = frontmatterName(readFileSync(join(dir, "SKILL.md"), "utf8"));
       if (declared !== name) {
         fail(`${where}: SKILL.md name ${JSON.stringify(declared)} must equal its directory ${JSON.stringify(name)}`);
       }
-      for (const f of listFiles(dir, "", where, tracked, rel)) put(`${base}/skills/${name}/${f}`, readFileSync(join(dir, ...f.split("/"))));
+      for (const f of files) put(`${base}/skills/${name}/${f}`, readFileSync(join(dir, ...f.split("/"))));
     }
 
     for (const rel of pack.agents) {
@@ -427,10 +429,10 @@ export function buildPlan(root: string): Plan {
       const where = `pack ${pack.id}: hooks ${pack.hooks}`;
       const dir = resolveMember(root, pack.hooks, "dir", where);
       needTracked(`${pack.hooks}/hooks.json`, where);
-      const hooksJson = join(dir, "hooks.json");
-      if (!lstatSync(hooksJson, { throwIfNoEntry: false })?.isFile()) fail(`${where}: no hooks.json`);
-      checkHooksJson(readFileSync(hooksJson, "utf8"), where);
-      for (const f of listFiles(dir, "", where, tracked, pack.hooks)) put(`${base}/hooks/${f}`, readFileSync(join(dir, ...f.split("/"))));
+      const files = listFiles(dir, "", where, tracked, pack.hooks);
+      if (!files.includes("hooks.json")) fail(`${where}: no hooks.json`);
+      checkHooksJson(readFileSync(join(dir, "hooks.json"), "utf8"), where);
+      for (const f of files) put(`${base}/hooks/${f}`, readFileSync(join(dir, ...f.split("/"))));
     }
   }
 
