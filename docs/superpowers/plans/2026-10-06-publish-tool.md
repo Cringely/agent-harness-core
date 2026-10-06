@@ -1529,10 +1529,12 @@ describe("lookups", () => {
     expect(() => gh(runner).prTemplate(REPO, "main")).toThrow(PublishError);
   });
 
-  test("issueTemplate refuses an issue form and a missing file", () => {
-    const runner = new FakeRunner([TOKEN, on(["gh", "api"], NOT_FOUND)]);
-    expect(() => gh(runner).issueTemplate(REPO, "main", "bug.yml")).toThrow(PublishRefusal);
-    expect(() => gh(runner).issueTemplate(REPO, "main", "absent.md")).toThrow(PublishRefusal);
+  test("issueTemplate refuses an issue form without reading it, and a missing file", () => {
+    const form = new FakeRunner([TOKEN, on(["gh", "api"], { stdout: "name: Bug" })]);
+    expect(() => gh(form).issueTemplate(REPO, "main", "bug.yml")).toThrow(PublishRefusal);
+    expect(form.calls).toHaveLength(1);
+    const missing = new FakeRunner([TOKEN, on(["gh", "api"], NOT_FOUND)]);
+    expect(() => gh(missing).issueTemplate(REPO, "main", "absent.md")).toThrow(PublishRefusal);
   });
 
   test("blankIssuesDisabled reads config.yml", () => {
@@ -1637,7 +1639,7 @@ describe("publishing calls", () => {
 });
 ````
 
-Expected sha256 of the extracted file: `be04c39d73492ad79412532ec77c3ad8d62657dae1c064588e6ab2c394a4c5b2`
+Expected sha256 of the extracted file: `37a3640bac985cdd87383343f725dc98219fdda97146b38c0e2e47a8ca154df6`
 
 - [ ] **Step 2: Run it to see it fail**
 

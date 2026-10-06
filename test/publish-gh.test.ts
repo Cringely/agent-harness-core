@@ -75,10 +75,12 @@ describe("lookups", () => {
     expect(() => gh(runner).prTemplate(REPO, "main")).toThrow(PublishError);
   });
 
-  test("issueTemplate refuses an issue form and a missing file", () => {
-    const runner = new FakeRunner([TOKEN, on(["gh", "api"], NOT_FOUND)]);
-    expect(() => gh(runner).issueTemplate(REPO, "main", "bug.yml")).toThrow(PublishRefusal);
-    expect(() => gh(runner).issueTemplate(REPO, "main", "absent.md")).toThrow(PublishRefusal);
+  test("issueTemplate refuses an issue form without reading it, and a missing file", () => {
+    const form = new FakeRunner([TOKEN, on(["gh", "api"], { stdout: "name: Bug" })]);
+    expect(() => gh(form).issueTemplate(REPO, "main", "bug.yml")).toThrow(PublishRefusal);
+    expect(form.calls).toHaveLength(1);
+    const missing = new FakeRunner([TOKEN, on(["gh", "api"], NOT_FOUND)]);
+    expect(() => gh(missing).issueTemplate(REPO, "main", "absent.md")).toThrow(PublishRefusal);
   });
 
   test("blankIssuesDisabled reads config.yml", () => {
