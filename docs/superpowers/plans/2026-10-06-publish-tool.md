@@ -931,6 +931,17 @@ describe("findClosingRefs()", () => {
   test("counts keywords inside code spans too", () => {
     expect(findClosingRefs("Write `fixes #20` to close one.", REPO)).toHaveLength(1);
   });
+
+  test("reads a reference on the line after the keyword", () => {
+    expect(findClosingRefs("Closes\n#5", REPO).map((ref) => ref.number)).toEqual([5]);
+    expect(findClosingRefs("Closes\r\n\r\n#6", REPO).map((ref) => ref.number)).toEqual([6]);
+  });
+
+  test("reads a reference after any other whitespace or a zero-width gap", () => {
+    expect(findClosingRefs(`Closes${String.fromCharCode(0xa0)}#7`, REPO).map((ref) => ref.number)).toEqual([7]);
+    expect(findClosingRefs(`Closes${String.fromCharCode(0x200b)}#8`, REPO).map((ref) => ref.number)).toEqual([8]);
+    expect(findClosingRefs(`Clo${String.fromCharCode(0x200b)}ses #9`, REPO).map((ref) => ref.number)).toEqual([9]);
+  });
 });
 
 describe("parseClosesList()", () => {
@@ -975,7 +986,7 @@ describe("compareClosing()", () => {
 });
 ````
 
-Expected sha256 of the extracted file: `05e8bd1f2f8f17fff77ec43b4a3968be7bcbf939a6bddc6431a90494d3c9b969`
+Expected sha256 of the extracted file: `5fcf358291338afdb0db3fc470f0fc880e4762d643e2a8655a10cf7a2d250de8`
 
 - [ ] **Step 2: Run it to see it fail**
 
@@ -995,8 +1006,10 @@ Expected: FAIL, `../tools/publish/scan` cannot be found.
 // removed, so a zero-width character inside the URL or the trailer does not slip past.
 //
 // findClosingRefs reads GitHub's closing keywords (close, closes, closed, fix, fixes, fixed,
-// resolve, resolves, resolved) followed by an issue reference. It deliberately counts keywords
-// inside code spans and fences too: that can refuse a body GitHub would not act on, never the
+// resolve, resolves, resolved) followed by an issue reference, with any whitespace (newlines and
+// no-break spaces included) between the two, over the text as written and over the copy with
+// invisible characters removed. It deliberately counts keywords inside code spans and fences too.
+// Every choice errs toward matching: that can refuse a body GitHub would not act on, never the
 // reverse.
 
 import { findIdentityHits, type IdentityDecl } from "../pr-review/identity";
@@ -1040,17 +1053,21 @@ export interface ClosingRef {
 }
 
 const CLOSING_RE =
-  /(?<![A-Za-z0-9_])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?![A-Za-z0-9_])[ \t]*:?[ \t]*(?:#(\d+)|gh-(\d+)|([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#(\d+)|https?:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/(?:issues|pull)\/(\d+))/gi;
+  /(?<![A-Za-z0-9_])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?![A-Za-z0-9_])\s*:?\s*(?:#(\d+)|gh-(\d+)|([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#(\d+)|https?:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/(?:issues|pull)\/(\d+))/gi;
 
 export function findClosingRefs(text: string, repo: string): ClosingRef[] {
-  const refs: ClosingRef[] = [];
-  for (const match of text.matchAll(CLOSING_RE)) {
-    const [, hash, gh, crossRepo, crossNumber, urlRepo, urlNumber] = match;
-    const target = (crossRepo ?? urlRepo ?? repo).toLowerCase();
-    const number = Number(hash ?? gh ?? crossNumber ?? urlNumber);
-    refs.push({ repo: target, number });
+  const refs = new Map<string, ClosingRef>();
+  // Both the text as written and a copy with invisible characters removed, results merged, so a
+  // zero-width gap inside the keyword or between it and the reference cannot hide a match.
+  for (const source of [text, stripInvisible(text)]) {
+    for (const match of source.matchAll(CLOSING_RE)) {
+      const [, hash, gh, crossRepo, crossNumber, urlRepo, urlNumber] = match;
+      const target = (crossRepo ?? urlRepo ?? repo).toLowerCase();
+      const number = Number(hash ?? gh ?? crossNumber ?? urlNumber);
+      refs.set(`${target}#${number}`, { repo: target, number });
+    }
   }
-  return refs;
+  return [...refs.values()];
 }
 
 // "--closes 12,34". An absent or empty value declares nothing, so no closing keyword is allowed.
@@ -1081,18 +1098,20 @@ export function compareClosing(
 }
 ````
 
-Expected sha256 of the extracted file: `8dfecd85aeed0db914cd7b064414a038d76991433ba05157b14117fef07c877d`
+Expected sha256 of the extracted file: `e8f7e3a88243fbcecdff2aaa22a71d4bb8ec582c862f1fcf50ea17a309e5e4f7`
 
 - [ ] **Step 4: Run it to see it pass**
 
 Run: `bun test test/publish-scan.test.ts`
-Expected: `23 pass`, `0 fail`.
+Expected: `25 pass`, `0 fail`.
 
 - [ ] **Step 5: Ablate, twice**
 
 First, in `scanText`, delete the one line that begins `if (SESSION_LINK_RE.test(text)`. Run the suite. Expected: `reports a Claude Code session link` and `reports a session link split by a zero-width character` fail. Restore.
 
-Second, in `compareClosing`, change `const missing = [...declaredSet].filter((n) => !foundSet.has(n)).length;` to `const missing = 0;`. Expected: `refuses a declared issue the text never closes` fails. Restore and re-run to `23 pass`.
+Second, in `compareClosing`, change `const missing = [...declaredSet].filter((n) => !foundSet.has(n)).length;` to `const missing = 0;`. Expected: `refuses a declared issue the text never closes` fails. Restore.
+
+Third, in `findClosingRefs`, change the loop source list `[text, stripInvisible(text)]` to `[text]`. Expected: `reads a reference after any other whitespace or a zero-width gap` fails. Restore. Then change the separator in `CLOSING_RE` from `\s*:?\s*` back to `[ \t]*:?[ \t]*`. Expected: `reads a reference on the line after the keyword` fails. Restore and re-run to `25 pass`.
 
 - [ ] **Step 6: Run the whole suite**
 

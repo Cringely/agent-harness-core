@@ -7,8 +7,10 @@
 // removed, so a zero-width character inside the URL or the trailer does not slip past.
 //
 // findClosingRefs reads GitHub's closing keywords (close, closes, closed, fix, fixes, fixed,
-// resolve, resolves, resolved) followed by an issue reference. It deliberately counts keywords
-// inside code spans and fences too: that can refuse a body GitHub would not act on, never the
+// resolve, resolves, resolved) followed by an issue reference, with any whitespace (newlines and
+// no-break spaces included) between the two, over the text as written and over the copy with
+// invisible characters removed. It deliberately counts keywords inside code spans and fences too.
+// Every choice errs toward matching: that can refuse a body GitHub would not act on, never the
 // reverse.
 
 import { findIdentityHits, type IdentityDecl } from "../pr-review/identity";
@@ -52,17 +54,21 @@ export interface ClosingRef {
 }
 
 const CLOSING_RE =
-  /(?<![A-Za-z0-9_])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?![A-Za-z0-9_])[ \t]*:?[ \t]*(?:#(\d+)|gh-(\d+)|([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#(\d+)|https?:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/(?:issues|pull)\/(\d+))/gi;
+  /(?<![A-Za-z0-9_])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?![A-Za-z0-9_])\s*:?\s*(?:#(\d+)|gh-(\d+)|([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#(\d+)|https?:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/(?:issues|pull)\/(\d+))/gi;
 
 export function findClosingRefs(text: string, repo: string): ClosingRef[] {
-  const refs: ClosingRef[] = [];
-  for (const match of text.matchAll(CLOSING_RE)) {
-    const [, hash, gh, crossRepo, crossNumber, urlRepo, urlNumber] = match;
-    const target = (crossRepo ?? urlRepo ?? repo).toLowerCase();
-    const number = Number(hash ?? gh ?? crossNumber ?? urlNumber);
-    refs.push({ repo: target, number });
+  const refs = new Map<string, ClosingRef>();
+  // Both the text as written and a copy with invisible characters removed, results merged, so a
+  // zero-width gap inside the keyword or between it and the reference cannot hide a match.
+  for (const source of [text, stripInvisible(text)]) {
+    for (const match of source.matchAll(CLOSING_RE)) {
+      const [, hash, gh, crossRepo, crossNumber, urlRepo, urlNumber] = match;
+      const target = (crossRepo ?? urlRepo ?? repo).toLowerCase();
+      const number = Number(hash ?? gh ?? crossNumber ?? urlNumber);
+      refs.set(`${target}#${number}`, { repo: target, number });
+    }
   }
-  return refs;
+  return [...refs.values()];
 }
 
 // "--closes 12,34". An absent or empty value declares nothing, so no closing keyword is allowed.

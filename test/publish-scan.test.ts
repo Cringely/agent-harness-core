@@ -80,6 +80,17 @@ describe("findClosingRefs()", () => {
   test("counts keywords inside code spans too", () => {
     expect(findClosingRefs("Write `fixes #20` to close one.", REPO)).toHaveLength(1);
   });
+
+  test("reads a reference on the line after the keyword", () => {
+    expect(findClosingRefs("Closes\n#5", REPO).map((ref) => ref.number)).toEqual([5]);
+    expect(findClosingRefs("Closes\r\n\r\n#6", REPO).map((ref) => ref.number)).toEqual([6]);
+  });
+
+  test("reads a reference after any other whitespace or a zero-width gap", () => {
+    expect(findClosingRefs(`Closes${String.fromCharCode(0xa0)}#7`, REPO).map((ref) => ref.number)).toEqual([7]);
+    expect(findClosingRefs(`Closes${String.fromCharCode(0x200b)}#8`, REPO).map((ref) => ref.number)).toEqual([8]);
+    expect(findClosingRefs(`Clo${String.fromCharCode(0x200b)}ses #9`, REPO).map((ref) => ref.number)).toEqual([9]);
+  });
 });
 
 describe("parseClosesList()", () => {
