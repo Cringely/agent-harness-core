@@ -201,10 +201,13 @@ jobs:
 
       # Reports file, line, rule and short commit only. --redact keeps the value out of the
       # report, and the log level keeps gitleaks' own output down to counts.
+      # --diff-merges=first-parent makes a merge commit show its diff against its first parent, so a
+      # secret that exists only in a merge commit (a conflict resolution, an evil merge) is scanned.
+      # Without it git log emits no diff for a merge and gitleaks counts the commit as scanned.
       - name: Scan the pull request's commits
         run: |
           report="$RUNNER_TEMP/files.json"
-          rc=0; "$RUNNER_TEMP/gitleaks" git --no-banner --redact --log-level warn --config .gitleaks.toml --log-opts "${BASE_SHA}..${HEAD_SHA}" --report-format json --report-path "$report" . || rc=$?
+          rc=0; "$RUNNER_TEMP/gitleaks" git --no-banner --redact --log-level warn --config .gitleaks.toml --log-opts "--diff-merges=first-parent ${BASE_SHA}..${HEAD_SHA}" --report-format json --report-path "$report" . || rc=$?
           if [ "$rc" -eq 0 ]; then exit 0; fi
           if [ "$rc" -eq 1 ] && jq -r '.[] | "::error file=\(.File),line=\(.StartLine)::\(.RuleID) in commit \(.Commit[0:7])"' "$report"; then exit 1; fi
           echo "::error::gitleaks could not complete (exit $rc)"
@@ -218,7 +221,7 @@ jobs:
           commits=$(git rev-list "${BASE_SHA}..${HEAD_SHA}") || { echo "::error::commit range does not resolve"; exit 1; }
           for c in $commits; do
             report="$RUNNER_TEMP/msg.json"
-            text=$(git log -1 --name-only --format=%B "$c") || { echo "::error::cannot read commit ${c:0:7}"; exit 1; }
+            text=$(git log -1 --diff-merges=first-parent --name-only --format=%B "$c") || { echo "::error::cannot read commit ${c:0:7}"; exit 1; }
             rc=0; printf '%s\n' "$text" | "$RUNNER_TEMP/gitleaks" stdin --no-banner --redact --log-level fatal --config .gitleaks.toml --report-format json --report-path "$report" || rc=$?
             if [ "$rc" -eq 0 ]; then continue; fi
             fail=1

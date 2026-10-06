@@ -73,6 +73,50 @@ describe("secret-scan job pins", () => {
   });
 });
 
+// A merge commit carries no diff of its own unless git is told which parent to compare against, so
+// a secret added only in a conflict resolution or an evil merge was counted as scanned and never
+// read. Verified against gitleaks 8.30.1: without the flag a 3-commit range reported 2 scanned and
+// exit 0, with it 3 scanned and exit 1. The flag must be on both scans.
+describe("secret-scan reads merge commits", () => {
+  test("both scans pass --diff-merges=first-parent", () => {
+    const job = loadJob();
+    expect(runOf(job, "Scan the pull request's commits")).toMatch(/--log-opts "--diff-merges=first-parent \$\{BASE_SHA\}\.\.\$\{HEAD_SHA\}"/);
+    expect(runOf(job, "Scan commit messages and paths")).toContain("git log -1 --diff-merges=first-parent --name-only");
+  });
+
+  test("the message scan feeds a merge-only path to the scanner", () => {
+    const s = scratch(0);
+    try {
+      const seen = join(s.dir, "rt", "seen.txt");
+      // Stub records its stdin so the test can see which paths the message step handed over.
+      writeFileSync(join(s.dir, "rt", "gitleaks"), `#!/bin/sh\ncat >> "${seen.replace(/\\/g, "/")}"\nexit 0\n`);
+      const g = (...a: string[]) => {
+        const r = Bun.spawnSync(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", ...a], {
+          cwd: join(s.dir, "repo"),
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        if (!r.success) throw new Error(`git ${a.join(" ")}: ${new TextDecoder().decode(r.stderr)}`);
+      };
+      const repo = join(s.dir, "repo");
+      g("checkout", "-q", "-b", "side", s.base);
+      writeFileSync(join(repo, "side.txt"), "s\n");
+      g("add", "side.txt");
+      g("commit", "-q", "-m", "side");
+      g("checkout", "-q", "-");
+      g("merge", "-q", "--no-ff", "--no-commit", "side");
+      writeFileSync(join(repo, "only-in-merge.txt"), "m\n");
+      g("add", "only-in-merge.txt");
+      g("commit", "-q", "-m", "merge side");
+      const mergeHead = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: repo, stdout: "pipe" }).stdout.toString().trim();
+      expect(s.run(runOf(loadJob(), "Scan commit messages and paths"), s.base, mergeHead)).toBe(0);
+      expect(readFileSync(seen, "utf8")).toContain("only-in-merge.txt");
+    } finally {
+      rmSync(s.dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe(".gitleaks.toml", () => {
   test("extends the default rules and allowlists only AWS's documented example key", () => {
     const cfg = Bun.TOML.parse(readFileSync(join(REPO_ROOT, ".gitleaks.toml"), "utf8")) as {
