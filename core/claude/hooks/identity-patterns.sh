@@ -730,13 +730,14 @@ EOF
 # read time). Nothing in od's output alone tells that from the real thing.
 #
 # Returns:
-#   0  clean -- no BOM, no NUL byte anywhere in the file
+#   0  clean -- no BOM, no NUL byte, and well-formed UTF-8 throughout
 #   1  a UTF-16 byte-order mark, or a NUL byte anywhere in the file (with
 #      or without a leading UTF-8 BOM -- non-BOM UTF-16, a UTF-8 BOM
 #      pasted onto a UTF-16 body, or some other encoding this
-#      byte-oriented parser cannot read) -- the caller refuses. The
-#      message is printed here, since only this function still has the
-#      byte-level evidence
+#      byte-oriented parser cannot read), or any byte sequence that is
+#      not valid UTF-8, such as a Latin-1 file (#206) -- the caller
+#      refuses. The message is printed here, since only this function
+#      still has the byte-level evidence
 #   2  a UTF-8 byte-order mark and nothing else wrong -- EF BB BF is
 #      three ordinary, non-NUL bytes, so $(...) carries it through
 #      untouched and every parser in this file already skips past it on
@@ -793,6 +794,17 @@ identity_check_encoding() (
     esac
     # The digits are listed rather than written as ranges, so what counts
     # as a hex digit never depends on the locale's collation order.
+    # #206: the same pass also walks the bytes as UTF-8 (RFC 3629: no
+    # overlong forms, no surrogates, nothing above U+10FFFF). A Latin-1 or
+    # Windows-1252 file has no NUL and no BOM, so everything above passes it,
+    # but its accented letter is one byte that is not valid UTF-8, and the
+    # arm built from it can never match the same name as git stores it. The
+    # verdict is recorded rather than acted on in the loop, so a NUL later in
+    # the file still gets its own, more specific, refusal first. Digit and
+    # letter classes are listed, never ranged, for the same locale reason.
+    identity_enc_need=0
+    identity_enc_kind=any
+    identity_enc_bad=0
     for identity_enc_byte do
         case $identity_enc_byte in
             00)
@@ -805,7 +817,45 @@ identity_check_encoding() (
                 exit 3
                 ;;
         esac
+        if [ "$identity_enc_need" -gt 0 ]; then
+            # A continuation byte is owed. The first one after e0, ed, f0 and
+            # f4 is narrower than 80-bf (overlong, surrogate, over U+10FFFF).
+            identity_enc_ok=0
+            case $identity_enc_kind in
+                any) case $identity_enc_byte in [89ab]?) identity_enc_ok=1 ;; esac ;;
+                e0) case $identity_enc_byte in [ab]?) identity_enc_ok=1 ;; esac ;;
+                ed) case $identity_enc_byte in [89]?) identity_enc_ok=1 ;; esac ;;
+                f0) case $identity_enc_byte in 9?|[ab]?) identity_enc_ok=1 ;; esac ;;
+                f4) case $identity_enc_byte in 8?) identity_enc_ok=1 ;; esac ;;
+            esac
+            if [ "$identity_enc_ok" = 1 ]; then
+                identity_enc_need=$((identity_enc_need - 1))
+                identity_enc_kind=any
+            else
+                identity_enc_bad=1
+                identity_enc_need=0
+                identity_enc_kind=any
+            fi
+        else
+            case $identity_enc_byte in
+                [01234567]?) : ;;
+                c[23456789abcdef]|d?) identity_enc_need=1 ;;
+                e0) identity_enc_need=2 identity_enc_kind=e0 ;;
+                ed) identity_enc_need=2 identity_enc_kind=ed ;;
+                e[123456789abcef]) identity_enc_need=2 ;;
+                f0) identity_enc_need=3 identity_enc_kind=f0 ;;
+                f[123]) identity_enc_need=3 ;;
+                f4) identity_enc_need=3 identity_enc_kind=f4 ;;
+                *) identity_enc_bad=1 ;;
+            esac
+        fi
     done
+    # A sequence cut off at end of file is as malformed as a stray byte.
+    [ "$identity_enc_need" -gt 0 ] && identity_enc_bad=1
+    if [ "$identity_enc_bad" = 1 ]; then
+        echo "identity gate: '$identity_enc_file' is not valid UTF-8. It is most likely Latin-1 or Windows-1252, where an accented letter is one byte that git's UTF-8 never contains, so a declared name using one would build a pattern arm that cannot match it and the gate would report clean (issue #206). Re-save the file as UTF-8 and retry." >&2
+        exit 1
+    fi
     [ "$identity_enc_utf8_bom" = 1 ] && exit 2
     exit 0
 )
