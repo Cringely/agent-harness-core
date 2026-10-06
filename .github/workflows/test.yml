@@ -141,3 +141,88 @@ jobs:
 
       - name: Account-Hooks.Tests.ps1
         run: pwsh -NoProfile -File install/Account-Hooks.Tests.ps1
+
+  secret-scan:
+    name: secret scan (Gitleaks)
+    # #251. The pre-commit token scan (#232) is the cheap first refusal and stays. This job covers
+    # what it cannot: secrets with no provider prefix, commit messages and touched paths, and any
+    # commit made with --no-verify or from a clone without the hook. It scans the pull request's
+    # own commit range, so master's existing history is never rescanned (a full-history baseline
+    # was clean when this job was added).
+    #
+    # Pull requests only. On a push to master the range would be the merge, already scanned as
+    # the pull request, so there is nothing for a push run to add.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    env:
+      # The Gitleaks binary (MIT) pinned by version and sha256, invoked directly. No third-party
+      # action: a binary checked against a hash needs nothing beyond the release asset, and it
+      # sidesteps any licence-key question about gitleaks-action. The hash is the one the release
+      # publishes in gitleaks_<version>_checksums.txt. A version bump changes both lines together.
+      GITLEAKS_VERSION: "8.30.1"
+      GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      # Full history, because the range base..head needs both ends and their ancestry.
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Gitleaks
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/gitleaks.tgz" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP" gitleaks
+
+      # A scanner that cannot detect anything passes every pull request. The planted value is
+      # assembled at run time, so this file never holds a string a scan would flag, and the
+      # check must see it in both a file and a piece of piped text (the commit message path).
+      # Fails closed: anything other than exit 1 means the job cannot vouch for the range.
+      - name: Scanner canary
+        run: |
+          canary_value='k8Dj29xPq4Lm7Zt1Wv5Rn3Bc6Hy0Fa2SeQ9'
+          canary_dir="$RUNNER_TEMP/canary"
+          mkdir -p "$canary_dir"
+          printf 'api_%s = "%s"\n' key "$canary_value" > "$canary_dir/planted.txt"
+          rc=0; "$RUNNER_TEMP/gitleaks" dir --no-banner --redact --log-level fatal --config .gitleaks.toml "$canary_dir" || rc=$?
+          [ "$rc" -eq 1 ] || { echo "::error::canary file was not detected (gitleaks exit $rc)"; exit 1; }
+          rc=0; printf 'api_%s = "%s"\n' key "$canary_value" | "$RUNNER_TEMP/gitleaks" stdin --no-banner --redact --log-level fatal --config .gitleaks.toml || rc=$?
+          [ "$rc" -eq 1 ] || { echo "::error::canary text was not detected (gitleaks exit $rc)"; exit 1; }
+
+      # gitleaks exits 0 when its own `git log` fails on a bad range, and an empty commit list
+      # makes the message loop below a no-op, so an unresolvable range would otherwise read as a
+      # clean scan. Resolve the range here and refuse when it does not.
+      - name: Resolve the commit range
+        run: |
+          git rev-list "${BASE_SHA}..${HEAD_SHA}" > /dev/null || { echo "::error::commit range ${BASE_SHA}..${HEAD_SHA} does not resolve"; exit 1; }
+
+      # Reports file, line, rule and short commit only. --redact keeps the value out of the
+      # report, and the log level keeps gitleaks' own output down to counts.
+      - name: Scan the pull request's commits
+        run: |
+          report="$RUNNER_TEMP/files.json"
+          rc=0; "$RUNNER_TEMP/gitleaks" git --no-banner --redact --log-level warn --config .gitleaks.toml --log-opts "${BASE_SHA}..${HEAD_SHA}" --report-format json --report-path "$report" . || rc=$?
+          if [ "$rc" -eq 0 ]; then exit 0; fi
+          if [ "$rc" -eq 1 ] && jq -r '.[] | "::error file=\(.File),line=\(.StartLine)::\(.RuleID) in commit \(.Commit[0:7])"' "$report"; then exit 1; fi
+          echo "::error::gitleaks could not complete (exit $rc)"
+          exit 1
+
+      # gitleaks git scans diffs, not commit messages, so each message and the paths the commit
+      # touches go through the same rules as piped text. Names the commit and the rule, never the text.
+      - name: Scan commit messages and paths
+        run: |
+          fail=0
+          commits=$(git rev-list "${BASE_SHA}..${HEAD_SHA}") || { echo "::error::commit range does not resolve"; exit 1; }
+          for c in $commits; do
+            report="$RUNNER_TEMP/msg.json"
+            text=$(git log -1 --name-only --format=%B "$c") || { echo "::error::cannot read commit ${c:0:7}"; exit 1; }
+            rc=0; printf '%s\n' "$text" | "$RUNNER_TEMP/gitleaks" stdin --no-banner --redact --log-level fatal --config .gitleaks.toml --report-format json --report-path "$report" || rc=$?
+            if [ "$rc" -eq 0 ]; then continue; fi
+            fail=1
+            if [ "$rc" -eq 1 ] && jq -r --arg c "$c" '.[] | "::error::\(.RuleID) in the message or paths of commit \($c[0:7])"' "$report"; then continue; fi
+            echo "::error::gitleaks could not complete for commit ${c:0:7} (exit $rc)"
+          done
+          exit "$fail"

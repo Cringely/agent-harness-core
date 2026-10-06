@@ -1,0 +1,12 @@
+# Gitleaks config for the CI secret scan (#251, job "secret scan" in
+# .github/workflows/test.yml). Extends the default rules and adds one allowlist
+# entry, the same single exception the pre-commit scan carries (#232): AWS's
+# documented example key, which tests and plan docs quote.
+title = "agent-harness-core"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "AWS documented example access key id"
+regexes = ['''AKIAIOSFODNN7EXAMPLE''']
