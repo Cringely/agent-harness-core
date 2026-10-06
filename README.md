@@ -108,7 +108,9 @@ for your name cannot carry your name in the repository it protects.
 
 Once the file exists, a file that cannot be read is a hard refusal rather than a skip. Something was
 declared and the gate cannot see it, which is a different situation from never having declared
-anything.
+anything. The same refusal covers a file that is not well-formed UTF-8, including UTF-16 and
+Latin-1 or Windows-1252 saves, because an accented letter in those encodings would never match the
+UTF-8 form git stores.
 
 The `.harness-manifest.json` behind that is a record of two different things, not one. `files` maps
 each installed path to the SHA256 it had at install time, which is what makes a project edit
