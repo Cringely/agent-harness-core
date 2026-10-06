@@ -97,7 +97,7 @@ distinguish clean from never linted.
 So the exemption goes per tree: one section or one entry per vendored directory, each under a
 comment naming the tree, where it came from, and the measurement that showed the exemption holding.
 This was settled on 2026-09-10, when the account kit gained its section for a vendored third-party
-skill. The kit already carried a per-tree section for a style contract that quotes its own banned
+skill. The kit then carried a per-tree section (since removed with the vendored style contract it covered, #179) for a style contract that quotes its own banned
 words, and the new one landed beside it as a second exemption section with its own comment, rather
 than as a widened glob over both. Adding a tree is then a reviewed act with a diff a reader can
 see. Removing one when the tree stops being vendored is a deletion, with nothing shared to re-check.
@@ -202,7 +202,7 @@ tell in that tree has nothing telling them the finding must not be acted on.
 
 The account-level lint kit at `~/.claude/tools/prose-lint/.vale.ini` carries its per-tree sections
 at the end of the file, each under a comment block holding its measurements; the vendored-skill
-section is `[**/skills/not-ai/**]`, and the style-contract section above it is where both footguns
+section is `[**/skills/not-ai/**]`, and the style-contract section that sat above it (since removed, #179) is where both footguns
 were first measured. The write hook at `core/claude/hooks/lint-doc-prose.ts` and the commit hook at
 `core/claude/hooks/pre-commit` carry the skip lists a project extends; `test/lint-doc-prose.test.ts`
 pins the set each one carries, and `test/pre-commit.test.ts` runs the commit hook's arms against a

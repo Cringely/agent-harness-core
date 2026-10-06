@@ -1694,25 +1694,17 @@ describe("identity gate — the pattern set is byte-transparent under the locale
     expect(mismatches).toEqual([]);
   });
 
-  test("a declared name carrying such a byte is still built into a live arm, and still found", () => {
+  // Until #206 this fixture loaded: the raw 0xE5 is not valid UTF-8, and
+  // nothing refused it, so the escape step above was the only thing between
+  // that byte and a re-encoded, dead arm. The encoding probe now refuses the
+  // file before the pattern is built. The escape-level test above still
+  // guards the sed behaviour itself, in case a valid file ever reaches it
+  // with such a byte by another route.
+  test("a declared name carrying such a byte is refused at load as not valid UTF-8 (#206)", () => {
     const gate = runHighByteGate();
-    expect(gate.rc).toBe(0);
-    // The arm has to carry the declared bytes, not a re-encoding of them.
-    const arm = Buffer.concat([
-      Buffer.from([0x5c, 0x62]),
-      Buffer.from("Zo", "latin1"),
-      Buffer.from([0xe5, 0x5c, 0x5c]),
-      Buffer.from("Example", "latin1"),
-      Buffer.from([0x5c, 0x62]),
-    ]);
-    expect(gate.pattern.includes(arm)).toBe(true);
-    // Both halves matter. identity_control proves no arm went dead, and
-    // identity_match proves the gate would refuse content carrying the name
-    // -- a control that passes over a pattern nothing matches is the shape
-    // this file's own canary check exists to catch.
-    expect(gate.control).toBe("pass");
-    expect(gate.match).toBe("found");
-    expect(gate.stderr).toBe("");
+    expect(gate.rc).toBe(1);
+    expect(gate.stderr).toContain("not valid UTF-8");
+    expect(gate.pattern.length).toBe(0);
   });
 });
 
@@ -2077,4 +2069,108 @@ describe("identity gate — the encoding probe refuses a lying tool or an unusua
       });
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// Issue #206: a Latin-1 identity file has no NUL and no BOM, so every probe
+// above passed it. Its accented letter is a single byte that is not valid
+// UTF-8, so the arm built from it could never match the same name as git
+// stores it, and the gate reported configured while missing the name. The
+// probe now refuses any file that is not well-formed UTF-8. Every byte below
+// is built from a code point, never typed as an escape.
+// ---------------------------------------------------------------------------
+
+/** A JSON identity file around raw bytes placed inside the declared name. */
+function identityBytesAround(inner: Buffer): Buffer {
+  return Buffer.concat([
+    Buffer.from('{"names":["Widget Pers', "latin1"),
+    inner,
+    Buffer.from(`n"],"emails":["${EMAIL}"]}`, "latin1"),
+  ]);
+}
+
+/** Runs identity_check_encoding alone over `bytes` and returns its status and stderr. */
+function probeEncoding(bytes: Buffer): { rc: number; stderr: string } {
+  const home = makeIdentityHomeBytes(bytes);
+  const file = join(home, ".claude-account-identity.json");
+  const driverPath = join(home, "driver.sh");
+  writeFileSync(
+    driverPath,
+    ["#!/bin/sh", '. "$1"', 'identity_check_encoding "$2" 2>"$3"', 'printf "%s" "$?"', ""].join("\n"),
+  );
+  const errPath = join(home, "err");
+  const sh = posixSh();
+  const shDir = posixShDir();
+  const base = hookLocaleEnv({});
+  const env = shDir ? { ...base, PATH: `${base.PATH ?? ""}${delimiter}${shDir}` } : base;
+  const run = Bun.spawnSync([sh, driverPath, LIB_SRC, file, errPath], { cwd: home, env, stdout: "pipe", stderr: "pipe" });
+  return { rc: Number(run.stdout.toString()), stderr: readFileSync(errPath, "utf8") };
+}
+
+describe("identity gate — the identity file must be well-formed UTF-8 (#206)", () => {
+  test("a Latin-1 file declaring a non-ASCII name is refused, so the name cannot slip through staged as UTF-8", () => {
+    // 0xF6 is the one-byte Latin-1 form of the letter whose UTF-8 form git stores as C3 B6.
+    const latin1 = Buffer.from(JSON.stringify({ names: [NON_ASCII_NAME], emails: [EMAIL] }), "latin1");
+    expect(latin1.includes(0xf6)).toBe(true);
+    const home = makeIdentityHomeBytes(latin1);
+    const dir = initPreCommitRepo();
+    stageNonAsciiName(dir);
+    const result = runPreCommit(dir, envWith({ USERPROFILE: home, HOME: home }));
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("not valid UTF-8");
+  });
+
+  const VALID: Array<[string, number[]]> = [
+    ["ASCII only", [0x41]],
+    ["two-byte, lowest (U+0080)", [0xc2, 0x80]],
+    ["two-byte, highest (U+07FF)", [0xdf, 0xbf]],
+    ["two-byte, the letter above (U+00F6)", [0xc3, 0xb6]],
+    ["three-byte, lowest (U+0800)", [0xe0, 0xa0, 0x80]],
+    ["three-byte, just under the surrogates (U+D7FF)", [0xed, 0x9f, 0xbf]],
+    ["three-byte, just over the surrogates (U+E000)", [0xee, 0x80, 0x80]],
+    ["three-byte, highest (U+FFFF)", [0xef, 0xbf, 0xbf]],
+    ["four-byte, lowest (U+10000)", [0xf0, 0x90, 0x80, 0x80]],
+    ["four-byte, highest (U+10FFFF)", [0xf4, 0x8f, 0xbf, 0xbf]],
+  ];
+  for (const [label, bytes] of VALID) {
+    test(`probe accepts valid UTF-8: ${label}`, () => {
+      expect(probeEncoding(identityBytesAround(Buffer.from(bytes))).rc).toBe(0);
+    });
+  }
+
+  const INVALID: Array<[string, number[]]> = [
+    ["a lone Latin-1 high byte (0xF6)", [0xf6]],
+    ["a Windows-1252 right single quote (0x92)", [0x92]],
+    ["a lone continuation byte (0x80)", [0x80]],
+    ["an overlong two-byte lead (0xC0 0x80)", [0xc0, 0x80]],
+    ["an overlong two-byte lead (0xC1 0xBF)", [0xc1, 0xbf]],
+    ["an overlong three-byte form (E0 80 80)", [0xe0, 0x80, 0x80]],
+    ["a UTF-16 surrogate half encoded as three bytes (ED A0 80)", [0xed, 0xa0, 0x80]],
+    ["an overlong four-byte form (F0 80 80 80)", [0xf0, 0x80, 0x80, 0x80]],
+    ["a code point above U+10FFFF (F4 90 80 80)", [0xf4, 0x90, 0x80, 0x80]],
+    ["a lead byte that never occurs in UTF-8 (0xF5)", [0xf5, 0x80, 0x80, 0x80]],
+    ["a lead byte that never occurs in UTF-8 (0xFF)", [0xff]],
+    ["a lead followed by an ASCII byte (C3 41)", [0xc3, 0x41]],
+    ["a three-byte lead cut short by ASCII (E2 82 41)", [0xe2, 0x82, 0x41]],
+  ];
+  for (const [label, bytes] of INVALID) {
+    test(`probe refuses invalid UTF-8: ${label}`, () => {
+      const result = probeEncoding(identityBytesAround(Buffer.from(bytes)));
+      expect(result.rc).toBe(1);
+      expect(result.stderr).toContain("not valid UTF-8");
+    });
+  }
+
+  test("probe refuses a multi-byte sequence cut off at the end of the file", () => {
+    const whole = Buffer.from(JSON.stringify({ names: [NAME], emails: [EMAIL] }), "utf8");
+    const result = probeEncoding(Buffer.concat([whole, Buffer.from([0xe2, 0x82])]));
+    expect(result.rc).toBe(1);
+    expect(result.stderr).toContain("not valid UTF-8");
+  });
+
+  test("a NUL byte still gets its own refusal ahead of the UTF-8 verdict", () => {
+    const result = probeEncoding(identityBytesAround(Buffer.from([0xf6, 0x00])));
+    expect(result.rc).toBe(1);
+    expect(result.stderr).toContain("NUL byte");
+  });
 });
