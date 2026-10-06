@@ -247,6 +247,18 @@ describe("lookups", () => {
   test("reviewerConfig refuses a repository the config does not declare", () => {
     expect(() => reviewerConfig(parsePublishConfig(config()), "fixture-owner/other-repo")).toThrow(PublishRefusal);
   });
+
+  test("ownerIdentity refuses an owner named like an inherited property", () => {
+    for (const owner of ["constructor", "__proto__", "toString"]) {
+      expect(() => ownerIdentity(parsePublishConfig(config()), `${owner}/repo`)).toThrow(PublishRefusal);
+    }
+  });
+
+  test("reviewerConfig refuses a repository key named like an inherited property", () => {
+    for (const key of ["constructor", "__proto__", "toString"]) {
+      expect(() => reviewerConfig(parsePublishConfig(config()), key)).toThrow(PublishRefusal);
+    }
+  });
 });
 
 describe("loadPublishConfig()", () => {
@@ -275,7 +287,7 @@ describe("loadPublishConfig()", () => {
 });
 ````
 
-Expected sha256 of the extracted file: `d960f75024942d47cb3661df1817815087e7f600c57c042898029f288f10ca45`
+Expected sha256 of the extracted file: `450ba20dc2db323124002e7b7a9adc48025cb8bfb7c931733b2f94a6c3683045`
 
 - [ ] **Step 2: Run it to see it fail**
 
@@ -463,30 +475,34 @@ export function loadPublishConfig(path: string = CONFIG_PATH): PublishConfig {
 
 export function ownerIdentity(config: PublishConfig, repo: string): OwnerIdentity {
   const owner = repo.split("/")[0]!.toLowerCase();
-  const identity = config.owners[owner];
+  // Own-property lookup: a plain object also answers for "constructor" and "__proto__", which would read as a declared owner.
+  const identity = Object.hasOwn(config.owners, owner) ? config.owners[owner] : undefined;
   if (identity === undefined) throw new PublishRefusal("the publish config declares no identity for this repository's owner");
   return identity;
 }
 
 export function reviewerConfig(config: PublishConfig, repo: string): ReviewerConfig {
-  const reviewer = config.reviewers[repo.toLowerCase()];
+  const key = repo.toLowerCase();
+  const reviewer = Object.hasOwn(config.reviewers, key) ? config.reviewers[key] : undefined;
   if (reviewer === undefined) throw new PublishRefusal("the publish config declares no reviewer for this repository");
   return reviewer;
 }
 ````
 
-Expected sha256 of the extracted file: `f89ecfe5b5275f12d4da9b3605c6909026ca9d514e9bbef170ba4a7b1ee778ae`
+Expected sha256 of the extracted file: `934740220af863d3a2c56aa72bba674279ec0d15f1d2c4ce701521f3413f040b`
 
 - [ ] **Step 4: Run it to see it pass**
 
 Run: `bun test test/publish-config.test.ts`
-Expected: `19 pass`, `0 fail`.
+Expected: `21 pass`, `0 fail`.
 
 - [ ] **Step 5: Ablate**
 
 First, in `tools/publish/config.ts`, change `if (typeof entry.ghUser !== "string" || !GH_USER_RE.test(entry.ghUser)) {` to `if (typeof entry.ghUser !== "string") {`. Run `bun test test/publish-config.test.ts`. Expected: `refuses a ghUser carrying shell metacharacters` fails. Restore.
 
-Second, change `if (SECRET_NAME_RE.test(name)) {` to `if (false) {`. Expected: `refuses a keyCommandEnv variable named like a secret, without echoing its value` fails. Restore the line and re-run to `19 pass`.
+Second, change `if (SECRET_NAME_RE.test(name)) {` to `if (false) {`. Expected: `refuses a keyCommandEnv variable named like a secret, without echoing its value` fails. Restore the line and re-run to `21 pass`.
+
+Third, in `ownerIdentity`, change `Object.hasOwn(config.owners, owner) ? config.owners[owner] : undefined` to `config.owners[owner]`. Expected: `ownerIdentity refuses an owner named like an inherited property` fails. Restore. Fourth, in `reviewerConfig`, change `Object.hasOwn(config.reviewers, key) ? config.reviewers[key] : undefined` to `config.reviewers[key]`. Expected: `reviewerConfig refuses a repository key named like an inherited property` fails. Restore and re-run to `21 pass`.
 
 - [ ] **Step 6: Own the new path**
 

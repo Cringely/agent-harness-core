@@ -143,13 +143,15 @@ export function loadPublishConfig(path: string = CONFIG_PATH): PublishConfig {
 
 export function ownerIdentity(config: PublishConfig, repo: string): OwnerIdentity {
   const owner = repo.split("/")[0]!.toLowerCase();
-  const identity = config.owners[owner];
+  // Own-property lookup: a plain object also answers for "constructor" and "__proto__", which would read as a declared owner.
+  const identity = Object.hasOwn(config.owners, owner) ? config.owners[owner] : undefined;
   if (identity === undefined) throw new PublishRefusal("the publish config declares no identity for this repository's owner");
   return identity;
 }
 
 export function reviewerConfig(config: PublishConfig, repo: string): ReviewerConfig {
-  const reviewer = config.reviewers[repo.toLowerCase()];
+  const key = repo.toLowerCase();
+  const reviewer = Object.hasOwn(config.reviewers, key) ? config.reviewers[key] : undefined;
   if (reviewer === undefined) throw new PublishRefusal("the publish config declares no reviewer for this repository");
   return reviewer;
 }

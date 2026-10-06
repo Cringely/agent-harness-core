@@ -119,6 +119,18 @@ describe("lookups", () => {
   test("reviewerConfig refuses a repository the config does not declare", () => {
     expect(() => reviewerConfig(parsePublishConfig(config()), "fixture-owner/other-repo")).toThrow(PublishRefusal);
   });
+
+  test("ownerIdentity refuses an owner named like an inherited property", () => {
+    for (const owner of ["constructor", "__proto__", "toString"]) {
+      expect(() => ownerIdentity(parsePublishConfig(config()), `${owner}/repo`)).toThrow(PublishRefusal);
+    }
+  });
+
+  test("reviewerConfig refuses a repository key named like an inherited property", () => {
+    for (const key of ["constructor", "__proto__", "toString"]) {
+      expect(() => reviewerConfig(parsePublishConfig(config()), key)).toThrow(PublishRefusal);
+    }
+  });
 });
 
 describe("loadPublishConfig()", () => {
