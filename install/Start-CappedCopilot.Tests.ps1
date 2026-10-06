@@ -156,6 +156,29 @@ exit ([int]$env:STUB_EXIT)
         $r.Argv | Should -BeNullOrEmpty
     }
 
+    It "refuses a usage directory when git stops at a filesystem boundary" {
+        # Git's "not a git repository (or any parent up to mount point X)" is undecided, not outside.
+        $bin = Join-Path $script:sandbox 'fakebin-fs'
+        New-Item -ItemType Directory $bin -Force | Out-Null
+        if ($IsWindows) {
+            Set-Content -LiteralPath (Join-Path $bin 'git.cmd') -Value "@echo off`r`necho fatal: not a git repository (or any parent up to mount point /mnt/x) 1>&2`r`necho Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set). 1>&2`r`nexit /b 128"
+        } else {
+            $g = Join-Path $bin 'git'
+            Set-Content -LiteralPath $g -Value "#!/bin/sh`necho 'fatal: not a git repository (or any parent up to mount point /mnt/x)' >&2`necho 'Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).' >&2`nexit 128"
+            & chmod +x $g
+        }
+        $savedPath = $env:PATH
+        try {
+            $env:PATH = "$bin$([System.IO.Path]::PathSeparator)$savedPath"
+            $r = Invoke-Wrapper @('-UsageDir', $script:usageDir)
+        } finally {
+            $env:PATH = $savedPath
+        }
+        $r.Exit | Should -Be 2
+        $r.Output | Should -Match 'git could not rule it out'
+        $r.Argv | Should -BeNullOrEmpty
+    }
+
     It "allows a usage directory outside any repository when the caller's locale is not English" {
         # A stub git that answers in English only under LC_ALL=C and in German otherwise, as a
         # translated git does. The wrapper must pin the locale for its git call.
@@ -227,6 +250,38 @@ exit ([int]$env:STUB_EXIT)
         $r.Exit | Should -Be 2
         $r.Output | Should -Match 'git work tree'
         $r.Argv | Should -BeNullOrEmpty
+    }
+
+    It "applies '..' in a link target to the resolved location when git is not on PATH" {
+        # l2 -> l1/../x. The OS follows l1 first, so '..' lands in deep/ and x is deep/x (a repo).
+        # Collapsing the text would give nogit-dd/x, which is not one.
+        $root = Join-Path $script:sandbox 'nogit-dd'
+        $inner = Join-Path $root 'deep/inner'
+        New-Item -ItemType Directory $inner -Force | Out-Null
+        New-Item -ItemType Directory (Join-Path $root 'deep/x/usage') -Force | Out-Null
+        New-Item -ItemType Directory (Join-Path $root 'deep/x/.git') -Force | Out-Null
+        New-Item -ItemType Directory (Join-Path $root 'x/usage') -Force | Out-Null
+        $l1 = Join-Path $root 'l1'
+        $l2 = Join-Path $root 'l2'
+        $made = $false
+        try {
+            New-Item -ItemType SymbolicLink -Path $l1 -Target $inner -ErrorAction Stop | Out-Null
+            New-Item -ItemType SymbolicLink -Path $l2 -Target (Join-Path 'l1' '..' | Join-Path -ChildPath 'x') -ErrorAction Stop | Out-Null
+            $made = $true
+        } catch { Set-ItResult -Skipped -Because "cannot create symlinks here: $($_.Exception.Message)" }
+        if ($made) {
+            $empty = Join-Path $script:sandbox 'emptybin3'
+            New-Item -ItemType Directory $empty -Force | Out-Null
+            $savedPath = $env:PATH
+            try {
+                $env:PATH = $empty
+                $r = Invoke-Wrapper @('-UsageDir', (Join-Path $l2 'usage'))
+            } finally {
+                $env:PATH = $savedPath
+            }
+            $r.Exit | Should -Be 2
+            $r.Output | Should -Match 'git work tree'
+        }
     }
 
     It "allows a plain usage directory when git is not on PATH" {

@@ -153,12 +153,15 @@ if ($help -match '--usage-output-file\b') {
             foreach ($n in $gitVars) { Remove-Item -LiteralPath "Env:$n" -ErrorAction SilentlyContinue }
             $env:LC_ALL = 'C'
             $env:LANGUAGE = ''
+            # Cross mount points: without this git stops at one and says "not a git repository (or any
+            # parent up to mount point ...)", which says nothing about the directory being outside.
+            $env:GIT_DISCOVERY_ACROSS_FILESYSTEM = '1'
             $gitOut = (& git -C $usageDir rev-parse --is-inside-work-tree 2>&1 | Out-String).Trim()
             $gitExit = $LASTEXITCODE
         } finally {
             foreach ($n in $gitVars) { if ($null -eq $saved[$n]) { Remove-Item -LiteralPath "Env:$n" -ErrorAction SilentlyContinue } else { Set-Item -LiteralPath "Env:$n" -Value $saved[$n] } }
         }
-        $outside = ($gitExit -eq 0 -and $gitOut -eq 'false') -or ($gitExit -ne 0 -and $gitOut -match 'not a git repository')
+        $outside = ($gitExit -eq 0 -and $gitOut -eq 'false') -or ($gitExit -ne 0 -and $gitOut -match 'not a git repository' -and $gitOut -notmatch 'filesystem boundary|mount point')
         if (-not $outside) {
             Stop-Wrapper "usage directory '$usageDir' is inside a git work tree, or git could not rule it out (link, separate git dir, or git error: $gitOut). Pick a directory outside any repository."
         }
@@ -173,14 +176,26 @@ if ($help -match '--usage-output-file\b') {
             foreach ($p in $usageDir.Substring($cur.Length).Split($seps, [System.StringSplitOptions]::RemoveEmptyEntries)) { $queue.Enqueue($p) }
             $hops = 0
             while ($queue.Count -gt 0) {
-                $item = Get-Item -LiteralPath (Join-Path $cur $queue.Dequeue()) -Force
+                $name = $queue.Dequeue()
+                if ($name -eq '.') { continue }
+                if ($name -eq '..') {
+                    $up = Split-Path -Parent $cur
+                    if ($up) { $cur = $up }
+                    continue
+                }
+                $item = Get-Item -LiteralPath (Join-Path $cur $name) -Force
                 if ($item.LinkTarget) {
                     if (++$hops -gt 40) { throw 'too many links' }
-                    $target = [System.IO.Path]::GetFullPath(([string]$item.LinkTarget -replace '^[\\?]{4}(?=[A-Za-z]:)', ''), $cur)
+                    # Raw target, unnormalised: the OS follows a link before applying "..", so each ".."
+                    # must act on the already-resolved location, not on the text.
+                    $target = [string]$item.LinkTarget -replace '^[\\?]{4}(?=[A-Za-z]:)', ''
                     $rest = @($queue)
                     $queue.Clear()
-                    $cur = [System.IO.Path]::GetPathRoot($target)
-                    foreach ($p in $target.Substring($cur.Length).Split($seps, [System.StringSplitOptions]::RemoveEmptyEntries)) { $queue.Enqueue($p) }
+                    if ([System.IO.Path]::IsPathRooted($target)) {
+                        $cur = [System.IO.Path]::GetPathRoot($target)
+                        $target = $target.Substring($cur.Length)
+                    }
+                    foreach ($p in $target.Split($seps, [System.StringSplitOptions]::RemoveEmptyEntries)) { $queue.Enqueue($p) }
                     foreach ($p in $rest) { $queue.Enqueue($p) }
                 } else {
                     $cur = $item.FullName
