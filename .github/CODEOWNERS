@@ -13,6 +13,7 @@
 /core/claude/templates/                     @Cringely
 /install/                                   @Cringely
 /tools/pr-review/                           @Cringely
+/tools/publish/                             @Cringely
 /account/claude/rules/                      @Cringely
 /account/claude/agents/                     @Cringely
 /account/claude/hooks/                      @Cringely
