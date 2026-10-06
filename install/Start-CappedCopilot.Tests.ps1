@@ -2,6 +2,17 @@
 Describe "Start-CappedCopilot" {
     BeforeAll {
         $script:wrapper = "$PSScriptRoot/Start-CappedCopilot.ps1"
+        # Full path, so a test can empty PATH (hiding git) and still start the child.
+        $script:pwshExe = (Get-Command pwsh).Source
+
+        # Makes a link to $Target at $Link: a junction on Windows, a symlink elsewhere.
+        function New-DirLink([string]$Link, [string]$Target) {
+            if ($IsWindows) { New-Item -ItemType Junction -Path $Link -Target $Target | Out-Null }
+            else { New-Item -ItemType SymbolicLink -Path $Link -Target $Target | Out-Null }
+        }
+        function Remove-DirLink([string]$Link) {
+            [System.IO.Directory]::Delete($Link)
+        }
 
         # A stand-in for the copilot CLI. '--help' prints a help text whose flag list the
         # STUB_HELP variable picks, so the wrapper's capability probe can be driven both ways.
@@ -31,7 +42,7 @@ exit ([int]$env:STUB_EXIT)
             $env:STUB_HELP = $Help
             $env:STUB_EXIT = "$StubExit"
             $env:STUB_ARGS_FILE = $script:argsFile
-            $out = & pwsh -NoProfile -File $script:wrapper -CopilotPath $script:stub @WrapperArgs 2>&1
+            $out = & $script:pwshExe -NoProfile -File $script:wrapper -CopilotPath $script:stub @WrapperArgs 2>&1
             [pscustomobject]@{
                 Exit   = $LASTEXITCODE
                 Output = (@($out) | ForEach-Object { "$_" }) -join "`n"
@@ -191,6 +202,62 @@ exit ([int]$env:STUB_EXIT)
             $r = Invoke-Wrapper @('-UsageDir', (Join-Path $link 'usage'))
         } finally {
             [System.IO.Directory]::Delete($link)
+        }
+        $r.Exit | Should -Be 2
+        $r.Output | Should -Match 'git work tree'
+        $r.Argv | Should -BeNullOrEmpty
+    }
+
+    It "refuses a usage directory reached through a link into a repository when git is not on PATH" {
+        $repo = Join-Path $script:sandbox 'nogit-repo'
+        New-Item -ItemType Directory (Join-Path $repo 'sub') -Force | Out-Null
+        New-Item -ItemType Directory (Join-Path $repo '.git') -Force | Out-Null
+        $link = Join-Path $script:sandbox 'nogit-link'
+        New-DirLink $link (Join-Path $repo 'sub')
+        $empty = Join-Path $script:sandbox 'emptybin'
+        New-Item -ItemType Directory $empty -Force | Out-Null
+        $savedPath = $env:PATH
+        try {
+            $env:PATH = $empty
+            $r = Invoke-Wrapper @('-UsageDir', (Join-Path $link 'usage'))
+        } finally {
+            $env:PATH = $savedPath
+            Remove-DirLink $link
+        }
+        $r.Exit | Should -Be 2
+        $r.Output | Should -Match 'git work tree'
+        $r.Argv | Should -BeNullOrEmpty
+    }
+
+    It "allows a plain usage directory when git is not on PATH" {
+        $empty = Join-Path $script:sandbox 'emptybin2'
+        New-Item -ItemType Directory $empty -Force | Out-Null
+        $savedPath = $env:PATH
+        try {
+            $env:PATH = $empty
+            $r = Invoke-Wrapper @('-UsageDir', $script:usageDir)
+        } finally {
+            $env:PATH = $savedPath
+        }
+        $r.Exit | Should -Be 0
+    }
+
+    It "is not redirected by an inherited GIT_DIR when judging a linked usage directory" {
+        $repo = Join-Path $script:sandbox 'env-repo'
+        New-Item -ItemType Directory (Join-Path $repo 'sub') -Force | Out-Null
+        git -C $repo init -q
+        $bare = Join-Path $script:sandbox 'env-bare.git'
+        git init -q --bare $bare
+        $link = Join-Path $script:sandbox 'env-link'
+        New-DirLink $link (Join-Path $repo 'sub')
+        $savedGitDir = $env:GIT_DIR
+        try {
+            # Pointing git at a bare repository makes it answer "false" for any directory.
+            $env:GIT_DIR = $bare
+            $r = Invoke-Wrapper @('-UsageDir', (Join-Path $link 'usage'))
+        } finally {
+            $env:GIT_DIR = $savedGitDir
+            Remove-DirLink $link
         }
         $r.Exit | Should -Be 2
         $r.Output | Should -Match 'git work tree'

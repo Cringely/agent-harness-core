@@ -37,7 +37,8 @@
 .PARAMETER UsageDir
     Where usage files go, one per launch. Defaults to `agent-harness/copilot-usage` under the
     per-user local application data folder. Refused when it sits inside a git work tree, or when git is on PATH but cannot
-    rule that out. Without git on PATH only a path walk runs, so a link into a repository is not covered.
+    rule that out. Without git on PATH the wrapper resolves every junction and symlink in the path itself,
+    walks the resolved path, and refuses when a component cannot be resolved.
 
 .PARAMETER CopilotPath
     The CLI to launch. Defaults to `copilot` on PATH.
@@ -139,26 +140,59 @@ if ($help -match '--usage-output-file\b') {
     # The walk above compares path text, so a junction or symlink into a repository, or a work tree
     # whose git dir lives elsewhere, passes it. Ask git, which resolves both, and fail closed: allow
     # only "not a git repository" or a clean "false". Any other git failure (dubious ownership,
-    # safe.directory, permissions, broken config) means git could not say, so refuse. No git on
-    # PATH means the walk is all there is.
+    # safe.directory, permissions, broken config) means git could not say, so refuse.
     if (Get-Command git -ErrorAction SilentlyContinue) {
         # Git translates its messages (gettext, LANG/LC_ALL, the Windows display language), so the
-        # "not a git repository" match below only holds in the C locale. Pin it for this one call
-        # and put the caller's values back afterwards.
-        $savedLcAll = $env:LC_ALL
-        $savedLanguage = $env:LANGUAGE
+        # "not a git repository" match below only holds in the C locale. Pin it for this one call.
+        # The GIT_* variables redirect repository discovery (a caller's GIT_DIR makes git answer
+        # for another repository), so clear them for the call too. The caller's values go back after.
+        $gitVars = 'LC_ALL', 'LANGUAGE', 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_CEILING_DIRECTORIES', 'GIT_DISCOVERY_ACROSS_FILESYSTEM'
+        $saved = @{}
+        foreach ($n in $gitVars) { $saved[$n] = [Environment]::GetEnvironmentVariable($n) }
         try {
+            foreach ($n in $gitVars) { Remove-Item -LiteralPath "Env:$n" -ErrorAction SilentlyContinue }
             $env:LC_ALL = 'C'
             $env:LANGUAGE = ''
             $gitOut = (& git -C $usageDir rev-parse --is-inside-work-tree 2>&1 | Out-String).Trim()
             $gitExit = $LASTEXITCODE
         } finally {
-            $env:LC_ALL = $savedLcAll
-            $env:LANGUAGE = $savedLanguage
+            foreach ($n in $gitVars) { if ($null -eq $saved[$n]) { Remove-Item -LiteralPath "Env:$n" -ErrorAction SilentlyContinue } else { Set-Item -LiteralPath "Env:$n" -Value $saved[$n] } }
         }
         $outside = ($gitExit -eq 0 -and $gitOut -eq 'false') -or ($gitExit -ne 0 -and $gitOut -match 'not a git repository')
         if (-not $outside) {
             Stop-Wrapper "usage directory '$usageDir' is inside a git work tree, or git could not rule it out (link, separate git dir, or git error: $gitOut). Pick a directory outside any repository."
+        }
+    } else {
+        # No git to resolve links, so resolve them here one component at a time and walk the result.
+        # A link target is re-split and re-resolved, because its own ancestors can be links. A
+        # component that cannot be read or resolved means the check cannot decide, so refuse.
+        try {
+            $seps = [char[]]@('/', [System.IO.Path]::DirectorySeparatorChar)
+            $cur = [System.IO.Path]::GetPathRoot($usageDir)
+            $queue = [System.Collections.Generic.Queue[string]]::new()
+            foreach ($p in $usageDir.Substring($cur.Length).Split($seps, [System.StringSplitOptions]::RemoveEmptyEntries)) { $queue.Enqueue($p) }
+            $hops = 0
+            while ($queue.Count -gt 0) {
+                $item = Get-Item -LiteralPath (Join-Path $cur $queue.Dequeue()) -Force
+                if ($item.LinkTarget) {
+                    if (++$hops -gt 40) { throw 'too many links' }
+                    $target = [System.IO.Path]::GetFullPath(([string]$item.LinkTarget -replace '^[\\?]{4}(?=[A-Za-z]:)', ''), $cur)
+                    $rest = @($queue)
+                    $queue.Clear()
+                    $cur = [System.IO.Path]::GetPathRoot($target)
+                    foreach ($p in $target.Substring($cur.Length).Split($seps, [System.StringSplitOptions]::RemoveEmptyEntries)) { $queue.Enqueue($p) }
+                    foreach ($p in $rest) { $queue.Enqueue($p) }
+                } else {
+                    $cur = $item.FullName
+                }
+            }
+        } catch {
+            Stop-Wrapper "usage directory '$usageDir' could not be resolved without git ($($_.Exception.Message)), so it cannot be shown to be outside a repository."
+        }
+        for ($dir = $cur; $dir; $dir = Split-Path -Parent $dir) {
+            if (Test-Path -LiteralPath (Join-Path $dir '.git')) {
+                Stop-Wrapper "usage directory '$usageDir' resolves to '$cur', inside the git work tree at '$dir'. Pick a directory outside any repository."
+            }
         }
     }
 
