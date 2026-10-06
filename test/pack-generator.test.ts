@@ -261,6 +261,15 @@ describe("generated shape", () => {
     expect(() => buildPlan(root)).toThrow(/binary file/);
   });
 
+  test("a BOM-less UTF-16LE ASCII member is refused, since it is valid UTF-8 and only the NUL check catches it", () => {
+    const root = makeRoot();
+    // "Jane" as UTF-16LE with no BOM: 4A 00 61 00 6E 00 65 00. Valid UTF-8, so the isUtf8 test passes it.
+    const bytes = Buffer.from([0x4a, 0x00, 0x61, 0x00, 0x6e, 0x00, 0x65, 0x00]);
+    expect(new TextDecoder("utf-8", { fatal: true }).decode(bytes).length).toBe(8);
+    put(root, "lib/skills/alpha/note.txt", bytes);
+    expect(() => buildPlan(root)).toThrow(/binary file/);
+  });
+
   test("a CRLF source writes LF output, and a CRLF checkout of the output is not drift", () => {
     const root = makeRoot();
     put(root, "lib/skills/alpha/SKILL.md", skillMd("alpha").replace(/\n/g, "\r\n"));
