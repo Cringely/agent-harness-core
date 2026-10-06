@@ -135,6 +135,16 @@ if ($help -match '--usage-output-file\b') {
     }
     New-Item -ItemType Directory -Force -Path $usageDir | Out-Null
 
+    # The walk above compares path text, so a junction or symlink into a repository, or a work tree
+    # whose git dir lives elsewhere, passes it. Ask git, which resolves both. No git on PATH means
+    # the walk is all there is.
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        $inside = (& git -C $usageDir rev-parse --is-inside-work-tree 2>$null | Out-String).Trim()
+        if ($inside -eq 'true') {
+            Stop-Wrapper "usage directory '$usageDir' resolves to a path inside a git work tree (link or separate git dir). Pick a directory outside any repository."
+        }
+    }
+
     $stamp = (Get-Date -AsUTC).ToString('yyyyMMddTHHmmssZ', [System.Globalization.CultureInfo]::InvariantCulture)
     $usageFile = Join-Path $usageDir "copilot-usage-$stamp-$PID.json"
     $launchArgs.Add('--usage-output-file')

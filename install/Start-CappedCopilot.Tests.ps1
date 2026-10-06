@@ -122,6 +122,22 @@ exit ([int]$env:STUB_EXIT)
         $r.Argv | Should -BeNullOrEmpty
     }
 
+    It "refuses a usage directory reached through a junction into a git work tree" {
+        $repo = Join-Path $script:sandbox 'jrepo'
+        New-Item -ItemType Directory (Join-Path $repo 'sub') -Force | Out-Null
+        git -C $repo init -q
+        $link = Join-Path $script:sandbox 'link'
+        New-Item -ItemType Junction -Path $link -Target (Join-Path $repo 'sub') | Out-Null
+        try {
+            $r = Invoke-Wrapper @('-UsageDir', (Join-Path $link 'usage'))
+        } finally {
+            [System.IO.Directory]::Delete($link)
+        }
+        $r.Exit | Should -Be 2
+        $r.Output | Should -Match 'git work tree'
+        $r.Argv | Should -BeNullOrEmpty
+    }
+
     It "defaults the usage directory to a per-user location outside this repo" {
         # The wrapper reads LOCALAPPDATA first, so point it at TestDrive: the run must not create
         # agent-harness/copilot-usage under the real local application data folder.
