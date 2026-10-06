@@ -122,7 +122,42 @@ exit ([int]$env:STUB_EXIT)
         $r.Argv | Should -BeNullOrEmpty
     }
 
-    It "refuses a usage directory reached through a junction into a git work tree" {
+    It "refuses a usage directory when git fails for a reason other than not-a-repository" {
+        # A stub git earlier on PATH stands in for dubious ownership / safe.directory refusals.
+        $bin = Join-Path $script:sandbox 'fakebin'
+        New-Item -ItemType Directory $bin -Force | Out-Null
+        if ($IsWindows) {
+            Set-Content -LiteralPath (Join-Path $bin 'git.cmd') -Value "@echo off`r`necho fatal: detected dubious ownership in repository 1>&2`r`nexit /b 128"
+        } else {
+            $g = Join-Path $bin 'git'
+            Set-Content -LiteralPath $g -Value "#!/bin/sh`necho 'fatal: detected dubious ownership in repository' >&2`nexit 128"
+            & chmod +x $g
+        }
+        $savedPath = $env:PATH
+        try {
+            $env:PATH = "$bin$([System.IO.Path]::PathSeparator)$savedPath"
+            $r = Invoke-Wrapper @('-UsageDir', $script:usageDir)
+        } finally {
+            $env:PATH = $savedPath
+        }
+        $r.Exit | Should -Be 2
+        $r.Output | Should -Match 'dubious ownership'
+        $r.Argv | Should -BeNullOrEmpty
+    }
+
+    It "refuses a usage directory reached through a symlink into a git work tree" -Skip:($IsWindows) {
+        $repo = Join-Path $script:sandbox 'srepo'
+        New-Item -ItemType Directory (Join-Path $repo 'sub') -Force | Out-Null
+        git -C $repo init -q
+        $link = Join-Path $script:sandbox 'slink'
+        New-Item -ItemType SymbolicLink -Path $link -Target (Join-Path $repo 'sub') | Out-Null
+        $r = Invoke-Wrapper @('-UsageDir', (Join-Path $link 'usage'))
+        $r.Exit | Should -Be 2
+        $r.Output | Should -Match 'git work tree'
+        $r.Argv | Should -BeNullOrEmpty
+    }
+
+    It "refuses a usage directory reached through a junction into a git work tree" -Skip:(-not $IsWindows) {
         $repo = Join-Path $script:sandbox 'jrepo'
         New-Item -ItemType Directory (Join-Path $repo 'sub') -Force | Out-Null
         git -C $repo init -q

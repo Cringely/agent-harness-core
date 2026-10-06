@@ -36,7 +36,8 @@
 
 .PARAMETER UsageDir
     Where usage files go, one per launch. Defaults to `agent-harness/copilot-usage` under the
-    per-user local application data folder. Refused when it sits inside a git work tree.
+    per-user local application data folder. Refused when it sits inside a git work tree, or when git is on PATH but cannot
+    rule that out. Without git on PATH only a path walk runs, so a link into a repository is not covered.
 
 .PARAMETER CopilotPath
     The CLI to launch. Defaults to `copilot` on PATH.
@@ -136,12 +137,16 @@ if ($help -match '--usage-output-file\b') {
     New-Item -ItemType Directory -Force -Path $usageDir | Out-Null
 
     # The walk above compares path text, so a junction or symlink into a repository, or a work tree
-    # whose git dir lives elsewhere, passes it. Ask git, which resolves both. No git on PATH means
-    # the walk is all there is.
+    # whose git dir lives elsewhere, passes it. Ask git, which resolves both, and fail closed: allow
+    # only "not a git repository" or a clean "false". Any other git failure (dubious ownership,
+    # safe.directory, permissions, broken config) means git could not say, so refuse. No git on
+    # PATH means the walk is all there is.
     if (Get-Command git -ErrorAction SilentlyContinue) {
-        $inside = (& git -C $usageDir rev-parse --is-inside-work-tree 2>$null | Out-String).Trim()
-        if ($inside -eq 'true') {
-            Stop-Wrapper "usage directory '$usageDir' resolves to a path inside a git work tree (link or separate git dir). Pick a directory outside any repository."
+        $gitOut = (& git -C $usageDir rev-parse --is-inside-work-tree 2>&1 | Out-String).Trim()
+        $gitExit = $LASTEXITCODE
+        $outside = ($gitExit -eq 0 -and $gitOut -eq 'false') -or ($gitExit -ne 0 -and $gitOut -match 'not a git repository')
+        if (-not $outside) {
+            Stop-Wrapper "usage directory '$usageDir' is inside a git work tree, or git could not rule it out (link, separate git dir, or git error: $gitOut). Pick a directory outside any repository."
         }
     }
 
