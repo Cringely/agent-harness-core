@@ -137,10 +137,6 @@ This file is canonical for the banned-vocabulary list. Vocabulary changes land h
 Cringely Vale style (`~/.claude/tools/prose-lint/Build-CringelyStyle.ps1`) updates from it in the
 same change.
 
-Em dashes: measured across 59,034 words of linted deliverables at 0.0 per 10,000 words, against
-15.5 in hand-authored human notes and 43.9 in this rules corpus, which no hook lints. A ban that
-produces exactly zero across sixty thousand words is not a preference being expressed.
-
 ## Four Alerts the Linter Gets Backwards
 
 The Vale kit flags `in order to`, `the fact that` and `tends to` through
@@ -268,6 +264,11 @@ Excessive formality in transitions: Furthermore, Moreover, Additionally, Subsequ
 No bold or italic for emphasis mid-sentence. Bold only for defined terms in a glossary, column headers in tables, and structural labels (e.g., "Option A" in a list of options). Never bold an adjective or verb to signal importance.
 
 Em dashes: avoid almost entirely. Replace with a period and new sentence, a comma, or parentheses. Rare exception: a genuine aside awkward as a parenthetical, otherwise default to not using them.
+
+That rule replaced an outright em-dash ban. Under the ban, em dashes measured 0.0 per 10,000 words
+across 59,034 words of linted deliverables, against 15.5 in hand-authored human notes and 43.9 in
+this rules corpus, which no hook lints. A ban that produces exactly zero across sixty thousand
+words is not a preference being expressed.
 
 Semicolons: banned (operator directive, 2026-09-21). Two independent clauses joined by a semicolon are two sentences, so write them as two. A semicolon splicing a list item is a comma or a line break. This binds every surface the em dash rule binds, including code comments and agent briefs, and it does not reach code itself, where a semicolon is syntax. Applies to the list separators inside a long clause as well, which are the common case in a spec or a prompt: break the clause into bullets rather than chaining items with semicolons.
 
