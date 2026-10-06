@@ -71,7 +71,7 @@ of the payload.
 Vendored from https://github.com/udaysharmadev/Not-Ai at commit
 `6a07d1c1488b94a018d3409a9fde6f7c7e8f93e1`, by Uday Sharma. **MIT licensed**, and the
 upstream LICENSE travels with both trees rather than being referenced from here, so
-this one carries stated permission that the two above do not.
+this one carries stated permission that filesystem-context does not.
 
 The skill is `SKILL.md` plus a `reference/` directory. The tools tree is a deterministic
 prose gate: `gate.py` and `not_ai_core/`, pure Python 3.10+ standard library with no
