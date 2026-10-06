@@ -29,6 +29,11 @@
 //   - A skill whose frontmatter name differs from its directory is shown differently by the two CLIs,
 //     so the two must match.
 //
+// Members are read from what the index tracks, never from whatever sits in the working tree. An
+// untracked or ignored file inside a member directory (a scratch note, a plugin-synced copy under a
+// nested synced/ directory) would otherwise be copied into packs/, which is committed and published.
+// Outside a work tree the generator refuses rather than guessing what is tracked.
+//
 // A member never carries a link, a dot entry, a .local.md overlay or a path under skills/synced.
 // packs/ is committed output, so anything copied into it is published.
 //
@@ -42,7 +47,9 @@
 // `bun tools/packs/cli.ts` to regenerate. `bun test` runs the drift check, so CI fails on a stale tree.
 
 import { lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { dirname, isAbsolute, join, posix, sep } from "node:path";
+import { findIdentityHits, type IdentityDecl } from "../pr-review/identity";
 
 export const SOURCE_FILE = "packs.json";
 export const PACKS_DIR = "packs";
@@ -265,6 +272,15 @@ function checkSourcePath(rel: string, where: string): void {
   if (parts.includes("synced")) fail(`${where}: ${JSON.stringify(rel)} names a synced skill, which is third-party and never published`);
 }
 
+/** Repo-relative POSIX paths of every file in the index under root. Refuses outside a work tree. */
+function trackedFiles(root: string): Set<string> {
+  const r = spawnSync("git", ["-C", root, "ls-files", "-z", "--cached"], { maxBuffer: 256 * 1024 * 1024 });
+  if (r.error !== undefined || r.status !== 0) {
+    return fail("cannot list tracked files: the root is not a work tree, and members are read from the index only");
+  }
+  return new Set(r.stdout.toString("utf8").split("\0").filter((p) => p !== ""));
+}
+
 function resolveMember(root: string, rel: string, kind: "dir" | "file", where: string): string {
   checkSourcePath(rel, where);
   const abs = join(root, ...rel.split("/"));
@@ -282,14 +298,16 @@ function resolveMember(root: string, rel: string, kind: "dir" | "file", where: s
 // is one machine's overlay, which the exporter and .gitignore both keep out of the repository, so
 // it is skipped here too. A link would let a member copy bytes from outside the tree, so one is
 // refused instead of followed.
-function listFiles(abs: string, rel: string, where: string, out: string[] = []): string[] {
+function listFiles(abs: string, rel: string, where: string, tracked: Set<string>, base: string, out: string[] = []): string[] {
   const entries = readdirSync(abs, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   for (const e of entries) {
     if (e.name.startsWith(".") || e.name === "__pycache__" || e.name.endsWith(".local.md")) continue;
     const childRel = rel === "" ? e.name : `${rel}/${e.name}`;
     if (e.isSymbolicLink()) fail(`${where}: ${childRel} is a symbolic link`);
-    if (e.isDirectory()) listFiles(join(abs, e.name), childRel, where, out);
-    else if (e.isFile()) out.push(childRel);
+    if (e.isDirectory()) listFiles(join(abs, e.name), childRel, where, tracked, base, out);
+    else if (e.isFile()) {
+      if (tracked.has(`${base}/${childRel}`)) out.push(childRel);
+    }
     else fail(`${where}: ${childRel} is not a regular file`);
   }
   return out;
@@ -364,6 +382,10 @@ function manifestOf(pack: PackDef): Record<string, unknown> {
 export function buildPlan(root: string): Plan {
   const source = loadSource(root);
   const plan: Plan = new Map();
+  const tracked = trackedFiles(root);
+  const needTracked = (rel: string, where: string): void => {
+    if (!tracked.has(rel)) fail(`${where}: ${rel} is not tracked`);
+  };
   const put = (path: string, data: Buffer): void => {
     if (plan.has(path)) fail(`two members write ${path}`);
     plan.set(path, normalizeEol(data));
@@ -377,18 +399,20 @@ export function buildPlan(root: string): Plan {
       const where = `pack ${pack.id}: skill ${rel}`;
       const dir = resolveMember(root, rel, "dir", where);
       const name = posix.basename(rel);
+      needTracked(`${rel}/SKILL.md`, where);
       const skillMd = join(dir, "SKILL.md");
       if (!lstatSync(skillMd, { throwIfNoEntry: false })?.isFile()) fail(`${where}: no SKILL.md`);
       const declared = frontmatterName(readFileSync(skillMd, "utf8"));
       if (declared !== name) {
         fail(`${where}: SKILL.md name ${JSON.stringify(declared)} must equal its directory ${JSON.stringify(name)}`);
       }
-      for (const f of listFiles(dir, "", where)) put(`${base}/skills/${name}/${f}`, readFileSync(join(dir, ...f.split("/"))));
+      for (const f of listFiles(dir, "", where, tracked, rel)) put(`${base}/skills/${name}/${f}`, readFileSync(join(dir, ...f.split("/"))));
     }
 
     for (const rel of pack.agents) {
       const where = `pack ${pack.id}: agent ${rel}`;
       const file = resolveMember(root, rel, "file", where);
+      needTracked(rel, where);
       const fileName = posix.basename(rel);
       if (!fileName.endsWith(".md")) fail(`${where}: an agent member must be a .md file`);
       const name = fileName.slice(0, -3);
@@ -402,10 +426,11 @@ export function buildPlan(root: string): Plan {
     if (pack.hooks !== null) {
       const where = `pack ${pack.id}: hooks ${pack.hooks}`;
       const dir = resolveMember(root, pack.hooks, "dir", where);
+      needTracked(`${pack.hooks}/hooks.json`, where);
       const hooksJson = join(dir, "hooks.json");
       if (!lstatSync(hooksJson, { throwIfNoEntry: false })?.isFile()) fail(`${where}: no hooks.json`);
       checkHooksJson(readFileSync(hooksJson, "utf8"), where);
-      for (const f of listFiles(dir, "", where)) put(`${base}/hooks/${f}`, readFileSync(join(dir, ...f.split("/"))));
+      for (const f of listFiles(dir, "", where, tracked, pack.hooks)) put(`${base}/hooks/${f}`, readFileSync(join(dir, ...f.split("/"))));
     }
   }
 
@@ -424,6 +449,26 @@ export function buildPlan(root: string): Plan {
     }),
   );
   return plan;
+}
+
+/**
+ * Identity gate for the public payload (security.md: a generator of public payloads refuses
+ * identifying strings itself). Scans every planned path and every planned buffer with the matcher
+ * the PR reviewer uses (tools/pr-review/identity.ts). Returns the classes that hit and the paths
+ * whose content hit. A path that itself hits is counted but never listed.
+ */
+export function scanPlan(plan: Plan, decl: IdentityDecl): { classes: string[]; paths: string[] } {
+  const classes = new Set<string>();
+  const paths: string[] = [];
+  for (const [path, data] of plan) {
+    const pathHits = findIdentityHits(path, decl);
+    const bodyHits = findIdentityHits(data.toString("utf8"), decl);
+    pathHits.forEach((c) => classes.add(c));
+    bodyHits.forEach((c) => classes.add(c));
+    if (pathHits.length > 0) paths.push("(a path that itself carries one)");
+    else if (bodyHits.length > 0) paths.push(path);
+  }
+  return { classes: [...classes].sort(), paths };
 }
 
 // Every file under packs/ as found, plus the marketplace manifest. null marks something that is not

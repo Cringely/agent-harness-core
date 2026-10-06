@@ -15,10 +15,12 @@
 // would fail every one of them.
 
 import { afterAll, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { main } from "../tools/packs/cli";
+import type { IdentityLoad } from "../tools/pr-review/identity";
 import { buildPlan, checkTree, frontmatterName, PackError, writePlan } from "../tools/packs/packs";
 
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -51,16 +53,24 @@ function sourceOf(packs: unknown[]): string {
   });
 }
 
-function put(root: string, rel: string, data: string | Buffer): void {
+// Members are read from the index, so a fixture is a repository and put() stages what it writes.
+// putUntracked() writes without staging, which is what a scratch or ignored file looks like.
+function putUntracked(root: string, rel: string, data: string | Buffer): void {
   const abs = join(root, ...rel.split("/"));
   mkdirSync(dirname(abs), { recursive: true });
   writeFileSync(abs, data);
+}
+
+function put(root: string, rel: string, data: string | Buffer): void {
+  putUntracked(root, rel, data);
+  if (spawnSync("git", ["-C", root, "add", "-f", "--", rel]).status !== 0) throw new Error("fixture add failed");
 }
 
 /** A fixture repository holding one skill, one agent and one hook bundle, and a packs.json over them. */
 function makeRoot(packs: unknown[] = [DEMO]): string {
   const root = mkdtempSync(join(tmpdir(), "packs-"));
   made.push(root);
+  if (spawnSync("git", ["-C", root, "init", "-q"]).status !== 0) throw new Error("fixture init failed");
   put(root, "packs.json", sourceOf(packs));
   put(root, "lib/skills/alpha/SKILL.md", skillMd("alpha"));
   put(root, "lib/skills/alpha/references/notes.md", "notes\n");
@@ -81,6 +91,7 @@ function generated(packs: unknown[] = [DEMO]): string {
 function listAll(dir: string, rel = ""): string[] {
   const out: string[] = [];
   for (const e of readdirSync(join(dir, rel), { withFileTypes: true })) {
+    if (rel === "" && e.name === ".git") continue; // the fixture's own repository, not generated output
     const child = rel === "" ? e.name : `${rel}/${e.name}`;
     if (e.isDirectory()) out.push(...listAll(dir, child));
     else out.push(child);
@@ -205,6 +216,25 @@ describe("generated shape", () => {
       "packs/demo/skills/alpha/SKILL.md",
       "packs/demo/skills/alpha/references/notes.md",
     ]);
+  });
+
+  test("an untracked file in a member directory is not copied, nor is a nested synced directory", () => {
+    const root = makeRoot();
+    putUntracked(root, "lib/skills/alpha/scratch.md", "not committed");
+    putUntracked(root, "lib/skills/alpha/synced/third-party/SKILL.md", "proprietary");
+    putUntracked(root, "lib/hooks/untracked.sh", "not committed");
+    expect([...buildPlan(root).keys()].filter((k) => /scratch|synced|untracked/.test(k))).toEqual([]);
+  });
+
+  test("a member file that is not tracked is refused, and so is a root that is not a work tree", () => {
+    const root = makeRoot();
+    putUntracked(root, "lib/agents/loose.md", agentMd("loose"));
+    put(root, "packs.json", sourceOf([{ ...DEMO, members: { ...DEMO.members, agents: ["lib/agents/loose.md"] } }]));
+    expect(() => buildPlan(root)).toThrow("is not tracked");
+    const bare = mkdtempSync(join(tmpdir(), "packs-bare-"));
+    made.push(bare);
+    writeFileSync(join(bare, "packs.json"), sourceOf([DEMO]));
+    expect(() => buildPlan(bare)).toThrow(PackError);
   });
 
   test("a .local.md overlay beside a member is not copied", () => {
@@ -479,6 +509,55 @@ describe("refusals", () => {
     expect(listAll(root).map((p) => [p, readFileSync(join(root, p), "utf8")])).toEqual(
       before.map(([p, text]) => [p, p === "lib/skills/alpha/SKILL.md" ? skillMd("renamed") : text]),
     );
+  });
+});
+
+describe("identity gate", () => {
+  // Synthetic identity. The marker is built from parts so the whole string is not in this file's text.
+  const MARK = ["zq", "fixture", "person"].join("");
+  const loader = (declared = true): (() => IdentityLoad) => () => ({
+    ok: true,
+    declared,
+    accountEmail: false,
+    decl: { names: [MARK], emails: [], username: "fixture-user-x", hostname: "fixture-host-x" },
+  });
+  const quiet = (fn: () => number): { code: number; err: string } => {
+    const errs: string[] = [];
+    const orig = console.error;
+    console.error = (...a: unknown[]) => void errs.push(a.join(" "));
+    try {
+      return { code: fn(), err: errs.join("\n") };
+    } finally {
+      console.error = orig;
+    }
+  };
+
+  test("an identifying string in a member file refuses in write and --check, names the class, and prints no value", () => {
+    const root = makeRoot();
+    put(root, "lib/skills/alpha/references/notes.md", `written by ${MARK} on a laptop\n`);
+    for (const args of [["--root", root], ["--check", "--root", root]]) {
+      const r = quiet(() => main(args, root, loader()));
+      expect(r.code).toBe(2);
+      expect(r.err).toContain("declared name #1");
+      expect(r.err.toLowerCase()).not.toContain(MARK);
+    }
+    expect(listAll(root).some((p) => p.startsWith("packs/"))).toBe(false);
+  });
+
+  test("an identifying string in a planned path refuses without printing that path", () => {
+    const root = makeRoot();
+    put(root, `lib/skills/alpha/${MARK}.md`, "clean body\n");
+    const r = quiet(() => main(["--root", root], root, loader()));
+    expect(r.code).toBe(2);
+    expect(r.err.toLowerCase()).not.toContain(MARK);
+  });
+
+  test("a clean tree passes, and an identity load that fails refuses", () => {
+    const root = makeRoot();
+    expect(quiet(() => main(["--root", root], root, loader())).code).toBe(0);
+    const bad = quiet(() => main(["--check", "--root", root], root, () => ({ ok: false, reason: "unusable identity file" })));
+    expect(bad.code).toBe(2);
+    expect(bad.err).toContain("unusable identity file");
   });
 });
 
