@@ -233,8 +233,19 @@ describe("generated shape", () => {
     expect(() => buildPlan(root)).toThrow("is not tracked");
     const bare = mkdtempSync(join(tmpdir(), "packs-bare-"));
     made.push(bare);
-    writeFileSync(join(bare, "packs.json"), sourceOf([DEMO]));
-    expect(() => buildPlan(bare)).toThrow(PackError);
+    // Member files exist here, so resolveMember passes and only the work-tree refusal can fire.
+    putUntracked(bare, "packs.json", sourceOf([DEMO]));
+    putUntracked(bare, "lib/skills/alpha/SKILL.md", skillMd("alpha"));
+    putUntracked(bare, "lib/agents/reviewer.md", agentMd("reviewer"));
+    putUntracked(bare, "lib/hooks/hooks.json", hooksOk);
+    expect(() => buildPlan(bare)).toThrow("the root is not a work tree");
+  });
+
+  test("a NUL-free member that is not valid UTF-8 is refused", () => {
+    const root = makeRoot();
+    // Short deflate-style bytes: no NUL, but 0xff and 0x8b can never appear in UTF-8.
+    put(root, "lib/skills/alpha/blob.dat", Buffer.from([0x78, 0x9c, 0xff, 0x8b, 0xc3, 0x28]));
+    expect(() => buildPlan(root)).toThrow(/binary file/);
   });
 
   test("a .local.md overlay beside a member is not copied", () => {

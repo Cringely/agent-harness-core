@@ -331,6 +331,17 @@ export function isBinary(data: Buffer): boolean {
   return data.includes(0);
 }
 
+// Text means valid UTF-8. A NUL-free compressed stream or non-UTF-8 text decodes lossily and would
+// pass the identity scan unread, so the NUL test alone is not enough for a member.
+function isUtf8(data: Buffer): boolean {
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(data);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function normalizeEol(data: Buffer): Buffer {
   if (isBinary(data)) return data;
   const out = Buffer.allocUnsafe(data.length);
@@ -398,7 +409,7 @@ export function buildPlan(root: string): Plan {
   // The identity gate decodes every planned buffer as UTF-8, which cannot see a string inside UTF-16
   // text or a compressed stream. A member is refused as binary rather than copied past the gate.
   const putMember = (path: string, data: Buffer, where: string, f: string): void => {
-    if (isBinary(data)) fail(`${where}: ${f} is a binary file, which a pack does not carry`);
+    if (isBinary(data) || !isUtf8(data)) fail(`${where}: ${f} is a binary file, which a pack does not carry`);
     put(path, data);
   };
 
