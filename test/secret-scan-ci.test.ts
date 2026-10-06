@@ -339,3 +339,68 @@ describe("secret-scan cannot be steered by files in the checkout", () => {
     }
   });
 });
+// Two fail-open reads of the scanner's exit code, both confirmed live against gitleaks 8.30.1
+// (#251 review, round 3). `gitleaks git` exits 0 when its own `git log` fails and says so only as
+// an ERR line on stderr. Any fatal error, such as an unparseable config, exits 1 with no report,
+// which the canary read as a detection. The stubs below reproduce each shape.
+describe("secret-scan does not read a scanner failure as a result", () => {
+  const SCAN = "Scan the pull request's commits";
+  const CANARY = "Scanner canary";
+
+  // A stub that writes `report` to whatever --report-path it is given, then exits `code`.
+  function stubbed(code: number, opts: { report?: string; stderr?: string }) {
+    const s = scratch(0);
+    const lines = [
+      "#!/bin/sh",
+      'while [ $# -gt 0 ]; do [ "$1" = --report-path ] && rp=$2; shift; done',
+      opts.report !== undefined ? `printf '%s' '${opts.report}' > "$rp"` : "",
+      opts.stderr ? `echo '${opts.stderr}' >&2` : "",
+      `exit ${code}`,
+    ];
+    writeFileSync(join(s.dir, "rt", "gitleaks"), lines.join("\n") + "\n");
+    // CI has jq. A workstation may not, so give the step a minimal stand-in for `jq -e 'length > 0'`.
+    if (!Bun.spawnSync([posixBash(), "-c", "command -v jq"], { stdout: "ignore", stderr: "ignore" }).success) {
+      writeFileSync(
+        join(s.dir, "rt", "jq"),
+        `#!/bin/sh\nexec bun -e 'let ok=false;try{const a=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));ok=Array.isArray(a)&&a.length>0}catch{}process.exit(ok?0:1)' "$3"\n`,
+      );
+      chmodSync(join(s.dir, "rt", "jq"), 0o755);
+    }
+    return s;
+  }
+  // A shell function rather than a PATH entry: Windows has no exec bit, so a bare script named jq is not found.
+  const withRt = (s: ReturnType<typeof scratch>) => (script: string) =>
+    s.run(`jq() { if [ -f "$RUNNER_TEMP/jq" ]; then sh "$RUNNER_TEMP/jq" "$@"; else command jq "$@"; fi; }\n${script}`, s.base, s.head);
+
+  test("a scan that exits 0 but logs ERR fails, a silent exit 0 passes", () => {
+    const script = runOf(loadJob(), SCAN);
+    const bad = stubbed(0, { stderr: "10:47PM ERR [git] fatal: Invalid revision range" });
+    const good = stubbed(0, {});
+    try {
+      expect(withRt(bad)(script)).not.toBe(0);
+      expect(withRt(good)(script)).toBe(0);
+    } finally {
+      rmSync(bad.dir, { recursive: true, force: true });
+      rmSync(good.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the canary needs exit 1 and a finding: a fatal error or an empty report fails", () => {
+    const script = runOf(loadJob(), CANARY);
+    const cases: Array<[ReturnType<typeof stubbed>, "pass" | "fail"]> = [
+      [stubbed(1, { report: '[{"RuleID":"generic-api-key"}]' }), "pass"],
+      [stubbed(1, { stderr: "FTL unable to load gitleaks config" }), "fail"],
+      [stubbed(1, { report: "[]" }), "fail"],
+      [stubbed(0, { report: '[{"RuleID":"generic-api-key"}]' }), "fail"],
+    ];
+    try {
+      for (const [s, outcome] of cases) {
+        const rc = withRt(s)(script);
+        if (outcome === "pass") expect(rc).toBe(0);
+        else expect(rc).not.toBe(0);
+      }
+    } finally {
+      for (const [s] of cases) rmSync(s.dir, { recursive: true, force: true });
+    }
+  });
+});

@@ -139,8 +139,11 @@ export function computeVerification(input: {
 
   // The secret scan reads .gitleaks.toml and .gitleaksignore from the base commit, but a change to
   // either still alters what the next scan allows. The scan cannot vouch for a pull request that
-  // rewrites its own rules.
-  const scannerEdits = input.changedFiles.filter((path) => path === ".gitleaks.toml" || path === ".gitleaksignore");
+  // rewrites its own rules. A .gitattributes at any depth counts too: a "-diff" or "binary" marking
+  // makes every later scan print "Binary files differ" and read nothing.
+  const scannerEdits = input.changedFiles.filter(
+    (path) => path === ".gitleaks.toml" || path === ".gitleaksignore" || path.split("/").pop() === ".gitattributes",
+  );
   if (scannerEdits.length > 0) {
     incomplete.push(`the pull request edits the secret scan configuration, so its own scan cannot vouch for it: ${scannerEdits.join(", ")}`);
   }

@@ -425,3 +425,15 @@ describe("computeEvent() implements option A", () => {
     expect(computeEvent({ reviewerOk, severities, verification }).basis.length).toBeGreaterThan(0);
   });
 });
+
+describe("a .gitattributes edit can blank the scan's diff, so the scan cannot vouch for it", () => {
+  test.each([".gitattributes", "docs/.gitattributes", "a/b/c/.gitattributes"])("%s: incomplete even when every check is green", (path) => {
+    const result = verify(green(), [path]);
+    expect(result.state).toBe("incomplete");
+    expect(result.reasons.join(" | ")).toContain(path);
+  });
+
+  test("a file that merely ends in the name is not a scanner edit", () => {
+    expect(verify(green(), ["docs/not.gitattributes.md", "x.gitattributes"]).state).toBe("passed");
+  });
+});

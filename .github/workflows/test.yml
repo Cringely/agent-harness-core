@@ -208,10 +208,14 @@ jobs:
           canary_dir="$RUNNER_TEMP/canary"
           mkdir -p "$canary_dir"
           printf 'api_%s = "%s"\n' key "$canary_value" > "$canary_dir/planted.txt"
-          rc=0; "$RUNNER_TEMP/gitleaks" dir --no-banner --ignore-gitleaks-allow --redact --log-level fatal --config "$RUNNER_TEMP/gitleaks.toml" "$canary_dir" || rc=$?
-          [ "$rc" -eq 1 ] || { echo "::error::canary file was not detected (gitleaks exit $rc)"; exit 1; }
-          rc=0; printf 'api_%s = "%s"\n' key "$canary_value" | "$RUNNER_TEMP/gitleaks" stdin --no-banner --ignore-gitleaks-allow --redact --log-level fatal --config "$RUNNER_TEMP/gitleaks.toml" || rc=$?
-          [ "$rc" -eq 1 ] || { echo "::error::canary text was not detected (gitleaks exit $rc)"; exit 1; }
+          # Exit 1 alone is not detection: gitleaks also exits 1 on a fatal error such as an
+          # unparseable config. A detection leaves a report with at least one finding.
+          report="$RUNNER_TEMP/canary.json"
+          rc=0; "$RUNNER_TEMP/gitleaks" dir --no-banner --ignore-gitleaks-allow --redact --log-level fatal --config "$RUNNER_TEMP/gitleaks.toml" --report-format json --report-path "$report" "$canary_dir" || rc=$?
+          { [ "$rc" -eq 1 ] && jq -e 'length > 0' "$report" > /dev/null; } || { echo "::error::canary file was not detected (gitleaks exit $rc)"; exit 1; }
+          rm -f "$report"
+          rc=0; printf 'api_%s = "%s"\n' key "$canary_value" | "$RUNNER_TEMP/gitleaks" stdin --no-banner --ignore-gitleaks-allow --redact --log-level fatal --config "$RUNNER_TEMP/gitleaks.toml" --report-format json --report-path "$report" || rc=$?
+          { [ "$rc" -eq 1 ] && jq -e 'length > 0' "$report" > /dev/null; } || { echo "::error::canary text was not detected (gitleaks exit $rc)"; exit 1; }
 
       # gitleaks exits 0 when its own `git log` fails on a bad range, and an empty commit list
       # makes the message loop below a no-op, so an unresolvable range would otherwise read as a
@@ -228,7 +232,12 @@ jobs:
       - name: Scan the pull request's commits
         run: |
           report="$RUNNER_TEMP/files.json"
-          rc=0; "$RUNNER_TEMP/gitleaks" git --no-banner --ignore-gitleaks-allow --redact --log-level warn --config "$RUNNER_TEMP/gitleaks.toml" --log-opts "--diff-merges=first-parent ${BASE_SHA}..${HEAD_SHA}" --report-format json --report-path "$report" . || rc=$?
+          log="$RUNNER_TEMP/scan.log"
+          rc=0; "$RUNNER_TEMP/gitleaks" git --no-banner --ignore-gitleaks-allow --redact --log-level warn --config "$RUNNER_TEMP/gitleaks.toml" --log-opts "--diff-merges=first-parent ${BASE_SHA}..${HEAD_SHA}" --report-format json --report-path "$report" . 2> "$log" || rc=$?
+          cat "$log" >&2
+          # gitleaks exits 0 when its own git log fails (bad range, unreadable repo) and logs an ERR
+          # line instead. Warnings such as "leaks found" are not errors, so only ERR refuses here.
+          if grep -qw ERR "$log"; then echo "::error::gitleaks logged an error while scanning, so the range may be unread"; exit 1; fi
           if [ "$rc" -eq 0 ]; then exit 0; fi
           if [ "$rc" -eq 1 ] && jq -r '.[] | "::error file=\(.File),line=\(.StartLine)::\(.RuleID) in commit \(.Commit[0:7])"' "$report"; then exit 1; fi
           echo "::error::gitleaks could not complete (exit $rc)"
