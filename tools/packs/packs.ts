@@ -326,8 +326,13 @@ export function frontmatterName(text: string): string | null {
 
 // A text file reads the same in a CRLF working tree and an LF index, so both sides of every
 // comparison and every write go through here. A file holding a NUL byte is binary and untouched.
+// buildPlan refuses a binary member outright, so only the disk side of a drift check reaches that branch.
+export function isBinary(data: Buffer): boolean {
+  return data.includes(0);
+}
+
 export function normalizeEol(data: Buffer): Buffer {
-  if (data.includes(0)) return data;
+  if (isBinary(data)) return data;
   const out = Buffer.allocUnsafe(data.length);
   let n = 0;
   for (let i = 0; i < data.length; i++) {
@@ -390,6 +395,12 @@ export function buildPlan(root: string): Plan {
     if (plan.has(path)) fail(`two members write ${path}`);
     plan.set(path, normalizeEol(data));
   };
+  // The identity gate decodes every planned buffer as UTF-8, which cannot see a string inside UTF-16
+  // text or a compressed stream. A member is refused as binary rather than copied past the gate.
+  const putMember = (path: string, data: Buffer, where: string, f: string): void => {
+    if (isBinary(data)) fail(`${where}: ${f} is a binary file, which a pack does not carry`);
+    put(path, data);
+  };
 
   for (const pack of source.packs) {
     const base = `${PACKS_DIR}/${pack.id}`;
@@ -408,7 +419,7 @@ export function buildPlan(root: string): Plan {
       if (declared !== name) {
         fail(`${where}: SKILL.md name ${JSON.stringify(declared)} must equal its directory ${JSON.stringify(name)}`);
       }
-      for (const f of files) put(`${base}/skills/${name}/${f}`, readFileSync(join(dir, ...f.split("/"))));
+      for (const f of files) putMember(`${base}/skills/${name}/${f}`, readFileSync(join(dir, ...f.split("/"))), where, f);
     }
 
     for (const rel of pack.agents) {
@@ -422,7 +433,7 @@ export function buildPlan(root: string): Plan {
       if (declared !== name) {
         fail(`${where}: frontmatter name ${JSON.stringify(declared)} must equal the file name ${JSON.stringify(name)}`);
       }
-      put(`${base}/agents/${fileName}`, readFileSync(file));
+      putMember(`${base}/agents/${fileName}`, readFileSync(file), where, fileName);
     }
 
     if (pack.hooks !== null) {
@@ -432,7 +443,7 @@ export function buildPlan(root: string): Plan {
       const files = listFiles(dir, "", where, tracked, pack.hooks);
       if (!files.includes("hooks.json")) fail(`${where}: no hooks.json`);
       checkHooksJson(readFileSync(join(dir, "hooks.json"), "utf8"), where);
-      for (const f of files) put(`${base}/hooks/${f}`, readFileSync(join(dir, ...f.split("/"))));
+      for (const f of files) putMember(`${base}/hooks/${f}`, readFileSync(join(dir, ...f.split("/"))), where, f);
     }
   }
 

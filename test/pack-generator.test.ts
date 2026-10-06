@@ -243,11 +243,11 @@ describe("generated shape", () => {
     expect([...buildPlan(root).keys()].some((k) => k.endsWith(".local.md"))).toBe(false);
   });
 
-  test("a binary member file is copied byte for byte, CRLF bytes included", () => {
+  test("a binary member file is refused, since the identity gate cannot read it", () => {
     const root = makeRoot();
-    const bytes = Buffer.from([0x00, 0x0d, 0x0a, 0xff, 0x0d, 0x0a]);
-    put(root, "lib/skills/alpha/pic.png", bytes);
-    expect(buildPlan(root).get("packs/demo/skills/alpha/pic.png")!.equals(bytes)).toBe(true);
+    // A UTF-16 BOM then NUL-interleaved text: a string inside it would pass a UTF-8 scan.
+    put(root, "lib/skills/alpha/note.txt", Buffer.from([0xff, 0xfe, 0x73, 0x00, 0x65, 0x00]));
+    expect(() => buildPlan(root)).toThrow(/binary file/);
   });
 
   test("a CRLF source writes LF output, and a CRLF checkout of the output is not drift", () => {
