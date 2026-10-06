@@ -122,7 +122,37 @@ describe("computeVerification()", () => {
     expect(result.reasons.join("\n")).toContain(".github/workflows/test.yml");
   });
 
-  test.each(["install/Restore-ClaudeProject.ps1", "install/Restore-ClaudeProject.Tests.ps1"])(
+  // #251: the secret scan gates the verdict like the two suites do. Index looked up by name so the
+  // test does not depend on list order.
+  const SCAN = REQUIRED_CHECKS.findIndex((c) => c.name === "secret scan (Gitleaks)");
+
+  test("the secret scan is a required check", () => {
+    expect(SCAN).toBeGreaterThan(-1);
+  });
+
+  test("a failing secret scan: failed", () => {
+    const result = verify(withRun(SCAN, { conclusion: "failure" }));
+    expect(result.state).toBe("failed");
+    expect(result.reasons.join(" | ")).toContain("secret scan (Gitleaks)");
+  });
+
+  test("a secret scan that never ran: incomplete", () => {
+    expect(verify(green().filter((_, i) => i !== SCAN)).state).toBe("incomplete");
+  });
+
+  test("a pull request that edits the scanner config: incomplete even when every check is green", () => {
+    const result = verify(green(), [".gitleaks.toml"]);
+    expect(result.state).toBe("incomplete");
+    expect(result.reasons.join(" | ")).toContain(".gitleaks.toml");
+  });
+
+  test("a pull request that edits the scanner ignore file: incomplete even when every check is green", () => {
+    const result = verify(green(), [".gitleaksignore"]);
+    expect(result.state).toBe("incomplete");
+    expect(result.reasons.join(" | ")).toContain(".gitleaksignore");
+  });
+
+  test.each(["install/Restore-ClaudeProject.ps1","install/Restore-ClaudeProject.Tests.ps1"])(
     "%s has its suite on a run line: passed",
     (path) => {
       expect(verify(green(), [path]).state).toBe("passed");
@@ -393,5 +423,17 @@ describe("computeEvent() implements option A", () => {
     [true, [], PASSED],
   ] as const)("every event carries a non-empty code-authored basis (reviewerOk=%p severities=%p verification=%p)", (reviewerOk, severities, verification) => {
     expect(computeEvent({ reviewerOk, severities, verification }).basis.length).toBeGreaterThan(0);
+  });
+});
+
+describe("a .gitattributes edit can blank the scan's diff, so the scan cannot vouch for it", () => {
+  test.each([".gitattributes", "docs/.gitattributes", "a/b/c/.gitattributes"])("%s: incomplete even when every check is green", (path) => {
+    const result = verify(green(), [path]);
+    expect(result.state).toBe("incomplete");
+    expect(result.reasons.join(" | ")).toContain(path);
+  });
+
+  test("a file that merely ends in the name is not a scanner edit", () => {
+    expect(verify(green(), ["docs/not.gitattributes.md", "x.gitattributes"]).state).toBe("passed");
   });
 });

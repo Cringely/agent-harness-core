@@ -91,3 +91,9 @@ Everything else under `account/claude/` is original to this workstation: rules, 
 definitions, hooks, the statusline scripts, the Cringely Vale style, and the templated
 `settings.account.json` and `mcp-servers.json`. Those are MIT under LICENSE with the
 rest of the repository.
+
+## Gitleaks default rules
+
+`.gitleaks.toml` is derived from the default configuration of Gitleaks v8.30.1
+(`config/gitleaks.toml`), MIT, Copyright (c) 2019 Zachary Rice. The file's header lists
+the changes made to it.

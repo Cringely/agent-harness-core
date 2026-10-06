@@ -147,3 +147,175 @@ jobs:
 
       - name: Start-CappedCopilot.Tests.ps1
         run: pwsh -NoProfile -File install/Start-CappedCopilot.Tests.ps1
+
+  secret-scan:
+    name: secret scan (Gitleaks)
+    # #251. The pre-commit token scan (#232) is the cheap first refusal and stays. This job covers
+    # what it cannot: secrets with no provider prefix, commit messages and touched paths, and any
+    # commit made with --no-verify or from a clone without the hook. It scans the pull request's
+    # own commit range, so master's existing history is never rescanned (a full-history baseline
+    # was clean when this job was added).
+    #
+    # Pull requests only. On a push to master the range would be the merge, already scanned as
+    # the pull request, so there is nothing for a push run to add.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    env:
+      # The Gitleaks binary (MIT) pinned by version and sha256, invoked directly. No third-party
+      # action: a binary checked against a hash needs nothing beyond the release asset, and it
+      # sidesteps any licence-key question about gitleaks-action. The hash is the one the release
+      # publishes in gitleaks_<version>_checksums.txt. A version bump changes both lines together.
+      GITLEAKS_VERSION: "8.30.1"
+      GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      # gitleaks logs through a coloured writer, so a redirected log still holds "ESC[31mERRESC[0m"
+      # and `grep -qw ERR` misses it. Plain output here, and the scan step strips escapes anyway.
+      NO_COLOR: "1"
+    steps:
+      # Full history, because the range base..head needs both ends and their ancestry.
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The scan reads history, not the working tree, so the tree can be base content at no cost to
+      # what is scanned. This stops the checkout (the pull request merge ref) from supplying files
+      # that gitleaks or git read from it: .gitleaksignore, .gitattributes (a binary marking blanks
+      # a diff) and any relative [extend] path in the config.
+      - name: Detach the working tree to the base commit
+        run: git checkout -q --detach "${BASE_SHA}"
+
+      - name: Install Gitleaks
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/gitleaks.tgz" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP" gitleaks
+
+      # The rules come from the base commit, never the pull request head. A config read from the
+      # head lets a change allowlist its own secret and scan clean. When the base has no
+      # .gitleaks.toml (the pull request that introduces it) the built-in defaults apply, written
+      # to an explicit file because gitleaks would otherwise discover the head's copy in the
+      # checkout. Any failure to read the base tree refuses the job.
+      - name: Load the scanner config from the base commit
+        run: |
+          entry=$(git ls-tree "${BASE_SHA}" -- .gitleaks.toml) || { echo "::error::cannot read the base tree ${BASE_SHA}"; exit 1; }
+          if [ -z "$entry" ]; then
+            printf '[extend]\nuseDefault = true\n' > "$RUNNER_TEMP/gitleaks.toml"
+          else
+            git show "${BASE_SHA}:.gitleaks.toml" > "$RUNNER_TEMP/gitleaks.toml" || { echo "::error::cannot read .gitleaks.toml at ${BASE_SHA}"; exit 1; }
+          fi
+
+      # A scanner that cannot detect anything passes every pull request. The planted value is
+      # assembled at run time, so this file never holds a string a scan would flag, and the
+      # check must see it in both a file and a piece of piped text (the commit message path).
+      # Fails closed: anything other than exit 1 means the job cannot vouch for the range.
+      - name: Scanner canary
+        run: |
+          canary_value='k8Dj29xPq4Lm7Zt1Wv5Rn3Bc6Hy0Fa2SeQ9'
+          canary_dir="$RUNNER_TEMP/canary"
+          mkdir -p "$canary_dir"
+          printf 'api_%s = "%s"\n' key "$canary_value" > "$canary_dir/planted.txt"
+          # Exit 1 alone is not detection: gitleaks also exits 1 on a fatal error such as an
+          # unparseable config. A detection leaves a report with at least one finding.
+          report="$RUNNER_TEMP/canary.json"
+          rc=0; "$RUNNER_TEMP/gitleaks" dir --no-banner --ignore-gitleaks-allow --redact --log-level fatal --config "$RUNNER_TEMP/gitleaks.toml" --report-format json --report-path "$report" "$canary_dir" || rc=$?
+          { [ "$rc" -eq 1 ] && jq -e 'length > 0' "$report" > /dev/null; } || { echo "::error::canary file was not detected (gitleaks exit $rc)"; exit 1; }
+          rm -f "$report"
+          rc=0; printf 'api_%s = "%s"\n' key "$canary_value" | "$RUNNER_TEMP/gitleaks" stdin --no-banner --ignore-gitleaks-allow --redact --log-level fatal --config "$RUNNER_TEMP/gitleaks.toml" --report-format json --report-path "$report" || rc=$?
+          { [ "$rc" -eq 1 ] && jq -e 'length > 0' "$report" > /dev/null; } || { echo "::error::canary text was not detected (gitleaks exit $rc)"; exit 1; }
+
+      # gitleaks exits 0 when its own `git log` fails on a bad range, and an empty commit list
+      # makes the message loop below a no-op, so an unresolvable range would otherwise read as a
+      # clean scan. Resolve the range here and refuse when it does not.
+      - name: Resolve the commit range
+        run: |
+          git rev-list "${BASE_SHA}..${HEAD_SHA}" > /dev/null || { echo "::error::commit range ${BASE_SHA}..${HEAD_SHA} does not resolve"; exit 1; }
+
+      # Reports file, line, rule and short commit only. --redact keeps the value out of the
+      # report, and the log level keeps gitleaks' own output down to counts.
+      # --diff-merges=first-parent makes a merge commit show its diff against its first parent, so a
+      # secret that exists only in a merge commit (a conflict resolution, an evil merge) is scanned.
+      # Without it git log emits no diff for a merge and gitleaks counts the commit as scanned.
+      - name: Scan the pull request's commits
+        run: |
+          report="$RUNNER_TEMP/files.json"
+          log="$RUNNER_TEMP/scan.log"
+          rc=0; "$RUNNER_TEMP/gitleaks" git --no-banner --ignore-gitleaks-allow --redact --log-level warn --config "$RUNNER_TEMP/gitleaks.toml" --log-opts "--diff-merges=first-parent ${BASE_SHA}..${HEAD_SHA}" --report-format json --report-path "$report" . 2> "$log" || rc=$?
+          cat "$log" >&2
+          # gitleaks exits 0 when its own git log fails (bad range, unreadable repo) and logs an ERR
+          # line instead. Warnings such as "leaks found" are not errors, so only ERR refuses here.
+          if sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -qw ERR; then echo "::error::gitleaks logged an error while scanning, so the range may be unread"; exit 1; fi
+          if [ "$rc" -eq 0 ]; then exit 0; fi
+          if [ "$rc" -eq 1 ] && jq -r '.[] | "::error file=\(.File),line=\(.StartLine)::\(.RuleID) in commit \(.Commit[0:7])"' "$report"; then exit 1; fi
+          echo "::error::gitleaks could not complete (exit $rc)"
+          exit 1
+
+      # gitleaks git scans diffs, not commit messages, so each message and the paths the commit
+      # touches go through the same rules as piped text. Names the commit and the rule, never the text.
+      - name: Scan commit messages and paths
+        run: |
+          fail=0
+          commits=$(git rev-list "${BASE_SHA}..${HEAD_SHA}") || { echo "::error::commit range does not resolve"; exit 1; }
+          for c in $commits; do
+            report="$RUNNER_TEMP/msg.json"
+            text=$(git log -1 --diff-merges=first-parent --name-only --format=%B "$c") || { echo "::error::cannot read commit ${c:0:7}"; exit 1; }
+            rc=0; printf '%s\n' "$text" | "$RUNNER_TEMP/gitleaks" stdin --no-banner --ignore-gitleaks-allow --redact --log-level fatal --config "$RUNNER_TEMP/gitleaks.toml" --report-format json --report-path "$report" || rc=$?
+            if [ "$rc" -eq 0 ]; then continue; fi
+            fail=1
+            if [ "$rc" -eq 1 ] && jq -r --arg c "$c" '.[] | "::error::\(.RuleID) in the message or paths of commit \($c[0:7])"' "$report"; then continue; fi
+            echo "::error::gitleaks could not complete for commit ${c:0:7} (exit $rc)"
+          done
+          exit "$fail"
+
+      # gitleaks git reads `git log -p`, and git prints "Binary files differ" with no content for any
+      # blob with a NUL byte in its first 8000 bytes (or marked binary in .gitattributes), so the
+      # diff scan never sees a secret in one. Those blobs are found from --numstat, where git shows
+      # them as "-<tab>-", and each is piped through the same rules as stdin. A binary that scans
+      # clean passes: failing on any binary would refuse every image. Deleted paths hold no blob.
+      # UTF-16 text (the Windows PowerShell 5.1 Out-File default, with or without a byte order mark)
+      # is NUL-interleaved, so it lands here, and the UTF-8 and ASCII rules never match across the
+      # NULs. A blob that looks like UTF-16 is therefore scanned a second time, transcoded to UTF-8.
+      # Detection is the byte order mark, or NULs at every other byte of the first 64 bytes (at least
+      # 75 percent of one parity, at most 25 percent of the other). A transcoding failure on such a
+      # blob fails the step: it cannot be shown clean.
+      - name: Scan binary files the diff scan skips
+        run: |
+          fail=0
+          scan_input() {
+            rc=0; "$RUNNER_TEMP/gitleaks" stdin --no-banner --ignore-gitleaks-allow --redact --log-level fatal --config "$RUNNER_TEMP/gitleaks.toml" --report-format json --report-path "$RUNNER_TEMP/bin.json" < "$1" || rc=$?
+            if [ "$rc" -eq 0 ]; then return 0; fi
+            fail=1
+            if [ "$rc" -eq 1 ] && jq -r --arg c "$c" '.[] | "::error::\(.RuleID) in a binary file of commit \($c[0:7])"' "$RUNNER_TEMP/bin.json"; then return 0; fi
+            echo "::error::gitleaks could not complete for a binary file of commit ${c:0:7} (exit $rc)"
+          }
+          commits=$(git rev-list "${BASE_SHA}..${HEAD_SHA}") || { echo "::error::commit range does not resolve"; exit 1; }
+          for c in $commits; do
+            list="$RUNNER_TEMP/binaries.list"
+            git log -1 --diff-merges=first-parent --numstat -z --no-renames --diff-filter=AMT --format= "$c" > "$list" || { echo "::error::cannot read commit ${c:0:7}"; exit 1; }
+            while IFS= read -r -d '' rec; do
+              case "$rec" in "-"$'\t'"-"$'\t'*) ;; *) continue ;; esac
+              path=${rec#-$'\t'-$'\t'}
+              blob="$RUNNER_TEMP/bin.blob"
+              git show "$c:$path" > "$blob" || { echo "::error::cannot read a binary file of commit ${c:0:7}"; exit 1; }
+              scan_input "$blob"
+              enc=$(head -c 64 "$blob" | od -An -v -tu1 | awk '
+                { for (i = 1; i <= NF; i++) b[n++] = $i }
+                END {
+                  if (n >= 2 && b[0] == 255 && b[1] == 254) { print "UTF-16LE"; exit }
+                  if (n >= 2 && b[0] == 254 && b[1] == 255) { print "UTF-16BE"; exit }
+                  h = int(n / 2)
+                  if (h < 4) exit
+                  for (i = 0; i < h; i++) { if (b[2 * i] == 0) ez++; if (b[2 * i + 1] == 0) oz++ }
+                  if (oz * 4 >= h * 3 && ez * 4 <= h) print "UTF-16LE"
+                  else if (ez * 4 >= h * 3 && oz * 4 <= h) print "UTF-16BE"
+                }') || { echo "::error::cannot inspect a binary file of commit ${c:0:7}"; exit 1; }
+              if [ -n "$enc" ]; then
+                conv="$RUNNER_TEMP/bin.utf8"
+                iconv -f "$enc" -t UTF-8 "$blob" > "$conv" || { echo "::error::cannot transcode a UTF-16 file of commit ${c:0:7}, so it cannot be scanned"; exit 1; }
+                scan_input "$conv"
+              fi
+            done < "$list"
+          done
+          exit "$fail"
