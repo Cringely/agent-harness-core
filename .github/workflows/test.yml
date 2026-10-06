@@ -274,7 +274,7 @@ jobs:
           commits=$(git rev-list "${BASE_SHA}..${HEAD_SHA}") || { echo "::error::commit range does not resolve"; exit 1; }
           for c in $commits; do
             list="$RUNNER_TEMP/binaries.list"
-            git log -1 --diff-merges=first-parent --numstat -z --no-renames --diff-filter=AM --format= "$c" > "$list" || { echo "::error::cannot read commit ${c:0:7}"; exit 1; }
+            git log -1 --diff-merges=first-parent --numstat -z --no-renames --diff-filter=AMT --format= "$c" > "$list" || { echo "::error::cannot read commit ${c:0:7}"; exit 1; }
             while IFS= read -r -d '' rec; do
               case "$rec" in "-"$'\t'"-"$'\t'*) ;; *) continue ;; esac
               path=${rec#-$'\t'-$'\t'}

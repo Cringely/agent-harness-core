@@ -117,17 +117,45 @@ describe("secret-scan reads merge commits", () => {
   });
 });
 
+// The default config's global [allowlist] paths skip images, svg, lockfiles, node_modules and vendor
+// in git mode, so a key committed to one scanned clean (verified live on gitleaks 8.30.1: a fake
+// ghp_ token in assets/logo.svg, node_modules/x/config.js and go.sum was reported only in a .txt).
+// `extend.useDefault` cannot drop that list, because extend() appends allowlists and no flag
+// disables it, so the default rules are vendored without the path list. The vendored version must
+// track the pinned binary, or the rules drift from the engine that reads them.
 describe(".gitleaks.toml", () => {
-  test("extends the default rules and allowlists only AWS's documented example key", () => {
-    const cfg = Bun.TOML.parse(readFileSync(join(REPO_ROOT, ".gitleaks.toml"), "utf8")) as {
-      extend?: { useDefault?: boolean };
-      allowlist?: Record<string, unknown>;
-      rules?: unknown;
-    };
-    expect(cfg.extend?.useDefault).toBe(true);
-    expect(cfg.rules).toBeUndefined();
-    const { description: _description, ...allow } = cfg.allowlist ?? {};
-    expect(allow).toEqual({ regexes: ["AKIAIOSFODNN7EXAMPLE"] });
+  type Cfg = {
+    extend?: unknown;
+    allowlist?: { paths?: unknown; regexes?: string[] };
+    allowlists?: unknown;
+    rules?: Array<{ id: string; allowlists?: Array<{ paths?: string[] }> }>;
+  };
+  const raw = () => readFileSync(join(REPO_ROOT, ".gitleaks.toml"), "utf8");
+  const cfg = () => Bun.TOML.parse(raw()) as Cfg;
+
+  test("vendors the default rules rather than extending them, with no global path allowlist", () => {
+    const c = cfg();
+    expect(c.extend).toBeUndefined();
+    expect(c.allowlists).toBeUndefined();
+    expect(c.allowlist?.paths).toBeUndefined();
+    expect((c.rules ?? []).length).toBeGreaterThan(100);
+    const ids = (c.rules ?? []).map((r) => r.id);
+    for (const id of ["generic-api-key", "github-pat", "aws-access-token"]) expect(ids).toContain(id);
+  });
+
+  test("keeps AWS's documented example key as the repo's one added allowlist regex", () => {
+    const c = cfg();
+    expect((c.allowlist?.regexes ?? []).filter((r) => r.includes("AKIA"))).toEqual(["AKIAIOSFODNN7EXAMPLE"]);
+    // The repo's one added path allowlist stops the bedrock rule matching its own definition. Other
+    // rules carry upstream path allowlists of their own, which are per rule and stay.
+    const bedrock = (c.rules ?? []).find((r) => r.id === "aws-amazon-bedrock-api-key-short-lived");
+    expect(bedrock?.allowlists?.flatMap((a) => a.paths ?? [])).toEqual(["^\\.gitleaks\\.toml$"]);
+  });
+
+  test("the vendored version equals the version the workflow pins", () => {
+    const m = raw().match(/Vendored from gitleaks v(\d+\.\d+\.\d+) /);
+    expect(m).not.toBeNull();
+    expect(m![1]).toBe(loadJob().env?.GITLEAKS_VERSION);
   });
 });
 
@@ -510,5 +538,51 @@ describe("secret-scan reads binary blobs the diff scan skips", () => {
     const names = loadJob().steps.map((s) => s.name);
     expect(names.indexOf(STEP)).toBeGreaterThan(names.indexOf("Scan the pull request's commits"));
     expect(names.indexOf(STEP)).toBeGreaterThan(names.indexOf("Scanner canary"));
+  });
+});
+
+// `log --diff-filter=AM` drops a type change (T). A symlink replaced by a binary file prints as
+// "Binary files /dev/null and b/x differ" in the diff scan and is listed by --numstat only when T is
+// in the filter, so a secret inside such a file was read by neither scan (verified live on gitleaks
+// 8.30.1: git mode exit 0, stdin mode exit 1 on the same blob).
+describe("secret-scan reads a symlink replaced by a binary file", () => {
+  const STEP = "Scan binary files the diff scan skips";
+
+  test("the binary step's diff filter includes T", () => {
+    expect(runOf(loadJob(), STEP)).toMatch(/--diff-filter=AMT\b/);
+  });
+
+  test("the replacement blob reaches the scanner", () => {
+    const s = scratch(0);
+    const repo = join(s.dir, "repo");
+    const seen = join(s.dir, "rt", "seen.bin");
+    try {
+      writeFileSync(join(s.dir, "rt", "gitleaks"), `#!/bin/sh\ncat >> "${seen.replace(/\\/g, "/")}"\nexit 0\n`);
+      const g = (input: string | null, ...a: string[]) => {
+        const r = Bun.spawnSync(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", ...a], {
+          cwd: repo,
+          stdin: input === null ? undefined : Buffer.from(input),
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        if (!r.success) throw new Error(`git ${a.join(" ")}: ${new TextDecoder().decode(r.stderr)}`);
+        return new TextDecoder().decode(r.stdout).trim();
+      };
+      // A blob in mode 120000 written straight to the index is a symlink without needing symlink privilege.
+      const blob = g("target", "hash-object", "-w", "--stdin");
+      g(null, "update-index", "--add", "--cacheinfo", `120000,${blob},x`);
+      g(null, "commit", "-q", "-m", "add symlink");
+      const base = g(null, "rev-parse", "HEAD");
+      g(null, "rm", "-q", "--cached", "x");
+      writeFileSync(join(repo, "x"), Buffer.from("x\0\napi_key = PLANTED\n"));
+      g(null, "add", "x");
+      g(null, "commit", "-q", "-m", "symlink becomes a binary file");
+      const head = g(null, "rev-parse", "HEAD");
+      expect(g(null, "log", "-1", "--name-status", "--format=", head)).toMatch(/^T\s+x$/);
+      expect(s.run(runOf(loadJob(), STEP), base, head)).toBe(0);
+      expect(readFileSync(seen).toString()).toContain("PLANTED");
+    } finally {
+      rmSync(s.dir, { recursive: true, force: true });
+    }
   });
 });
