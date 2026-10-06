@@ -99,9 +99,12 @@ jobs:
       - name: Account-Hooks.Tests.ps1
         run: pwsh -NoProfile -File install/Account-Hooks.Tests.ps1
 
+      - name: Start-CappedCopilot.Tests.ps1
+        run: pwsh -NoProfile -File install/Start-CappedCopilot.Tests.ps1
+
   pester-test-linux:
     name: Pester (fixture-built installer suites, Linux)
-    # #151: the same five suites the Windows job runs, on the platform the installer also
+    # #151: the same suites the Windows job runs, on the platform the installer also
     # targets. This is a separate job rather than a matrix on pester-test above so the Windows
     # job's check name stays exactly "Pester (fixture-built installer suites)" -- the App
     # reviewer's REQUIRED_CHECKS (tools/pr-review/verdict.ts) matches on that literal name, and a
@@ -141,6 +144,9 @@ jobs:
 
       - name: Account-Hooks.Tests.ps1
         run: pwsh -NoProfile -File install/Account-Hooks.Tests.ps1
+
+      - name: Start-CappedCopilot.Tests.ps1
+        run: pwsh -NoProfile -File install/Start-CappedCopilot.Tests.ps1
 
   secret-scan:
     name: secret scan (Gitleaks)

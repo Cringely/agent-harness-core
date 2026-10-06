@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "marketplace": {
+    "name": "agent-harness-core",
+    "owner": "Cringely",
+    "description": "Installable packs from agent-harness-core: skills, agents and hooks packaged as plugins."
+  },
+  "packs": [
+    {
+      "id": "engineering-method",
+      "version": "0.1.0",
+      "tier": "core",
+      "description": "Portable engineering method for agent-driven work: how to plan, delegate, fix, verify, review and close a change. Tool-neutral, written for harnesses other than Claude Code.",
+      "author": { "name": "Cringely" },
+      "license": "MIT",
+      "repository": "https://github.com/Cringely/agent-harness-core",
+      "members": {
+        "skills": ["account/claude/skills/engineering-method"]
+      }
+    }
+  ]
+}

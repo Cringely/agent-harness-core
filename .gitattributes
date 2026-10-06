@@ -23,3 +23,11 @@ core/claude/hooks/commit-msg text eol=lf
 # detects as binary, while still giving text files the same eol=lf the
 # rules above already give *.sh and the hook filenames under it.
 account/claude/** text=auto eol=lf
+
+# The generated pack tree and marketplace manifest (tools/packs/cli.ts, #254) are written with LF
+# for the same reason as the payload above. tools/packs/packs.ts compares them with line endings
+# normalised, so this rule is checkout ergonomics only and no check depends on it. text=auto for
+# the same reason as above: the generator refuses a binary member, but a hand-placed file in the
+# tree still must not be line-converted.
+packs/** text=auto eol=lf
+.claude-plugin/marketplace.json text eol=lf
