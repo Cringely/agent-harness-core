@@ -146,7 +146,13 @@ describe("computeVerification()", () => {
     expect(result.reasons.join(" | ")).toContain(".gitleaks.toml");
   });
 
-  test.each(["install/Restore-ClaudeProject.ps1", "install/Restore-ClaudeProject.Tests.ps1"])(
+  test("a pull request that edits the scanner ignore file: incomplete even when every check is green", () => {
+    const result = verify(green(), [".gitleaksignore"]);
+    expect(result.state).toBe("incomplete");
+    expect(result.reasons.join(" | ")).toContain(".gitleaksignore");
+  });
+
+  test.each(["install/Restore-ClaudeProject.ps1","install/Restore-ClaudeProject.Tests.ps1"])(
     "%s has its suite on a run line: passed",
     (path) => {
       expect(verify(green(), [path]).state).toBe("passed");

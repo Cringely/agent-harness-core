@@ -137,9 +137,10 @@ export function computeVerification(input: {
     incomplete.push(`the pull request edits CI definitions, so its own checks cannot vouch for it: ${workflowEdits.join(", ")}`);
   }
 
-  // The secret scan reads .gitleaks.toml from the base commit, but a change to it still alters what
-  // the next scan allows. The scan cannot vouch for a pull request that rewrites its own rules.
-  const scannerEdits = input.changedFiles.filter((path) => path === ".gitleaks.toml");
+  // The secret scan reads .gitleaks.toml and .gitleaksignore from the base commit, but a change to
+  // either still alters what the next scan allows. The scan cannot vouch for a pull request that
+  // rewrites its own rules.
+  const scannerEdits = input.changedFiles.filter((path) => path === ".gitleaks.toml" || path === ".gitleaksignore");
   if (scannerEdits.length > 0) {
     incomplete.push(`the pull request edits the secret scan configuration, so its own scan cannot vouch for it: ${scannerEdits.join(", ")}`);
   }

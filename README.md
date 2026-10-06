@@ -370,10 +370,12 @@ The workflow also carries a Gitleaks secret scan that runs on pull requests only
 a third-party action. A canary step fails the job if the scanner cannot detect a planted secret, and
 a finding is reported as file, line and rule, never the matched value. Gitleaks does not read commit
 messages, so a separate step pipes each message and its touched paths through the same rules. The
-scan reads `.gitleaks.toml` from the pull request's base commit, never its head, so a pull request
-cannot allowlist its own secret. When the base has no such file, the built-in rules apply. The job
+scan reads `.gitleaks.toml` from the pull request's base commit, never its head, and runs with the
+working tree detached to the base commit and `--ignore-gitleaks-allow`, so a pull request cannot
+allowlist its own secret through `.gitleaks.toml`, `.gitleaksignore` or an inline `gitleaks:allow`
+comment. When the base has no config file, the built-in rules apply. The job
 is in `REQUIRED_CHECKS`, so a failed or missing scan keeps the reviewer from approving. A pull
-request that edits `.gitleaks.toml` reads as incomplete, the same way an edit under
+request that edits `.gitleaks.toml` or `.gitleaksignore` reads as incomplete, the same way an edit under
 `.github/workflows/` does. Adding the job to the "CI required" ruleset is an operator change made
 once the job has run on a pull request.
 

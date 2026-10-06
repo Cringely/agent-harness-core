@@ -17,7 +17,7 @@
 // CRLF-tolerant: the YAML and TOML are read through parsers, not line splits.
 
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { posixBash } from "./posix-sh";
@@ -285,6 +285,57 @@ describe("secret-scan reads its config from the base commit", () => {
       expect(w.s.run(runOf(loadJob(), STEP), BOGUS, w.head)).not.toBe(0);
     } finally {
       rmSync(w.s.dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// gitleaks and git read more than the config from the checkout, which is the pull request merge
+// ref: .gitleaksignore (suppresses a finding by fingerprint), .gitattributes (a binary marking
+// blanks a diff) and any relative [extend] path. The scans read commits, not the tree, so the tree
+// is detached to the base commit. Confirmed live against gitleaks 8.30.1: a head-added
+// .gitleaksignore turns the scan exit 1 into exit 0, and --ignore-gitleaks-allow defeats an
+// inline gitleaks:allow comment.
+describe("secret-scan cannot be steered by files in the checkout", () => {
+  const DETACH = "Detach the working tree to the base commit";
+
+  test("the working tree is detached to the base commit before anything runs the scanner", () => {
+    const job = loadJob();
+    const names = job.steps.map((s) => s.name);
+    expect(names).toContain(DETACH);
+    expect(runOf(job, DETACH)).toMatch(/checkout -q --detach "\$\{BASE_SHA\}"/);
+    const at = names.indexOf(DETACH);
+    job.steps.forEach((s, i) => {
+      if (s.run?.includes('/gitleaks" ')) expect(i).toBeGreaterThan(at);
+    });
+  });
+
+  test("the detach step leaves a head-only .gitleaksignore out of the tree", () => {
+    const s = scratch(0);
+    const repo = join(s.dir, "repo");
+    try {
+      writeFileSync(join(repo, ".gitleaksignore"), "fake:rule:1\n");
+      const g = (...a: string[]) => {
+        const r = Bun.spawnSync(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", ...a], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+        if (!r.success) throw new Error(`git ${a.join(" ")}: ${new TextDecoder().decode(r.stderr)}`);
+        return new TextDecoder().decode(r.stdout).trim();
+      };
+      g("add", ".gitleaksignore");
+      g("commit", "-q", "-m", "head adds an ignore file");
+      expect(existsSync(join(repo, ".gitleaksignore"))).toBe(true);
+      expect(s.run(runOf(loadJob(), DETACH), s.head, g("rev-parse", "HEAD"))).toBe(0);
+      expect(existsSync(join(repo, ".gitleaksignore"))).toBe(false);
+    } finally {
+      rmSync(s.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("every gitleaks call carries --ignore-gitleaks-allow and --config, counted per call not per step", () => {
+    const calls = loadJob().steps.filter((st) => st.run?.includes('/gitleaks" '));
+    expect(calls.length).toBeGreaterThanOrEqual(3);
+    for (const st of calls) {
+      const n = (st.run!.match(/\/gitleaks" /g) ?? []).length;
+      expect((st.run!.match(/--ignore-gitleaks-allow/g) ?? []).length).toBe(n);
+      expect((st.run!.match(/--config "\$RUNNER_TEMP\/gitleaks\.toml"/g) ?? []).length).toBe(n);
     }
   });
 });

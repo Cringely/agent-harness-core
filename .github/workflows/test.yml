@@ -171,6 +171,13 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # The scan reads history, not the working tree, so the tree can be base content at no cost to
+      # what is scanned. This stops the checkout (the pull request merge ref) from supplying files
+      # that gitleaks or git read from it: .gitleaksignore, .gitattributes (a binary marking blanks
+      # a diff) and any relative [extend] path in the config.
+      - name: Detach the working tree to the base commit
+        run: git checkout -q --detach "${BASE_SHA}"
+
       - name: Install Gitleaks
         run: |
           curl -fsSL -o "$RUNNER_TEMP/gitleaks.tgz" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
@@ -201,9 +208,9 @@ jobs:
           canary_dir="$RUNNER_TEMP/canary"
           mkdir -p "$canary_dir"
           printf 'api_%s = "%s"\n' key "$canary_value" > "$canary_dir/planted.txt"
-          rc=0; "$RUNNER_TEMP/gitleaks" dir --no-banner --redact --log-level fatal --config "$RUNNER_TEMP/gitleaks.toml" "$canary_dir" || rc=$?
+          rc=0; "$RUNNER_TEMP/gitleaks" dir --no-banner --ignore-gitleaks-allow --redact --log-level fatal --config "$RUNNER_TEMP/gitleaks.toml" "$canary_dir" || rc=$?
           [ "$rc" -eq 1 ] || { echo "::error::canary file was not detected (gitleaks exit $rc)"; exit 1; }
-          rc=0; printf 'api_%s = "%s"\n' key "$canary_value" | "$RUNNER_TEMP/gitleaks" stdin --no-banner --redact --log-level fatal --config "$RUNNER_TEMP/gitleaks.toml" || rc=$?
+          rc=0; printf 'api_%s = "%s"\n' key "$canary_value" | "$RUNNER_TEMP/gitleaks" stdin --no-banner --ignore-gitleaks-allow --redact --log-level fatal --config "$RUNNER_TEMP/gitleaks.toml" || rc=$?
           [ "$rc" -eq 1 ] || { echo "::error::canary text was not detected (gitleaks exit $rc)"; exit 1; }
 
       # gitleaks exits 0 when its own `git log` fails on a bad range, and an empty commit list
@@ -221,7 +228,7 @@ jobs:
       - name: Scan the pull request's commits
         run: |
           report="$RUNNER_TEMP/files.json"
-          rc=0; "$RUNNER_TEMP/gitleaks" git --no-banner --redact --log-level warn --config "$RUNNER_TEMP/gitleaks.toml" --log-opts "--diff-merges=first-parent ${BASE_SHA}..${HEAD_SHA}" --report-format json --report-path "$report" . || rc=$?
+          rc=0; "$RUNNER_TEMP/gitleaks" git --no-banner --ignore-gitleaks-allow --redact --log-level warn --config "$RUNNER_TEMP/gitleaks.toml" --log-opts "--diff-merges=first-parent ${BASE_SHA}..${HEAD_SHA}" --report-format json --report-path "$report" . || rc=$?
           if [ "$rc" -eq 0 ]; then exit 0; fi
           if [ "$rc" -eq 1 ] && jq -r '.[] | "::error file=\(.File),line=\(.StartLine)::\(.RuleID) in commit \(.Commit[0:7])"' "$report"; then exit 1; fi
           echo "::error::gitleaks could not complete (exit $rc)"
@@ -236,7 +243,7 @@ jobs:
           for c in $commits; do
             report="$RUNNER_TEMP/msg.json"
             text=$(git log -1 --diff-merges=first-parent --name-only --format=%B "$c") || { echo "::error::cannot read commit ${c:0:7}"; exit 1; }
-            rc=0; printf '%s\n' "$text" | "$RUNNER_TEMP/gitleaks" stdin --no-banner --redact --log-level fatal --config "$RUNNER_TEMP/gitleaks.toml" --report-format json --report-path "$report" || rc=$?
+            rc=0; printf '%s\n' "$text" | "$RUNNER_TEMP/gitleaks" stdin --no-banner --ignore-gitleaks-allow --redact --log-level fatal --config "$RUNNER_TEMP/gitleaks.toml" --report-format json --report-path "$report" || rc=$?
             if [ "$rc" -eq 0 ]; then continue; fi
             fail=1
             if [ "$rc" -eq 1 ] && jq -r --arg c "$c" '.[] | "::error::\(.RuleID) in the message or paths of commit \($c[0:7])"' "$report"; then continue; fi
