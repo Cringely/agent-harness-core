@@ -19,7 +19,7 @@
 import { describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { posixBash } from "./posix-sh";
 
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -193,7 +193,7 @@ function scratch(stubExit: number) {
     const bash = posixBash();
     const r = Bun.spawnSync([bash, "-e", "-c", script], {
       cwd: repo,
-      env: { ...process.env, RUNNER_TEMP: fwd(rt), BASE_SHA: baseSha, HEAD_SHA: headSha },
+      env: { ...process.env, PATH: `${rt}${delimiter}${process.env.PATH}`, RUNNER_TEMP: fwd(rt), BASE_SHA: baseSha, HEAD_SHA: headSha },
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -484,6 +484,18 @@ describe("secret-scan reads binary blobs the diff scan skips", () => {
       if (!r.success) throw new Error(`git ${a.join(" ")}: ${new TextDecoder().decode(r.stderr)}`);
       return new TextDecoder().decode(r.stdout).trim();
     };
+    // Git Bash ships no iconv. Where the real one is absent, a perl stand-in with the same
+    // `iconv -f ENC -t UTF-8 FILE` contract, failing on a malformed or truncated sequence.
+    if (!Bun.which("iconv")) {
+      writeFileSync(
+        join(s.dir, "rt", "iconv"),
+        [
+          "#!/bin/sh",
+          `exec perl -MEncode -0777 -e 'binmode STDIN; binmode STDOUT; print encode("UTF-8", decode($ARGV[0], <STDIN>, Encode::FB_CROAK))' "$2" < "$5"`,
+        ].join("\n") + "\n",
+      );
+      chmodSync(join(s.dir, "rt", "iconv"), 0o755);
+    }
     for (const [name, body] of Object.entries(files)) writeFileSync(join(repo, name), body);
     g("add", "-A");
     g("commit", "-q", "-m", "add files");
@@ -520,6 +532,61 @@ describe("secret-scan reads binary blobs the diff scan skips", () => {
     try {
       expect(t.runStep()).toBe(0);
       expect(t.calls()).toBe(0);
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  // UTF-16 text (Windows PowerShell 5.1 Out-File) is NUL-interleaved, so git lists it as binary and the
+  // scanner's UTF-8 rules never match the raw bytes (verified live on gitleaks 8.30.1: raw exit 0,
+  // transcoded exit 1). The step scans the raw blob and a UTF-8 transcoding. Bytes are built from
+  // numeric code units, never from typed escape sequences.
+  const PLANTED = `${["api_", "key"].join("")} = "k8Dj29xPq4Lm7Zt1Wv5Rn3Bc6Hy0Fa2SeQ9"\n`;
+  function utf16(text: string, bigEndian: boolean, bom: boolean): Buffer {
+    const bytes: number[] = bom ? (bigEndian ? [254, 255] : [255, 254]) : [];
+    for (const ch of text) {
+      const n = ch.charCodeAt(0);
+      bytes.push(...(bigEndian ? [n >> 8, n & 255] : [n & 255, n >> 8]));
+    }
+    return Buffer.from(bytes);
+  }
+
+  for (const [label, be, bom] of [
+    ["UTF-16LE with a BOM", false, true],
+    ["UTF-16LE without a BOM", false, false],
+    ["UTF-16BE with a BOM", true, true],
+    ["UTF-16BE without a BOM", true, false],
+  ] as const) {
+    test(`${label} is scanned raw and as UTF-8`, () => {
+      const raw = utf16(PLANTED, be, bom);
+      const t = withBinaryCommit(0, { "ps.txt": raw });
+      try {
+        expect(t.runStep()).toBe(0);
+        expect(t.calls()).toBe(2);
+        const seen = readFileSync(t.seen);
+        expect(seen.subarray(0, raw.length)).toEqual(raw);
+        expect(seen.subarray(raw.length).toString("utf8").replace(/^﻿/, "")).toBe(PLANTED);
+      } finally {
+        rmSync(t.dir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test("UTF-16 that cannot be transcoded fails the step instead of passing unscanned", () => {
+    const cut = Buffer.concat([utf16(PLANTED, false, true), Buffer.from([65])]);
+    const t = withBinaryCommit(0, { "ps.txt": cut });
+    try {
+      expect(t.runStep()).not.toBe(0);
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a NUL binary that is not UTF-16 is scanned once", () => {
+    const t = withBinaryCommit(0, { "img.dat": Buffer.from([137, 80, 78, 71, 0, 0, 0, 13, 1, 2, 3, 4, 0, 0, 5, 6]) });
+    try {
+      expect(t.runStep()).toBe(0);
+      expect(t.calls()).toBe(1);
     } finally {
       rmSync(t.dir, { recursive: true, force: true });
     }
