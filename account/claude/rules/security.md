@@ -84,14 +84,15 @@ Any code accepting external input (CLI args, files, env vars, network) must vali
 An agent step that reads pull request or issue text, fetched web pages, or files from a third-party
 repository holds no write, publish or approve credential. Prompt injection through repository and web
 content is observed in production incidents, not only in demonstrations, so text from those sources
-is attacker-controlled input to whatever reads it. Directory text from a client tenant, such as
-display names, app names and policy descriptions, belongs on the same list.
+is attacker-controlled input to whatever reads it. So is any text an audited system lets its own
+users set, such as account names, app names and policy descriptions.
 
 A credential is anything that can push, merge, approve, publish or deploy. That includes a shell from
 which such a token can be read, such as `gh auth token`, a configured credential helper, or an
 environment variable carrying the token. A step whose shell can run `gh auth token` holds the
-credential whether or not it ever runs the command. A write role in a client tenant is a credential
-too, and so is any action that reads secrets there, such as function keys or app settings.
+credential whether or not it ever runs the command. In an audited environment a write role is a
+credential too, and so is any permission that reads secrets there, such as keys, connection strings
+or recovery keys.
 
 Where reading and acting cannot be separated, a human or a deterministic check sits between them,
 and the reading step hands over data, not instructions. Its output is a structured result the acting
@@ -101,24 +102,16 @@ In the reference shape, the model that reads the untrusted input has no tools, a
 credential decides the action from that model's structured output. The reader cannot act, and the
 actor never treats the untrusted text as instructions.
 
-### Client Tenant Assessments
+### Auditing an Environment
 
-Anyone with a low-privilege account in a tenant can set its display names, app names and policy
-descriptions. An agent that reads them is a reading step under the section above.
+An agent auditing any tenant, cloud account or directory is a reading step under the section above.
 
-- Assessment work uses read-only tenant roles: Global Reader, Security Reader and Reports Reader.
-  Reports Reader matters only for delegated access, since app-only access follows the application
-  permissions granted. These three roles do not cover the full scope of every assessment scanner.
-  Where a tool needs more, grant the permissions in that tool's own allowlist and name each exception.
-  The check is that the permissions actually granted match the allowlist, not that the identity
-  holds reader roles.
-- No write credential sits beside a reading agent. The credential definition above applies without
-  change, which includes tenant write roles and secret reads. A scope that writes, or that lists
-  keys and settings, counts as one even when the tool's vendor says it never writes.
-- Client consent for processing tenant data through a model service is PENDING the retention
-  statement. Retention and training terms have not been read against the client's contract. Until
-  they are, treat consent as not yet given and keep tenant data off any model tier whose terms are
-  unread.
+- Grant the audit identity an explicit allowlist of permissions, and check what was actually granted
+  against it. A built-in role named "reader" is not evidence of read-only access. Such roles often
+  include secret reads (Entra's Global Reader and Security Reader both return BitLocker recovery
+  keys), which makes them credentials under the definition above.
+- Data from an environment audited on someone else's behalf goes only to model services whose
+  retention and training terms have been read against that engagement's contract.
 
 ## Supply Chain
 
