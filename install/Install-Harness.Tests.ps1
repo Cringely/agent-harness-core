@@ -3,8 +3,16 @@ Describe "Install-Harness" {
     BeforeEach {
         $script:target = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-test-" + [guid]::NewGuid())
         New-Item -ItemType Directory -Path $script:target | Out-Null
+        # Every install registers its checkout in the per-user drift-check allowlist (issue
+        # #265). Point it at the sandbox so the suite never writes the real profile.
+        $script:savedAllowlist = $env:HARNESS_CORE_ALLOWLIST
+        $env:HARNESS_CORE_ALLOWLIST = "$($script:target)-allowlist/harness-core-checkouts"
     }
-    AfterEach { Remove-Item -Recurse -Force $script:target }
+    AfterEach {
+        $env:HARNESS_CORE_ALLOWLIST = $script:savedAllowlist
+        Remove-Item -Recurse -Force "$($script:target)-allowlist" -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $script:target
+    }
 
     It "copies agents, hooks, and templates into .claude" {
         $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500

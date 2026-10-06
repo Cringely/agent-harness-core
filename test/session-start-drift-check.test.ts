@@ -56,6 +56,26 @@ if (!pwshPath) {
 
 const tempDirs: string[] = [];
 
+// The hook refuses a coreRepo that is not on the per-user allowlist (issue #265), and the
+// installer registers the checkout it runs from. Every case points both at a throwaway file
+// via HARNESS_CORE_ALLOWLIST so no run reads or writes the real profile. One file per project
+// dir, named lazily, so a case that never registers anything sees an empty list.
+const allowlists = new Map<string, string>();
+function allowlistPath(dir: string): string {
+  let path = allowlists.get(dir);
+  if (!path) {
+    const holder = mkdtempSync(join(tmpdir(), "driftcheck-allow-"));
+    tempDirs.push(holder);
+    path = join(holder, "harness-core-checkouts");
+    allowlists.set(dir, path);
+  }
+  return path;
+}
+/** Register checkouts for a project the way the installer would. */
+function allow(dir: string, ...paths: string[]) {
+  writeFileSync(allowlistPath(dir), `${paths.join("\n")}\n`);
+}
+
 afterEach(() => {
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop()!;
@@ -72,7 +92,11 @@ function installedProject(includeCeremonies = false): string {
   tempDirs.push(dir);
   const args = [pwshPath!, "-NoProfile", "-NonInteractive", "-File", INSTALLER, "-Target", dir];
   if (includeCeremonies) args.push("-IncludeCeremonies");
-  const result = Bun.spawnSync(args, { stdout: "pipe", stderr: "pipe" });
+  const result = Bun.spawnSync(args, {
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, HARNESS_CORE_ALLOWLIST: allowlistPath(dir) },
+  });
   if (result.exitCode !== 0) {
     throw new Error(`installer failed (exit ${result.exitCode}): ${result.stderr.toString()}`);
   }
@@ -116,6 +140,7 @@ function runHook(dir: string) {
     ...process.env,
     PATH: posixShDir() ? `${basePath}${delimiter}${posixShDir()}` : basePath,
     CLAUDE_PROJECT_DIR: dir,
+    HARNESS_CORE_ALLOWLIST: allowlistPath(dir),
   };
   return Bun.spawnSync([sh, join(dir, HOOK_REL)], {
     cwd: dir,
@@ -339,6 +364,7 @@ describe("session-start drift-check hook — every degradation exits silent and 
     // parses. Cutting coreRepo too would exercise the earlier guard instead and prove
     // nothing about this path.
     writeFileSync(join(dir, SIDECAR_REL), JSON.stringify({ coreRepo: REPO_ROOT }, null, 2));
+    allow(dir, REPO_ROOT);
     writeFileSync(join(dir, MANIFEST_REL), `{"files": {`);
     const result = runHook(dir);
     expect(result.stdout.length).toBe(0);
@@ -500,6 +526,7 @@ describe("session-start drift-check hook — coreRepo is untrusted input", () =>
     // JSON.stringify produces the same doubling, which is what the hook's unescape undoes;
     // this asserts the unescape does not mangle a path that was correct to begin with.
     writeFileSync(join(dir, SIDECAR_REL), JSON.stringify({ coreRepo: REPO_ROOT }, null, 2));
+    allow(dir, REPO_ROOT);
     const result = runHook(dir);
     // No install ever ran here, so every managed file reads as untracked or not-installed:
     // the point is that the audit was reached at all, which silence would not distinguish
@@ -522,6 +549,113 @@ describe("session-start drift-check hook — coreRepo is untrusted input", () =>
       const result = runHook(dir);
       expect(result.stdout.toString()).toBe("harness drift: 1 project-modified (promote?)\n");
       expect(result.exitCode).toBe(0);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+});
+
+describe("session-start drift-check hook — coreRepo must be a checkout the operator registered", () => {
+  // Issue #265. Containment keeps a core out of the project, but any directory OUTSIDE it
+  // holding install/Install-Harness.ps1 still passed on name and location alone. The
+  // authenticity anchor is a per-user allowlist the repo cannot write.
+  const REFUSAL =
+    "harness: coreRepo is not on the checkout allowlist, drift check skipped (re-run install/Install-Harness.ps1 from your core checkout)\n";
+
+  /** A fake core in a directory of its own, outside the project (a sibling clone, a
+   * downloads folder), whose installer writes `marker` when run. */
+  function plantOutsideCore(marker: string): string {
+    const fakeCore = mkdtempSync(join(tmpdir(), "driftcheck-sibling-"));
+    tempDirs.push(fakeCore);
+    mkdirSync(join(fakeCore, "install"), { recursive: true });
+    writeFileSync(
+      join(fakeCore, "install", "Install-Harness.ps1"),
+      `New-Item -ItemType File -Path '${marker}' -Force | Out-Null\n`,
+    );
+    return fakeCore;
+  }
+
+  test.skipIf(!pwshPath)(
+    "an unregistered core outside the project runs nothing and says why",
+    () => {
+      const dir = bareProject();
+      const marker = join(dir, "PWNED-BY-SIBLING-CORE");
+      writeFileSync(join(dir, SIDECAR_REL), JSON.stringify({ coreRepo: plantOutsideCore(marker) }, null, 2));
+      // The real core is registered, so the refusal is about the sidecar's path and not an
+      // empty list.
+      allow(dir, REPO_ROOT);
+
+      const result = runHook(dir);
+      // Marker first: the execution is the harm, the line is only the visibility.
+      expect(existsSync(marker)).toBe(false);
+      expect(result.stdout.toString()).toBe(REFUSAL);
+      expect(result.stderr.length).toBe(0);
+      expect(result.exitCode).toBe(0);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  test.skipIf(!pwshPath)(
+    "the same core runs once it is registered, so the refusal above is the allowlist and nothing else",
+    () => {
+      const dir = bareProject();
+      const marker = join(dir, "RAN-REGISTERED-CORE");
+      const fakeCore = plantOutsideCore(marker);
+      writeFileSync(join(dir, SIDECAR_REL), JSON.stringify({ coreRepo: fakeCore }, null, 2));
+      allow(dir, "/no/such/checkout", fakeCore);
+
+      runHook(dir);
+      expect(existsSync(marker)).toBe(true);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  test.skipIf(!pwshPath)(
+    "no allowlist file at all refuses, it does not fall back to trusting the sidecar",
+    () => {
+      const dir = bareProject();
+      const marker = join(dir, "PWNED-NO-ALLOWLIST");
+      writeFileSync(join(dir, SIDECAR_REL), JSON.stringify({ coreRepo: plantOutsideCore(marker) }, null, 2));
+      // allowlistPath(dir) names a file that is never written.
+      const result = runHook(dir);
+      expect(existsSync(marker)).toBe(false);
+      expect(result.stdout.toString()).toBe(REFUSAL);
+      expect(result.exitCode).toBe(0);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  test.skipIf(!pwshPath)(
+    "a CRLF allowlist still matches",
+    () => {
+      const dir = bareProject();
+      const marker = join(dir, "RAN-CRLF-ALLOWLIST");
+      const fakeCore = plantOutsideCore(marker);
+      writeFileSync(join(dir, SIDECAR_REL), JSON.stringify({ coreRepo: fakeCore }, null, 2));
+      writeFileSync(allowlistPath(dir), `${fakeCore}\r\n`);
+
+      runHook(dir);
+      expect(existsSync(marker)).toBe(true);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  test.skipIf(!pwshPath)(
+    "the installer registers the checkout it runs from, once",
+    () => {
+      const dir = installedProject();
+      const listed = () =>
+        readFileSync(allowlistPath(dir), "utf8")
+          .split(/\r?\n/)
+          .filter((l) => l !== "");
+      expect(listed()).toEqual([REPO_ROOT]);
+
+      // A second run must not append a duplicate.
+      const again = Bun.spawnSync(
+        [pwshPath!, "-NoProfile", "-NonInteractive", "-File", INSTALLER, "-Target", dir],
+        { stdout: "pipe", stderr: "pipe", env: { ...process.env, HARNESS_CORE_ALLOWLIST: allowlistPath(dir) } },
+      );
+      expect(again.exitCode).toBe(0);
+      expect(listed()).toEqual([REPO_ROOT]);
     },
     INSTALL_TIMEOUT_MS,
   );
