@@ -107,9 +107,10 @@ actor never treats the untrusted text as instructions.
 An agent auditing any tenant, cloud account or directory is a reading step under the section above.
 
 - Grant the audit identity an explicit allowlist of permissions, and check what was actually granted
-  against it. A built-in role named "reader" is not evidence of read-only access. Such roles often
-  include secret reads (Entra's Global Reader and Security Reader both return BitLocker recovery
-  keys), which makes them credentials under the definition above.
+  against it. The allowlist leaves out every permission that writes or reads secrets, so the audit
+  identity holds no credential under the definition above. A built-in role named "reader" is not
+  evidence of read-only access. Such roles often include secret reads (Entra's Global Reader and
+  Security Reader both return BitLocker recovery keys), so an audit identity never holds them.
 - Data from an environment audited on someone else's behalf goes only to model services whose
   retention and training terms have been read against that engagement's contract.
 
