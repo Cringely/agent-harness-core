@@ -91,6 +91,10 @@ describe("decideMerge(): refuses", () => {
     expect(refused({ review: { ...APPROVED, event: "COMMENT" }, mergeState: "BLOCKED" })).toContain("Only --allow-admin");
   });
 
+  test("a COMMENT on a merge state other than CLEAN or BLOCKED, even with --allow-admin", () => {
+    expect(refused({ review: { ...APPROVED, event: "COMMENT" }, mergeState: "BEHIND", allowAdmin: true })).toContain("merge state BEHIND");
+  });
+
   test("a COMMENT with an at-floor finding, even with --allow-admin", () => {
     expect(refused({ review: { ...APPROVED, event: "COMMENT", severities: ["security"] }, mergeState: "BLOCKED", allowAdmin: true })).toContain(
       "1 finding(s) at or above the floor",
