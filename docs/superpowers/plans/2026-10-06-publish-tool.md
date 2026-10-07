@@ -3709,7 +3709,7 @@ describe("parseCommand()", () => {
   });
 
   test("rejects a branch name that reads as a flag", () => {
-    expect(() => parseCommand(["pr", "create", "--repo", REPO, "--base", "main", "--head", "-x", "--title", "t", "--body-file", ABS])).toThrow(UsageError);
+    expect(() => parseCommand(["pr", "create", "--repo", REPO, "--base", "main", "--head=-x", "--title", "t", "--body-file", ABS])).toThrow(UsageError);
   });
 
   test("rejects --closes on pr edit without a new body", () => {
@@ -3748,7 +3748,14 @@ describe("assertNeutralCwd()", () => {
   });
 
   test("refuses when git is not on PATH", () => {
-    expect(() => assertNeutralCwd(WORK, WORK, new FakeRunner([on(["git"], { spawnError: true, code: null })]), {})).toThrow(PublishRefusal);
+    const probe = () => assertNeutralCwd(WORK, WORK, new FakeRunner([on(["git"], { spawnError: true, code: null })]), {});
+    expect(probe).toThrow(PublishRefusal);
+    expect(probe).toThrow("git is not on PATH");
+  });
+
+  test("refuses when the git probe fails for any reason other than not being a repository", () => {
+    const dubious = on(["git", "-C"], { code: 128, stderr: "fatal: detected dubious ownership in repository" });
+    expect(() => assertNeutralCwd(WORK, WORK, new FakeRunner([dubious]), {})).toThrow(PublishRefusal);
   });
 
   test("runs the git probe in the C locale", () => {
@@ -3823,7 +3830,7 @@ describe("main()", () => {
 });
 ````
 
-Expected sha256 of the extracted file: `02cbacd28f00f8c219d87afbbef9712af0feb59b0c5244050800b673eeb707e8`
+Expected sha256 of the extracted file: `548ff45e6ad82bb198ca37cb152dc8157609f44b6677846d9794aa6c807444dd`
 
 - [ ] **Step 2: Run it to see it fail**
 
@@ -4157,11 +4164,11 @@ Expected sha256 of the extracted file: `5a6fae292bde962cf16315480517425ac8959402
 - [ ] **Step 4: Run it to see it pass**
 
 Run: `bun test test/publish-cli.test.ts`
-Expected: `22 pass`, `0 fail`.
+Expected: `23 pass`, `0 fail`.
 
 - [ ] **Step 5: Ablate**
 
-In `assertNeutralCwd`, change `if (here === null || work === null || here !== work) {` to `if (here === null || work === null) {`. Expected: `refuses any other working directory` and `the working-directory guard refuses before the config is read` fail. Restore and re-run to `22 pass`.
+In `assertNeutralCwd`, change `if (here === null || work === null || here !== work) {` to `if (here === null || work === null) {`. Expected: `refuses any other working directory` and `the working-directory guard refuses before the config is read` fail. Restore and re-run to `23 pass`.
 
 - [ ] **Step 6: Smoke the real entry point**
 

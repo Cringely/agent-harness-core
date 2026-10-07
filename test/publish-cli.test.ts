@@ -68,7 +68,7 @@ describe("parseCommand()", () => {
   });
 
   test("rejects a branch name that reads as a flag", () => {
-    expect(() => parseCommand(["pr", "create", "--repo", REPO, "--base", "main", "--head", "-x", "--title", "t", "--body-file", ABS])).toThrow(UsageError);
+    expect(() => parseCommand(["pr", "create", "--repo", REPO, "--base", "main", "--head=-x", "--title", "t", "--body-file", ABS])).toThrow(UsageError);
   });
 
   test("rejects --closes on pr edit without a new body", () => {
@@ -107,7 +107,14 @@ describe("assertNeutralCwd()", () => {
   });
 
   test("refuses when git is not on PATH", () => {
-    expect(() => assertNeutralCwd(WORK, WORK, new FakeRunner([on(["git"], { spawnError: true, code: null })]), {})).toThrow(PublishRefusal);
+    const probe = () => assertNeutralCwd(WORK, WORK, new FakeRunner([on(["git"], { spawnError: true, code: null })]), {});
+    expect(probe).toThrow(PublishRefusal);
+    expect(probe).toThrow("git is not on PATH");
+  });
+
+  test("refuses when the git probe fails for any reason other than not being a repository", () => {
+    const dubious = on(["git", "-C"], { code: 128, stderr: "fatal: detected dubious ownership in repository" });
+    expect(() => assertNeutralCwd(WORK, WORK, new FakeRunner([dubious]), {})).toThrow(PublishRefusal);
   });
 
   test("runs the git probe in the C locale", () => {
