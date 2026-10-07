@@ -3069,6 +3069,8 @@ describe("review-merge: merges", () => {
     for (const call of gitCalls) {
       expect(call.argv).toContain("user.name=fixture-owner");
       expect(call.argv).toContain("credential.helper=");
+      expect(call.argv.some((a) => a.startsWith("credential.https://github.com.helper=!"))).toBe(true);
+      expect(call.argv.some((a) => a.startsWith("credential.helper=!"))).toBe(false);
       expect(call.options.env?.PUBLISH_GIT_TOKEN).toBe("fake-token");
       expect(call.options.env?.GH_TOKEN).toBeUndefined();
     }
@@ -3267,11 +3269,19 @@ describe("remoteMatches()", () => {
     expect(remoteMatches(`https://github.com/${REPO}.git`, REPO)).toBe(true);
     expect(remoteMatches(`git@github.com:${REPO}`, REPO)).toBe(true);
     expect(remoteMatches(`https://github.com/${REPO}-fork.git`, REPO)).toBe(false);
+    expect(remoteMatches(`ssh://git@github.com/${REPO}.git`, REPO)).toBe(true);
+  });
+
+  test("rejects look-alike hosts", () => {
+    expect(remoteMatches(`https://notgithub.com/${REPO}.git`, REPO)).toBe(false);
+    expect(remoteMatches(`https://attacker.test/github.com/${REPO}`, REPO)).toBe(false);
+    expect(remoteMatches(`https://github.com.attacker.test/${REPO}.git`, REPO)).toBe(false);
+    expect(remoteMatches(`git@notgithub.com:${REPO}`, REPO)).toBe(false);
   });
 });
 ````
 
-Expected sha256 of the extracted file: `5d9c5e2d5d002e5684b7316a4a2d1439d9bf31c52f5d74975be7b986335549e1`
+Expected sha256 of the extracted file: `8a63dc3ddc04a2ff8ed4362f46596205e8dbc7077fea6b19d49267c645d3c0d6`
 
 - [ ] **Step 2: Run it to see it fail**
 
@@ -3373,9 +3383,11 @@ function auditClosing(gh: Gh, repo: string, view: PrState, declared: number[]): 
   if (!verdict.ok) throw new PublishRefusal(`not merged: ${verdict.reason} across the title, body and commit messages`);
 }
 
-// owner/name of a GitHub remote URL, or null for anything else.
+// owner/name of a GitHub remote URL, or null for anything else. The host is anchored to the start
+// of the URL, so notgithub.com and a github.com path segment on another host do not match. The
+// token helper below is scoped to https://github.com for the same reason.
 export function remoteRepo(url: string): string | null {
-  const match = /github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/i.exec(url.trim());
+  const match = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/i.exec(url.trim());
   return match !== null && parseRepo(match[1]!) !== null ? match[1]! : null;
 }
 
@@ -3396,7 +3408,7 @@ function git(ctx: ReviewMergeContext, owner: OwnerIdentity, token: string, dir: 
       "-c",
       "credential.helper=",
       "-c",
-      `credential.helper=${helper}`,
+      `credential.https://github.com.helper=${helper}`,
       "-C",
       dir,
       ...args,
@@ -3560,7 +3572,7 @@ export async function reviewMerge(ctx: ReviewMergeContext, args: ReviewMergeArgs
 }
 ````
 
-Expected sha256 of the extracted file: `057fa12de3f13e368db25b287e97b2b083dd41f166d4eed9166fe57bc603ce63`
+Expected sha256 of the extracted file: `4b69db8e0c4282d819e5a643b63eda5290509c8c83d0c66d5a1aefb0a2fa29a1`
 
 - [ ] **Step 4: Run it to see it pass**
 

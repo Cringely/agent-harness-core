@@ -175,6 +175,8 @@ describe("review-merge: merges", () => {
     for (const call of gitCalls) {
       expect(call.argv).toContain("user.name=fixture-owner");
       expect(call.argv).toContain("credential.helper=");
+      expect(call.argv.some((a) => a.startsWith("credential.https://github.com.helper=!"))).toBe(true);
+      expect(call.argv.some((a) => a.startsWith("credential.helper=!"))).toBe(false);
       expect(call.options.env?.PUBLISH_GIT_TOKEN).toBe("fake-token");
       expect(call.options.env?.GH_TOKEN).toBeUndefined();
     }
@@ -373,5 +375,13 @@ describe("remoteMatches()", () => {
     expect(remoteMatches(`https://github.com/${REPO}.git`, REPO)).toBe(true);
     expect(remoteMatches(`git@github.com:${REPO}`, REPO)).toBe(true);
     expect(remoteMatches(`https://github.com/${REPO}-fork.git`, REPO)).toBe(false);
+    expect(remoteMatches(`ssh://git@github.com/${REPO}.git`, REPO)).toBe(true);
+  });
+
+  test("rejects look-alike hosts", () => {
+    expect(remoteMatches(`https://notgithub.com/${REPO}.git`, REPO)).toBe(false);
+    expect(remoteMatches(`https://attacker.test/github.com/${REPO}`, REPO)).toBe(false);
+    expect(remoteMatches(`https://github.com.attacker.test/${REPO}.git`, REPO)).toBe(false);
+    expect(remoteMatches(`git@notgithub.com:${REPO}`, REPO)).toBe(false);
   });
 });

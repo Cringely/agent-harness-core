@@ -89,9 +89,11 @@ function auditClosing(gh: Gh, repo: string, view: PrState, declared: number[]): 
   if (!verdict.ok) throw new PublishRefusal(`not merged: ${verdict.reason} across the title, body and commit messages`);
 }
 
-// owner/name of a GitHub remote URL, or null for anything else.
+// owner/name of a GitHub remote URL, or null for anything else. The host is anchored to the start
+// of the URL, so notgithub.com and a github.com path segment on another host do not match. The
+// token helper below is scoped to https://github.com for the same reason.
 export function remoteRepo(url: string): string | null {
-  const match = /github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/i.exec(url.trim());
+  const match = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/i.exec(url.trim());
   return match !== null && parseRepo(match[1]!) !== null ? match[1]! : null;
 }
 
@@ -112,7 +114,7 @@ function git(ctx: ReviewMergeContext, owner: OwnerIdentity, token: string, dir: 
       "-c",
       "credential.helper=",
       "-c",
-      `credential.helper=${helper}`,
+      `credential.https://github.com.helper=${helper}`,
       "-C",
       dir,
       ...args,
