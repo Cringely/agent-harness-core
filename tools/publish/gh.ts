@@ -142,7 +142,11 @@ export class Gh {
   blankIssuesDisabled(repo: string, ref: string): boolean {
     for (const name of ["config.yml", "config.yaml"]) {
       const text = this.fileAt(repo, `.github/ISSUE_TEMPLATE/${name}`, ref);
-      if (text !== null) return /^blank_issues_enabled:[ \t]*false[ \t]*(?:#.*)?$/m.test(text);
+      if (text === null) continue;
+      // Fail closed: blank issues count as enabled only when the key reads as a YAML true, in any
+      // case, quoted or not. A present key with any other value (False, no, off, "false") disables.
+      const value = /^blank_issues_enabled:[ \t]*(.*?)[ \t]*(?:#.*)?\r?$/m.exec(text)?.[1];
+      return value !== undefined && !/^(["']?)(true|yes|on|y)\1$/i.test(value);
     }
     return false;
   }

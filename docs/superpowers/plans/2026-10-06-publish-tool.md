@@ -2499,7 +2499,7 @@ Expected sha256 of the extracted file: `80d6cb73981f35689065410141328c952ece7e2a
 - [ ] **Step 4: Run it to see it pass**
 
 Run: `bun test test/publish-create.test.ts`
-Expected: `34 pass`, `0 fail`.
+Expected: `36 pass`, `0 fail`.
 
 - [ ] **Step 5: Ablate, four times**
 
@@ -2509,7 +2509,7 @@ Second, in `prCreate`, delete `if (template !== null) templateGate(template, bod
 
 Third, in `identityFor`, change `if (!identity.declared || identity.decl.names.length === 0) {` to `if (false) {`. Expected: `refuses when no identity file is declared` and `refuses when the identity file declares no name` fail, because a body naming the fixture person publishes (measured 2026-10-06). Restore.
 
-Fourth, change `if (identity.accountEmail !== true || identity.decl.emails.length === 0) {` to `if (false) {`. Expected: `refuses when the claude CLI's account email is unknown` fails. Restore and re-run to `34 pass`.
+Fourth, change `if (identity.accountEmail !== true || identity.decl.emails.length === 0) {` to `if (identity.decl.emails.length === 0) {`, which removes only the accountEmail half. Expected: `refuses when the CLI's account email is unknown even though the identity file declares emails` fails, because the empty-emails half cannot catch a file that declares emails. Restore and re-run to `36 pass`. The emails-length half is not pinned by a test of its own, since accountEmail true already implies a non-empty list.
 
 - [ ] **Step 6: Run the whole suite**
 

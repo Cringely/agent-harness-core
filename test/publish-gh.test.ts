@@ -92,6 +92,24 @@ describe("lookups", () => {
     ]);
     expect(gh(runner).blankIssuesDisabled(REPO, "main")).toBe(true);
   });
+
+  // Fail closed: only a YAML true leaves blank issues enabled, whatever the spelling or quoting.
+  test("blankIssuesDisabled reads any false spelling as disabled and any true spelling as enabled", () => {
+    const answer = (text: string): boolean =>
+      gh(
+        new FakeRunner([
+          TOKEN,
+          on(["gh", "api", "-H", "Accept: application/vnd.github.raw", `repos/${REPO}/contents/.github/ISSUE_TEMPLATE/config.yml?ref=main`], { stdout: text }),
+        ]),
+      ).blankIssuesDisabled(REPO, "main");
+    for (const value of ["False", "FALSE", "no", "off", '"false"', "'false'", "false # on purpose", "nope"]) {
+      expect(answer(`blank_issues_enabled: ${value}\n`)).toBe(true);
+    }
+    for (const value of ["true", "True", "yes", '"true"', "true # default"]) {
+      expect(answer(`blank_issues_enabled: ${value}\n`)).toBe(false);
+    }
+    expect(answer("contact_links: []\n")).toBe(false);
+  });
 });
 
 describe("prView()", () => {

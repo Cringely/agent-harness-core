@@ -137,6 +137,15 @@ describe("pr create", () => {
     refuses(() => prCreate(ctx(runner, "Mail fixture@example.test.\n", { loadIdentity: () => identity }), PR_ARGS), runner, "no account email");
   });
 
+  // identity.ts: an email declared in the identity file never satisfies the account-email check, so
+  // a file that declares emails beside an unknown CLI account still refuses.
+  test("refuses when the CLI's account email is unknown even though the identity file declares emails", () => {
+    const runner = publishingRepo();
+    const identity: IdentityLoad = { ...IDENTITY, accountEmail: false };
+    expect(identity.decl.emails).not.toEqual([]);
+    refuses(() => prCreate(ctx(runner, CLEAN_BODY, { loadIdentity: () => identity }), PR_ARGS), runner, "no account email");
+  });
+
   test("refuses an identifying string in the body, naming only its class", () => {
     const runner = publishingRepo();
     let message = "";
@@ -235,6 +244,15 @@ describe("pr edit", () => {
   test("refuses when the pull request's base is not the --base given", () => {
     const runner = publishingRepo([on(["gh", "pr", "view"], { stdout: VIEW })]);
     refuses(() => prEdit(ctx(runner), { ...EDIT_ARGS, base: "release" }), runner, "--base given");
+  });
+
+  test("refuses closing keywords on an edit of a pull request into a non-default base", () => {
+    const runner = publishingRepo([on(["gh", "pr", "view"], { stdout: VIEW.replace('"baseRefName":"main"', '"baseRefName":"release"') })]);
+    refuses(
+      () => prEdit(ctx(runner, `${CLEAN_BODY}\nCloses #12\n`), { ...EDIT_ARGS, base: "release", closes: [12] }),
+      runner,
+      "default branch",
+    );
   });
 
   test("refuses a closing keyword in a title-only edit, which can declare none", () => {
