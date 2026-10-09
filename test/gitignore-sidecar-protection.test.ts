@@ -226,6 +226,25 @@ function gitHiddenUnder(pathValue: string): boolean {
 // F4 and R2-2 skipped on CI and no run ever exercised them). The probe spawns pwsh rather than
 // git because Bun's own executable lookup was measured to ignore an `env.PATH` override, while
 // PowerShell's command resolution honors the environment block of the process it runs in.
+//
+// The binDir needs more than pwsh: on a non-Windows host the installer runs `chmod +x` on the
+// git hooks before it writes settings.json and the manifest (Install-Harness.ps1, the
+// `if (-not $IsWindows)` hook loop), and a missing chmod is a CommandNotFoundException under
+// $ErrorActionPreference = 'Stop', which would exit F4 with 1 for a reason unrelated to git.
+// Any other native command the installer gains on that path has to be added here too.
+export function gitFreeBinTools(
+  pwsh: string,
+  which: (name: string) => string | null,
+): Array<[string, string]> | undefined {
+  const tools: Array<[string, string]> = [["pwsh", pwsh]];
+  for (const name of ["chmod"]) {
+    const found = which(name);
+    if (!found) return undefined;
+    tools.push([name, found]);
+  }
+  return tools;
+}
+
 const gitFreePath: string | undefined = (() => {
   if (!pwshPath) return undefined;
   const stripped = (process.env.PATH ?? "")
@@ -235,9 +254,11 @@ const gitFreePath: string | undefined = (() => {
   if (gitHiddenUnder(stripped)) return stripped;
   if (process.platform === "win32") return undefined;
   try {
+    const tools = gitFreeBinTools(pwshPath, (name) => Bun.which(name) ?? null);
+    if (!tools) return undefined;
     const binDir = join(GIT_ISOLATION_DIR, "no-git-bin");
     mkdirSync(binDir);
-    symlinkSync(realpathSync(pwshPath), join(binDir, "pwsh"));
+    for (const [name, target] of tools) symlinkSync(realpathSync(target), join(binDir, name));
     return gitHiddenUnder(binDir) ? binDir : undefined;
   } catch {
     return undefined;
@@ -1314,4 +1335,23 @@ describe("manifest and sidecar key order", () => {
     },
     INSTALL_TIMEOUT_MS * 3,
   );
+});
+
+// The Linux fallback PATH for F4 and R2-2 must carry every native command the installer runs
+// before it writes settings.json and the manifest, or those cases exit 1 for a reason that has
+// nothing to do with git (#141). The symlinking itself only happens off Windows, so this pins
+// the list, which is the part that can silently lose chmod.
+describe("git-free PATH fallback tools", () => {
+  test("carries pwsh and chmod, each pointed at its resolved binary", () => {
+    const found: Record<string, string> = { chmod: "/usr/bin/chmod" };
+    const tools = gitFreeBinTools("/opt/pwsh", (n) => found[n] ?? null);
+    expect(tools).toEqual([
+      ["pwsh", "/opt/pwsh"],
+      ["chmod", "/usr/bin/chmod"],
+    ]);
+  });
+
+  test("returns nothing when chmod cannot be resolved, so the cases skip instead of failing", () => {
+    expect(gitFreeBinTools("/opt/pwsh", () => null)).toBeUndefined();
+  });
 });
