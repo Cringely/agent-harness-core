@@ -267,9 +267,16 @@ const gitFreePath: string | undefined = (() => {
 if (!gitFreePath) {
   console.warn(
     "gitignore-sidecar-protection.test.ts: could not hide git from a child process's PATH on " +
-      "this host; the git-missing cases (F4, R2-2) are skipped here.",
+      "this host; the git-missing cases (F4, F4b, R2-2) are skipped here.",
   );
 }
+
+// The skips above are for a developer host. On CI the git-missing cases must run, so a CI image that
+// loses pwsh, chmod or the symlink trick fails here instead of going green with F4, F4b and R2-2 skipped.
+test.if(!!process.env.CI)("git-missing cases can run on CI (pwsh found, git hideable)", () => {
+  expect(pwshPath).toBeTruthy();
+  expect(gitFreePath).toBeTruthy();
+});
 
 describe("sidecar gitignore protection", () => {
   // (a) No pre-existing .claude/.gitignore: the installer plants core's template fresh, so the
@@ -561,6 +568,25 @@ describe("sidecar gitignore protection — round 2 findings", () => {
       expect(sidecarExists(dir)).toBe(false);
       expect(existsSync(join(dir, ".claude", "settings.json"))).toBe(true);
       expect(existsSync(join(dir, MANIFEST_REL))).toBe(true);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  // F4b: a git-free re-install must not blank the commit a git-ful install recorded. The sidecar
+  // is removed between the runs so the second run is not refused whole (that is R2-2's case) and
+  // actually reaches the manifest write.
+  test.skipIf(!pwshPath || !gitFreePath)(
+    "(F4b) git missing from PATH on a re-install: the recorded coreCommit survives",
+    () => {
+      const dir = freshRepo();
+      expect(runInstall(dir).exitCode).toBe(0);
+      const recorded = JSON.parse(readFileSync(join(dir, MANIFEST_REL), "utf8")).coreCommit;
+      expect(recorded).toBeTruthy();
+      rmSync(join(dir, SIDECAR_REL));
+
+      const result = runInstall(dir, [], { extraEnv: { PATH: gitFreePath! } });
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(readFileSync(join(dir, MANIFEST_REL), "utf8")).coreCommit).toBe(recorded);
     },
     INSTALL_TIMEOUT_MS,
   );

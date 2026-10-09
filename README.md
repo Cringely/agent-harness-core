@@ -128,7 +128,7 @@ The `.harness-manifest.json` behind that is a record of two different things, no
 each installed path to the SHA256 it had at install time, which is what makes a project edit
 detectable. `accepted` maps a path to the hash of the project's own fork, pinned deliberately, and
 says the divergence is the intended state. `coreCommit` is the third field, recording which core
-commit the layer was installed from. A manifest written before this shape existed, a flat
+commit the layer was installed from. A re-install that cannot ask git keeps the recorded value. A manifest written before this shape existed, a flat
 path-to-hash map, is migrated on the next run with every hash preserved under `files`.
 
 None of that travels between clones, which is exactly why two other fields never reach this file:

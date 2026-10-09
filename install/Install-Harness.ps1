@@ -1758,7 +1758,10 @@ foreach ($eventType in $hooksTemplate.PSObject.Properties.Name) {
 # stackDetected do not travel and go in the gitignored sidecar instead (issue #137). Hooks
 # reading coreRepo to locate core need a path that survives the core repo being moved, which
 # is exactly the sidecar's job.
-$manifest['coreCommit'] = Get-CoreCommit
+# Null (no git) must not overwrite a recorded commit: a no-op re-install would rewrite the committed manifest.
+$coreCommit = Get-CoreCommit
+if ($coreCommit) { $manifest['coreCommit'] = $coreCommit }
+elseif (-not $manifest.Contains('coreCommit')) { $manifest['coreCommit'] = $null }
 
 $sidecar['coreRepo'] = $repoRoot
 Register-CoreCheckout -Path $repoRoot
