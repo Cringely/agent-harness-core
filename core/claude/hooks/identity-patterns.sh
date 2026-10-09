@@ -507,6 +507,28 @@ identity_json_array() {
     esac
     flat=$(printf '%s' "$raw" | tr '\n' ' ') || return 1
 
+    # Issue #91: a key spelled with a JSON u-escape for one of its letters
+    # is the declared key to the exporter's ConvertFrom-Json, but matches
+    # neither the key count nor the sed below, so the channel read as never
+    # declared (rc 0, silent). Decoding it would take a general JSON key
+    # parser. Refusing an escaped-u key costs a legitimate file nothing,
+    # since no real key needs one. Checked on every key, not only this one,
+    # so it needs no knowledge of what the escape spells. The case glob is
+    # a no-fork prefilter: grep only runs when the text holds a backslash
+    # followed by u at all, which an ordinary identity file never does.
+    # The escape is written as backslash-backslash plus [u] so no u-escape
+    # sequence appears in this source.
+    case $flat in
+        *\\[u]*)
+            printf '%s' "$flat" | grep -qE '"([^"\\]|\\.)*\\[u]([^"\\]|\\.)*"[[:space:]]*:'
+            identity_arr_uesc_rc=$?
+            if [ "$identity_arr_uesc_rc" -ne 1 ]; then
+                echo "identity gate: '$identity_file' has an object key written with a JSON u-escape (or the check for one did not run cleanly, grep exited $identity_arr_uesc_rc). The '$key' key cannot be told apart from an escaped spelling of it, so the channel could read as empty. Refusing. Write every key with its plain letters." >&2
+                return 1
+            fi
+            ;;
+    esac
+
     # Issue #91, round-2 review: the sed extraction below is a greedy
     # `.*` match, so once the key lookup went case-insensitive it also
     # started treating a shadowing duplicate as "the same key" and
@@ -554,7 +576,18 @@ EOF
         echo "identity gate: the '$key' key lookup in '$identity_file' did not run cleanly. Refusing rather than reading a crashed extraction as an absent key." >&2
         return 1
     }
-    [ -n "$tail" ] || return 0
+    if [ -z "$tail" ]; then
+        # Issue #91: sed finding no array means "absent" only when the key
+        # count above found no key. One declared key whose value is not an
+        # array (a string, null, a comment or other text between the colon
+        # and the bracket) is a declaration this parser cannot read, which
+        # is not "zero entries".
+        if [ "$identity_arr_key_hits" -ge 1 ]; then
+            echo "identity gate: '$identity_file' declares '$key' but its value is not a JSON array starting right after the colon (a string, null, or a comment or other text before the '['). Refusing rather than reading a declared channel as empty." >&2
+            return 1
+        fi
+        return 0
+    fi
 
     # #135's review (F2): the sed above used to discard the array's own
     # '[' along with everything before it, so a key that IS declared but

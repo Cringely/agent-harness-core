@@ -392,6 +392,24 @@ describe("identity gate — identity-patterns.sh: JSON parser residuals (issue #
     expect(result.exitCode).not.toBe(0);
     expect(result.stderr.toString()).toContain("identifying string");
   });
+
+  // #91: a declared names key the parser cannot read must stop the commit,
+  // not load an empty channel. emails still declares one entry so the
+  // "declares no names and no emails" refusal cannot be what fires.
+  test.each([
+    ["a string instead of an array", `{"names": "Fictional Persona", "emails": ["${EMAIL}"]}`],
+    ["a comment before the array", `{"names": /* c */ ["Fictional Persona"], "emails": ["${EMAIL}"]}`],
+    ["a u-escape in the key", `{"n\\u0061mes": ["Fictional Persona"], "emails": ["${EMAIL}"]}`],
+  ])("a declared names key written as %s refuses the commit rather than loading empty", (_label, raw) => {
+    const dir = initPreCommitRepo();
+    const home = makeIdentityHome(raw);
+    writeFileSync(join(dir, "notes.txt"), "the changelog credits Fictional Persona for this release\n");
+    git(["add", "notes.txt"], dir);
+    const result = runPreCommit(dir, envWith({ USERPROFILE: home, HOME: home }));
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).not.toContain("identifying string");
+    expect(result.stderr.toString()).toMatch(/identity gate:/);
+  });
 });
 
 // #135's adversarial review of the #91c/#91d fix (PR #135) found the fix
@@ -1346,6 +1364,91 @@ describe("identity gate — the pattern-set builders match the pipelines they re
         if (got.stderr !== "") mismatches.push(`${label}: expected no stderr, got ${JSON.stringify(got.stderr)}`);
       } else if (!got.stderr.includes(stderrFragment)) {
         mismatches.push(`${label}: stderr missing ${JSON.stringify(stderrFragment)}, got ${JSON.stringify(got.stderr)}`);
+      }
+    });
+    expect(mismatches).toEqual([]);
+  });
+});
+
+// #91: a declared key whose value identity_json_array cannot read used to fall
+// out of its key-extraction sed as an empty result and return rc 0, the same
+// answer as a key never declared. The exporter's ConvertFrom-Json reads the
+// declared value in each of these, so the two readers of one file disagreed
+// and the hook's channel went silently empty. Kept out of ARRAY_MATRIX above,
+// whose rows are recorded from the pre-#113 sed and whose runtime already sits
+// near the 30s limit on a Windows seat. One sh process runs every row here.
+// [label, key asked for, raw JSON, expected rc, stderr fragment, expected stdout]
+const UNREADABLE_KEY_CASES: Array<[string, string, string, number, string | null, string]> = [
+  ["a u-escape in the key", "names", '{"n\\u0061mes":["Alice Example"],"emails":[]}', 1, "JSON u-escape", ""],
+  [
+    "a u-escape in the other channel's key",
+    "names",
+    '{"names":["Alice Example"],"em\\u0061ils":["a@b.test"]}',
+    1,
+    "JSON u-escape",
+    "",
+  ],
+  ["a string where the array belongs", "names", '{"names":"Alice Example","emails":[]}', 1, "not a JSON array", ""],
+  ["null where the array belongs", "names", '{"names":null,"emails":[]}', 1, "not a JSON array", ""],
+  [
+    "a comment between the colon and the [",
+    "names",
+    '{"names": /* legal in pwsh */ ["Alice Example"],"emails":[]}',
+    1,
+    "not a JSON array",
+    "",
+  ],
+  [
+    "a string in the emails channel",
+    "emails",
+    '{"names":["Alice Example"],"emails":"a@b.test"}',
+    1,
+    "not a JSON array",
+    "",
+  ],
+  // Controls: the check must not widen into refusing readable files.
+  [
+    "a u-escape inside an entry value is decoded, not taken for a key",
+    "names",
+    '{"names":["F\\u0069ctional: Persona"],"emails":[]}',
+    0,
+    null,
+    "Fictional: Persona\n",
+  ],
+  ["an absent key still reads as zero entries", "names", '{"emails":["a@b.test"]}', 0, null, ""],
+];
+
+describe("identity gate — identity_json_array refuses a declared key it cannot read (#91)", () => {
+  test("each unreadable shape refuses, and the readable controls still pass", () => {
+    const dir = mkdtempSync(join(tmpdir(), "identity-unreadable-"));
+    tempDirs.push(dir);
+    const outDir = join(dir, "out");
+    mkdirSync(outDir, { recursive: true });
+    const driver: string[] = ["#!/bin/sh", '. "$1"', "identity_file=/fixture/.claude-account-identity.json"];
+    UNREADABLE_KEY_CASES.forEach(([, key, raw], i) => {
+      driver.push(`( identity_json_array ${shQuote(raw)} ${key} ) > "$2/${i}.out" 2> "$2/${i}.err"`);
+      driver.push(`printf '%s' "$?" > "$2/${i}.rc"`);
+    });
+    const driverPath = join(dir, "driver.sh");
+    writeFileSync(driverPath, driver.join("\n") + "\n");
+    const shDir = posixShDir();
+    const env = shDir
+      ? { ...process.env, PATH: `${process.env.PATH ?? ""}${delimiter}${shDir}` }
+      : { ...process.env };
+    const run = Bun.spawnSync([posixSh(), driverPath, LIB_SRC, outDir], { cwd: dir, env, stdout: "pipe", stderr: "pipe" });
+    expect(run.exitCode).toBe(0);
+
+    const mismatches: string[] = [];
+    UNREADABLE_KEY_CASES.forEach(([label, , , rc, fragment, stdout], i) => {
+      const gotRc = Number(readFileSync(join(outDir, `${i}.rc`), "utf8"));
+      const gotErr = readFileSync(join(outDir, `${i}.err`), "utf8");
+      const gotOut = readFileSync(join(outDir, `${i}.out`), "utf8");
+      if (gotRc !== rc) mismatches.push(`${label}: rc expected ${rc}, got ${gotRc}`);
+      if (gotOut !== stdout) {
+        mismatches.push(`${label}: stdout expected ${JSON.stringify(stdout)}, got ${JSON.stringify(gotOut)}`);
+      }
+      if (fragment === null ? gotErr !== "" : !gotErr.includes(fragment)) {
+        mismatches.push(`${label}: stderr ${JSON.stringify(gotErr)} vs expected ${JSON.stringify(fragment)}`);
       }
     });
     expect(mismatches).toEqual([]);
