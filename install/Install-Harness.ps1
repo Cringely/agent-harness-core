@@ -532,8 +532,24 @@ function ConvertTo-ManifestV2 {
     return $m
 }
 
+# Key-sorted copy of a map, for the two JSON files this script writes (#141). Both are built
+# from plain @{} hashtables, and .NET randomizes string hashing per process, so the same
+# content enumerated in a different key order on each run. The manifest is committed, so a
+# no-op re-install showed up as a diff. Ordinal, so the order is the same on every host and
+# culture. Only maps are sorted. Arrays keep their order, which carries meaning.
+function ConvertTo-SortedMap {
+    param($Map)
+
+    if ($Map -isnot [System.Collections.IDictionary]) { return ,$Map }
+    $keys = [string[]]@($Map.Keys)
+    [System.Array]::Sort($keys, [System.StringComparer]::Ordinal)
+    $sorted = [ordered]@{}
+    foreach ($key in $keys) { $sorted[$key] = ConvertTo-SortedMap -Map $Map[$key] }
+    return $sorted
+}
+
 $manifestPath = Join-Path $claudeDir '.harness-manifest.json'
-$sidecarPath = Join-Path $claudeDir '.harness-manifest.local.json'
+$sidecarPath =Join-Path $claudeDir '.harness-manifest.local.json'
 $manifest = @{}
 if (Test-Path -LiteralPath $manifestPath) {
     $raw = Get-Content -LiteralPath $manifestPath -Raw
@@ -991,7 +1007,7 @@ function Invoke-SidecarPlan {
         # hook's missing-sidecar check and silences its "sidecar unavailable" advisory, so an
         # -Accept, -Unaccept or -Prune with no sidecar and no legacy fields leaves the file absent.
         if (-not ($Sidecar.Contains('coreRepo') -or $Sidecar.Contains('stackDetected'))) { return 'skipped' }
-        $Sidecar | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $Plan.Facts.SidecarAbs
+        (ConvertTo-SortedMap -Map $Sidecar) | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $Plan.Facts.SidecarAbs
         return 'written'
     }
     if ($Plan.Action -eq 'remove') {
@@ -1048,7 +1064,7 @@ if ($Accept) {
     # retry once git answers still has its pin to make (round-4 B). See Get-SidecarPlan.
     $sidecarPlan = Get-SidecarPlan -TargetDir $Target
     $manifest['accepted'][$acceptKey] = Get-FileHashHex -Path $acceptPath
-    $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
+    (ConvertTo-SortedMap -Map $manifest) | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
     $null = Invoke-SidecarPlan -Plan $sidecarPlan -Sidecar $sidecar
     Write-Host "Accepted overlay '$acceptKey' pinned at $($manifest['accepted'][$acceptKey])."
     return
@@ -1082,7 +1098,7 @@ if ($Unaccept) {
     # before the manifest write for the same reason.
     $sidecarPlan = Get-SidecarPlan -TargetDir $Target
     $manifest['accepted'].Remove($unacceptKey)
-    $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
+    (ConvertTo-SortedMap -Map $manifest) | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
     $null = Invoke-SidecarPlan -Plan $sidecarPlan -Sidecar $sidecar
     Write-Host "Dropped the accepted-overlay pin on '$unacceptKey'. The file itself was left alone; the audit now judges it against core again."
     return
@@ -1152,7 +1168,7 @@ if ($Prune) {
     # before the manifest write for the same reason.
     $sidecarPlan = Get-SidecarPlan -TargetDir $Target
     $manifest['files'].Remove($pruneKey)
-    $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
+    (ConvertTo-SortedMap -Map $manifest) | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
     $null = Invoke-SidecarPlan -Plan $sidecarPlan -Sidecar $sidecar
 
     if (-not (Test-Path -LiteralPath $prunePath -PathType Leaf)) {
@@ -1742,7 +1758,10 @@ foreach ($eventType in $hooksTemplate.PSObject.Properties.Name) {
 # stackDetected do not travel and go in the gitignored sidecar instead (issue #137). Hooks
 # reading coreRepo to locate core need a path that survives the core repo being moved, which
 # is exactly the sidecar's job.
-$manifest['coreCommit'] = Get-CoreCommit
+# Null (no git) must not overwrite a recorded commit: a no-op re-install would rewrite the committed manifest.
+$coreCommit = Get-CoreCommit
+if ($coreCommit) { $manifest['coreCommit'] = $coreCommit }
+elseif (-not $manifest.Contains('coreCommit')) { $manifest['coreCommit'] = $null }
 
 $sidecar['coreRepo'] = $repoRoot
 Register-CoreCheckout -Path $repoRoot
@@ -1769,7 +1788,7 @@ $sidecarAction = if ($sidecarOutcome -eq 'removed') { 'removed' } elseif ($sidec
 $results.Add([pscustomobject]@{ File = '.harness-manifest.local.json'; Action = $sidecarAction })
 
 $settings | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $settingsPath
-$manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
+(ConvertTo-SortedMap -Map $manifest) | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
 
 # Git hooksPath wiring. The Claude Code PostToolUse hooks above only see this
 # session's direct Write/Edit tool calls — a script-applied OLD/NEW patch
@@ -1785,8 +1804,15 @@ $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
 $hooksDstAbs = (Resolve-Path -LiteralPath $hooksDst).Path
 
 $gitDirRaw = $null
-$gitCheck = & git -C $Target rev-parse --git-dir 2>$null
-if ($LASTEXITCODE -eq 0) { $gitDirRaw = $gitCheck }
+# try/catch because `& git` on a PATH without git throws a terminating CommandNotFoundException
+# under $ErrorActionPreference = 'Stop' (#141). By here settings.json and the manifest are
+# already written, so an unguarded call aborted a run that had otherwise succeeded and exited 1
+# over a convenience wiring. A missing git is the same "nothing to wire" as no repository.
+try {
+    $gitCheck = & git -C $Target rev-parse --git-dir 2>$null
+    if ($LASTEXITCODE -eq 0) { $gitDirRaw = $gitCheck }
+}
+catch { $gitDirRaw = $null }
 
 if (-not $gitDirRaw) {
     # Not a git repository (or git missing from PATH) — nothing to wire.
@@ -1804,10 +1830,9 @@ elseif (-not (Test-GitAnswersForTarget -AbsTarget (Resolve-Path -LiteralPath $Ta
     # reused rather than reimplemented: one shared definition of "git answers for this target,"
     # though the two call sites now read different answers from it by design. This call site
     # passes -IgnoreIndex, the sidecar probe does not (see the function's own comment for why).
-    # A missing git never reaches this elseif: `& git ...` on a PATH without git throws a
-    # terminating CommandNotFoundException at the rev-parse above, under this script's
-    # $ErrorActionPreference = 'Stop', with no try/catch there to hold it. The whole run aborts,
-    # not just this branch.
+    # A missing git never reaches this elseif: the rev-parse above is wrapped in a try/catch
+    # (#141) that turns the CommandNotFoundException into the silent no-op branch, so the run
+    # finishes and exits 0 with no hooksPath row.
     #
     # Dubious ownership is not excluded the same way (#165, corrected from an earlier version of
     # this comment that claimed it was). Without a location variable exported, it exits 128 at the
