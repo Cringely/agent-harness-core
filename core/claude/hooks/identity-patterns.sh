@@ -586,6 +586,22 @@ EOF
             echo "identity gate: '$identity_file' declares '$key' but its value is not a JSON array starting right after the colon (a string, null, or a comment or other text before the '['). Refusing rather than reading a declared channel as empty." >&2
             return 1
         fi
+        # Zero double-quoted keys found. The exporter's ConvertFrom-Json
+        # (Newtonsoft) also reads an unquoted key (names: [..]) and a
+        # single-quoted one ('names': [..]), neither of which the quoted-key
+        # count above can see, so "no quoted key" is not yet "absent".
+        # Looked for here without the quotes, case-insensitively through the
+        # same bracket-expression key_ci, as the key letters followed by an
+        # optional quote and the colon, and not preceded by a word character
+        # (so xnames: is not names:). Requiring the colon keeps a value that
+        # merely contains the word (bob.names@x.test) from refusing a file
+        # that never declared the key.
+        printf '%s' "$flat" | grep -qE "(^|[^A-Za-z0-9_])${key_ci}['\"]?[[:space:]]*:"
+        identity_arr_bare_rc=$?
+        if [ "$identity_arr_bare_rc" -ne 1 ]; then
+            echo "identity gate: '$identity_file' holds the text '$key' followed by a colon outside a double-quoted key (an unquoted or single-quoted key, or the key-presence check did not run cleanly, grep exited $identity_arr_bare_rc). The exporter may read it as a declared channel this parser cannot. Refusing rather than reading it as empty. Write the key as \"$key\" with double quotes." >&2
+            return 1
+        fi
         return 0
     fi
 

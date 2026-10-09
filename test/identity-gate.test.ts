@@ -1406,7 +1406,20 @@ const UNREADABLE_KEY_CASES: Array<[string, string, string, number, string | null
     "not a JSON array",
     "",
   ],
+  // The exporter's Newtonsoft reader also accepts an unquoted and a
+  // single-quoted key, which the quoted-key count cannot see.
+  ["an unquoted key", "names", '{names: ["Alice Example"],"emails":[]}', 1, "outside a double-quoted key", ""],
+  ["a single-quoted key", "names", "{'names': ['Alice Example'],\"emails\":[]}", 1, "outside a double-quoted key", ""],
+  ["an unquoted key in the other casing", "emails", '{"names":[],EMAILS : ["a@b.test"]}', 1, "outside a double-quoted key", ""],
   // Controls: the check must not widen into refusing readable files.
+  [
+    "the key word inside another channel's value is not a declaration",
+    "names",
+    '{"emails":["bob.names@x.test"]}',
+    0,
+    null,
+    "",
+  ],
   [
     "a u-escape inside an entry value is decoded, not taken for a key",
     "names",

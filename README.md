@@ -124,8 +124,9 @@ anything. The same refusal covers a file that is not well-formed UTF-8, includin
 Latin-1 or Windows-1252 saves, because an accented letter in those encodings would never match the
 UTF-8 form git stores. A `names` or `emails` key that is present but unreadable gets the same
 treatment: a value that is a string or `null` instead of an array, a comment between the colon and
-the `[`, or a key spelled with a JSON `\u` escape. Write both keys plainly, with the array starting
-right after the colon.
+the `[`, a key spelled with a JSON `\u` escape, or a key written without double quotes (unquoted or
+single-quoted), which PowerShell's JSON reader accepts and the gate's parser does not. Write both keys
+plainly in double quotes, with the array starting right after the colon.
 
 The `.harness-manifest.json` behind that is a record of two different things, not one. `files` maps
 each installed path to the SHA256 it had at install time, which is what makes a project edit
