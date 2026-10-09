@@ -1388,6 +1388,22 @@ const UNREADABLE_KEY_CASES: Array<[string, string, string, number, string | null
     "JSON u-escape",
     "",
   ],
+  [
+    "a u-escape in a single-quoted key",
+    "names",
+    "{'n\\u0061mes': ['Alice Example'], \"emails\": [\"a@b.test\"]}",
+    1,
+    "JSON u-escape",
+    "",
+  ],
+  [
+    "a u-escape in a single-quoted key of the other channel",
+    "names",
+    "{\"names\": [\"Alice Example\"], 'em\\u0061ils': ['a@b.test']}",
+    1,
+    "JSON u-escape",
+    "",
+  ],
   ["a string where the array belongs", "names", '{"names":"Alice Example","emails":[]}', 1, "not a JSON array", ""],
   ["null where the array belongs", "names", '{"names":null,"emails":[]}', 1, "not a JSON array", ""],
   [

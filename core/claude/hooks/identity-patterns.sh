@@ -520,7 +520,10 @@ identity_json_array() {
     # sequence appears in this source.
     case $flat in
         *\\[u]*)
-            printf '%s' "$flat" | grep -qE '"([^"\\]|\\.)*\\[u]([^"\\]|\\.)*"[[:space:]]*:'
+            # The second -e is the single-quoted form, which Newtonsoft
+            # (the exporter's reader) also decodes escapes in. The '\''
+            # sequences are a literal single quote inside the shell quotes.
+            printf '%s' "$flat" | grep -qE -e '"([^"\\]|\\.)*\\[u]([^"\\]|\\.)*"[[:space:]]*:' -e ''\''([^'\''\\]|\\.)*\\[u]([^'\''\\]|\\.)*'\''[[:space:]]*:'
             identity_arr_uesc_rc=$?
             if [ "$identity_arr_uesc_rc" -ne 1 ]; then
                 echo "identity gate: '$identity_file' has an object key written with a JSON u-escape (or the check for one did not run cleanly, grep exited $identity_arr_uesc_rc). The '$key' key cannot be told apart from an escaped spelling of it, so the channel could read as empty. Refusing. Write every key with its plain letters." >&2
