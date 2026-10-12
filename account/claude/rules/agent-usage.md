@@ -58,6 +58,13 @@ and not merely present. A rules-file edit encoding a directive verbatim, a commi
 entry: the coordinator writes those inline rather than paying a Fable dispatch to phrase what is
 already decided.
 
+Fable generation and Fable prose review apply only to persistent output intended for human
+consumption (operator directive, 2026-10-12: "Fable prose generation and review should only ever be
+done for persistant outputs that are intended for human consumption"). Internal tooling gets
+neither: rules files, agent defs, skills, hooks, briefs, and anything else written for agents to
+act on. This narrows the prose row of "Review Is Always Delegated" below. Correctness review of
+internal tooling with logic in it is untouched.
+
 ## Effort Is a Judgment Call, Not a Mandate
 
 Pick the effort level the work justifies. `xhigh` where the reasoning is real, something cheaper where it is not. A premium reasoning budget spent on a mechanical task is waste. The key is `effort`, never `reasoning_effort`, which is ignored without error and leaves the agent at inherited session effort forever. Effort is settable in agent-def frontmatter and on a Workflow `agent()` call. The Agent tool's input schema has no `effort` parameter at all, so a plain dispatch cannot state one.

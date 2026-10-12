@@ -1,0 +1,70 @@
+# Coordinator Output: Silent Mid-Run, One Self-Contained Close
+
+Operator directive, 2026-10-12. Mid-run text scrolls away unread while work continues. The
+coordinator then says something like "still waiting on your decision" with no context, and the
+operator has to dig back through the console to find out what the decision was. Text nobody reads
+is waste, and a reference to text nobody read is worse.
+
+## Mid-run: say nothing
+
+Between tool calls, and on any turn opened by an agent or workflow completion notification, emit
+no text. Read the report file, update the queue below, and continue.
+
+One exception: an irreversible action that `change-management.md` says needs confirmation. Ask for
+that immediately, and make the question complete under the restating rule below.
+
+Explanatory-style insights are held until the close, not printed beside the code they explain.
+
+## Decisions: default, log, continue
+
+When the work needs an operator input and both options are reversible, take the recommended
+option, keep working, and log the item. When an option is irreversible, stop and ask, as above.
+
+Log each item to `<scratchpad>/needs-you.md` as it arises, not from memory at the end. Compaction
+drops an instruction that has not been acted on, and a queued decision is exactly that.
+
+## Never point at a decision without restating it
+
+Every mention of a pending input carries all of it, in this shape:
+
+```
+1. <The question, one sentence.>
+   - Default taken: A. Why A over B: <the one deciding factor>.
+   - A means: <what happens, what it costs, how hard to undo>.
+   - B means: <same three, for B>.
+   - Flips if: <the fact that would make B the right call>.
+   - Blocks: <what waits on this, or "nothing, work continued on A">.
+```
+
+For an irreversible ask, the first line is "Recommend: A" because no default was taken.
+
+A ramification is concrete: what breaks, what it costs, who notices, how long to undo. "Riskier"
+and "cleaner" are not ramifications. The recommendation names the single factor that decides it,
+not a pros-and-cons list, so the operator can check that one factor against what they know. "Flips
+if" is the most useful line, because it names the knowledge the operator may hold and the
+coordinator lacks. Three options at most. A fourth means the question is not framed yet.
+
+Never write "still waiting on your decision", "see above", "as noted earlier", or a bare issue
+number standing in for the question. If nothing changed since the last close, say nothing.
+
+## The close
+
+The close is the turn where no agent or workflow is outstanding, or where everything left is
+blocked on the operator. It stands alone. A reader who saw nothing earlier in the session can act
+on it.
+
+1. Verdict, first line.
+2. **Needs you**, numbered, each item complete under the rule above. Omit the section when empty.
+3. **Done**, with the evidence for each claim (`no-overclaim.md`).
+4. **Unproven**, and the signal that would settle each item.
+5. **Insights** held from the run.
+
+The wrap-up cap in `writing-style.md` applies to everything except Needs you. An item is never cut
+short to fit the cap.
+
+## Push notification at the close
+
+When the close carries Needs-you items, or the run went longer than about ten minutes, send one
+`PushNotification` leading with what to act on: "2 decisions need you: deny-rule scope, PR footer".
+The tool skips sending when the operator is at the terminal, so no presence check is needed. Never
+notify mid-run except for the irreversible-action confirmation.
