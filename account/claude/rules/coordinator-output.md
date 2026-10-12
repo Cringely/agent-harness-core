@@ -29,12 +29,18 @@ Every mention of a pending input carries all of it, in this shape:
 
 ```
 1. <The question, one sentence.>
+   - Where this came from: <what the thing is, how it arose, why it surfaced now>.
    - Default taken: A. Why A over B: <the one deciding factor>.
    - A means: <what happens, what it costs, how hard to undo>.
    - B means: <same three, for B>.
    - Flips if: <the fact that would make B the right call>.
    - Blocks: <what waits on this, or "nothing, work continued on A">.
 ```
+
+"Where this came from" is written for a reader who saw nothing earlier in the session: name the
+thing in plain terms (what a setting does, not just its key), how it came to be in play, and why it
+surfaced now. A coordinator that cannot fill that line does not understand its own question yet. It
+investigates first and asks after, never the reverse.
 
 For an irreversible ask, the first line is "Recommend: A" because no default was taken.
 
