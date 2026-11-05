@@ -33,11 +33,22 @@ pwsh -NoProfile -File {{CORE_REPO}}/install/Export-Account.ps1
 Then review `git diff account/claude` in the core repo and commit. A second export with
 nothing changed produces no content diff, so anything the diff shows is a real change.
 
-Use `git diff` here and not `git status`. The export writes LF, a Windows checkout writes CRLF,
-and a no-change re-export therefore flips the working-tree line endings without touching the
-index. Measured 2026-09-05 on a clean tree: `git status --short` listed 203 modified paths where
-`git diff --exit-code` returned 0. To put the endings back afterwards, run
-`git checkout -- account/claude`. The content is identical, so nothing is lost.
+A clone that predates the `account/claude/** text=auto eol=lf` rule in `.gitattributes` keeps
+CRLF working files after pulling it, and `git checkout -- account/claude` does not change that,
+because git skips files whose stat info is unchanged. Renormalise once. This overwrites
+uncommitted changes under `account/claude/`, so commit or discard a pending export first and
+check `git status -- account/claude`:
+
+```powershell
+git rm -r --cached -q account/claude
+git checkout HEAD -- account/claude
+```
+
+`git ls-files --eol account/claude` should then show every file as `i/lf w/lf`. In a clone
+renormalised this way, `git status` is reliable for `account/claude`, because the export's LF
+output matches the checkout. In a clone that has not been renormalised, the checkout writes CRLF
+and a no-change re-export flips the working-tree endings without touching the index (203 paths
+listed by `git status --short` on a clean tree, 2026-09-05), so use `git diff` there.
 
 On a second machine, after `git pull` in the core repo:
 
