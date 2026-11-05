@@ -161,7 +161,7 @@ export function renderReviewBody(input: RenderInput): string {
       {
         name: "Findings below the floor",
         text: findingsSection(
-          "Findings below the floor: file these, they do not withhold approval",
+          "Findings below the floor: they stay in this comment and do not withhold approval",
           output.findings.filter((f) => !LOAD_BEARING_SET.has(f.severity)),
           changed,
         ),
