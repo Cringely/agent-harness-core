@@ -1042,7 +1042,7 @@ function shQuote(value: string): string {
 // [label, input, expected output]. Recorded from the pre-#113
 // `printf '%s' "$1" | sed 's/[].^$(){}?+*|\\[]/\\&/g'`.
 //
-// The shipped matrices are 16 escape rows plus 26 array rows, 42 total.
+// The shipped matrices are 16 escape rows plus 38 array rows, 54 total.
 // The 78 cited in commit 3e9425c's message and in PR #163's merged
 // description cannot be reconciled with either count.
 const ESCAPE_MATRIX: Array<[string, string, string]> = [
@@ -1076,8 +1076,14 @@ const ESCAPE_MATRIX: Array<[string, string, string]> = [
   ],
 ];
 
+// A JSON backslash built from its character code. A typed escape sequence
+// can arrive decoded on the way into this file, so the #91 rows below never
+// spell one out.
+const JSON_BS = String.fromCharCode(92);
+
 // [label, raw JSON text, key, expected stdout, expected rc, expected stderr
-// fragment]. Recorded from the pre-#113 token-extraction sed.
+// fragment]. Recorded from the pre-#113 token-extraction sed, plus the #91
+// residual rows, which record refusals that sed never made.
 const ARRAY_MATRIX: Array<[string, string, string, string, number, string | null]> = [
   ["an empty array", '{"names":[],"emails":[]}', "names", "", 0, null],
   ["an absent key", '{"emails":["a@b.test"]}', "names", "", 0, null],
@@ -1136,6 +1142,51 @@ const ARRAY_MATRIX: Array<[string, string, string, string, number, string | null
     "",
     1,
     "declares a key matching",
+  ],
+  // Issue #91 residuals: a key the parser cannot positively read as an array
+  // of strings refuses. Each of these read as an absent key, rc 0, and the
+  // channel went silently empty while the other stayed populated.
+  [
+    "a key spelled with a backslash-u escape refuses (#91)",
+    `{"${JSON_BS}u006eames":["Alice Example"],"emails":["a@b.test"]}`,
+    "names",
+    "",
+    1,
+    "has a key written with a JSON escape",
+  ],
+  [
+    "an escaped emails key refuses (#91)",
+    `{"names":["Alice Example"],"${JSON_BS}u0065mails":["a@b.test"]}`,
+    "emails",
+    "",
+    1,
+    "has a key written with a JSON escape",
+  ],
+  ["names declared as a string refuses (#91)", '{"names":"Alice Example","emails":["a@b.test"]}', "names", "", 1, "is not an array"],
+  ["emails declared as a string refuses (#91)", '{"names":["Alice Example"],"emails":"a@b.test"}', "emails", "", 1, "is not an array"],
+  [
+    "a comment between the colon and the [ refuses (#91)",
+    '{"names": /* note */ ["Alice Example"],"emails":["a@b.test"]}',
+    "names",
+    "",
+    1,
+    "is not an array",
+  ],
+  [
+    "a comment between the key and its colon refuses (#91)",
+    '{"names" /* note */ : ["Alice Example"],"emails":["a@b.test"]}',
+    "names",
+    "",
+    1,
+    "not followed directly by ':'",
+  ],
+  [
+    "an escape inside an entry or another key's string value is not an escaped key (#91)",
+    `{"names":["O${JSON_BS}u0027Brien"],"emails":["a@b.test"],"note":"x${JSON_BS}u0041"}`,
+    "names",
+    "O'Brien\n",
+    0,
+    null,
   ],
   [
     "several entries",
@@ -2173,4 +2224,74 @@ describe("identity gate — the identity file must be well-formed UTF-8 (#206)",
     expect(result.rc).toBe(1);
     expect(result.stderr).toContain("NUL byte");
   });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #91 residuals, through the real pre-commit hook under the locale Git
+// for Windows gives a hook. Each identity file declares NAME in a shape the
+// parser used to read as "no names key", and the staged content carries
+// NAME. Before the fix every one of these committed.
+// ---------------------------------------------------------------------------
+function stageDeclaredName(dir: string) {
+  writeFileSync(join(dir, "notes.txt"), `this document mentions ${NAME} by name\n`);
+  git(["add", "notes.txt"], dir);
+}
+
+const UNREADABLE_NAMES_KEYS: Array<[string, string, string]> = [
+  [
+    "a names key spelled with a backslash-u escape",
+    `{"${JSON_BS}u006eames":["${NAME}"],"emails":["${EMAIL}"]}`,
+    "has a key written with a JSON escape",
+  ],
+  ["names declared as a string", `{"names":"${NAME}","emails":["${EMAIL}"]}`, "is not an array"],
+  [
+    "a comment between the names colon and its [",
+    `{"names": /* note */ ["${NAME}"],"emails":["${EMAIL}"]}`,
+    "is not an array",
+  ],
+];
+
+describe("identity gate — a names key the parser cannot read as an array refuses (#91 residuals)", () => {
+  for (const [label, content, fragment] of UNREADABLE_NAMES_KEYS) {
+    test(`${label} refuses rather than committing the name`, () => {
+      const home = makeIdentityHome(content);
+      const dir = initPreCommitRepo();
+      stageDeclaredName(dir);
+      const result = runPreCommit(dir, envWith({ USERPROFILE: home, HOME: home, LC_CTYPE: "C.UTF-8" }));
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr.toString()).toContain(fragment);
+    });
+  }
+
+  // The duplicate-key count used to come from a `grep -oE` whose answer the
+  // extraction sed never cross-checked. A grep answering "no match" over a
+  // shadowing duplicate let the sed take the trailing empty "Names" array,
+  // and the name committed. The count now comes from the extraction sed
+  // itself, so a grep that lies or crashes on that call has nothing to lie
+  // about. The stub hits only an -oE call, which nothing else in the hooks
+  // makes, and execs the real grep for the canary and the scans.
+  const KEY_COUNT_GREP_FAILURES: Array<[string, string]> = [
+    ["answers no match", "exit 1"],
+    ["crashes", "exit 2"],
+  ];
+  for (const [label, failure] of KEY_COUNT_GREP_FAILURES) {
+    test.skipIf(!realGrep)(`a key-count grep that ${label} cannot hide a shadowing duplicate key`, () => {
+      const stubDir = installToolStub("grep", ['case "$*" in', `    *-oE*) ${failure} ;;`, "esac", 'exec "$REAL_GREP" "$@"']);
+      const home = makeIdentityHome(`{"names":["${NAME}"],"emails":["${EMAIL}"],"Names":[]}`);
+      const dir = initPreCommitRepo();
+      stageDeclaredName(dir);
+      const result = runPreCommit(
+        dir,
+        envWith({
+          USERPROFILE: home,
+          HOME: home,
+          LC_CTYPE: "C.UTF-8",
+          PATH: pathWithStubFirst(stubDir),
+          REAL_GREP: realGrep!,
+        }),
+      );
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr.toString()).toContain("declares a key matching");
+    });
+  }
 });
