@@ -20,6 +20,8 @@ Explanatory-style insights are held until the close, not printed beside the code
 When the work needs an operator input and both options are reversible, take the recommended
 option, keep working, and log the item. When an option is irreversible, stop and ask, as above.
 
+An item enters Needs you only if one of its answers changes code, config or policy. A shipped default with no plausible flip goes in Done. A check not yet run goes in Unproven. (Operator, 2026-10-28, in another project, on a padded list: "This isn't a decision".)
+
 Log each item to `<scratchpad>/needs-you.md` as it arises, not from memory at the end. Compaction
 drops an instruction that has not been acted on, and a queued decision is exactly that.
 

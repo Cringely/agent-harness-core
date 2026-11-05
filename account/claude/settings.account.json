@@ -14,6 +14,11 @@
   "skillOverrides": {
     "filesystem-context": "off"
   },
+  "deniedMcpServers": [
+    {
+      "serverName": "claude.ai tldraw"
+    }
+  ],
   "hooks": {
     "PreToolUse": [
       {
@@ -142,7 +147,8 @@
     "superpowers@claude-plugins-official": true,
     "ponytail@ponytail": true,
     "caveman@caveman": true,
-    "document-skills@anthropic-agent-skills": true
+    "document-skills@anthropic-agent-skills": true,
+    "mattpocock-skills@claude-plugins-official": true
   },
   "extraKnownMarketplaces": {
     "ponytail": {
