@@ -20,12 +20,19 @@ File listing without running the image:
 
 ```sh
 set -o pipefail; rm -f files.txt        # a failed create must not leave the last run's listing behind
-cid=$(docker create IMG) &&
-  { docker export "$cid" | tar -tv > files.txt; rc=$?; docker rm "$cid" > /dev/null; [ "$rc" -eq 0 ]; } ||
-  { rm -f files.txt; echo "file listing failed, stop and read the error above"; }
-[ -s files.txt ] || echo "no files.txt, do not run the greps below"
-grep -E 'bin/(sshd|mosquitto|nginx|httpd|avahi-daemon|cupsd|vsftpd|telnetd|rpcbind)$' files.txt
-grep -E '^-..s|^-.....s' files.txt          # setuid and setgid files (CIS 4.8)
+if cid=$(docker create IMG); then
+  docker export "$cid" | tar -tv > files.txt; rc=$?
+  docker rm "$cid" > /dev/null
+  [ "$rc" -eq 0 ] || { rm -f files.txt; echo "export failed, stop and read the error above"; }
+else
+  echo "docker create failed, stop and read the error above"
+fi
+if [ -s files.txt ]; then                # the greps run only when the listing exists
+  grep -E 'bin/(sshd|mosquitto|nginx|httpd|avahi-daemon|cupsd|vsftpd|telnetd|rpcbind)$' files.txt
+  grep -E '^-..s|^-.....s' files.txt     # setuid and setgid files (CIS 4.8)
+else
+  echo "no files.txt, nothing below this line may be read"
+fi
 ```
 
 What actually listens, on a host where the container runs (root on the host):
