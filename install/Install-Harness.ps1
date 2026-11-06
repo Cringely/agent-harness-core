@@ -549,7 +549,7 @@ function ConvertTo-SortedMap {
 }
 
 $manifestPath = Join-Path $claudeDir '.harness-manifest.json'
-$sidecarPath =Join-Path $claudeDir '.harness-manifest.local.json'
+$sidecarPath = Join-Path $claudeDir '.harness-manifest.local.json'
 $manifest = @{}
 if (Test-Path -LiteralPath $manifestPath) {
     $raw = Get-Content -LiteralPath $manifestPath -Raw
@@ -566,6 +566,11 @@ $legacyCoreRepo = $manifest['coreRepo']
 $legacyStackDetected = $manifest['stackDetected']
 
 $manifest = ConvertTo-ManifestV2 -Loaded $manifest
+
+# The files map as loaded, before any copy loop touches it. A git-less re-install keeps the
+# recorded coreCommit only when the map still equals this snapshot, so the commit never outlives
+# the files it described.
+$loadedFilesJson = (ConvertTo-SortedMap -Map $manifest['files']) | ConvertTo-Json -Depth 20 -Compress
 
 # Sidecar: coreRepo (absolute path to the core checkout) and stackDetected (the per-machine
 # plugin/output-style/MCP-server inventory). Neither travels between clones, so neither goes in
@@ -1758,10 +1763,15 @@ foreach ($eventType in $hooksTemplate.PSObject.Properties.Name) {
 # stackDetected do not travel and go in the gitignored sidecar instead (issue #137). Hooks
 # reading coreRepo to locate core need a path that survives the core repo being moved, which
 # is exactly the sidecar's job.
-# Null (no git) must not overwrite a recorded commit: a no-op re-install would rewrite the committed manifest.
+# Null (no git) keeps a recorded commit only when the installed files are unchanged since it was
+# recorded, so a no-op re-install does not rewrite the committed manifest. If the files changed,
+# the old commit would name a checkout the files no longer came from, so it is cleared.
 $coreCommit = Get-CoreCommit
 if ($coreCommit) { $manifest['coreCommit'] = $coreCommit }
-elseif (-not $manifest.Contains('coreCommit')) { $manifest['coreCommit'] = $null }
+else {
+    $currentFilesJson = (ConvertTo-SortedMap -Map $manifest['files']) | ConvertTo-Json -Depth 20 -Compress
+    if (-not $manifest.Contains('coreCommit') -or $currentFilesJson -ne $loadedFilesJson) { $manifest['coreCommit'] = $null }
+}
 
 $sidecar['coreRepo'] = $repoRoot
 Register-CoreCheckout -Path $repoRoot
@@ -1804,6 +1814,7 @@ $settings | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $settingsPath
 $hooksDstAbs = (Resolve-Path -LiteralPath $hooksDst).Path
 
 $gitDirRaw = $null
+$gitBinaryMissing = $false
 # try/catch because `& git` on a PATH without git throws a terminating CommandNotFoundException
 # under $ErrorActionPreference = 'Stop' (#141). By here settings.json and the manifest are
 # already written, so an unguarded call aborted a run that had otherwise succeeded and exited 1
@@ -1812,10 +1823,26 @@ try {
     $gitCheck = & git -C $Target rev-parse --git-dir 2>$null
     if ($LASTEXITCODE -eq 0) { $gitDirRaw = $gitCheck }
 }
-catch { $gitDirRaw = $null }
+catch { $gitDirRaw = $null; $gitBinaryMissing = $true }
 
 if (-not $gitDirRaw) {
-    # Not a git repository (or git missing from PATH) — nothing to wire.
+    # Not a git repository: nothing to wire. A missing git binary is different when the target
+    # does have a .git on disk: the hooks are mandatory there and nothing can wire them, so say
+    # so loudly rather than finishing as if they were in place.
+    if ($gitBinaryMissing) {
+        $probe = (Resolve-Path -LiteralPath $Target).Path
+        $targetIsRepo = $false
+        while ($probe) {
+            if (Test-Path -LiteralPath (Join-Path $probe '.git')) { $targetIsRepo = $true; break }
+            $parent = Split-Path -Parent $probe
+            if (-not $parent -or $parent -eq $probe) { break }
+            $probe = $parent
+        }
+        if ($targetIsRepo) {
+            Write-Warning "git is not on PATH, so core.hooksPath was NOT wired: the harness's git hooks (commit-msg, pre-commit, pre-push) will not run until it is. Install git and re-run the installer, or wire it by hand: git -C `"$Target`" config core.hooksPath `"$hooksDstAbs`""
+            $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'FAILED (git not on PATH) - hook not wired' })
+        }
+    }
 }
 elseif (-not (Test-GitAnswersForTarget -AbsTarget (Resolve-Path -LiteralPath $Target).Path -IgnoreIndex)) {
     # Issue #145. Every probe below asks git through `-C $Target`, and GIT_DIR, GIT_WORK_TREE,
@@ -1831,8 +1858,8 @@ elseif (-not (Test-GitAnswersForTarget -AbsTarget (Resolve-Path -LiteralPath $Ta
     # though the two call sites now read different answers from it by design. This call site
     # passes -IgnoreIndex, the sidecar probe does not (see the function's own comment for why).
     # A missing git never reaches this elseif: the rev-parse above is wrapped in a try/catch
-    # (#141) that turns the CommandNotFoundException into the silent no-op branch, so the run
-    # finishes and exits 0 with no hooksPath row.
+    # (#141) that turns the CommandNotFoundException into the not-a-repository branch, which
+    # warns and adds a FAILED hooksPath row when the target has a .git on disk, and exits 0.
     #
     # Dubious ownership is not excluded the same way (#165, corrected from an earlier version of
     # this comment that claimed it was). Without a location variable exported, it exits 128 at the

@@ -565,6 +565,10 @@ describe("sidecar gitignore protection — round 2 findings", () => {
       // and the manifest were written, and take the run to exit 1 (#141).
       expect(result.exitCode).toBe(0);
       expect(result.stdout.toString()).toContain("Skipping the machine-specific sidecar");
+      // The hooks could not be wired, so the run must say so rather than finish silently.
+      const output = result.stdout.toString() + result.stderr.toString();
+      expect(output).toContain("core.hooksPath was NOT wired");
+      expect(output).toContain("FAILED (git not on PATH) - hook not wired");
       expect(sidecarExists(dir)).toBe(false);
       expect(existsSync(join(dir, ".claude", "settings.json"))).toBe(true);
       expect(existsSync(join(dir, MANIFEST_REL))).toBe(true);
@@ -587,6 +591,31 @@ describe("sidecar gitignore protection — round 2 findings", () => {
       const result = runInstall(dir, [], { extraEnv: { PATH: gitFreePath! } });
       expect(result.exitCode).toBe(0);
       expect(JSON.parse(readFileSync(join(dir, MANIFEST_REL), "utf8")).coreCommit).toBe(recorded);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  // F4c: the recorded commit may only survive a git-free re-install while the installed files are
+  // the ones it described. Here the manifest's recorded hash for one file is falsified and the
+  // re-install runs with -Force, so it rewrites that entry, the files map changes, and the old commit must not be kept.
+  test.skipIf(!pwshPath || !gitFreePath)(
+    "(F4c) git missing from PATH on a re-install that changes the files map: coreCommit is cleared",
+    () => {
+      const dir = freshRepo();
+      expect(runInstall(dir).exitCode).toBe(0);
+      const manifestPath = join(dir, MANIFEST_REL);
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+      expect(manifest.coreCommit).toBeTruthy();
+      const firstKey = Object.keys(manifest.files)[0];
+      manifest.files[firstKey] = "0".repeat(64);
+      writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+      rmSync(join(dir, SIDECAR_REL));
+
+      const result = runInstall(dir, ["-Force"], { extraEnv: { PATH: gitFreePath! } });
+      expect(result.exitCode).toBe(0);
+      const after = JSON.parse(readFileSync(manifestPath, "utf8"));
+      expect(after.files[firstKey]).not.toBe("0".repeat(64));
+      expect(after.coreCommit).toBeNull();
     },
     INSTALL_TIMEOUT_MS,
   );
@@ -1343,6 +1372,14 @@ describe("manifest and sidecar key order", () => {
     () => {
       const dir = freshRepo();
       expect(runInstall(dir).exitCode).toBe(0);
+      // The plain-install write, checked before any -Accept rewrites the manifest through its own
+      // sorted write: reverting the sort on this path must fail here.
+      const plain = JSON.parse(readFileSync(join(dir, MANIFEST_REL), "utf8"));
+      expect(Object.keys(plain.files).length).toBeGreaterThan(2);
+      expect(Object.keys(plain)).toEqual(sortedKeys(plain));
+      expect(Object.keys(plain.files)).toEqual(sortedKeys(plain.files));
+      const plainSidecar = JSON.parse(readFileSync(join(dir, SIDECAR_REL), "utf8"));
+      expect(Object.keys(plainSidecar.stackDetected)).toEqual(sortedKeys(plainSidecar.stackDetected));
       // Two overlays added in reverse order, so an insertion-ordered write would fail the check.
       writeFileSync(join(dir, ".claude", "agents", "zz-b.md"), "fork b");
       writeFileSync(join(dir, ".claude", "agents", "zz-a.md"), "fork a");
