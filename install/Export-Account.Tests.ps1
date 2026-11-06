@@ -1275,7 +1275,7 @@ exit 0
 
     It "folds a trailing-slash -WslHome to a single separator in mcpServers, not a missing or doubled one" {
         # Issue #81: a prior fix normalised how the fold handles a trailing-slash -WslHome
-        # (`$WslHome.Trim().TrimEnd('/')` at the producer, Export-Account.ps1:230-236), but
+        # (`$WslHome.Trim().TrimEnd('/')` at the producer, Export-Account.ps1:232-238), but
         # nothing pinned the FOLD's own output shape. The trailing-slash rows already in this file
         # (the degenerate-value table above, and "still fails closed on a copied-file literal
         # when -WslHome carries a trailing slash" further down) both exercise the payload-wide
@@ -1675,8 +1675,8 @@ exit 0
         # and ":744-749", was never same-file -- checked against f47563e, the commit that wrote it,
         # both ranges landed on Export-Account.ps1's own boundary comments at those exact line
         # numbers, so the filename prefix was dropped by mistake, not drift. Repointed below.)
-        # Export-Account.ps1:1182-1184 ("a bare `/root` at end of line still fire") and
-        # Export-Account.ps1:1186-1191 ("the negated class now also excludes those") are the two
+        # Export-Account.ps1:1184-1186 ("a bare `/root` at end of line still fire") and
+        # Export-Account.ps1:1188-1193 ("the negated class now also excludes those") are the two
         # comments that assert ablation is caught; this It is what makes that true.
         $stand = New-StandInHome
         $out = New-OutputRoot
