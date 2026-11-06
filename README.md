@@ -128,7 +128,7 @@ The `.harness-manifest.json` behind that is a record of two different things, no
 each installed path to the SHA256 it had at install time, which is what makes a project edit
 detectable. `accepted` maps a path to the hash of the project's own fork, pinned deliberately, and
 says the divergence is the intended state. `coreCommit` is the third field, recording which core
-commit the layer was installed from. A manifest written before this shape existed, a flat
+commit the layer was installed from. A re-install that cannot ask git keeps the recorded value. A manifest written before this shape existed, a flat
 path-to-hash map, is migrated on the next run with every hash preserved under `files`.
 
 None of that travels between clones, which is exactly why two other fields never reach this file:
@@ -157,8 +157,11 @@ not trusted on its own. A full install appends the checkout it runs from, and a 
 before this check needs one re-run of the installer. Until then the hook prints one
 "not on the checkout allowlist" line at session start. `HARNESS_CORE_ALLOWLIST` points both at a
 different file. When the sidecar is missing but the committed
-manifest exists (an install ran, but the write was refused), the hook and `-Audit` each print one
-line saying so instead of going quiet. A project that installed an earlier version of this layer
+manifest exists (an install ran, but the write was refused), the hook prints one line saying so
+instead of going quiet, and points at a plain installer run, which says why the write was refused.
+`-Audit` reports it too, except on the legacy shape below, where it compares against the values
+still embedded in the manifest. Both JSON files are written with their keys sorted, so a re-install
+that changes nothing leaves the committed manifest byte-identical. A project that installed an earlier version of this layer
 has both fields embedded directly in `.harness-manifest.json`, and the next run of any installer
 command splits them into the sidecar and drops them from the committed file, as long as that run's
 ignore check passes. When it does not, the legacy values are dropped rather than migrated, same as
