@@ -87,7 +87,7 @@ withholds approval:
 - `fails-open`: a check, gate, verifier or detector that reports success for a case it did not
   verify.
 
-Five sit below the floor. They are displayed and filed, and never withhold approval:
+Five sit below the floor. They are displayed in the review comment and never withhold approval. Do not tell anyone to file them as issues:
 `comment-accuracy`, `stale-citation`, `naming`, `coverage-gap`, `other`.
 
 <!-- vale ai-tells.AnthropomorphicJustification = NO -->
