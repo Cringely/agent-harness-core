@@ -83,6 +83,19 @@ present, and the installer records whether it found one under `stackDetected` in
 sidecar (`.claude/.harness-manifest.local.json`), not the manifest a project commits.
 Its absence costs search quality, nothing more.
 
+Part of the harness, expected on every machine: the `document-skills@anthropic-agent-skills` plugin
+from the `anthropic-agent-skills` marketplace, which is the GitHub repository `anthropics/skills`.
+It provides Anthropic's `docx`, `pdf`, `pptx` and `xlsx` skills, which agents use to read and
+produce Word, PDF, PowerPoint and Excel files. It is third-party code, not vendored here, used under
+the license terms in that repository. It travels with the account layer:
+`account/claude/settings.account.json` carries the `enabledPlugins` entry and the `github`-sourced
+marketplace, and `Install-Account.ps1` deep-merges `settings.json`, which adds both on a receiving
+machine.
+
+Whether Claude Code installs the plugin by itself from those two entries has not been tried on a
+second machine. If it is missing, install it by hand with `/plugin marketplace add anthropics/skills`
+then `/plugin install document-skills@anthropic-agent-skills`.
+
 ```
 pwsh install/Install-Harness.ps1 -Target <project-root>
 ```

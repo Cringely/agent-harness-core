@@ -14,6 +14,11 @@
   "skillOverrides": {
     "filesystem-context": "off"
   },
+  "deniedMcpServers": [
+    {
+      "serverName": "claude.ai tldraw"
+    }
+  ],
   "hooks": {
     "PreToolUse": [
       {
@@ -141,7 +146,9 @@
     "code-review@claude-plugins-official": true,
     "superpowers@claude-plugins-official": true,
     "ponytail@ponytail": true,
-    "caveman@caveman": true
+    "caveman@caveman": true,
+    "document-skills@anthropic-agent-skills": true,
+    "mattpocock-skills@claude-plugins-official": true
   },
   "extraKnownMarketplaces": {
     "ponytail": {
@@ -155,15 +162,30 @@
         "source": "github",
         "repo": "JuliusBrussee/caveman"
       }
+    },
+    "anthropic-agent-skills": {
+      "source": {
+        "source": "github",
+        "repo": "anthropics/skills"
+      }
     }
   },
+  "outputStyle": "Explanatory",
   "alwaysThinkingEnabled": true,
   "effortLevel": "xhigh",
+  "modelSettings": {
+    "claude-opus-5": {
+      "effortLevel": "high"
+    },
+    "claude-opus-5-5": {
+      "effortLevel": "high"
+    }
+  },
   "awaySummaryEnabled": false,
   "skipDangerousModePermissionPrompt": true,
   "preferredNotifChannel": "auto",
+  "switchModelsOnFlag": false,
   "teammateMode": "auto",
   "inputNeededNotifEnabled": true,
-  "agentPushNotifEnabled": true,
-  "outputStyle": "Explanatory"
+  "agentPushNotifEnabled": true
 }
