@@ -10,15 +10,17 @@ is waste, and a reference to text nobody read is worse.
 Between tool calls, and on any turn opened by an agent or workflow completion notification, emit
 no text. Read the report file, update the queue below, and continue.
 
-One exception: an irreversible action that `change-management.md` says needs confirmation. Ask for
-that immediately, and make the question complete under the restating rule below.
+One exception: any action on the `change-management.md` confirmation list (Risky Operations
+Requiring Confirmation), reversible or not, and any other irreversible action. Ask for that
+immediately, and make the question complete under the restating rule below.
 
 Explanatory-style insights are held until the close, not printed beside the code they explain.
 
 ## Decisions: default, log, continue
 
-When the work needs an operator input and both options are reversible, take the recommended
-option, keep working, and log the item. When an option is irreversible, stop and ask, as above.
+When the work needs an operator input, both options are reversible, and neither is on the
+confirmation list, take the recommended option, keep working, and log the item. Otherwise stop and
+ask, as above.
 
 An item enters Needs you only if one of its answers changes code, config or policy. A shipped default with no plausible flip goes in Done. A check not yet run goes in Unproven. (Operator, 2026-10-28, in another project, on a padded list: "This isn't a decision".)
 
