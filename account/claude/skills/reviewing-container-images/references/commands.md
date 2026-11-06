@@ -19,7 +19,11 @@ docker history --no-trunc --format '{{.CreatedBy}}' IMG   # build steps, ADD, cu
 File listing without running the image:
 
 ```sh
-cid=$(docker create IMG) && docker export "$cid" | tar -tv > files.txt; docker rm "$cid"
+set -o pipefail; rm -f files.txt        # a failed create must not leave the last run's listing behind
+cid=$(docker create IMG) &&
+  { docker export "$cid" | tar -tv > files.txt; rc=$?; docker rm "$cid" > /dev/null; [ "$rc" -eq 0 ]; } ||
+  { rm -f files.txt; echo "file listing failed, stop and read the error above"; }
+[ -s files.txt ] || echo "no files.txt, do not run the greps below"
 grep -E 'bin/(sshd|mosquitto|nginx|httpd|avahi-daemon|cupsd|vsftpd|telnetd|rpcbind)$' files.txt
 grep -E '^-..s|^-.....s' files.txt          # setuid and setgid files (CIS 4.8)
 ```
@@ -122,12 +126,22 @@ curl -fsS https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnera
 jq -r '.catalogVersion, .dateReleased' kev.json
 jq -r '.Results[].Vulnerabilities[]?.VulnerabilityID' R | sort -u | comm -12 - kev.txt   # CVEs in KEV
 
-# CVE-2021-44228 rides along as the control. epss, percentile and date come back per CVE
-curl -fsS 'https://api.first.org/data/v1/epss?cve=CVE-2021-44228,CVE-A,CVE-B' -o epss.json &&
-  jq -e '.data[] | select(.cve=="CVE-2021-44228") | .epss' epss.json > /dev/null &&
-  jq -r '.data[] | "\(.cve) \(.epss) \(.percentile) \(.date)"' epss.json ||
-  echo "EPSS lookup failed"
+# CVE-2021-44228 rides along in every request as the control. The API pages at 100 rows by default,
+# so ask in chunks of 50 with an explicit limit, then diff requested IDs against returned IDs.
+jq -r '.Results[].Vulnerabilities[]?.VulnerabilityID' R | sort -u > cves.txt
+rm -f epss.txt cvechunk.*; split -l 50 cves.txt cvechunk.
+for f in cvechunk.*; do
+  list=$(printf 'CVE-2021-44228\n'; cat "$f"); list=$(echo "$list" | paste -sd, -)
+  curl -fsS "https://api.first.org/data/v1/epss?limit=100&cve=$list" -o epss.json &&
+    jq -e '.data[] | select(.cve=="CVE-2021-44228") | .epss' epss.json > /dev/null &&
+    jq -e '.total == (.data | length)' epss.json > /dev/null &&
+    jq -r '.data[] | "\(.cve) \(.epss) \(.percentile) \(.date)"' epss.json >> epss.txt ||
+    echo "EPSS lookup failed for chunk $f"
+done
+cut -d' ' -f1 epss.txt | sort -u | comm -23 cves.txt -    # CVEs with no EPSS row
 ```
+
+Any chunk that printed "EPSS lookup failed", and every CVE the last `comm` line prints, is reported as not looked up, never as a low score.
 
 A failed block removes `kev.json` and `kev.txt`, so the `comm` line errors instead of printing an empty
 result. Record the KEV `catalogVersion` and the EPSS `date` with the result.
