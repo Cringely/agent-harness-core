@@ -523,17 +523,22 @@ identity_json_array() {
     # {"names":["Alice Example"],"Names":[]}) with rc 0.
     #
     # ESCAPED KEYS. Keys are never decoded here, so any key carrying a
-    # backslash refuses, whatever it decodes to. The sed below looks for a
-    # quoted string holding a backslash and followed, before any ',' ']'
-    # or '"', by a ':' -- a key position. A string inside an array is
+    # backslash refuses, whatever it decodes to. The sed below refuses any
+    # quoted string holding a backslash that is not followed, after spaces,
+    # by ',' ']' '}' or the end of the text. A string inside an array is
     # followed by ',' or ']', so an escape inside a declared entry (the
-    # backslash-u 0027 apostrophe PowerShell writes) never trips it. The
-    # one false refusal is an entry whose own text holds an escaped quote
-    # followed by '":', which is fail-closed. Skipped without a fork when
-    # the text holds no backslash at all, the usual case.
+    # backslash-u 0027 apostrophe PowerShell writes) never trips it, while
+    # a key followed by a comment holding a comma, bracket or quote before
+    # its ':' still does. Escaped backslashes and escaped quotes are
+    # removed from the copy under test first, so an entry such as
+    # "say \"hi\"" is not read as a string that ends early. Fail-closed
+    # false refusals: a backslash-bearing entry directly followed by
+    # anything other than ',' ']' '}', and an entry ending in an escaped
+    # backslash followed by more text. Skipped without a fork when the text
+    # holds no backslash at all, the usual case.
     case $flat in
         *'\'*)
-            identity_arr_esc_key=$(printf '%s' "$flat" | sed -n 's/.*"[^"]*\\[^"]*"[^],"]*:.*/x/p') || {
+            identity_arr_esc_key=$(printf '%s' "$flat" | sed -n -e 's/\\\\//g' -e 's/\\"//g' -e 's/.*"[^"]*\\[^"]*"[[:space:]]*[^],}[:space:]].*/x/p' -e 's/.*"[^"]*\\[^"]*"[[:space:]]*$/x/p') || {
                 echo "identity gate: the escaped-key check in '$identity_file' did not run cleanly. Refusing rather than reading a crashed check as no escaped key." >&2
                 return 1
             }
@@ -543,6 +548,43 @@ identity_json_array() {
             fi
             ;;
     esac
+
+    # UNQUOTED AND SINGLE-QUOTED KEYS. JSON keys are double-quoted, and the
+    # marker sed below sees only the double-quoted spelling, so {names: [..]}
+    # or {'names': [..]} would read as absent with the other channel still
+    # populated. Refuse a bare or single-quoted key spelling instead. The
+    # leading space gives a key at the very start of the text a character
+    # to be preceded by. Done in the shell with case-insensitive globs, not
+    # sed, so it adds no process to the per-call spawn count. Fail-closed
+    # false refusal: an entry whose own text holds the key word followed
+    # by a colon.
+    identity_arr_t=" $flat"
+    while :; do
+        case $identity_arr_t in
+            *${key_ci}*) ;;
+            *) break ;;
+        esac
+        identity_arr_before=${identity_arr_t%%${key_ci}*}
+        identity_arr_prev=${identity_arr_before#"${identity_arr_before%?}"}
+        identity_arr_t=${identity_arr_t#"$identity_arr_before"}
+        identity_arr_t=${identity_arr_t#${key_ci}}
+        identity_ltrim "$identity_arr_t"
+        identity_arr_bare=0
+        case $identity_arr_prev in
+            '"') ;;
+            "'")
+                case $identity_arr_t in "'"*) identity_arr_bare=1 ;; esac
+                ;;
+            [A-Za-z0-9_]) ;;
+            *)
+                case $identity_trimmed in ':'*) identity_arr_bare=1 ;; esac
+                ;;
+        esac
+        if [ "$identity_arr_bare" = 1 ]; then
+            echo "identity gate: '$identity_file' has a key matching \"$key\" written without double quotes. This parser reads only double-quoted keys. Refusing rather than reading it as absent. Write it as \"$key\": [\"...\"]." >&2
+            return 1
+        fi
+    done
 
     # ONE sed marks every occurrence of the key's quoted text, matched
     # case-insensitively through key_ci, with a newline, which $flat cannot
@@ -685,7 +727,7 @@ identity_json_array() {
 #
 # The hold-off is what a rewrite would put at risk. identity_json_array is
 # the parser #91 and #135 took four review rounds to harden, proved
-# against the 38-row ARRAY_MATRIX in test/identity-gate.test.ts, and
+# against the 43-row ARRAY_MATRIX in test/identity-gate.test.ts, and
 # folding it into one pass means re-proving that matrix byte for byte on
 # new code.
 #

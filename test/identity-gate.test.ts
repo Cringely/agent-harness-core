@@ -1042,7 +1042,7 @@ function shQuote(value: string): string {
 // [label, input, expected output]. Recorded from the pre-#113
 // `printf '%s' "$1" | sed 's/[].^$(){}?+*|\\[]/\\&/g'`.
 //
-// The shipped matrices are 16 escape rows plus 38 array rows, 54 total.
+// The shipped matrices are 16 escape rows plus 43 array rows, 59 total.
 // The 78 cited in commit 3e9425c's message and in PR #163's merged
 // description cannot be reconciled with either count.
 const ESCAPE_MATRIX: Array<[string, string, string]> = [
@@ -1299,6 +1299,47 @@ const ARRAY_MATRIX: Array<[string, string, string, string, number, string | null
     JSON.stringify({ names: Array.from({ length: 12 }, (_, i) => `Person Number ${i}`) }),
     "names",
     Array.from({ length: 12 }, (_, i) => `Person Number ${i}\n`).join(""),
+    0,
+    null,
+  ],
+  // Issue #91, round-1 App review: fail-open shapes the earlier rows missed.
+  [
+    "an escaped key followed by a comment holding a comma, bracket and quote refuses",
+    `{"emails":["a@b.test"],"na${JSON_BS}u006des" /* , ] " */ : ["Bob Example"]}`,
+    "names",
+    "",
+    1,
+    "written with a JSON escape",
+  ],
+  [
+    "an unquoted key refuses rather than reading as absent",
+    '{names: ["Bob Example"], "emails": ["a@b.test"]}',
+    "names",
+    "",
+    1,
+    "without double quotes",
+  ],
+  [
+    "a single-quoted key refuses rather than reading as absent",
+    `{'names': ["Bob Example"], "emails": ["a@b.test"]}`,
+    "names",
+    "",
+    1,
+    "without double quotes",
+  ],
+  [
+    "a file truncated right after the key refuses",
+    '{"emails":["a@b.test"],"names"',
+    "names",
+    "",
+    1,
+    "not followed directly by ':'",
+  ],
+  [
+    "an entry with an escaped quote is still read",
+    `{"names":["say ${JSON_BS}"hi${JSON_BS}" now"]}`,
+    "names",
+    'say "hi" now\n',
     0,
     null,
   ],
