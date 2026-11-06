@@ -503,6 +503,22 @@ describe("identity gate — identity-patterns.sh: key-extraction sed residual (i
     expect(result.exitCode).not.toBe(0);
     expect(result.stderr.toString()).toContain("did not run cleanly");
   });
+
+  // Issue #91, round-2 App review: a key-lookup sed that exits 0 but prints
+  // nothing used to read as an absent key, the same silent-empty channel as
+  // the crash above with a clean exit status.
+  test.skipIf(!realSed)("a key-lookup sed for 'names' that exits 0 and prints nothing refuses", () => {
+    const dir = initPreCommitRepo();
+    writeFileSync(join(dir, "notes.txt"), `this document mentions ${NAME} by name\n`);
+    git(["add", "notes.txt"], dir);
+    const stubDir = installNamesKeyCrashingSedStub(0);
+    const result = runPreCommit(
+      dir,
+      envWith({ PATH: pathWithStubFirst(stubDir), REAL_SED: realSed! }),
+    );
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("returned truncated or empty output");
+  });
 });
 
 /** Test double for `sed`: crashes (exit 1, no output) only when invoked with
@@ -515,7 +531,7 @@ describe("identity gate — identity-patterns.sh: key-extraction sed residual (i
  * shell script) for every other invocation. The match substring is itself
  * single-quoted so its own `[`/`]` are literal characters in the stub's
  * case pattern rather than glob bracket expressions. */
-function installNamesKeyCrashingSedStub(): string {
+function installNamesKeyCrashingSedStub(exitCode = 1): string {
   const stubDir = mkdtempSync(join(tmpdir(), "identity-sedshim-"));
   tempDirs.push(stubDir);
   const stubPath = join(stubDir, "sed");
@@ -524,7 +540,7 @@ function installNamesKeyCrashingSedStub(): string {
     [
       "#!/bin/sh",
       'case "$*" in',
-      '    *\'"[Nn][Aa][Mm][Ee][Ss]"\'*) exit 1 ;;',
+      `    *'"[Nn][Aa][Mm][Ee][Ss]"'*) exit ${exitCode} ;;`,
       "esac",
       'exec "$REAL_SED" "$@"',
       "",
@@ -1042,7 +1058,8 @@ function shQuote(value: string): string {
 // [label, input, expected output]. Recorded from the pre-#113
 // `printf '%s' "$1" | sed 's/[].^$(){}?+*|\\[]/\\&/g'`.
 //
-// The shipped matrices are 16 escape rows plus 43 array rows, 59 total.
+// The shipped matrices are 16 escape rows plus 48 array rows, 64 total,
+// pinned by the row-count test below so this line cannot drift silently.
 // The 78 cited in commit 3e9425c's message and in PR #163's merged
 // description cannot be reconciled with either count.
 const ESCAPE_MATRIX: Array<[string, string, string]> = [
@@ -1343,6 +1360,48 @@ const ARRAY_MATRIX: Array<[string, string, string, string, number, string | null
     0,
     null,
   ],
+  // Issue #91, round-2 App review: any mention of the key word other than
+  // one strict double-quoted key refuses.
+  [
+    "an unquoted key followed by a comment before its colon refuses",
+    '{names /* note */ : ["Bob Example"], "emails": ["a@b.test"]}',
+    "names",
+    "",
+    1,
+    "without double quotes",
+  ],
+  [
+    "a single-quoted key followed by a comment before its colon refuses",
+    `{'names' /* note */ : ["Bob Example"], "emails": ["a@b.test"]}`,
+    "names",
+    "",
+    1,
+    "without double quotes",
+  ],
+  [
+    "a single-quoted escaped key at the start of the file refuses",
+    `{'n${JSON_BS}u0061mes' /* note */ : ["Bob Example"], "emails": ["a@b.test"]}`,
+    "names",
+    "",
+    1,
+    "without double quotes",
+  ],
+  [
+    "a quoted emails key with a comment between it and its colon refuses",
+    '{"names":["Bob Example"],"emails" /* note */ : ["a@b.test"]}',
+    "emails",
+    "",
+    1,
+    "not followed directly by ':'",
+  ],
+  [
+    "the key word inside a comment only refuses rather than reading as absent",
+    '{/* names */ "emails": ["a@b.test"]}',
+    "names",
+    "",
+    1,
+    "without double quotes",
+  ],
 ];
 
 type MatrixResults = {
@@ -1411,6 +1470,10 @@ function runBuilderMatrix(): MatrixResults {
 }
 
 describe("identity gate — the pattern-set builders match the pipelines they replaced, byte for byte (#113)", () => {
+  test("the matrices hold the row counts their header comment states", () => {
+    expect([ESCAPE_MATRIX.length, ARRAY_MATRIX.length]).toEqual([16, 48]);
+  });
+
   test("identity_regex_escape escapes exactly the fourteen ERE metacharacters, on every recorded input", () => {
     const results = runBuilderMatrix();
     const mismatches = ESCAPE_MATRIX.map((entry, i) => [entry[0], entry[2], results.escaped[i]] as const)
