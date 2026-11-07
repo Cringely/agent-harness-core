@@ -9,16 +9,24 @@ Read an empty result as absence only after a control on the same input. The KEV 
 
 ## Step 1. Exposure triage
 
-Image config without running it:
+Image config without running it. Env, ARG and build-step values print as key names only, so no
+secret value reaches the transcript:
 
 ```sh
-docker image inspect IMG --format '{{json .Config}}'      # User, ExposedPorts, Entrypoint, Cmd, Healthcheck
-docker history --no-trunc --format '{{.CreatedBy}}' IMG   # build steps, ADD, curl|sh, secrets in ARG/ENV
+docker image inspect IMG | jq '.[0].Config | {User, ExposedPorts, Entrypoint, Cmd, Healthcheck,
+  EnvKeys: [.Env[]? | split("=")[0]]}'
+# Build steps. A step holding KEY=value prints as its instruction plus key names, values cut.
+docker history --no-trunc --format '{{.CreatedBy}}' IMG | awk '
+  !/=/ { print; next }
+  { out = $1; s = $0
+    while (match(s, /[A-Za-z_][A-Za-z0-9_]*=/)) { out = out " " substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH) }
+    print out " (values hidden)" }'
+docker history --no-trunc --format '{{.CreatedBy}}' IMG | grep -nE '(curl|wget)[^|]*[|] *(ba)?sh' | cut -d: -f1   # pipe-to-shell steps, by line
 ```
 
 File listing without running the image:
 
-```sh
+```bash
 set -o pipefail; rm -f files.txt        # a failed create must not leave the last run's listing behind
 if cid=$(docker create IMG); then
   docker export "$cid" | tar -tv > files.txt; rc=$?
@@ -70,24 +78,29 @@ jq -r '[.Results[].Vulnerabilities[]?.Status] | group_by(.) | map("\(.[0]) \(len
 
 Trivy documents only `fixed` and `affected` for Ubuntu (Debian adds `fix_deferred` and
 `end_of_life`, RHEL has more). On Ubuntu, `affected` with no FixedVersion does not tell you whether a
-fix is pending upstream, available only through Ubuntu Pro, or will never ship. Check the archive component:
+fix is pending upstream, available only through Ubuntu Pro, or will never ship. Check the archive
+component, from the archive index first, without running the image. The Packages index for each
+component of the release (`jammy`, `noble`, and so on) lists the package with its Section. Fetch it
+over https only, never plain http, because an unverified index can be swapped in transit:
 
 ```sh
-docker run --rm --entrypoint sh IMG -c 'apt-get update -qq && apt-cache policy PKG && apt-cache show PKG | grep -m1 ^Section'
+curl -fsS https://archive.ubuntu.com/ubuntu/dists/RELEASE/universe/binary-amd64/Packages.gz | zcat | grep -A12 '^Package: PKG$' | grep -m1 '^Section'
 ```
 
-A `.../universe` or `.../multiverse` source line, or a Section starting `universe/` or `multiverse/`,
-means community-maintained. Fixes come from community uploads, or through Ubuntu Pro (esm-apps) for
-high and critical CVEs only. Read the tracker row for each CVE.
+A hit in `universe/` means community-maintained. No hit there: try `main`, then `multiverse`. A
+Section starting `universe/` or `multiverse/` means community-maintained. Fixes come from community
+uploads, or through Ubuntu Pro (esm-apps) for high and critical CVEs only. Read the tracker row for
+each CVE.
 
-Without running the image, read the archive index for the release (`jammy`, `noble`, and so on). The
-Packages index for each component lists the package with its Section:
+Fallback when the index lookup fails: read the package lists already inside the image, with no
+network. Never run the image under review with network access. Slim images often delete their lists,
+so an empty result here reads as "lookup failed":
 
 ```sh
-curl -fsS http://archive.ubuntu.com/ubuntu/dists/RELEASE/universe/binary-amd64/Packages.gz | zcat | grep -A12 '^Package: PKG$' | grep -m1 '^Section'
+docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges --entrypoint sh IMG -c 'apt-cache policy PKG && apt-cache show PKG | grep -m1 ^Section'
 ```
 
-A hit in `universe/` means community-maintained. No hit there: try `main`. On a host with the Pro client, `pro security-status --esm-apps` lists them. Then read the
+A `.../universe` or `.../multiverse` source line means community-maintained. On a host with the Pro client, `pro security-status --esm-apps` lists them. Then read the
 package row in the distro tracker (Ubuntu: ubuntu.com/security/CVE-ID. Debian:
 security-tracker.debian.org/tracker/CVE-ID).
 
@@ -159,13 +172,22 @@ Run the same lookup over the kernel-header CVEs from step 5. A KEV hit there is 
 ## Step 8. Runtime configuration (CIS section 5)
 
 ```sh
-docker compose -f FILE config --no-interpolate      # merged compose, overrides applied. env_file and
-                                                    # literal values can still print. Quote keys, never values
+# Merged compose, overrides applied, projected to the runtime fields. Environment prints as key names
+# only, and top-level secrets as their source kind (file, environment), never their values.
+docker compose -f FILE config --no-interpolate --format json | jq '{
+  services: (.services | map_values({image, user, privileged, cap_add, network_mode, pid, ipc,
+    userns_mode, volumes, ports, read_only, security_opt, devices, mem_limit, pids_limit, deploy,
+    env_file, env_keys: (.environment // {} | keys)})),
+  secrets: (.secrets // {} | map_values(keys))}'
 docker inspect C --format '{{json .HostConfig}}'    # Privileged, CapAdd, NetworkMode, PidMode, IpcMode,
                                                     # UsernsMode, Binds, PortBindings, ReadonlyRootfs,
                                                     # SecurityOpt, Devices, Memory, PidsLimit
 docker inspect C --format '{{.Config.User}}'
-docker inspect --format '{{.Name}} {{range .Mounts}}{{.Source}} {{end}}' $(docker ps -q) | grep docker.sock
+# Docker socket reach (Critical, 5.32): the socket itself, or a directory that holds it (/, /run,
+# /var/run) bound in. Reads every mount source, from Mounts, HostConfig.Mounts and HostConfig.Binds.
+docker inspect $(docker ps -q) | jq -r '.[] | .Name as $n |
+  ([.Mounts[]?.Source] + [.HostConfig.Mounts[]?.Source] + [.HostConfig.Binds[]? | split(":")[0]])
+  | unique | .[] | $n + " " + .' | grep -E ' (/|/run/?|/var/run/?|/.*docker[.]sock)$'
 ```
 
 ## Step 9. What is running now

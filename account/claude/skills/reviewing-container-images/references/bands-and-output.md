@@ -7,14 +7,16 @@ scanner do not set the band.
 
 | Band | Predicate (any one) |
 |---|---|
-| Critical | A reachable listener or untrusted-input parser has a CVE in CISA KEV or with public exploit code. Or a flag from the Critical row below is set on a container with a reachable listener or untrusted-input parser. Or plaintext secrets are in the image or compose file, whatever is reachable. |
+| Critical | A reachable listener or untrusted-input parser has a CVE that passes the High row's trigger test (an untrusted party can trigger it through that listener or parser) and is in CISA KEV or has public exploit code. Or a flag from the Critical row below is set on a container with a reachable listener or untrusted-input parser. Or plaintext secrets are in the image or compose file, whatever is reachable. |
 | High | A reachable listener or parser has a CVE with no KEV entry that an untrusted party can trigger through it: memory safety, auth bypass, injection, deserialization, path traversal, SSRF, request smuggling, or another remote-impact class. Or the container has at least one High-row flag other than root and `no-new-privileges`, and has a reachable listener or parser. |
 | Medium | Vulnerable packages exist but none is reachable from a listener or parser on the evidence you hold. Or hardening gaps from the Medium row with no reachable vulnerable component. |
 | Low | No reachable vulnerable component, non-root, no flags above Low. |
 
 A Critical-row flag other than plaintext secrets, with no reachable listener or parser, sets High. A
-High-row flag with no reachable listener or parser sets Medium. Root with a reachable listener and no
-other High flag is Medium. When predicates for more than one band match, the highest applies. If none
+High-row flag with no reachable listener or parser sets Medium. Root, `no-new-privileges` not set, or
+both, with a reachable listener or parser and no other High flag is Medium. KEV or public exploit code
+escalates a CVE that passes the trigger test from High to Critical. It does not escalate a CVE that
+fails it. When predicates for more than one band match, the highest applies. If none
 matches, the band is Medium and the unmatched case goes in Data gaps.
 
 "Reachable" means: the process runs in the deployed container, listens or parses data an untrusted
