@@ -9,20 +9,121 @@ Read an empty result as absence only after a control on the same input. The KEV 
 
 ## Step 1. Exposure triage
 
-Image config without running it. Env, ARG and build-step values print as key names only, so no
-secret value reaches the transcript:
+Image config and build history without running the image. Output is an allowlist, not a
+redaction: what prints is a key name, a layer size, a created timestamp, or a word from a fixed
+vocabulary. Build-step text, env values, argv strings and healthcheck commands are matched against
+patterns and never printed, whatever they contain. A field that fails its format check prints
+`(unparsed)` or `(hidden)`. Never print `CreatedBy`, `Comment`, `Env`, `Entrypoint`, `Cmd`,
+`Healthcheck` or `Labels` raw to work around a `(hidden)`.
+
+Write the views module once per review, in the working directory:
 
 ```sh
-docker image inspect IMG | jq '.[0].Config | {User, ExposedPorts, Entrypoint, Cmd, Healthcheck,
-  EnvKeys: [.Env[]? | split("=")[0]]}'
-# Build steps. A step holding KEY=value prints as its instruction plus key names, values cut.
-docker history --no-trunc --format '{{.CreatedBy}}' IMG | awk '
-  !/=/ { print; next }
-  { out = $1; s = $0
-    while (match(s, /[A-Za-z_][A-Za-z0-9_]*=/)) { out = out " " substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH) }
-    print out " (values hidden)" }'
-docker history --no-trunc --format '{{.CreatedBy}}' IMG | grep -nE '(curl|wget)[^|]*[|] *(ba)?sh' | cut -d: -f1   # pipe-to-shell steps, by line
+cat > review.jq <<'EOF'
+# Allowlist views. Every string printed is a key name, a size, a timestamp or a word from a
+# fixed vocabulary. Build-step text, env values and argv strings are only tested, never printed.
+def secret_name: test("passw(or)?d|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|(^|_)auth$"; "i") and (test("_file$"; "i") | not);
+def classes:
+  gsub("(file|dir|sha256):[0-9a-f]{64}|\\b[0-9a-f]{64}\\b|\\b[0-9a-f]{128}\\b"; "") as $t
+  | [ (if ($t | test("-----BEGIN|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_|glpat-|xox[abposr]-|AKIA[0-9A-Z]{16}|://[^/@ :]+:[^/@ ]+@|[Bb]earer +[A-Za-z0-9._~+/=-]{8,}")) then "key-material" else empty end),
+      (if ($t | test("(passw(or)?d|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential)[A-Za-z0-9_]*(?<!_file)=\"?[^ $\"]"; "i")) then "secret-assignment" else empty end),
+      (if ($t | test("passw(or)?d|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|authorization"; "i")) then "secret-word" else empty end),
+      (if ($t | test("(?=[A-Za-z0-9_+]*[0-9])(?=[A-Za-z0-9_+]*[A-Za-z])[A-Za-z0-9_+]{32,}")) then "opaque" else empty end) ]
+  | if length == 0 then "none" else join(",") end;
+def keyname: if test("^[A-Za-z_][A-Za-z0-9_.-]{0,127}$") then . else "(unparsed)" end;
+def vclass:
+  if . == null then "reference"
+  elif tostring == "" then "empty"
+  elif tostring | test("^\\$[A-Za-z_][A-Za-z0-9_]*$|^\\$\\{[A-Za-z_][A-Za-z0-9_]*(:?[?][^}]*|:?-)?\\}$") then "reference"
+  else "literal" end;
+def env_line($k; $v):
+  ($v | vclass) as $c
+  | ([ (if $k | secret_name then "name" else empty end),
+       (if $c == "literal" then ($v | tostring | classes | split(",")[] | select(. == "key-material" or . == "secret-assignment")) else empty end) ]
+     | if length == 0 then "none" else join(",") end) as $s
+  | "\($k | tostring | keyname) value=\($c) secret=\($s)";
+def env_pairs:
+  if type == "array" then .[] | tostring | (index("=")) as $i
+    | if $i == null then {key: ., value: null} else {key: .[:$i], value: .[$i + 1:]} end
+  else to_entries[] end;
+def keyword:
+  sub("^/bin/sh -c #\\(nop\\) +"; "") as $s
+  | ([$s | capture("^(?<k>[A-Z]+)( |$)") | .k] | first) as $k
+  | if $k != null and any("ADD", "ARG", "CMD", "COPY", "ENTRYPOINT", "ENV", "EXPOSE", "HEALTHCHECK",
+        "LABEL", "MAINTAINER", "ONBUILD", "RUN", "SHELL", "STOPSIGNAL", "USER", "VOLUME", "WORKDIR"; . == $k)
+    then $k
+    elif $s | test("^([|][0-9]+ |/bin/sh -c )") then "RUN"
+    else "OTHER" end;
+def arg_name:
+  [sub("^/bin/sh -c #\\(nop\\) +"; "") | sub("^ARG +"; "") | capture("^(?<n>[A-Za-z_][A-Za-z0-9_]*)(=| |$)") | .n]
+  | first // "(unparsed)";
+def argv:
+  if . == null then null else
+  { program: ((.[0] // "") | tostring | split("/") | last
+      | if test("^[A-Za-z0-9._+-]{1,64}$") and classes == "none" then . else "(hidden)" end),
+    args: (length - 1),
+    shell_form: ((.[0] // "" | tostring | test("(^|/)(ba|da|a)?sh$")) and .[1] == "-c"),
+    secret_like: (map(tostring) | join(" ") | classes) } end;
+def history_view:
+  to_entries[] | .key as $i | .value | (.CreatedBy // "" | tostring) as $c | ($c | keyword) as $k
+  | [ "layer=\($i)",
+      "created=\(.CreatedAt // "" | tostring | if test("^[0-9][0-9 :.TZ+-]{0,40}(UTC)?$") then gsub(" "; "_") else "(unparsed)" end)",
+      "size=\(.Size // "" | tostring | if test("^[0-9.]{1,12} ?[kKMGTP]?i?B?$") then gsub(" "; "") else "(unparsed)" end)",
+      $k,
+      (if $k == "ARG" then "name=\($c | arg_name)" else empty end),
+      "secret-like=\($c | classes)",
+      "pipe-to-shell=\(if $c | test("(curl|wget)[^|]*[|] *(ba)?sh") then "yes" else "no" end)" ]
+  | join(" ");
+def inspect_view:
+  .[0].Config | {
+    User: (.User // "" | tostring
+      | if . == "" then "(unset, runs as root)"
+        elif test("^[A-Za-z0-9_][A-Za-z0-9_.-]{0,31}(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,31})?$") then .
+        else "(unparsed)" end),
+    ExposedPorts: [(.ExposedPorts // {}) | keys[] | if test("^[0-9]{1,5}(-[0-9]{1,5})?/(tcp|udp|sctp)$") then . else "(unparsed)" end],
+    Entrypoint: (.Entrypoint | argv),
+    Cmd: (.Cmd | argv),
+    Healthcheck: (if .Healthcheck == null then "none"
+      else "present, secret-like=\(.Healthcheck.Test // [] | map(tostring) | join(" ") | classes)" end),
+    Env: [(.Env // []) | env_pairs | env_line(.key; .value)] };
+def compose_view: {
+  services: (.services | map_values({image, user, privileged, cap_add, network_mode, pid, ipc,
+    userns_mode, volumes, ports, read_only, security_opt, devices, mem_limit, pids_limit, deploy,
+    env_file, environment: [(.environment // {}) | env_pairs | env_line(.key; .value)]})),
+  secrets: (.secrets // {} | map_values(keys)) };
+EOF
 ```
+
+Then:
+
+```sh
+docker image inspect IMG | jq -L . 'include "review"; inspect_view'
+# One line per layer, newest first: layer index, created, size, instruction keyword, the ARG name
+# for an ARG step, the secret-like classes, and whether the step pipes a download to a shell.
+# The step text is never printed. JSON format keeps a multi-line (heredoc) step on one record.
+docker history --no-trunc --format '{{json .}}' IMG | jq -rs -L . 'include "review"; history_view'
+```
+
+Reading the output:
+
+- **Env entries** read `KEY value=CLASS secret=REASONS`. CLASS is `literal`, `empty` or
+  `reference` (a lone `$VAR` or `${VAR}`, or a key passed through with no value). A `${VAR:-x}`
+  with a non-empty default is `literal`, because the default is written in the file. REASONS is
+  `name` (the key looks like a credential name, `*_FILE` keys excepted), `key-material` or
+  `secret-assignment` (found in a literal value), or `none`.
+- **`secret-like` on a step, an argv or a healthcheck** lists the classes it matched.
+  `key-material` (a private key header, a known token prefix, credentials in a URL, a bearer token)
+  and `secret-assignment` (a credential-named key set to a non-empty literal) count as a literal
+  secret. `secret-word` (a credential word with no value beside it) and `opaque` (a long
+  mixed letter-and-digit string, sha256 and sha512 digests excepted) mark a candidate the pattern
+  cannot settle. `none` means no pattern matched, which is not evidence that no secret is there.
+- `name=` on an ARG step is the first name the instruction declares. Further names in the same
+  instruction are not printed. Their values still feed that step's `secret-like`.
+- `program` is the basename of argv[0], or `(hidden)`. With `shell_form: true` the real program
+  is inside the hidden `-c` string. Find it from the file listing, the Dockerfile, or the process
+  table in a running container.
+
+Report a literal secret by key name, or by layer index and class, never by value.
 
 File listing without running the image:
 
@@ -172,13 +273,12 @@ Run the same lookup over the kernel-header CVEs from step 5. A KEV hit there is 
 ## Step 8. Runtime configuration (CIS section 5)
 
 ```sh
-# Merged compose, overrides applied, projected to the runtime fields. Environment prints as key names
-# only, and top-level secrets as their source kind (file, environment), never their values.
-docker compose -f FILE config --no-interpolate --format json | jq '{
-  services: (.services | map_values({image, user, privileged, cap_add, network_mode, pid, ipc,
-    userns_mode, volumes, ports, read_only, security_opt, devices, mem_limit, pids_limit, deploy,
-    env_file, env_keys: (.environment // {} | keys)})),
-  secrets: (.secrets // {} | map_values(keys))}'
+# Merged compose, overrides applied, projected to the runtime fields with review.jq from step 1.
+# Each environment entry prints as KEY value=CLASS secret=REASONS (step 1 explains both), so a
+# plaintext secret and a variable reference are told apart without printing either. Top-level
+# secrets print as their source kind (file, environment). command, entrypoint and labels are not
+# projected, so their text never prints.
+docker compose -f FILE config --no-interpolate --format json | jq -L . 'include "review"; compose_view'
 docker inspect C --format '{{json .HostConfig}}'    # Privileged, CapAdd, NetworkMode, PidMode, IpcMode,
                                                     # UsernsMode, Binds, PortBindings, ReadonlyRootfs,
                                                     # SecurityOpt, Devices, Memory, PidsLimit
