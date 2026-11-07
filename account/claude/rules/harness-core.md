@@ -30,7 +30,11 @@ After changing anything under `~/.claude/rules/`, `agents/`, `skills/`, `hooks/`
 pwsh -NoProfile -File {{CORE_REPO}}/install/Export-Account.ps1
 ```
 
-Then review `git diff account/claude` in the core repo and commit. A second export with
+Then review `git diff account/claude` in the core repo and commit. Stage only the paths that
+belong to the change the PR is for (`git add <paths>`), never the whole `account/claude` diff.
+Other live drift the export picks up waits for its own PR. (2026-11-06: #278 grew across
+re-exports from a rules change into the container-image skill and a settings export, and its
+review then blocked on defects in both.) A second export with
 nothing changed produces no content diff, so anything the diff shows is a real change.
 
 A clone that predates the `account/claude/** text=auto eol=lf` rule in `.gitattributes` keeps
