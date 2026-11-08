@@ -170,13 +170,34 @@ that file at the commit above if the deployment uses swarm mode. Otherwise out o
 
 Run only with the host owner's written sign-off. It needs root, or a container started with
 `--net host --pid host --userns host`, the Docker socket, and read access to `/etc`, `/var/lib` and the
-container runtime binaries (README at the same commit). Pin the clone to a commit you record:
+container runtime binaries (README at the same commit).
+
+Run commit `154869da6418089decf7e1ab0cfca0e1cdfc5c49` and nothing else, the commit the control list
+above was read from. It runs as root, so a branch tip, a tag (tags can be moved) or any commit
+nobody has read is unreviewed code with root on the host. To move to a newer commit, read its diff
+against this one first, then change the pin and the control list here in the same edit.
+
+Fetch that commit by its full ID, which makes git check the content against the ID, and confirm the
+checkout before anything runs:
 
 ```sh
-git clone https://github.com/docker/docker-bench-security.git
-cd docker-bench-security && git checkout <sha-you-record>
-sudo sh docker-bench-security.sh -l /tmp/docker-bench.log
-sudo sh docker-bench-security.sh -c container_images,container_runtime   # sections 4 and 5 only
+PIN=154869da6418089decf7e1ab0cfca0e1cdfc5c49
+mkdir docker-bench-security && cd docker-bench-security && git init -q &&
+  git fetch -q --depth 1 https://github.com/docker/docker-bench-security.git "$PIN" &&
+  git checkout -q --detach "$PIN" &&
+  [ "$(git rev-parse HEAD)" = "$PIN" ] && [ -z "$(git status --porcelain)" ] &&
+  echo "pin verified" || echo "pin check failed, do not run"
 ```
 
-Output lands in `docker-bench-security.log` and `docker-bench-security.log.json` unless `-l` is given.
+Run only after `pin verified`, from that directory. The terminal output names containers, images
+and mount paths, so it goes to `/dev/null` and the JSON log is read as control ID, result and an
+item count. The names stay in `bench.log.json` on the host.
+
+```sh
+sudo sh docker-bench-security.sh -b -l "$PWD/bench.log" > /dev/null    # add -c container_images,container_runtime for sections 4 and 5 only
+jq -r '.tests[].results[] | "\(.id) \(.result) items=\(.items // [] | length)"' bench.log.json
+```
+
+docker-bench writes that JSON with `printf`, so a detail string with a quote in it can break it. If
+jq reports a parse error, read the text log the same way:
+`sed -nE 's/^\[(PASS|WARN|INFO|NOTE)\] ([0-9]+(\.[0-9]+)+) .*/\2 \1/p' bench.log`.

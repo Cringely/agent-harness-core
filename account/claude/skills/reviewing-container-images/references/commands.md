@@ -10,38 +10,53 @@ Read an empty result as absence only after a control on the same input. The KEV 
 ## Step 1. Exposure triage
 
 Image config and build history without running the image. Output is an allowlist, not a
-redaction: what prints is a key name, a layer size, a created timestamp, or a word from a fixed
-vocabulary. Build-step text, env values, argv strings and healthcheck commands are matched against
-patterns and never printed, whatever they contain. A field that fails its format check prints
-`(unparsed)` or `(hidden)`. Never print `CreatedBy`, `Comment`, `Env`, `Entrypoint`, `Cmd`,
-`Healthcheck` or `Labels` raw to work around a `(hidden)`.
+redaction. Build-step text, env values, env_file lines, argv strings and healthcheck commands are
+matched against patterns and print only as a class, whatever they contain. Labels, logging options
+and mount driver options are not read at all. The module header below lists what does print. A
+field that fails its format check prints `(unparsed)` or `(hidden)`. Never print a field raw to
+work around a `(hidden)`. Every `docker image inspect`, `docker inspect`, `docker history`,
+`docker image ls` and `docker compose config` in this file goes through a view in this module,
+except the `{{.State.Pid}}` lookup below, which puts a number in a shell variable. An env file is
+never read except through `envfile_view` (step 8).
 
 Write the views module once per review, in the working directory:
 
 ```sh
 cat > review.jq <<'EOF'
-# Allowlist views. Every string printed is a key name, a size, a timestamp or a word from a
-# fixed vocabulary. Build-step text, env values and argv strings are only tested, never printed.
-def secret_name: test("passw(or)?d|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|(^|_)auth$"; "i") and (test("_file$"; "i") | not);
+# Allowlist views for steps 1, 8 and 9. Never printed: build-step text, env values, env_file lines,
+# argv strings and healthcheck commands, which print only as a class, and labels (deploy.labels
+# included), logging options and mount driver options, which no view reads. Printed after a
+# format check, as "(unparsed)" or "(hidden)" when the check fails: key names, sizes, timestamps,
+# the image or container user, exposed and published ports, the argv[0] basename, image references
+# and IDs, container names,
+# env_file paths and docker socket mount paths. Printed unchecked, because the flag ladder reads
+# them and they hold flags and host paths rather than free text: compose image and user,
+# privileged, cap_add, namespace modes, volumes and binds, devices, security_opt, limits, and
+# deploy mode, replicas, placement, resources and restart_policy.
+def secret_name: test("passw(or)?d|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|(^|_)auth$|(^|_)(pass|pwd)(_|$)"; "i")
+  and (test("_file$"; "i") | not) and (test("^(old)?pwd$"; "i") | not);
 def classes:
   gsub("(file|dir|sha256):[0-9a-f]{64}|\\b[0-9a-f]{64}\\b|\\b[0-9a-f]{128}\\b"; "") as $t
   | [ (if ($t | test("-----BEGIN|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_|glpat-|xox[abposr]-|AKIA[0-9A-Z]{16}|://[^/@ :]+:[^/@ ]+@|[Bb]earer +[A-Za-z0-9._~+/=-]{8,}")) then "key-material" else empty end),
-      (if ($t | test("(passw(or)?d|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential)[A-Za-z0-9_]*(?<!_file)=\"?[^ $\"]"; "i")) then "secret-assignment" else empty end),
+      (if ($t | test("((passw(or)?d|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential)[A-Za-z0-9_]*(?<!_file)|[A-Za-z0-9]_(pass|pwd))=\"?[^ $\"]"; "i")) then "secret-assignment" else empty end),
       (if ($t | test("passw(or)?d|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|authorization"; "i")) then "secret-word" else empty end),
       (if ($t | test("(?=[A-Za-z0-9_+]*[0-9])(?=[A-Za-z0-9_+]*[A-Za-z])[A-Za-z0-9_+]{32,}")) then "opaque" else empty end) ]
   | if length == 0 then "none" else join(",") end;
-def keyname: if test("^[A-Za-z_][A-Za-z0-9_.-]{0,127}$") then . else "(unparsed)" end;
+# A 24-character run with no separator is a value fragment, not a variable name.
+def keyname: if test("^[A-Za-z_][A-Za-z0-9_.-]{0,127}$") and (test("[A-Za-z0-9]{24,}") | not) then . else "(unparsed)" end;
 def vclass:
   if . == null then "reference"
   elif tostring == "" then "empty"
   elif tostring | test("^\\$[A-Za-z_][A-Za-z0-9_]*$|^\\$\\{[A-Za-z_][A-Za-z0-9_]*(:?[?][^}]*|:?-)?\\}$") then "reference"
   else "literal" end;
-def env_line($k; $v):
+# Every class a literal value matches is kept, the undecidable secret-word and opaque included.
+def env_line($k; $v; $src):
   ($v | vclass) as $c
-  | ([ (if $k | secret_name then "name" else empty end),
-       (if $c == "literal" then ($v | tostring | classes | split(",")[] | select(. == "key-material" or . == "secret-assignment")) else empty end) ]
+  | ([ (if $k | tostring | secret_name then "name" else empty end),
+       (if $c == "literal" then ($v | tostring | classes | split(",")[] | select(. != "none")) else empty end) ]
      | if length == 0 then "none" else join(",") end) as $s
-  | "\($k | tostring | keyname) value=\($c) secret=\($s)";
+  | "\($k | tostring | keyname) value=\($c) secret=\($s)\(if $src == null then "" else " source=\($src)" end)";
+def env_line($k; $v): env_line($k; $v; null);
 def env_pairs:
   if type == "array" then .[] | tostring | (index("=")) as $i
     | if $i == null then {key: ., value: null} else {key: .[:$i], value: .[$i + 1:]} end
@@ -74,23 +89,69 @@ def history_view:
       "secret-like=\($c | classes)",
       "pipe-to-shell=\(if $c | test("(curl|wget)[^|]*[|] *(ba)?sh") then "yes" else "no" end)" ]
   | join(" ");
+def user_check: . // "" | tostring
+  | if . == "" then "(unset, runs as root)"
+    elif test("^[A-Za-z0-9_][A-Za-z0-9_.-]{0,31}(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,31})?$") then .
+    else "(unparsed)" end;
 def inspect_view:
   .[0].Config | {
-    User: (.User // "" | tostring
-      | if . == "" then "(unset, runs as root)"
-        elif test("^[A-Za-z0-9_][A-Za-z0-9_.-]{0,31}(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,31})?$") then .
-        else "(unparsed)" end),
+    User: (.User | user_check),
     ExposedPorts: [(.ExposedPorts // {}) | keys[] | if test("^[0-9]{1,5}(-[0-9]{1,5})?/(tcp|udp|sctp)$") then . else "(unparsed)" end],
     Entrypoint: (.Entrypoint | argv),
     Cmd: (.Cmd | argv),
     Healthcheck: (if .Healthcheck == null then "none"
       else "present, secret-like=\(.Healthcheck.Test // [] | map(tostring) | join(" ") | classes)" end),
     Env: [(.Env // []) | env_pairs | env_line(.key; .value)] };
-def compose_view: {
-  services: (.services | map_values({image, user, privileged, cap_add, network_mode, pid, ipc,
-    userns_mode, volumes, ports, read_only, security_opt, devices, mem_limit, pids_limit, deploy,
-    env_file, environment: [(.environment // {}) | env_pairs | env_line(.key; .value)]})),
-  secrets: (.secrets // {} | map_values(keys)) };
+def pathcheck: tostring | if test("^[A-Za-z0-9_./@+:\\\\ -]{1,255}$") and (classes | test("key-material|opaque") | not) then . else "(unparsed)" end;
+def env_files: .env_file // [] | if type == "string" then [.] else . end | .[] | if type == "object" then .path else . end;
+# Input is one env file read whole (jq -Rs). Matches start at a line start, so a quoted value that
+# spans lines is consumed with its entry and its lines are never read as entries of their own.
+def unquote: if length >= 2 and ((startswith("\"") and endswith("\"")) or (startswith("'") and endswith("'"))) then .[1:-1]
+  else sub("[ \\t]+#.*$"; "") end;
+def envfile_view($f):
+  "env_file \($f | pathcheck)",
+  (gsub("\\r"; "") | [scan("(?:^|\\n)[ \\t]*(?:export[ \\t]+)?([A-Za-z_][A-Za-z0-9_.-]*)[ \\t]*(?:(=)[ \\t]*(\"(?:[^\"\\\\]|\\\\.)*\"|'[^']*'|[^\\n]*))?[ \\t]*(?=\\n|$)")][]
+   | if .[1] == null then env_line(.[0]; null; "env_file") else env_line(.[0]; .[2] | unquote; "env_file") end);
+# $ef is envfile_view's output. compose config may merge env_file entries into environment, so in
+# a service that names an env_file, an environment key that any env_file sets is marked
+# env_file-or-compose. Step 8's count check settles which one it is.
+def compose_view($ef):
+  [$ef | scan("(?:^|\\n)([^ \\n]+) value=") | .[0]] as $efk
+  | { services: (.services | map_values(
+        ([env_files] | length > 0) as $hasef
+        | { image, user, privileged, cap_add, network_mode, pid, ipc, userns_mode, volumes, ports,
+            read_only, security_opt, devices, mem_limit, pids_limit,
+            deploy: (if .deploy == null then null else .deploy | {mode, replicas, placement, resources, restart_policy} end),
+            env_file: [env_files | pathcheck],
+            environment: [(.environment // {}) | env_pairs | (.key | tostring | keyname) as $k
+              | env_line(.key; .value; if $hasef and any($efk[]; . == $k) then "env_file-or-compose" else "compose" end)] })),
+      secrets: (.secrets // {} | map_values(keys)) };
+def compose_view: compose_view("");
+def hostconfig_view:
+  .[0] | { User: (.Config.User | user_check),
+    HostConfig: (.HostConfig | {Privileged, CapAdd, NetworkMode, PidMode, IpcMode, UsernsMode, Binds,
+      Mounts: [(.Mounts // [])[] | {Type, Source, Target, ReadOnly}], PortBindings, ReadonlyRootfs,
+      SecurityOpt, Devices, Memory, PidsLimit, LogDriver: .LogConfig.Type}) };
+def cname: tostring | ltrimstr("/") | if test("^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$") then . else "(unparsed)" end;
+def ref_check: tostring | if test("^[A-Za-z0-9][A-Za-z0-9._/:-]{0,254}(@sha256:[0-9a-f]{64})?$") then . else "(unparsed)" end;
+def socket_view:
+  .[] | (.Name | cname) as $n
+  | ([.Mounts[]?.Source] + [.HostConfig.Mounts[]?.Source] + [.HostConfig.Binds[]? | split(":")[0]])
+  | unique | .[] | select(type == "string" and test("^(/|/run/?|/var/run/?|/.*docker[.]sock)$")) | "\($n) \(.)";
+def images_view:
+  [ (.Repository | tostring | if . == "<none>" then . else ref_check end),
+    (.Tag | tostring | if . == "<none>" or test("^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$") then . else "(unparsed)" end),
+    (.Digest | tostring | if . == "<none>" or test("^sha256:[0-9a-f]{64}$") then . else "(unparsed)" end),
+    (.ID | tostring | if test("^(sha256:)?[0-9a-f]{12,64}$") then . else "(unparsed)" end) ] | join(" ");
+def running_view:
+  .[] | [ "name=\(.Name | cname)",
+    "image=\(.Config.Image | ref_check)",
+    "id=\(.Image | tostring | if test("^sha256:[0-9a-f]{64}$") then . else "(unparsed)" end)",
+    "state=\(.State.Status | tostring | if IN("created", "running", "paused", "restarting", "removing", "exited", "dead") then . else "(unparsed)" end)",
+    "published=\([(.NetworkSettings.Ports // {}) | to_entries[] | .key as $p | (.value // [])[]
+      | "\(.HostIp // ""):\(.HostPort // "")->\($p)"
+      | if test("^[0-9A-Fa-f.:\\[\\]]*:[0-9]{1,5}->[0-9]{1,5}/(tcp|udp|sctp)$") then . else "(unparsed)" end] | join(","))" ]
+  | join(" ");
 EOF
 ```
 
@@ -106,11 +167,13 @@ docker history --no-trunc --format '{{json .}}' IMG | jq -rs -L . 'include "revi
 
 Reading the output:
 
-- **Env entries** read `KEY value=CLASS secret=REASONS`. CLASS is `literal`, `empty` or
-  `reference` (a lone `$VAR` or `${VAR}`, or a key passed through with no value). A `${VAR:-x}`
-  with a non-empty default is `literal`, because the default is written in the file. REASONS is
-  `name` (the key looks like a credential name, `*_FILE` keys excepted), `key-material` or
-  `secret-assignment` (found in a literal value), or `none`.
+- **Env entries** read `KEY value=CLASS secret=REASONS`, with `source=SOURCE` added in step 8.
+  CLASS is `literal`, `empty` or `reference` (a lone `$VAR` or `${VAR}`, or a key passed through
+  with no value). A `${VAR:-x}` with a non-empty default is `literal`, because the default is
+  written in the file. REASONS lists every match, or `none`: `name` (the key looks like a
+  credential name, `*_PASS` and `*_PWD` included, `*_FILE` and `PWD` excepted), and for a literal
+  value every class below that it matched, `secret-word` and `opaque` included. A key that fails
+  its format check prints `(unparsed)` with its classes still shown.
 - **`secret-like` on a step, an argv or a healthcheck** lists the classes it matched.
   `key-material` (a private key header, a known token prefix, credentials in a URL, a bearer token)
   and `secret-assignment` (a credential-named key set to a non-empty literal) count as a literal
@@ -198,10 +261,11 @@ network. Never run the image under review with network access. Slim images often
 so an empty result here reads as "lookup failed":
 
 ```sh
-docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges --entrypoint sh IMG -c 'apt-cache policy PKG && apt-cache show PKG | grep -m1 ^Section'
+docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges --entrypoint sh IMG -c 'apt-cache policy PKG | grep -oE "[a-z0-9.-]+/(main|restricted|universe|multiverse)( |$)" | sort -u; apt-cache show PKG | grep -m1 "^Section"'
 ```
 
-A `.../universe` or `.../multiverse` source line means community-maintained. On a host with the Pro client, `pro security-status --esm-apps` lists them. Then read the
+This prints the suite and component of each source, never the source URL, because a private
+mirror's URL can carry credentials. A `.../universe` or `.../multiverse` line means community-maintained. On a host with the Pro client, `pro security-status --esm-apps` lists them. Then read the
 package row in the distro tracker (Ubuntu: ubuntu.com/security/CVE-ID. Debian:
 security-tracker.debian.org/tracker/CVE-ID).
 
@@ -273,29 +337,44 @@ Run the same lookup over the kernel-header CVEs from step 5. A KEV hit there is 
 ## Step 8. Runtime configuration (CIS section 5)
 
 ```sh
-# Merged compose, overrides applied, projected to the runtime fields with review.jq from step 1.
-# Each environment entry prints as KEY value=CLASS secret=REASONS (step 1 explains both), so a
-# plaintext secret and a variable reference are told apart without printing either. Top-level
-# secrets print as their source kind (file, environment). command, entrypoint and labels are not
-# projected, so their text never prints.
-docker compose -f FILE config --no-interpolate --format json | jq -L . 'include "review"; compose_view'
-docker inspect C --format '{{json .HostConfig}}'    # Privileged, CapAdd, NetworkMode, PidMode, IpcMode,
-                                                    # UsernsMode, Binds, PortBindings, ReadonlyRootfs,
-                                                    # SecurityOpt, Devices, Memory, PidsLimit
-docker inspect C --format '{{.Config.User}}'
+# Merged compose, overrides applied, saved to a file and never printed raw. Pass every -f file.
+docker compose -f FILE config --no-interpolate --format json > compose.json
+# Each env_file the services name, classified entry by entry through review.jq from step 1. Never
+# cat, grep or source an env file. A file that cannot be read prints the notice, not its content.
+: > envfile.txt
+jq -r -L . 'include "review"; .services[] | env_files' compose.json | while IFS= read -r f; do
+  jq -Rrs -L . --arg f "$f" 'include "review"; envfile_view($f)' "$f" >> envfile.txt ||
+    echo "an env_file could not be read, its entries are a data gap"
+done
+cat envfile.txt
+# Runtime fields, each environment entry as KEY value=CLASS secret=REASONS source=SOURCE. command,
+# entrypoint, labels, deploy.labels, logging and build args are not projected.
+jq -L . --rawfile ef envfile.txt 'include "review"; compose_view($ef)' compose.json
+# For an entry with source=env_file-or-compose: does a compose file set KEY itself? Prints a count,
+# never a line. 0 means the value comes only from the env_file. Anything else, including a hit on
+# the same key in another service, reads as set in the compose file.
+cat FILE | grep -cE "^[[:space:]]*(-[[:space:]]*)?[\"']?KEY[\"']?[[:space:]]*[:=]"
+# Container runtime fields and the effective user. The log driver prints by type only, because its
+# options can hold a credential (splunk-token, for one). Mounts print type, source, target and
+# read-only, never driver options.
+docker inspect C | jq -L . 'include "review"; hostconfig_view'
 # Docker socket reach (Critical, 5.32): the socket itself, or a directory that holds it (/, /run,
 # /var/run) bound in. Reads every mount source, from Mounts, HostConfig.Mounts and HostConfig.Binds.
-docker inspect $(docker ps -q) | jq -r '.[] | .Name as $n |
-  ([.Mounts[]?.Source] + [.HostConfig.Mounts[]?.Source] + [.HostConfig.Binds[]? | split(":")[0]])
-  | unique | .[] | $n + " " + .' | grep -E ' (/|/run/?|/var/run/?|/.*docker[.]sock)$'
+docker inspect $(docker ps -q) | jq -r -L . 'include "review"; socket_view'
 ```
+
+`source=compose` means the compose model sets the entry. `source=env_file` lines come from
+`envfile_view` and mean the value sits in an env file on the host. `source=env_file-or-compose`
+means `docker compose config` may have merged an env_file entry into the service's environment.
+The count check above decides between the two. `bands-and-output.md` (Secrets input) reads each one.
 
 ## Step 9. What is running now
 
 ```sh
-docker image ls --digests
-docker ps --format '{{.ID}} {{.Image}} {{.Status}} {{.Ports}}'
-docker inspect --format '{{.Name}} {{.Image}}' $(docker ps -q)     # image ID each container runs
+# Cached images: repository, tag, digest, image ID.
+docker image ls --digests --format '{{json .}}' | jq -r -L . 'include "review"; images_view'
+# Running containers: name, image reference, image ID, state, published ports.
+docker inspect $(docker ps -q) | jq -r -L . 'include "review"; running_view'
 ```
 
 A registry quarantine or block stops new pulls. It does not stop a container already running, or a

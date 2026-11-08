@@ -16,11 +16,19 @@ Inputs:
   SSRF, request smuggling, or another remote-impact class). Exploit evidence: in CISA KEV or public
   exploit code exists.
 - **Flags** from the runtime flag ladder below, by level.
-- **Secrets.** Each env entry and build step from `commands.md` steps 1 and 8, read as literal (an
-  entry with value `literal` and secret not `none`, or a step whose `secret-like` includes
-  `key-material` or `secret-assignment`), reference (value `reference`, secret `name`), or
-  candidate (a step whose `secret-like` is only `secret-word` or `opaque`). `empty` and `none` set
-  nothing.
+- **Secrets.** Each env entry and build step from `commands.md` steps 1 and 8, read as one of:
+  - literal: an entry with value `literal` whose secret includes `name`, `key-material` or
+    `secret-assignment`, from the image (step 1, no source), `source=compose`, or
+    `source=env_file-or-compose` where step 8's count check is not 0. Or a build step whose
+    `secret-like` includes `key-material` or `secret-assignment`.
+  - reference: value `reference` with secret `name`. Also an entry that would be literal but has
+    `source=env_file`, or `source=env_file-or-compose` with a count of 0. Its value sits in an env
+    file on the host and reaches the container as an environment variable, which is the Medium row,
+    not plaintext in the image or compose file. Report the env file by path and key, never by value.
+  - candidate: an entry with value `literal` whose secret is only `secret-word` or `opaque`, any
+    source, or a build step whose `secret-like` is only `secret-word` or `opaque`. The pattern
+    cannot settle these, so each is a missing input (Data gaps below).
+  - nothing: value `empty`, or secret `none`. `none` is not evidence that no secret is there.
 
 | Step | Band | Predicate (any one) |
 |---|---|---|
@@ -39,7 +47,8 @@ party controls, and the port is published or reachable on a network you cannot v
 
 Data gaps holds missing inputs only, never an unmatched case, since there is none. An input is
 missing when the scan is absent or failed its control, a KEV lookup failed, runtime data for
-reachability or flags is absent, or a build step is a candidate. For each missing input, run the
+reachability or flags is absent, an env_file could not be read, or an env entry or build step is a
+candidate. For each missing input, run the
 table under each value it can take and state the band per value ("Medium if not published, High if
 published", or "Critical if layer 3 holds a secret, Medium if not"), then put the input in the gaps
 table with the artifact that closes it. EPSS is not a band input. A failed EPSS lookup is a gap in
@@ -57,7 +66,7 @@ High because Docker applies a default profile, so `seccomp=unconfined` is an exp
 |---|---|
 | Critical | `privileged: true` (5.5). Docker socket mounted (5.32). `pid: host` (5.16) or `network_mode: host` (5.10) on an app container. Secrets in plaintext in the image or compose file, meaning a secret read as literal (4.10). |
 | High | Runs as root (4.1). `cap_add` of SYS_ADMIN, NET_ADMIN, SYS_PTRACE or ALL (5.4). Sensitive host directories mounted (5.6). `no-new-privileges` not set (5.26). `seccomp=unconfined` (5.22). AppArmor or SELinux disabled (5.2, 5.3). Host devices passed through (5.18). |
-| Medium | Ports published on all interfaces instead of a specific host IP (5.14). No memory or PIDs limit (5.11, 5.29). Writable root filesystem (5.13). Mutable image tag in compose. Secrets passed as environment variables, meaning a secret read as reference. |
+| Medium | Ports published on all interfaces instead of a specific host IP (5.14). No memory or PIDs limit (5.11, 5.29). Writable root filesystem (5.13). Mutable image tag in compose. Secrets passed as environment variables, meaning a secret read as reference, an env_file secret included. |
 | Low | No HEALTHCHECK (4.6, 5.27). ADD instead of COPY (4.9). |
 
 ## Output sections, in this order

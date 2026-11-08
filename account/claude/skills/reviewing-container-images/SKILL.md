@@ -28,9 +28,9 @@ Commands for each step: `references/commands.md`.
 5. **Kernel headers.** Report `linux-libc-dev` CVEs as a separate line: inert in the container (the host kernel runs), a host-patching signal, and a sign of a build toolchain in the runtime image. Exception: the image is used as a build base. A KEV hit on a kernel-header package (`linux-libc-dev`, `kernel-headers`) does not raise the image band, but it is an actively exploited host-kernel CVE: record an urgent host-patching action for the host owner, closed by `uname -r` and livepatch status.
 6. **KEV and EPSS** for every CVE on an exposed component and every kernel-header CVE. A failed fetch or control reads "lookup failed", never "not in KEV".
 7. **Hygiene smells.** Servers, editors, compilers, package managers at runtime, sshd, avahi, systemd, GUI libraries (X11, GTK, Qt, Mesa) in a server image, `-dev` packages.
-8. **Runtime config** against CIS section 5 from the compose file or `docker inspect`.
+8. **Runtime config** against CIS section 5 from the compose file or `docker inspect`, read through the views in `references/commands.md`. Never print a compose file, env file or inspect output raw.
 9. **Current exposure.** What is cached and running on hosts. A registry quarantine does not stop running containers.
-10. **Host evidence** via docker-bench-security pinned to a recorded commit, only with the host owner's sign-off, because it needs root, the Docker socket and `--pid host`.
+10. **Host evidence** via docker-bench-security at the commit pinned in `references/cis-docker-controls.md`, verified before it runs, and only with the host owner's sign-off, because it needs root, the Docker socket and `--pid host`.
 
 ## Output
 
