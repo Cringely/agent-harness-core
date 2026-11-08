@@ -147,8 +147,7 @@
     "superpowers@claude-plugins-official": true,
     "ponytail@ponytail": true,
     "caveman@caveman": true,
-    "document-skills@anthropic-agent-skills": true,
-    "mattpocock-skills@claude-plugins-official": true
+    "document-skills@anthropic-agent-skills": true
   },
   "extraKnownMarketplaces": {
     "ponytail": {
