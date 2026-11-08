@@ -88,10 +88,13 @@ commit above is provenance, not a claim that this tree still tracks it.
 ## mattpocock-skills
 
 `account/claude/skills/grill-me/`, `grilling/`, `wait-what/`, `improve-codebase-architecture/`,
-`retro/`, `teach/` and `to-questionnaire/`.
+`retro/`, `teach/`, `to-questionnaire/`, `codebase-design/`, `domain-modeling/` and
+`writing-for-agents/`.
 
 Vendored unchanged from https://github.com/mattpocock/skills at commit
-`49dd158d1076134a641b33efb035946536778336` (plugin version 1.3.1), by Matt Pocock.
+`49dd158d1076134a641b33efb035946536778336` (plugin version 1.3.1), by Matt Pocock. The copies
+were taken from the mattpocock-skills plugin as installed at that commit on the maintainer's
+workstation, not fetched from the upstream repository directly.
 **MIT licensed.** The licence requires its notice to accompany copies, so it is reproduced
 here in full:
 
