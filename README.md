@@ -347,7 +347,8 @@ pwsh -NoProfile -File install/Install-Account.ps1
 ```
 
 It copies the payload over `~/.claude/`, expands five of the six tokens from the receiver's own
-environment (`{{WSL_HOME}}` has no receiver-side answer and is left as shipped), rewrites
+environment (`{{WSL_HOME}}` has no receiver-side answer, so an `mcpServers` entry carrying it is
+skipped and named, as is any Windows-shaped entry on a non-Windows target), rewrites
 PowerShell hook invocations for a non-Windows target, deep-merges
 `settings.json` rather than replacing it (Claude Code writes that file itself, and an overwrite
 would revert every `/plugin` toggle on every pull), adds missing `mcpServers` entries to
