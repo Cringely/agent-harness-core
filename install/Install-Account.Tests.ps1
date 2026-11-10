@@ -712,17 +712,19 @@ Describe "Install-Account" {
     # via `npm root -g` rather than assuming npm absent. A stub npm.cmd on an otherwise-empty
     # PATH stands in for a real npm install; finding it and treating npm as present is what
     # suppresses jq from the missing-tool list below.
+    # The stub prints two lines on purpose (#288): a first-item selector on a multi-line native
+    # command stops the pipeline before $LASTEXITCODE is set, so a present npm read as absent.
     It "probes npm for -NpmGlobal when the parameter is omitted, and finds it" {
         $p = New-StandInPayload; $h = New-StandInClaudeHome
         $stubBin = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-npmstub-" + [guid]::NewGuid())
         New-Item -ItemType Directory -Path $stubBin -Force | Out-Null
-        Set-Content (Join-Path $stubBin 'npm.cmd') "@echo off`r`necho C:\fake\global`r`nexit /b 0"
+        Set-Content (Join-Path $stubBin 'npm.cmd') "@echo off`r`necho C:\fake\global`r`necho second line`r`nexit /b 0"
         # Issue #151: same Linux-visibility gap as the chmod stubs -- `npm.cmd` answers nothing
         # on Linux, where a bare `npm` (if present on the real PATH further down) would be found
         # instead once $env:PATH stops being just $stubBin, or nothing would be found at all.
         # A bare-name companion makes the stub itself answer on Linux, same as on Windows.
         $npmPosix = Join-Path $stubBin 'npm'
-        Set-Content -LiteralPath $npmPosix -Value "#!/bin/sh`necho /fake/global`nexit 0`n" -NoNewline
+        Set-Content -LiteralPath $npmPosix -Value "#!/bin/sh`necho /fake/global`necho second line`nexit 0`n" -NoNewline
         if (-not $IsWindows) { & /bin/chmod +x $npmPosix }
         $savedPath = $env:PATH
         $out = $null
