@@ -51,10 +51,14 @@ $script:AccountRootFiles = @('statusline-command.ps1', 'statusline-command.sh')
 # to rot apart. It is a skip rather than a delete of core's copy on purpose. The hook's own header
 # says to wire it at user level rather than per project, so the live copy has to be the one under
 # ~/.claude, and deleting core's would break that copy on the next Install-Account run.
-$script:AccountSkipFiles = @(
-    'hooks/model-tier-gate.ts',
-    'hooks/Guard-ModelTier.HANDOFF.md',
-    'hooks/memory-transition-log.ts'
+#
+# One list names the core-owned hooks. The exporter derives its skip entries from it and the
+# installer copies each one out of core/claude/hooks/, so a hook skipped at export can never
+# be left without an installer copy (issue 289: memory-transition-log.ts was skipped here,
+# registered in settings.account.json, and copied by nothing, so the hook command failed).
+$script:AccountCoreHooks = @('model-tier-gate.ts', 'memory-transition-log.ts')
+$script:AccountSkipFiles = @($script:AccountCoreHooks | ForEach-Object { "hooks/$_" }) + @(
+    'hooks/Guard-ModelTier.HANDOFF.md'
 )
 
 # Payload-relative directory prefixes that never travel, whole subtree, regardless of what

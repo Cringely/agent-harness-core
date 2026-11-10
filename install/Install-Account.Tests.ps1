@@ -106,6 +106,22 @@ Describe "Install-Account" {
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
 
+    It "installs memory-transition-log.ts from core, byte-identical, though the payload lacks it" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            Test-Path -LiteralPath (Join-Path $p 'hooks/memory-transition-log.ts') |
+                Should -BeFalse -Because "core owns that file and the exporter skips it"
+            & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') `
+                -CoreRepo $script:repoRoot -SkipPreflight | Out-Null
+            $installed = Join-Path $h 'hooks/memory-transition-log.ts'
+            Test-Path -LiteralPath $installed | Should -BeTrue
+            (Get-FileHash $installed -Algorithm SHA256).Hash |
+                Should -Be (Get-FileHash (Join-Path $script:repoRoot 'core/claude/hooks/memory-transition-log.ts') -Algorithm SHA256).Hash
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
     # Review round 2, item C: -ForEach makes each tool its own It. Measured: dropping vale, uvx
     # and jq from the prerequisite list at once used to produce one failure line naming only
     # vale, since Pester stops at the first failing Should in a bundled It. The install runs
