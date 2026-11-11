@@ -37,10 +37,20 @@ const CWD = "/home/runner/project";
 const BS = String.fromCharCode(92);
 const NL = String.fromCharCode(10);
 
+// A backslash separates path segments only on Windows. On POSIX it is an ordinary file-name
+// character, so a Windows-style literal there names ONE file in the working directory. Fixtures
+// that mean "an absolute path on this host" are therefore spelled per platform, and the tests that
+// pin the literal's meaning on each platform say so explicitly.
+const WIN = process.platform === "win32";
+const hostPath = (win: string, posix: string): string => (WIN ? win : posix);
+
 describe("inScratch() — path classification", () => {
   test.each([
     "/tmp/claude/proj/sess/scratchpad/report.md",
-    "C:\\Users\\me\\AppData\\Local\\Temp\\claude\\proj\\sess\\scratchpad\\findings.md",
+    hostPath(
+      "C:\\Users\\me\\AppData\\Local\\Temp\\claude\\proj\\sess\\scratchpad\\findings.md",
+      "/Users/me/AppData/Local/Temp/claude/proj/sess/scratchpad/findings.md",
+    ),
     "/tmp/SCRATCHPAD/case-insensitive.md",
   ])("in scope: %s", (p) => {
     expect(inScratch(p, CWD, CWD)).toBe(true);
@@ -48,7 +58,7 @@ describe("inScratch() — path classification", () => {
 
   test.each([
     "/home/runner/project/src/index.ts",
-    "C:\\Users\\me\\.claude\\rules\\agent-usage.md",
+    hostPath("C:\\Users\\me\\.claude\\rules\\agent-usage.md", "/Users/me/.claude/rules/agent-usage.md"),
     "docs/STATE.md",
     "/etc/hosts",
     // Traversal out of a scratch dir resolves away from it, so it must not pass.
@@ -74,7 +84,24 @@ describe("inScratch() — path classification", () => {
   // the one scratch directory the harness ships.
   test("the installer-created .claude/scratch/ is in scope", () => {
     expect(inScratch("/home/runner/project/.claude/scratch/report.md", CWD, CWD)).toBe(true);
-    expect(inScratch("C:\\repo\\.claude\\scratch\\report.md", CWD, CWD)).toBe(true);
+    expect(inScratch(hostPath("C:\\repo\\.claude\\scratch\\report.md", "/repo/.claude/scratch/report.md"), CWD, CWD)).toBe(true);
+  });
+
+  // The same literal means different things per platform, and the gate must follow the host. On
+  // Windows the backslashes separate segments and the path is a scratch folder outside the project.
+  // On POSIX it is one file name created in the working directory, which is the project, so it is
+  // not scratch. Splitting on backslashes on POSIX would call it scratch.
+  test("a Windows-style literal is read with the host's separator rules", () => {
+    expect(inScratch("C:\\repo\\.claude\\scratch\\report.md", CWD, CWD)).toBe(WIN);
+  });
+
+  // A backslash that is not a separator must not let a name pose as a traversal or as a scratch
+  // directory on POSIX. Each of these is one file name there, in a directory that is not scratch.
+  test.each([
+    ["a dot-dot spelled with backslashes after a scratch name", "/home/runner/project/.claude/scratch\\..\\x.md"],
+    ["a scratch name glued to a file name with a backslash", "/tmp/scratchpad\\..\\x.md"],
+  ])("%s is not scratch on any host", (_label, p) => {
+    expect(inScratch(p, CWD, CWD)).toBe(false);
   });
 
   // Widening the segment set to accept `scratch` must not drag the rest of

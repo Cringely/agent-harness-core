@@ -136,7 +136,15 @@ function canonicalize(p: string): string {
   }
 }
 
-const segmentsOf = (p: string): string[] => p.split(/[\\/]+/).map((s) => s.toLowerCase());
+/**
+ * Segment separators on this host. A backslash separates segments only on Windows. On POSIX it is
+ * an ordinary file-name character, so splitting on it there would read the single file name
+ * `scratch\..\x.md` as a scratch directory followed by a traversal, and call a file that lands in
+ * `.claude` scratch. Matching what the filesystem will do is the whole point of comparing segments.
+ */
+const SEPARATORS = process.platform === "win32" ? /[\\/]+/ : /\/+/;
+
+const segmentsOf = (p: string): string[] => p.split(SEPARATORS).map((s) => s.toLowerCase());
 const startsWith = (a: string[], b: string[]): boolean => a.length >= b.length && b.every((s, i) => a[i] === s);
 
 /**
