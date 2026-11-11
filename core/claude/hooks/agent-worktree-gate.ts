@@ -367,17 +367,39 @@ const ALLOW: GateDecision = { action: "allow" };
 const classificationCache = new Map<string, boolean>();
 
 /**
+ * The lines between a leading `---` line and the next `---` line, or null when the text has no such
+ * frontmatter. The boundaries are the shared writeScope parser's (write-scope-parse.ts): a fence is
+ * a line of three dashes with optional trailing whitespace, CRLF-agnostic, and an unterminated
+ * block is not frontmatter. The trust decision below must read the same block the confinement side
+ * reads, or a line one of them sees and the other misses would be decided differently. One
+ * deliberate difference: this side does not strip a leading byte order mark, so a definition that
+ * has one reads as no frontmatter and requires isolation. The trust side under-detects on purpose.
+ */
+export function frontmatterLines(text: string): string[] | null {
+  const lines = text.split(/\r?\n/);
+  if (!/^---\s*$/.test(lines[0] ?? "")) return null;
+  for (let i = 1; i < lines.length; i++) {
+    if (/^---\s*$/.test(lines[i])) return lines.slice(1, i);
+  }
+  return null;
+}
+
+/**
  * True unless the frontmatter proves the role needs no isolation. Two things prove it:
  *   - a `tools:` field whose every entry is on the read-only allowlist, or
  *   - a trusted scoped writer: `parseScope` is non-null and reads `writeScope: scratch`, there is no
  *     `memory:` line, and every tool is read-only or one of Write, Edit and SendMessage.
- * An absent or empty `tools:` field means all tools. The caller decides whether a parser may be
- * passed at all (decide() checks the project agents folder, the type spelling and the registration).
+ * An absent or empty `tools:` field means all tools. The key is matched case-sensitively, as Claude
+ * Code reads it, so `Tools:` or `TOOLS:` is no grant at all and the role inherits every tool.
+ *
+ * Whether a parser may be passed at all is the caller's decision, not made here. That means the
+ * write-scope gate being at REQUIRED_WRITE_SCOPE_GATE_VERSION and registered for Write and Edit
+ * (loadWriteScopeParser), and the project agents folder, type spelling and project root checks in
+ * decide().
  */
 function frontmatterRequiresIsolation(text: string, parseScope: WriteScopeParser | null): boolean {
-  const fm = text.match(/^---\r?\n([\s\S]*?)\r?\n---/)?.[1];
-  if (fm === undefined) return true; // no parseable frontmatter → cannot prove read-only
-  const lines = fm.split(/\r?\n/);
+  const lines = frontmatterLines(text);
+  if (lines === null) return true; // no parseable frontmatter → cannot prove read-only
   // A `memory:` field (any scope) auto-enables Read, Write, and Edit regardless
   // of what `tools:` grants, per the docs' persistent-memory section.
   // `memory: user` writes outside the checkout (~/.claude/agent-memory/), so
@@ -386,10 +408,12 @@ function frontmatterRequiresIsolation(text: string, parseScope: WriteScopeParser
   // at line start so a `memory:` substring inside a description value does
   // not false-positive.
   if (lines.some((l) => /^memory\s*:\s*\S/i.test(l))) return true;
-  const toolsLine = lines.find((l) => /^tools\s*:/i.test(l));
+  // Case-sensitive on purpose: Claude Code reads the `tools` key exactly, so `Tools:` grants nothing
+  // and the role inherits every tool. A case-insensitive match would read it as a restriction.
+  const toolsLine = lines.find((l) => /^tools\s*:/.test(l));
   if (!toolsLine) return true; // no tools: restriction = all tools
   const tokens = toolsLine
-    .replace(/^tools\s*:/i, "")
+    .replace(/^tools\s*:/, "")
     .split(",")
     .map((s) => s.trim().toLowerCase())
     .filter((s) => s !== "");

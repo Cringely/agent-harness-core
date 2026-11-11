@@ -74,8 +74,10 @@
 // normal permission flow proceeds. Only a well-formed deny emits JSON. A
 // broken gate must never brick writing.
 //
-// Decision logic is the exported pure decide(); `bun test
-// test/agent-write-scope.test.ts` exercises it with no spawn and no filesystem.
+// Decision logic is the exported decide(). It touches the filesystem only through the
+// realpathSync and lstatSync calls in inScratch(), which resolve paths that need not exist, so
+// `bun test test/agent-write-scope.test.ts` exercises most of it with no spawn and no fixture.
+// The cases about links, short names and dangling links build real temporary directories.
 
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
@@ -90,13 +92,12 @@ import { parseWriteScope } from "./write-scope-parse";
 export const WRITE_SCOPE_GATE_VERSION = 2;
 
 /**
- * Directory names that count as scratch. A path is in scope if a segment matches and that
- * directory does not contain the project root (see the header).
- * `scratch` is here because it is the drop box `install/Install-Harness.ps1` creates
- * under a project's `.claude`; without it this gate denied the one scratch directory
- * the harness itself ships. Rejected matching the `.claude/scratch` suffix instead:
- * that adds a second matching rule beside segment matching to buy precision this gate
- * does not claim, per the coverage boundary above.
+ * Directory names that count as scratch OUTSIDE the project root: a path is in scope if a segment
+ * matches and that directory does not contain the project root (see the header). Inside the
+ * project root these names mean nothing. There the only scratch folder is `<project>/.claude/scratch`,
+ * the drop box `install/Install-Harness.ps1` creates, matched by its exact location rather than by
+ * name, because a scratch-named folder elsewhere in the project is tracked content the main session
+ * can load.
  */
 const SCRATCH_SEGMENTS = new Set(["scratchpad", ".scratch", "scratch"]);
 

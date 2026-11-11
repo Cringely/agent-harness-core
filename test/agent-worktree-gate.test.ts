@@ -15,6 +15,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import {
   BASE_SHA_TOKEN,
   decide,
+  frontmatterLines,
   type GitProbe,
   loadWriteScopeParser,
   nonGitNote,
@@ -747,6 +748,72 @@ const EXTRA_TOOLS: Array<[string, string]> = [
 ];
 for (const [name, tool] of EXTRA_TOOLS) writeScopedDef(name, [`${SCOPED_TOOLS}, ${tool}`, "writeScope: scratch"]);
 writeScopedDef("web-fetch", ["tools: Write"]);
+// Claude Code reads the frontmatter key `tools` case-sensitively. A differently cased key is not a
+// grant, so the definition inherits every tool, a shell included.
+writeScopedDef("scoped-key-title", ["Tools: Read, Write", "writeScope: scratch"]);
+writeScopedDef("scoped-key-upper", ["TOOLS: Read, Write", "writeScope: scratch"]);
+writeScopedDef("readonly-key-title", ["Tools: Read, Grep"]);
+writeScopedDef("readonly-key-upper", ["TOOLS: Read, Grep"]);
+// A lowercase grant after a cased one is the grant Claude Code sees only if it reads the first line
+// it matches, so the cased line must not hide the real one: here the real one is a read-only list.
+writeScopedDef("scoped-key-both", ["Tools: Read, Write, Bash", "tools: Read, Write", "writeScope: scratch"]);
+
+describe("requiresIsolation() — the tools key is read as Claude Code reads it, case-sensitively", () => {
+  test.each([
+    ["scoped-key-title", "Tools:"],
+    ["scoped-key-upper", "TOOLS:"],
+  ])("a scratch writer whose grant key is %s (%s) inherits every tool, so it requires isolation", (type) => {
+    expect(requiresIsolation(type, scopedDir, parseWriteScope)).toBe(true);
+    expect(requiresIsolation(type, scopedDir, null)).toBe(true);
+  });
+
+  test.each([["readonly-key-title"], ["readonly-key-upper"]])(
+    "%s: a read-only list under a differently cased key is not a grant, so it requires isolation",
+    (type) => {
+      expect(requiresIsolation(type, scopedDir, parseWriteScope)).toBe(true);
+    },
+  );
+
+  test("the lowercase key keeps working for both a scoped writer and a read-only role", () => {
+    expect(requiresIsolation("scoped", scopedDir, parseWriteScope)).toBe(false);
+    expect(requiresIsolation("scoped-readonly", scopedDir, null)).toBe(false);
+  });
+
+  test("a cased line does not stand in for the lowercase one", () => {
+    expect(requiresIsolation("scoped-key-both", scopedDir, parseWriteScope)).toBe(false);
+  });
+});
+
+// The trust side must read the same frontmatter the confinement side does. These texts probe the
+// boundaries: a closing fence with trailing spaces, a line that merely starts with three dashes, a
+// missing close, and CRLF. For each, the gate's reading and the shared parser's agree on whether a
+// `writeScope` line is inside the frontmatter.
+describe("frontmatterLines() — the same boundaries as the shared writeScope parser", () => {
+  const N = String.fromCharCode(10);
+  const R = String.fromCharCode(13) + N;
+  const cases: Array<[string, string]> = [
+    ["plain", ["---", "tools: Read", "writeScope: scratch", "---", "body"].join(N)],
+    ["CRLF", ["---", "tools: Read", "writeScope: scratch", "---", "body"].join(R)],
+    ["trailing spaces on both fences", ["--- ", "tools: Read", "writeScope: scratch", "---  ", "body"].join(N)],
+    ["a dash-prefixed line is not a close", ["---", "tools: Read", "---x", "writeScope: scratch", "---", "body"].join(N)],
+    ["four dashes are not a close", ["---", "tools: Read", "----", "writeScope: scratch", "---", "body"].join(N)],
+    ["no close", ["---", "tools: Read", "writeScope: scratch", "body"].join(N)],
+    ["key in the body", ["---", "tools: Read", "---", "writeScope: scratch"].join(N)],
+    ["no opening fence", ["tools: Read", "writeScope: scratch", "---"].join(N)],
+    ["blank first line", ["", "---", "writeScope: scratch", "---"].join(N)],
+  ];
+
+  test.each(cases)("%s", (_label, text) => {
+    const lines = frontmatterLines(text);
+    const gateSees = lines?.some((l) => /^writeScope:\s*(\S+)\s*$/.test(l)) ?? false;
+    expect(gateSees).toBe(parseWriteScope(text) !== null);
+  });
+
+  test("a leading byte order mark is not frontmatter here, so the type requires isolation", () => {
+    const bom = String.fromCharCode(0xfeff) + ["---", "tools: Read, Write", "writeScope: scratch", "---"].join(N);
+    expect(frontmatterLines(bom)).toBeNull();
+  });
+});
 
 describe("requiresIsolation() — a shell-less scratch writer is trusted only with the parser (#310)", () => {
   test("scratch scope, Write + Edit + SendMessage, no shell: not an isolation case", () => {
