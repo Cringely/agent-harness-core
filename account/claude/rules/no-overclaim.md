@@ -86,6 +86,12 @@ clean answer that no observation contradicts.
   answered the question for every offset at once, and turned up a defect no screenshot could reach: the
   building carries two `Container` components and `GetPart<Container>()` returns only the first.
 
+## Absence is a claim too
+
+A failed fetch, an empty search or a thin result supports only "could not find it, tried X, Y and Z", never "it does not exist". Name what was tried.
+
+Before stating that a human step did not happen (a spot check, a review, a call), ask the operator. Offline human work leaves no transcript, so missing evidence of it is not evidence it was skipped.
+
 ## How to apply
 
 Before writing "fixed / solved / works / complete / proven," ask: what is the concrete evidence, and

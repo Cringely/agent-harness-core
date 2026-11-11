@@ -8,7 +8,7 @@
   "packs": [
     {
       "id": "engineering-method",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "tier": "core",
       "description": "Portable engineering method for agent-driven work: how to plan, delegate, fix, verify, review and close a change. Tool-neutral, written for harnesses other than Claude Code.",
       "author": { "name": "Cringely" },
