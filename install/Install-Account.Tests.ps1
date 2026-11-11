@@ -2123,7 +2123,9 @@ Describe "Install-Account" {
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
             $args = @{
                 PayloadRoot = $p; ClaudeHome = $h; ClaudeJson = $cj
-                CoreRepo = 'C:/projects/agent-harness-core'; NpmGlobal = 'C:/npm'
+                # TargetIsWindows is pinned: the fixture is a Windows-shaped entry, which the #290
+                # filter drops on a Linux target, so a host-defaulted run has nothing to hand-fix.
+                CoreRepo = 'C:/projects/agent-harness-core'; NpmGlobal = 'C:/npm'; TargetIsWindows = $true
             }
             & $script:install @args -SkipPreflight | Out-Null
 
@@ -2163,7 +2165,7 @@ Describe "Install-Account" {
 
             $out = & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
                 -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal '/usr/lib/node_modules' `
-                -TargetIsWindows:$false -SkipPreflight *>&1 | Out-String
+                -TargetIsWindows:$true -SkipPreflight *>&1 | Out-String
 
             # Scope every assertion to the report block. The "N added (names)" line above it
             # legitimately names all three servers, so a whole-output match would pass for the
@@ -2207,55 +2209,52 @@ Describe "Install-Account" {
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
 
-    # {{WSL_HOME}} has no entry in Get-AccountTokenMap by design (see that function's comment),
-    # so a payload the exporter folded still carries the literal token after install. Task 11's
-    # acceptance criterion for the sibling test above must survive that: a fold that made the
-    # entry look resolved would be the exact failure the team lead's review called out.
-    Context "leaves {{WSL_HOME}} unexpanded and still reports code-context's dead path" {
+    # Issue #290. {{WSL_HOME}} has no entry in Get-AccountTokenMap by design, so a payload the
+    # exporter folded still carries the literal token after expansion. That entry cannot run on
+    # any receiver, and Merge-McpServer's add-if-missing rule would preserve it forever, so it
+    # is skipped before the merge on every target. A Windows-shaped entry is skipped on a Linux
+    # target only. Each case builds its own payload so the assertions read one install.
+    Context "skips mcpServers entries the target cannot run (#290)" {
         BeforeAll {
-            $script:wlP = New-StandInPayload
-            $script:wlH = New-StandInClaudeHome
-            $script:wlCj = Join-Path $script:wlH 'claude.json'
-            @{ mcpServers = @{} } | ConvertTo-Json -Depth 20 | Set-Content $script:wlCj
-            @{ mcpServers = @{
-                    'code-context' = @{ type = 'stdio'; command = 'wsl'
-                        args = @('-e', '{{WSL_HOME}}/code-context-mcp.sh'); env = @{} }
-                } } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $script:wlP 'mcp-servers.json')
+            function script:Install-Mcp {
+                param([bool]$Windows)
+                $p = New-StandInPayload; $h = New-StandInClaudeHome
+                $cj = Join-Path $h 'claude.json'
+                @{ mcpServers = @{} } | ConvertTo-Json -Depth 20 | Set-Content $cj
+                @{ mcpServers = @{
+                        '1password' = @{ type = 'stdio'
+                            command = 'C:\Program Files\WindowsApps\Agilebits.1Password_8.12.26.40_x64__amwd9z03whsfe\onepassword-mcp.exe'
+                            args = @(); env = @{} }
+                        'code-context' = @{ type = 'stdio'; command = 'wsl'
+                            args = @('-e', '{{WSL_HOME}}/code-context-mcp.sh'); env = @{} }
+                        # A URL scheme must not read as a drive letter, or this is dropped too.
+                        acme = @{ type = 'stdio'; command = 'uvx'
+                            args = @('--from', 'git+https://example.invalid/acme_mcp', 'acme-mcp'); env = @{} } } } |
+                    ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
+                $out = & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
+                    -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -TargetIsWindows:$Windows -SkipPreflight *>&1 | Out-String
+                $servers = (Get-Content $cj -Raw | ConvertFrom-Json).mcpServers
+                Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue
+                return [pscustomobject]@{ Out = $out; Names = @($servers.PSObject.Properties.Name) }
+            }
+            $script:mcpLinux = Install-Mcp -Windows $false
+            $script:mcpWin = Install-Mcp -Windows $true
+        }
 
-            $script:wlOut = & $script:install -PayloadRoot $script:wlP -ClaudeHome $script:wlH `
-                -ClaudeJson $script:wlCj -CoreRepo 'C:/projects/agent-harness-core' `
-                -NpmGlobal 'C:/npm' -SkipPreflight *>&1 | Out-String
-
-            $script:wlServers = (Get-Content $script:wlCj -Raw | ConvertFrom-Json).mcpServers
+        It "on a Linux target keeps only the portable entry and names both skips" {
+            $script:mcpLinux.Names | Should -Be @('acme')
+            $script:mcpLinux.Out | Should -Match 'mcpServers: skipped code-context \(unexpanded placeholder\(s\) \{\{WSL_HOME\}\}'
+            $script:mcpLinux.Out | Should -Match 'mcpServers: skipped 1password \(Windows-shaped path on a non-Windows target\)'
+            $script:mcpLinux.Out | Should -Match 'mcpServers: 1 added \(acme\)'
+            $script:mcpLinux.Out | Should -Not -Match 'Still carrying a source-machine path'
         }
-        AfterAll {
-            Remove-Item -Recurse -Force $script:wlP, $script:wlH -ErrorAction SilentlyContinue
-        }
-
-        It "leaves {{WSL_HOME}} unexpanded in the merged claude.json" {
-            $script:wlServers.'code-context'.args | Should -Contain '{{WSL_HOME}}/code-context-mcp.sh'
-        }
-        It "warns about the unexpanded token by name" {
-            $script:wlOut | Should -Match 'Unexpanded placeholder\(s\) in mcpServers: \{\{WSL_HOME\}\}'
-        }
-        It "still names mcpServers.code-context in the residual-path report" {
-            # Get-UnresolvedPath's regex is path-shaped, not token-aware: it does not match the
-            # opening {{WSL_HOME}} itself, but the / between the closing }} and the filename
-            # still satisfies the POSIX branch on its own, so the entry stays flagged -- on the
-            # truncated tail rather than the full original path. That is a pre-existing property
-            # of the regex (the same class of truncation review F6 already documents for a
-            # space inside a Whole command), not something this fold introduces.
-            #
-            # Review round 1, F4: a bare 'mcpServers\.code-context' match here is satisfied by the
-            # unconditional "Expected here: mcpServers.1password ... and mcpServers.code-context"
-            # trailer line, which prints whenever the block prints at all, regardless of which
-            # entries were actually flagged -- proven by ablation, redacting the per-entry line
-            # left this assertion green. Anchored on the classifier tag from the per-entry line
-            # instead ("[POSIX-shaped]"), which the trailer sentence never carries, so this can
-            # only pass when code-context's own line was printed.
-            $parts = @($script:wlOut -split 'Still carrying a source-machine path')
-            $parts.Count | Should -Be 2 -Because "the report must have printed at all"
-            $parts[1] | Should -Match 'mcpServers\.code-context \[POSIX-shaped\]'
+        It "on a Windows target still skips the placeholder entry but keeps the Windows path" {
+            $script:mcpWin.Names | Should -Contain '1password'
+            $script:mcpWin.Names | Should -Contain 'acme'
+            $script:mcpWin.Names | Should -Not -Contain 'code-context'
+            $script:mcpWin.Out | Should -Match 'mcpServers: skipped code-context'
+            $script:mcpWin.Out | Should -Not -Match 'skipped 1password'
         }
     }
 
@@ -2268,7 +2267,7 @@ Describe "Install-Account" {
                         args = @('-e', 'C:\Users\user\x.sh'); env = @{} } } } |
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
             & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
-                -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight | Out-Null
+                -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -TargetIsWindows:$true -SkipPreflight | Out-Null
             Test-Path -LiteralPath (Join-Path $h 'rules/security.md') | Should -BeTrue
             (Get-Content $cj -Raw | ConvertFrom-Json).mcpServers.wsl.command | Should -Be 'wsl'
         }
@@ -2330,7 +2329,7 @@ Describe "Install-Account" {
 
             $out = & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
                 -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
-                -SkipPreflight -WhatIf *>&1 | Out-String
+                -TargetIsWindows:$true -SkipPreflight -WhatIf *>&1 | Out-String
 
             Test-Path -LiteralPath $cj |
                 Should -BeFalse -Because "a -WhatIf run must not create the file it is reporting on"

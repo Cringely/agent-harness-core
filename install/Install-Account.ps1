@@ -864,6 +864,44 @@ function Expand-McpServer {
     return $Servers
 }
 
+# Issue #290: an mcpServers entry that cannot run on this target is dropped before the merge,
+# not merged and then reported. Two shapes: an unexpanded {{TOKEN}} (code-context's
+# {{WSL_HOME}}, which no receiver can answer), and, on a non-Windows target, a Windows-shaped
+# command, args or env value (1password's Store path). Merging either writes an entry that
+# fails at launch into ~/.claude.json, where Merge-McpServer's add-if-missing rule then
+# preserves it forever. URL schemes are stripped first because Test-ResidualWindowsPath reads
+# the "s:/" of "https://" as a drive letter, and a git+https install argument is not a path.
+function Select-PortableMcpServer {
+    param([pscustomobject]$Servers, [bool]$TargetIsWindows)
+    $kept = [pscustomobject]@{}
+    $skipped = @()
+    if (-not $Servers) { return [pscustomobject]@{ Servers = $Servers; Skipped = $skipped } }
+    foreach ($name in @($Servers.PSObject.Properties.Name | Where-Object { $_ })) {
+        $srv = $Servers.$name
+        $strings = @($srv.command) + @($srv.args)
+        if ($srv.env) {
+            foreach ($k in @($srv.env.PSObject.Properties.Name | Where-Object { $_ })) { $strings += $srv.env.$k }
+        }
+        $strings = @($strings | Where-Object { $_ -is [string] -and $_ })
+        $found = @($strings | ForEach-Object { Get-ResidualToken -Text $_ } | Select-Object -Unique)
+        $reason = $null
+        if ($found.Count -gt 0) {
+            $reason = "unexpanded placeholder(s) $($found -join ', ') that no receiver can fill in"
+        }
+        elseif (-not $TargetIsWindows) {
+            foreach ($str in $strings) {
+                if (Test-ResidualWindowsPath ($str -replace '[A-Za-z][A-Za-z0-9+.\-]*://', '')) {
+                    $reason = 'Windows-shaped path on a non-Windows target'
+                    break
+                }
+            }
+        }
+        if ($reason) { $skipped += "$name ($reason)" }
+        else { $kept | Add-Member -NotePropertyName $name -NotePropertyValue $srv -Force }
+    }
+    return [pscustomobject]@{ Servers = $kept; Skipped = @($skipped) }
+}
+
 function Merge-McpServer {
     param([pscustomobject]$PayloadServers, [string]$ClaudeJsonPath)
     $added = @()
@@ -940,30 +978,13 @@ if (Test-Path -LiteralPath $mcpSrc) {
         $payloadServers = Expand-McpServer -Tokens $tokens `
             -Servers ((Get-Content -LiteralPath $mcpSrc -Raw | ConvertFrom-Json).mcpServers)
         # {{WSL_HOME}} has no entry in $tokens (Get-AccountTokenMap says why), so it survives
-        # Expand-McpServer verbatim on the one entry the exporter folds it into today,
-        # code-context's WSL launcher. The residual-path report further down still catches the
-        # dead path this leaves behind, but only as a truncated fragment after the token -- the
-        # regex there is path-shaped, not token-aware, and stops matching at the { that starts
-        # the placeholder. This check names the actual token directly, on the same fields
-        # Expand-McpServer just walked, so an operator sees the real cause instead of only a
-        # partial path.
-        $mcpResidual = @()
-        if ($payloadServers) {
-            foreach ($name in @($payloadServers.PSObject.Properties.Name | Where-Object { $_ })) {
-                $srv = $payloadServers.$name
-                $mcpResidual += Get-ResidualToken -Text $srv.command
-                foreach ($a in @($srv.args)) { $mcpResidual += Get-ResidualToken -Text $a }
-                if ($srv.env) {
-                    foreach ($k in @($srv.env.PSObject.Properties.Name | Where-Object { $_ })) {
-                        $mcpResidual += Get-ResidualToken -Text $srv.env.$k
-                    }
-                }
-            }
-        }
-        $mcpResidual = @($mcpResidual | Select-Object -Unique)
-        if ($mcpResidual.Count -gt 0) {
-            Write-Warning "Unexpanded placeholder(s) in mcpServers: $($mcpResidual -join ', '). Left verbatim; this entry cannot run as shipped on this host."
-        }
+        # Expand-McpServer verbatim on code-context's WSL launcher. Issue #290: that entry, and
+        # on a non-Windows target any Windows-shaped one, is dropped here and named, so it never
+        # reaches ~/.claude.json to fail at launch and then be preserved by the add-if-missing
+        # merge.
+        $portable = Select-PortableMcpServer -Servers $payloadServers -TargetIsWindows $TargetIsWindows
+        foreach ($sk in $portable.Skipped) { Write-Host "  mcpServers: skipped $sk" }
+        $payloadServers = $portable.Servers
         $mcpMergeResult = Merge-McpServer -PayloadServers $payloadServers -ClaudeJsonPath $ClaudeJson
         $added = @($mcpMergeResult.Added)
         $reportServers = $mcpMergeResult.Servers
@@ -1131,7 +1152,7 @@ if ($residuals.Count -gt 0) {
         Write-Host "  $($r.Where) [$($r.Shape)]: $($r.Command)"
         Write-Host "    does not exist here: $($r.Dead)"
     }
-    Write-Host 'Expected here: mcpServers.1password (a Store path with an embedded version) and mcpServers.code-context (a WSL launcher into another user home). Anything else on this list is an exporter bug.'
+    Write-Host 'Expected here: at most mcpServers.1password on a Windows target (a Store path with an embedded version). Entries this target cannot run are skipped before the merge and named on a skipped line above. Anything else on this list is an exporter bug.'
 }
 # F4, final review round: unlike the status lines above, "Install complete" is not a report that
 # can be softened with a "(dry run)" suffix; it claims the whole run finished. Full gate, not a
