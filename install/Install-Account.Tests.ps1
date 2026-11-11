@@ -712,6 +712,10 @@ Describe "Install-Account" {
     # via `npm root -g` rather than assuming npm absent. A stub npm.cmd on an otherwise-empty
     # PATH stands in for a real npm install; finding it and treating npm as present is what
     # suppresses jq from the missing-tool list below.
+    # #288: a first-item selector piped from a native command stops the pipeline before PowerShell
+    # records the exit code, so $LASTEXITCODE keeps whatever value it held before the probe. The It
+    # resets it to $null first, because the script runs in-process and an earlier test's native call
+    # leaves a stale 0 that satisfies the exit-code check and hides the defect.
     It "probes npm for -NpmGlobal when the parameter is omitted, and finds it" {
         $p = New-StandInPayload; $h = New-StandInClaudeHome
         $stubBin = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-npmstub-" + [guid]::NewGuid())
@@ -728,6 +732,7 @@ Describe "Install-Account" {
         $out = $null
         try {
             $env:PATH = $stubBin
+            $global:LASTEXITCODE = $null
             $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo $script:repoRoot `
                 -TargetIsWindows:$false *>&1 | Out-String
@@ -1378,7 +1383,7 @@ Describe "Install-Account" {
     # which Convert-SettingsForTarget already sanitises before Merge-AccountSettings ever sees
     # it. The receiver's own settings.json takes no such pass, and Merge-AccountSettings and
     # Merge-HookEvent do their own @()-wrapping of its properties, so the same
-    # "Cannot index into a null array" hazard documented at Install-Account.ps1:657-668 recurs
+    # "Cannot index into a null array" hazard documented at Install-Account.ps1:662-673 recurs
     # here, fed this time by hand-edited data instead of the exporter's own output. Four cases
     # below, one It per site, matching this file's convention for the three sites already pinned
     # on the payload side.
