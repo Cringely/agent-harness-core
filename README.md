@@ -124,6 +124,11 @@ anything. The same refusal covers a file that is not well-formed UTF-8, includin
 Latin-1 or Windows-1252 saves, because an accented letter in those encodings would never match the
 UTF-8 form git stores.
 
+A file that declares emails but has no `names` key is a refusal too, in the git hooks and in the PR review tool,
+because the name is the channel that leaked before and a dropped key would otherwise read as having no names to
+protect. Write `"names": []` to opt out of the name channel on purpose. The account exporter's own scan still
+accepts an emails-only file.
+
 The `.harness-manifest.json` behind that is a record of two different things, not one. `files` maps
 each installed path to the SHA256 it had at install time, which is what makes a project edit
 detectable. `accepted` maps a path to the hash of the project's own fork, pinned deliberately, and
@@ -317,7 +322,6 @@ keeps its shape and stops naming a person. The other two cannot be derived, so t
 `{"names": [...], "emails": [...]}`. That file sits outside both this repo and `~/.claude` on
 purpose: a declaration list inside either one would publish the strings it exists to catch. Without
 it the run warns and checks the username alone, which is a narrower gate rather than no gate.
-
 A second declaration file is required rather than optional. `$HOME/.claude-personal-terms.json`, or
 the file `-PersonalTermsFile` names, lists strings that are not identity strings but still have no
 place in a public payload, project names for one, as `{"terms": [...], "excludeMcpServers": [...]}`.

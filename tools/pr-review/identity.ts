@@ -133,6 +133,11 @@ export function loadIdentity(
   if (hasDuplicateKey(raw)) {
     return { ok: false, reason: "the identity file repeats the names or emails key" };
   }
+  // An absent names key refuses (issue #91, operator ruling 2026-11-11); an explicit empty list
+  // is the deliberate opt-out and passes. stringList alone cannot tell them apart.
+  if (!("names" in record)) {
+    return { ok: false, reason: "the identity file has no names key; write an explicit empty list to opt out" };
+  }
   const names = stringList(record.names);
   const emails = stringList(record.emails);
   if (names === null || emails === null) {
