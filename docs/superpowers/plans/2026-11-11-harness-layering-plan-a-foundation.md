@@ -2,74 +2,73 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Lay the foundation the layered harness needs: a write-scope gate with no scratch-parent hole, a worktree gate that checks its own preconditions, a versioned manifest that records layers and settings, an installer that copies layer rules into projects, the move of the code-layer rules out of the account layer, and a model currency check.
+**Goal:** Build what the layered harness stands on. That means a write-scope gate with no scratch-parent hole, a worktree gate that checks its own preconditions, the kernel rule additions, a versioned manifest that records layers and settings, an installer that copies layer rules into projects, the move of the code-repo rules out of the account layer, and a model currency check.
 
-**Architecture:** Layer rules live as files in `core/claude/rules/`, with `core/claude/rules/layers.json` saying which layers each file belongs to and what the project settings mean. `Install-Harness.ps1` reads the layers and settings recorded in the project's committed manifest (schema version 3), copies the matching rules into `.claude/rules/harness/`, and renders the settings into a generated rule file beside them. The account layer keeps the kernel. The move happens in two phases (copy into core, then remove from `~/.claude` after every installed project carries the copy) so no machine is left with neither copy.
+**Architecture:** Layer rules live as files in `core/claude/rules/`, and `core/claude/rules/layers.json` says which layer each file belongs to and what each project setting means. `Install-Harness.ps1` reads the layers and settings recorded in the project's committed manifest (schema version 3), copies the matching rules into `.claude/rules/harness/`, and renders the settings into a generated rule file beside them. The account layer keeps the kernel, which after this plan still holds most of today's rules. Only the code-repo halves of `change-management.md` and `fix-quality.md` move, and only after a live check shows isolated agents can see the project copy.
 
 **Tech Stack:** Bun and TypeScript for hooks and tools (`bun test`), PowerShell 7 with Pester 5 for the installers, POSIX sh and bash for shell hooks.
 
-**Spec:** `docs/superpowers/specs/2026-11-11-harness-layering-design.md` (tracking issue #310). Model findings: the 2026-11-11 model pin audit, whose table the coordinator holds in the session scratchpad. Task 4 restates every finding it acts on.
+**Spec:** `docs/superpowers/specs/2026-11-11-harness-layering-design.md` (tracking issue #310). Task 4 restates every model-audit finding it acts on.
 
 ## Global Constraints
 
-- Public repository. Nothing identifying the operator reaches it. Rule text copied into `core/` is copied from the exported, redacted `account/claude/` tree at a commit, never from `~/.claude` directly.
-- Commits: `git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit ...`. No attribution trailer, no session link. A commit message never mentions reviews or findings.
-- Every isolated write dispatch carries a `BASE-SHA: <sha>` line. The agent compares it with its worktree HEAD before touching a file and aborts on a mismatch. Worktree agents commit only. The coordinator pushes.
+- Public repository. Nothing identifying the operator reaches it. Rule text copied into `core/` or `test/fixtures/` comes from the exported, redacted `account/claude/` tree at a commit, never from `~/.claude` directly.
+- Commits use `git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit ...`, with no attribution trailer or session link. A commit message never mentions reviews or findings.
+- Every isolated write dispatch carries a `BASE-SHA: <sha>` line. The agent compares it with its worktree HEAD before touching a file and aborts on a mismatch. Worktree agents commit only, and the coordinator pushes.
 - Tests: `bun test` from the repo root. Pester as `pwsh -NoProfile -File install/<name>.Tests.ps1`, never bare `Invoke-Pester` (it exits 0 on failure).
-- PowerShell: wrap any output you index, count or iterate in `@()`. Filter a possibly-null source with `Where-Object { $_ }` before wrapping. Join multi-line native output with `-join "`n"` before a substring check.
+- PowerShell: wrap any output you index, count or iterate in `@()`. Filter a possibly-null source with `Where-Object { $_ }` before wrapping. Join multi-line native output with `-join "`n"` before a substring check. Test presence with `.Contains(key)`, never truthiness, wherever an empty value means something.
 - Every matcher that reads a repo file is CRLF-agnostic: split on `/\r?\n/` in TypeScript, use `\r?$` in regexes, and normalise `"\r\n"` to `"\n"` on both sides before comparing text in PowerShell.
 - Timestamps are UTC at the point of formatting (`Get-Date -AsUTC`, `toISOString()`).
 - A new executable artifact carries its registration (hook entry, installer copy path, or documented invocation) in the same commit.
 - A gate's test pins its refusal and its allow.
-- `account/claude/` is generated. Source edits happen under `~/.claude` on the operator's machine, then `pwsh -NoProfile -File install/Export-Account.ps1`, then `git diff account/claude` is reviewed and only the paths belonging to the change are staged. Task 8 is the one exception and says how it reconciles.
+- `account/claude/` is generated. Source edits happen under `~/.claude` on the operator's machine, then `pwsh -NoProfile -File install/Export-Account.ps1`, then `git diff account/claude` is reviewed and only the paths belonging to the change are staged. Task 9 is the one exception and says how it reconciles.
 - Layer names are exactly `code`, `documents`, `physical`. The kernel is implied and never listed. The CLI value `none` means an empty layer list.
 - Manifest `schemaVersion` is `3`.
 - A probe that cannot answer fails closed: the gate behaves as it does today.
 - One PR per task group. The App reviewer is the merge gate. Every PR body carries a `Docs: README ...` verdict line. README and rule-file prose follows `writing-style.md` (the Vale hook lints on write).
+- Redirect `git show` output to a file from Git Bash, never from PowerShell, which re-encodes it.
 
 ## Review Focus
 
 1. A project checked out under a scratch-named ancestor whose spelling differs in case from the path being written (`C:\Scratch\repo` against `c:\scratch\repo\src\a.ts`): the write must still be denied. Test in Task 1.
-2. A session whose cwd is a subfolder of a repository, or a linked worktree where `.git` is a file: the worktree gate must still treat it as a repository and deny an unisolated writer. Test in Task 2.
-3. A hand-edited manifest whose `layers` is a string, names `kernel`, or names an unknown layer: the installer must throw before writing anything. Test in Task 7.
-4. A re-run that drops a layer whose rule file the project edited: the file stays on disk, a warning names it, and the audit counts it. Test in Task 7.
-5. The model check run with no API key, no `--latest` file and `--no-resolve`: it must exit 2 and say the latest models are unknown, never report a pin as current. Test in Task 3.
+2. A git project whose session has moved its cwd into a non-git folder (an added directory): the worktree gate must still deny an unisolated writer, because the project root is a repository. Test in Task 2.
+3. A hand-edited manifest whose `layers` is a string, names `kernel`, or names an unknown layer: the installer must throw before writing anything, and `-Audit -Quiet` must report it rather than go silent. Test in Task 8.
+4. A project that chose `-Layers none` and is then re-run with no flags: the empty list must stay empty and no code rule may be installed. Test in Task 8.
+5. The model check run with no API key and no `--latest` file: it must exit 2 and never report a pin or alias as current. Test in Task 3.
 
 ## Rule inventory
 
-Source: `account/claude/rules/` at `898ef59`, plus the account agents, skills and hooks. The kernel stays in the account layer. Files assigned to a layer move to `core/claude/rules/` in Task 6 and leave the account layer in Task 10.
+Source: `account/claude/rules/` at `898ef59`, plus the account agents, skills and hooks.
 
 | File | Goes to | Reason |
 |---|---|---|
 | `rules/agent-usage.md` | kernel | Model-tier routing is its core (spec kernel item 8), and both field reports dispatched agents on non-code projects |
-| `rules/challenge-mandate.md` | kernel | Spec kernel item 7 |
-| `rules/change-management.md` | code, except the section "Deliverables Do Not Live in the Scratchpad", which becomes kernel file `rules/durable-deliverables.md` | Homelab change control, commit and push, and invariants are code and infrastructure practice. Durable deliverables is kernel item 4 |
-| `rules/coordinator-output.md` | code | Silent mid-run is the code default. #308 shows it is wrong for documents work, which the status cadence setting now governs |
-| `rules/fix-quality.md` | code, except the section "Work has to be able to end", which becomes kernel file `rules/bounded-review.md` | Producer fixes, complexity receipts and cache inputs are code-fix discipline. Bounded review is kernel item 6 |
+| `rules/challenge-mandate.md` | kernel | Spec kernel item 7. Gains the scope-accumulation sentence (Task 5) |
+| `rules/change-management.md` | split. Code layer gets "Decision Documentation" and "Session Close Protocol" as `core/claude/rules/change-management-code.md`. Every other section stays in the kernel file of the same name | The confirmation list, backups, non-destructive practice, script and secret hygiene, commit identity, decision notes and invariant promotion apply wherever destructive or credentialed work runs, including SSH sessions from folders with no manifest. Commit-message rationale and the commit-and-push close are code-repo process |
+| `rules/coordinator-output.md` | kernel, minus "say nothing mid-run", which becomes the `statusCadence: silent` setting text (Task 12) | The stop-and-ask exception, decision restating, Needs-you shape and close format apply on every project type. #308's repeated status requests are what they answer |
+| `rules/fix-quality.md` | split. "Work has to be able to end" becomes kernel file `rules/bounded-review.md`. The rest moves to `core/claude/rules/fix-quality.md` | Producer fixes, complexity receipts and cache inputs are code-fix discipline. Bounded review is kernel item 6 |
 | `rules/harness-core.md` | kernel | Carries the export flow and the install nudge, which every folder needs |
-| `rules/no-overclaim.md` | kernel | Kernel item 3 |
-| `rules/obsidian.md` | kernel (account infrastructure) | Memory sync is per person, not per project type |
-| `rules/security.md` | kernel | Kernel items 1 and 2. The anti-goals forbid weakening it anywhere |
-| `rules/ssh.md` | kernel (account infrastructure) | Per-workstation SSH config |
+| `rules/no-overclaim.md` | kernel | Kernel item 3. Gains the absence rules (Task 5) |
+| `rules/obsidian.md`, `rules/ssh.md` | kernel (account infrastructure) | Per person and per workstation, not per project type |
+| `rules/security.md` | kernel | Kernel items 1 and 2. The anti-goals forbid weakening it |
 | `rules/subagent-prompting.md` | kernel | Brief failures recur on every project type that dispatches agents |
-| `rules/writing-style.md` | code, documents, physical | Register becomes a project setting (`audience`). Every layer produces prose. A folder with no manifest no longer gets it, per the operator's kernel-only ruling for such folders |
-| `rules/*.local.md` (never exported) | stay in `~/.claude/rules` | Machine overlays. `change-management.local.md` keeps loading on this machine |
-| `agents/*.md` (8 defs) | stay in account | A def costs nothing until dispatched. The four domain defs are barred from core by `CONTRIBUTING.md` ("never in core") |
-| `skills/*` (16 skills) | stay in account | A skill loads only on its trigger. `engineering-method` mirrors principles that do not change here |
-| `hooks/harness-core-reminder.sh` | kernel | Becomes the one-time nudge (Task 8) |
+| `rules/writing-style.md` | kernel | Nearly all of it binds every surface. `audience: plain-all-roles` overrides its peer-engineer principle and its Scannable Structure section through `project-settings.md` |
+| new `rules/decision-log.md` | kernel | Kernel item 5 (Task 5) |
+| `rules/*.local.md` (never exported) | stay in `~/.claude/rules` | Machine overlays |
+| `agents/*.md` (8 defs) | stay in account | A def costs nothing until dispatched. The four domain defs are barred from core by `CONTRIBUTING.md` |
+| `skills/*` | stay in account | A skill loads only on its trigger |
+| `hooks/harness-core-reminder.sh` | kernel | Becomes the one-time nudge (Task 9) |
 | `hooks/Scan-MemorySecrets.ps1` | kernel | Leak protection |
-| `hooks/Lint-DocumentProse.ps1` | stays in account | Lints prose writes in every folder. Moving hooks between layers is outside Plan A |
-| `hooks/Guard-SkillSize.ps1`, `Sync-MemoryToObsidian.ps1`, `memory-proposal-digest.ts` | stay in account | Account infrastructure |
+| `hooks/Lint-DocumentProse.ps1`, `Guard-SkillSize.ps1`, `Sync-MemoryToObsidian.ps1`, `memory-proposal-digest.ts` | stay in account | Account infrastructure. Moving hooks between layers is outside Plan A |
 | `model-tier-gate.ts` (sourced from core) | kernel | Already wired in both the account settings and the project template. No change |
-| `settings.account.json` | stays in account | No change |
 
 Agents and hooks installed by `Install-Harness.ps1` stay ungated by layer in Plan A. The self-checks in Tasks 1 and 2 are what make them safe on a project that is not code.
 
 ## Interfaces for Plans B and C
 
-- `pwsh install/Install-Harness.ps1 -Target <dir> [-Layers code,documents,physical|none] [-StatusCadence silent|heartbeat] [-Audience peer-engineer|plain-all-roles] [-LengthBudget <int>]`. Re-runnable. `-LengthBudget 0` clears the budget. Prints one line `Layers: <list>. Settings: statusCadence=<v>, audience=<v>, lengthBudgetDefault=<n|none>.`
+- `pwsh install/Install-Harness.ps1 -Target <dir> [-Layers code,documents,physical|none] [-StatusCadence silent|heartbeat] [-Audience peer-engineer|plain-all-roles] [-LengthBudget <int>]`. `-Layers` accepts a comma list in one argument from any shell. Re-runnable. `-LengthBudget 0` clears the budget. Prints one line `Layers: <list>. Settings: statusCadence=<v>, audience=<v>, lengthBudgetDefault=<n|none>.`
 - Manifest `.claude/.harness-manifest.json` fields `schemaVersion` (3), `layers` (string array), `settings` (`statusCadence`, `audience`, `lengthBudgetDefault`). The interview reads these as its recommended answers.
-- `core/claude/rules/layers.json`: `rules` maps file name to layer list, `settings` holds each setting's values and their rule text. Plan C adds documents and physical rule files here. Plan B reads the settings values for its questions.
+- `core/claude/rules/layers.json`: `rules` maps file name to layer list, and `settings` holds each setting's values and rule text. Plan C adds documents and physical rule files here. Plan B reads the settings values for its questions, and adds a decision-log template if one is wanted.
 - `account/claude/hooks/harness-core-reminder.sh` nudge text. Plan B replaces the installer command in it with the interview skill's name.
 
 ## Task groups
@@ -77,55 +76,52 @@ Agents and hooks installed by `Install-Harness.ps1` stay ungated by layer in Pla
 | Group | Branch | Tasks | Who |
 |---|---|---|---|
 | A1 gates | `feat/310-gates` | 1, 2 | agents |
-| A2 model currency | `feat/310-model-currency` | 3, 4 | agent, then coordinator |
-| A3 layers | `feat/310-layers` | 5, 6, 7, 8, 9 | coordinator preflight, then agents |
-| A4 cutover | `feat/310-cutover` | 10, 11, 12 | coordinator on the operator's machine, then agents |
+| A2 model currency and kernel rules | `feat/310-kernel` | 3, 4, 5 | agent, then coordinator |
+| A3 layers | `feat/310-layers` | 6, 7, 8, 9, 10 | coordinator preflight, then agents |
+| A4 cutover | `feat/310-cutover` | 11, 12, 13 | coordinator on the operator's machine, then an agent |
+| A5 session close | `feat/310-session-close` | 14 | agent |
 
-A4 starts only after A3 merges. A1, A2 and A3 are independent of each other.
+A1, A2 and A3 are independent. A4 starts after A1 and A3 merge, and only if Task 11's check passes. A5 starts after A4 merges.
 
 ---
 
-### Task 1: Close the scratch-parent gap in the write-scope gate
+### Task 1: Close the scratch-parent gap and share one writeScope parser
 
 **Files:**
-- Modify: `core/claude/hooks/agent-write-scope.ts` (header paragraph "Second coverage boundary", `inScratch`, `decide`, the `import.meta.main` block)
+- Modify: `core/claude/hooks/agent-write-scope.ts` (header paragraph "Second coverage boundary", `inScratch`, `readWriteScope`, `decide`, the `import.meta.main` block)
 - Test: `test/agent-write-scope.test.ts`
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `inScratch(filePath: string, cwd: string, projectDir: string): boolean` and `decide(scope: string | null, filePath: string | undefined, cwd: string, projectDir: string): Decision`. Task 2 relies on the semantics: a scratch-named directory counts only when it does not contain the project root.
+- Produces: `export function parseWriteScope(text: string): string | null`, `inScratch(filePath: string, cwd: string, projectDir: string): boolean`, `decide(scope: string | null, filePath: string | undefined, cwd: string, projectDir: string): Decision`. Task 2 imports `parseWriteScope` and relies on the rule that a scratch-named directory counts only when it does not contain the project root.
 
-- [ ] **Step 1: Write the failing tests.** Add a describe block "inScratch(): a scratch-named ancestor of the project is not scratch". Update every existing `inScratch`/`decide` call to pass `CWD` as `projectDir`.
+- [ ] **Step 1: Write the failing tests.** Add a describe block "inScratch(): a scratch-named ancestor of the project is not scratch", and update every existing `inScratch`/`decide` call to pass `CWD` as `projectDir`.
 
 ```ts
 const PROJ = "/home/x/scratch/myrepo";
-test("a file inside a project checked out under a scratch folder is out of scope", () => {
-  expect(inScratch(`${PROJ}/src/index.ts`, PROJ, PROJ)).toBe(false);
-});
-test("a sibling under the same scratch ancestor is out of scope", () => {
-  expect(inScratch("/home/x/scratch/other/f.md", PROJ, PROJ)).toBe(false);
-});
-test("the project's own .claude/scratch is still in scope", () => {
-  expect(inScratch(`${PROJ}/.claude/scratch/r.md`, PROJ, PROJ)).toBe(true);
-});
-test("a session scratchpad outside the project is still in scope", () => {
-  expect(inScratch("/tmp/claude/s/scratchpad/r.md", PROJ, PROJ)).toBe(true);
-});
-test("containment ignores case, so a case-variant ancestor still fails closed", () => {
-  expect(inScratch("/home/x/scratch/myrepo/src/a.ts", "/home/x/Scratch/myrepo", "/home/x/Scratch/myrepo")).toBe(false);
-});
-test("decide denies a scoped write into a project under a scratch folder", () => {
-  expect(decide("scratch", `${PROJ}/src/index.ts`, PROJ, PROJ).action).toBe("deny");
-});
+expect(inScratch(`${PROJ}/src/index.ts`, PROJ, PROJ)).toBe(false);
+expect(inScratch("/home/x/scratch/other/f.md", PROJ, PROJ)).toBe(false);
+expect(inScratch(`${PROJ}/.claude/scratch/r.md`, PROJ, PROJ)).toBe(true);
+expect(inScratch("/tmp/claude/s/scratchpad/r.md", PROJ, PROJ)).toBe(true);
+expect(inScratch("/home/x/scratch/myrepo/src/a.ts", "/home/x/Scratch/myrepo", "/home/x/Scratch/myrepo")).toBe(false);
+expect(decide("scratch", `${PROJ}/src/index.ts`, PROJ, PROJ).action).toBe("deny");
 ```
 
-Add a spawned-process case: build `<tmp>/scratch/proj/.claude/agents/scoped.md` with `writeScope: scratch`, run the hook with `CLAUDE_PROJECT_DIR=<tmp>/scratch/proj`, `agent_type: "scoped"`, `file_path: <tmp>/scratch/proj/src/x.ts`, and assert exit 0 with a deny JSON on stdout.
+`parseWriteScope` cases: `"---\nwriteScope: scratch\n---\n"` gives `"scratch"`. CRLF frontmatter gives the same. A `writeScope:` line in the body after the closing `---` gives `null`. Two keys, `writeScope: repo` then `writeScope: scratch`, give `"repo"`. Frontmatter longer than 4,096 characters with the key at the end gives `"scratch"`. No frontmatter gives `null`. `readWriteScope` on a def file with the duplicate keys returns `"repo"`.
 
-- [ ] **Step 2: Run to verify they fail.** `bun test test/agent-write-scope.test.ts`. Expected: the new cases FAIL (today any scratch segment counts).
+A NotebookEdit call: the entrypoint reads `tool_input.file_path ?? tool_input.notebook_path`. A spawned case with a scoped agent and `notebook_path` outside scratch is denied.
 
-- [ ] **Step 3: Implement.** In `inScratch`, split the resolved file path and the resolved `projectDir` into segments on `/[\\/]+/`. A segment at index `i` whose lowercased name is in `SCRATCH_SEGMENTS` counts only when the project's segments do not start with the file's segments `0..i` (compare lowercased, on every platform: case-insensitive containment can only add denies). `decide` passes `projectDir` through. The entrypoint passes the value it already computes for `readWriteScope` (`process.env.CLAUDE_PROJECT_DIR ?? cwd`). Replace the "Second coverage boundary" header paragraph with two sentences: a scratch-named directory counts only when it does not contain the project root, so a checkout under `/home/x/scratch/` no longer puts the project in scope, and a project whose root sits inside a scratch directory gets denies for every scoped write outside a deeper scratch folder, which is the fail-closed direction.
+Spawned case for the ancestor: build `<tmp>/scratch/proj/.claude/agents/scoped.md` with `writeScope: scratch`, run the hook with `CLAUDE_PROJECT_DIR=<tmp>/scratch/proj`, `agent_type: "scoped"`, `file_path: <tmp>/scratch/proj/src/x.ts`. Expected: exit 0 and a deny JSON on stdout.
 
-- [ ] **Step 4: Run to verify they pass.** `bun test test/agent-write-scope.test.ts`, then `bun test`. Expected: all PASS.
+- [ ] **Step 2: Run to verify they fail.** `bun test test/agent-write-scope.test.ts`. Expected: the new cases FAIL.
+
+- [ ] **Step 3: Implement.**
+  - `parseWriteScope` reads only the frontmatter between a leading `---` line and the next `---` line, split on `/\r?\n/`, and returns the value of the first `writeScope:` key. `readWriteScope` reads the whole file and calls it.
+  - `inScratch` splits the resolved file path and the resolved `projectDir` into segments on `/[\\/]+/`. A segment at index `i` whose lowercased name is in `SCRATCH_SEGMENTS` counts only when the project's segments do not start with the file's segments `0..i`. Compare lowercased on every platform, since case-insensitive containment can only add denies.
+  - The entrypoint passes `process.env.CLAUDE_PROJECT_DIR ?? cwd` as `projectDir`.
+  - Header: replace "Second coverage boundary" with three facts. A scratch-named directory counts only when it does not contain the project root. A project whose root sits inside a scratch directory gets denies for scoped writes outside a deeper scratch folder, the fail-closed direction. A tracked subfolder of the project named `scratch`, `scratchpad` or `.scratch` is still in scope.
+
+- [ ] **Step 4: Run to verify they pass.** `bun test`. Expected: all PASS.
 
 - [ ] **Step 5: Commit.**
 
@@ -139,47 +135,47 @@ git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit
 ### Task 2: Worktree gate checks its own preconditions
 
 **Files:**
-- Modify: `core/claude/hooks/agent-worktree-gate.ts` (header, `BUILTIN_READ_ONLY`, `frontmatterRequiresIsolation`, `GateDecision`, `decide`, entrypoint)
+- Modify: `core/claude/hooks/agent-worktree-gate.ts` (header including the "reads no git state" line near 79, `BUILTIN_READ_ONLY`, `frontmatterRequiresIsolation`, `GateDecision`, `decide`, entrypoint)
 - Test: `test/agent-worktree-gate.test.ts`
 
 **Interfaces:**
-- Consumes: Task 1's containment rule. The gate trusts `writeScope: scratch` only because Task 1 made that scope mean "scratch folders that do not contain the project". Task 2 lands after Task 1 in the same PR.
-- Produces: `export type GitProbe = "repo" | "not-repo" | "unknown"`, `export function probeGitWorkTree(cwd: string, env?: Record<string, string | undefined>): GitProbe`, `export function nonGitNote(cwd: string): string`, `GateDecision = { action: "allow"; note?: string } | { action: "deny"; reason: string }`, `decide(payload: unknown, agentsDir?: string, probe?: (cwd: string) => GitProbe): GateDecision`.
+- Consumes: `parseWriteScope` from `./agent-write-scope` (Task 1), and Task 1's containment rule. Task 2 lands after Task 1 in the same PR.
+- Produces: `export type GitProbe = "repo" | "not-repo" | "unknown"`, `export function probeGitWorkTree(dir: string, env?: Record<string, string | undefined>): GitProbe`, `export function nonGitNote(projectRoot: string): string`, `export function projectRootOf(env: Record<string, string | undefined>): string` (the `CLAUDE_PROJECT_DIR` value, else `join(import.meta.dir, "..", "..")`), `GateDecision = { action: "allow"; note?: string } | { action: "deny"; reason: string }`, `decide(payload: unknown, agentsDir?: string, projectRoot?: string | null, probe?: (dir: string) => GitProbe): GateDecision`.
 
 - [ ] **Step 1: Write the failing tests.**
 
 Probe (real temp dirs):
-- `probeGitWorkTree(dirWithGitDir)` is `"repo"`, and so is a subfolder of it (Review Focus 2).
-- A dir holding a `.git` file (the linked-worktree shape) is `"repo"` (Review Focus 2).
+- `probeGitWorkTree` on a dir holding a `.git` directory is `"repo"`, and so is a subfolder of it.
+- A dir holding a `.git` file (the linked-worktree shape) is `"repo"`.
 - A path that does not exist is `"unknown"`.
 - Any dir with `env = { GIT_DIR: "/x" }` is `"repo"`.
 - A fresh `mkdtempSync(tmpdir())` is `"not-repo"`, skipped with `test.skipIf` when a `.git` exists in any ancestor of `tmpdir()`.
 
 Decide (stub probe, write-capable type `writer`, no isolation, no override):
-- probe `"not-repo"` with payload `cwd: "/w"`: `{ action: "allow", note: nonGitNote("/w") }`, and the note contains `is not a git repository` and `git init`.
-- probe `"repo"`: deny, reason unchanged.
-- probe `"unknown"`: deny.
-- payload without `cwd`: deny, and the stub records zero calls.
-- read-only type `reader` with probe `"not-repo"`: `{ action: "allow" }` with no `note`, stub not called.
+- Project root `"/p"` probed `"not-repo"`, payload with no `cwd`: `{ action: "allow", note: nonGitNote("/p") }`. The note contains `is not a git repository` and `git init`.
+- Root `"not-repo"`, payload `cwd` probed `"repo"`: deny. Review Focus 2's inverse: root `"repo"`, payload `cwd` probed `"not-repo"`: deny.
+- Root probed `"unknown"`: deny. `projectRoot` `null`: deny, and the stub records zero calls.
+- Read-only type `reader` with root `"not-repo"`: `{ action: "allow" }` with no `note`, stub not called.
 
 Write-scope trust (`requiresIsolation`, real def files):
 - `tools: Read, Grep, Glob, WebFetch, WebSearch, Write, SendMessage` plus `writeScope: scratch`: `false`.
-- The same with `Bash` added, or `PowerShell`, `Agent`, `Skill`, `mcp__x__y`, or `*`: `true`.
-- The same tools with no `writeScope`: `true`. With `writeScope: repo`: `true`. With `memory: user` added: `true`.
+- The same with `NotebookEdit`, `Bash`, `PowerShell`, `Agent`, `Skill`, `mcp__x__y` or `*` added: `true`.
+- The same tools with no `writeScope`, with `writeScope: repo`, or with `memory: user` added: `true`.
+- Duplicate keys `writeScope: repo` then `writeScope: scratch`: `true`.
 - `web-fetch` with no def file: `false`. A `web-fetch.md` def granting `Write` with no `writeScope`: `true`.
 
-Spawned process: payload with `cwd` set to a non-git temp dir (same skip guard), `subagent_type: "general-purpose"`, no isolation. Assert exit 0, stdout parses as JSON with `systemMessage` equal to the note and `hookSpecificOutput.additionalContext` equal to the note, and no `permissionDecision` key.
+Spawned process: `CLAUDE_PROJECT_DIR` set to a git temp dir and payload `cwd` set to a non-git temp dir, `subagent_type: "general-purpose"`, no isolation: deny JSON. `CLAUDE_PROJECT_DIR` set to a non-git temp dir (same skip guard): exit 0, stdout JSON with `systemMessage` and `hookSpecificOutput.additionalContext` both equal to the note, and no `permissionDecision` key.
 
 - [ ] **Step 2: Run to verify they fail.** `bun test test/agent-worktree-gate.test.ts`. Expected: FAIL on the new exports and cases.
 
 - [ ] **Step 3: Implement.**
-  - `probeGitWorkTree`: `"repo"` when `env.GIT_DIR` or `env.GIT_WORK_TREE` is a non-empty string. Otherwise `"unknown"` if `cwd` is not an existing directory, then walk from `resolve(cwd)` to the filesystem root and return `"repo"` at the first `.git` entry (file or directory), `"not-repo"` at the root. Any thrown error returns `"unknown"`. No git binary is spawned.
-  - `nonGitNote(cwd)` returns exactly: `` Worktree gate: ${cwd} is not a git repository, so worktree isolation is not available and this dispatch runs in the shared folder. If this work should be versioned, run `git init` here and the gate will isolate concurrent writers. ``
-  - In `decide`, after `requiresIsolation` returns true and before the isolation branch: when `p.cwd` is a non-empty string and `probe(p.cwd) === "not-repo"`, return the allow with the note.
-  - `BUILTIN_READ_ONLY` gains `"web-fetch"` (its published grant is WebFetch only).
-  - `frontmatterRequiresIsolation`: after the `memory:` check and the tools parse, return `false` when the frontmatter has a line matching `/^writeScope:\s*scratch\s*$/m` and every tools token is in `READ_ONLY_TOOLS` or in a new `SCOPED_WRITE_TOOLS = new Set(["write", "edit", "notebookedit", "sendmessage"])`. Comment why: `agent-write-scope.ts` reads this same file and confines those writes, and with no shell the confinement holds.
-  - Entrypoint: when the decision is an allow with a note, print `{"systemMessage": note, "hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": note}}`. A plain allow still prints nothing.
-  - Header: replace "No network, no git" with the probe's contract (filesystem only, no git spawned, unknown keeps today's behaviour), and add one paragraph on the scoped-writer rule naming Task 1's fix as its precondition.
+  - `probeGitWorkTree` returns `"repo"` when `env.GIT_DIR` or `env.GIT_WORK_TREE` is non-empty. Otherwise it returns `"unknown"` if `dir` is not an existing directory, then walks from `resolve(dir)` upward and returns `"repo"` at the first `.git` entry (file or directory). It returns `"not-repo"` when `dirname(p) === p`, which is how the walk ends at `/` and at a Windows drive root. A thrown error returns `"unknown"`. No git binary is spawned.
+  - `nonGitNote(root)` returns exactly: `` Worktree gate: ${root} is not a git repository, so worktree isolation is not available and this dispatch runs in the shared folder. A git repository in a subfolder of it is not isolated either. If this work should be versioned, run `git init` here and the gate will isolate concurrent writers. ``
+  - In `decide`, after `requiresIsolation` returns true and before the isolation branch: allow with the note only when `projectRoot` is a non-empty string, `probe(projectRoot)` is `"not-repo"`, and either the payload has no string `cwd` or `probe(cwd)` is also `"not-repo"`. Any other answer falls through to today's logic.
+  - `BUILTIN_READ_ONLY` gains `"web-fetch"`, whose published grant is WebFetch only.
+  - `frontmatterRequiresIsolation` returns `false` when `parseWriteScope(text) === "scratch"`, there is no `memory:` line, and every tools token is in `READ_ONLY_TOOLS` or in `SCOPED_WRITE_TOOLS = new Set(["write", "edit", "sendmessage"])`. A comment says why. `agent-write-scope.ts` reads this same file with the same parser and confines those writes, and with no shell the confinement holds. NotebookEdit stays out.
+  - The entrypoint passes `projectRootOf(process.env)`. On an allow with a note it prints `{"systemMessage": note, "hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": note}}`. A plain allow prints nothing.
+  - Header: replace "No network, no git" and "The gate reads no git state" with the probe's contract (filesystem only, no git spawned, the project root decides, unknown keeps today's behaviour). Add one paragraph on the scoped-writer rule, naming Task 1's fix as its precondition.
 
 - [ ] **Step 4: Run to verify they pass.** `bun test`. Expected: all PASS.
 
@@ -190,7 +186,7 @@ git add core/claude/hooks/agent-worktree-gate.ts test/agent-worktree-gate.test.t
 git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "feat(worktree-gate): allow with a note outside git, trust shell-less scratch writers (#310)"
 ```
 
-PR A1 body: `Docs: README still accurate: the hooks row names the gates without describing their decisions`.
+PR A1 body: `Docs: README still accurate: the hooks row names the gates without describing their decisions`. PR checklist: one live run in a non-git folder confirms the note reaches the session (`systemMessage` shown, and the model can repeat the `git init` offer). If Claude Code rejects `additionalContext` on PreToolUse, drop that key and keep `systemMessage`.
 
 ---
 
@@ -199,7 +195,7 @@ PR A1 body: `Docs: README still accurate: the hooks row names the gates without 
 **Files:**
 - Create: `tools/model-currency/check.ts`
 - Test: `test/model-currency.test.ts`
-- Modify: `README.md` ("What's here" table, one row for `tools/model-currency/`)
+- Modify: `README.md` ("What's here" table)
 
 **Interfaces:**
 - Consumes: nothing.
@@ -207,7 +203,7 @@ PR A1 body: `Docs: README still accurate: the hooks row names the gates without 
   - `type Family = "fable" | "opus" | "sonnet" | "haiku"`
   - `interface ModelId { family: Family; major: number; minor: number; date: string | null; raw: string }`
   - `parseModelId(id: string): ModelId | null`
-  - `compareModelIds(a: ModelId, b: ModelId): number` (major, then minor. Dates ignored)
+  - `compareModelIds(a: ModelId, b: ModelId): number` (major, then minor, dates ignored)
   - `latestByFamily(ids: string[]): Partial<Record<Family, string>>`
   - `interface Finding { file: string; line: number; value: string; kind: "pin" | "alias" }`
   - `scanText(file: string, text: string): Finding[]`
@@ -217,11 +213,12 @@ PR A1 body: `Docs: README still accurate: the hooks row names the gates without 
   - `fetchLatestFromApi(apiKey: string | undefined, fetchImpl: typeof fetch): Promise<LatestTable | null>`
   - `type ClaudeRunner = (args: string[]) => { code: number; stdout: string }`
   - `resolveAlias(alias: Family, runClaude: ClaudeRunner): string | null`
+  - `DEFAULT_EXCLUDES: string[]`
   - `interface RunDeps { env: Record<string, string | undefined>; fetchImpl: typeof fetch; runClaude: ClaudeRunner }`
   - `run(argv: string[], deps: RunDeps): Promise<{ exitCode: 0 | 1 | 2; output: string }>`
-  - CLI: `bun tools/model-currency/check.ts [--root <dir>]... [--latest <file.json>] [--no-resolve]`
+  - CLI: `bun tools/model-currency/check.ts [--root <dir-or-file>]... [--exclude <name>]... [--latest <file.json>] [--no-resolve]`
 
-- [ ] **Step 1: Write the failing tests.** Lines that hold test model IDs carry the marker `model-currency: ignore`.
+- [ ] **Step 1: Write the failing tests.** Lines holding test model IDs carry the marker `model-currency: ignore`.
 
 ```ts
 expect(parseModelId("claude-opus-5-5")).toMatchObject({ family: "opus", major: 5, minor: 5, date: null });
@@ -232,31 +229,34 @@ expect(parseModelId("sonnet")).toBeNull();
 expect(latestByFamily(["claude-opus-5", "claude-opus-5-5", "claude-haiku-5-5"])).toEqual({ opus: "claude-opus-5-5", haiku: "claude-haiku-5-5" });
 ```
 
-`scanText` finds a pin in `--model claude-sonnet-5` with its 1-based line, an alias in a frontmatter line `model: sonnet`, in JSON `"model": "opus"` and in `--model haiku`. It returns nothing for prose "Opus 5" and for any line containing `model-currency: ignore`.
-
-`classify`, with latest `{ source: "api", models: { sonnet: "claude-sonnet-5-5", opus: "claude-opus-5-5" } }`: pin `claude-sonnet-5` is `behind`, pin `claude-opus-5-5` is `current`, alias `sonnet` resolved to `claude-sonnet-5` is `stale-alias`, alias `opus` resolved to `null` is `unknown`, a `haiku` pin with no latest entry is `unknown`.
-
-`resolveAlias("sonnet", stub)` with stdout `{"modelUsage":{"claude-sonnet-5-5":{},"claude-haiku-5-5":{}}}` returns `claude-sonnet-5-5`. A non-zero code or unparsable stdout returns `null`.
-
-`fetchLatestFromApi(undefined, spy)` returns `null` and never calls `spy`. With a stub returning `{"data":[{"id":"claude-opus-5"},{"id":"claude-opus-5-5"}]}` it returns `{ source: "api", models: { opus: "claude-opus-5-5" } }`. A throwing fetch returns `null`.
-
-`run` over a temp root holding one file with `--model claude-sonnet-5`:
-- Review Focus 5: `env` with no `ANTHROPIC_API_KEY`, no `--latest`, `--no-resolve`: `exitCode` 2, output contains `latest unknown`, and no output line starts with `current`.
-- With `--latest` pointing at `{"sonnet":"claude-sonnet-5-5"}`: `exitCode` 1, a `behind` row.
-- With every pin current: `exitCode` 0.
+- `scanText` finds a pin in `--model claude-sonnet-5` with its 1-based line, and aliases in a frontmatter line `model: sonnet`, in JSON `"model": "opus"`, and in `--model haiku`. It returns nothing for prose "Opus 5" or for a line containing `model-currency: ignore`.
+- `classify` with latest `{ source: "api", models: { sonnet: "claude-sonnet-5-5", opus: "claude-opus-5-5" } }`:
+  - pin `claude-sonnet-5` is `behind`, and pin `claude-opus-5-5` is `current`
+  - alias `sonnet` resolved to `claude-sonnet-5` is `stale-alias`
+  - alias `opus` resolved to `null` is `unknown`
+  - a `haiku` pin with no latest entry is `unknown`
+- `classify` with source `alias`: every alias row is `unknown`, a pin below the alias-derived latest is `behind`, and a pin equal to it is `unknown`.
+- `resolveAlias("sonnet", stub)` with stdout `{"modelUsage":{"claude-sonnet-5-5":{},"claude-haiku-5-5":{}}}` returns `claude-sonnet-5-5`. A non-zero code or unparsable stdout returns `null`.
+- `fetchLatestFromApi(undefined, spy)` returns `null` and never calls `spy`. A stub returning `{"data":[{"id":"claude-opus-5"},{"id":"claude-opus-5-5"}]}` gives `{ source: "api", models: { opus: "claude-opus-5-5" } }`. A throwing fetch returns `null`.
+- The walker skips every `DEFAULT_EXCLUDES` name (a temp root with `.claude/worktrees/x/a.md`, `projects/t.jsonl`, `docs/superpowers/p.md`, each holding a pin, reports none of them). An `--exclude extra` argument skips `extra/`.
+- `run` over a temp root holding one file with `--model claude-sonnet-5`:
+  - Review Focus 5: no `ANTHROPIC_API_KEY`, no `--latest`, and a stub runner resolving every alias. `exitCode` is 2, and no output row starts with `current`.
+  - The same with `--no-resolve`: `exitCode` 2 and output contains `latest unknown`.
+  - `--latest` pointing at `{"sonnet":"claude-sonnet-5-5"}`: `exitCode` 1 and a `behind` row.
+  - Every pin current under source `file`: `exitCode` 0.
 
 - [ ] **Step 2: Run to verify they fail.** `bun test test/model-currency.test.ts`. Expected: FAIL, module missing.
 
 - [ ] **Step 3: Implement.**
-  - Pin patterns: `claude-(fable|opus|sonnet|haiku)-(\d{1,2})(?:-(\d{1,2}))?(?:-(\d{8}))?` with a word boundary at the end, and the older shape `claude-(\d)(?:-(\d))?-(opus|sonnet|haiku)(?:-(\d{8}))?`. Alias patterns: `^\s*model:\s*(fable|opus|sonnet|haiku)\s*$`, `"model"\s*:\s*"(fable|opus|sonnet|haiku)"`, `--model[ =](fable|opus|sonnet|haiku)\b`.
-  - Walk each `--root` (default `process.cwd()`), skipping `.git`, `node_modules`, `runs` directories, files named `*.bak*`, files over 2 MB and files containing a NUL byte.
-  - Latest source order: the Models API (`GET https://api.anthropic.com/v1/models?limit=1000`, headers `x-api-key` and `anthropic-version: 2023-06-01`), then the `--latest` JSON file, then the live alias resolutions with source `alias`. Print a first line naming the source. For `alias` the line adds `(unverified: an alias can itself resolve to an older model)`.
-  - The default `ClaudeRunner` runs `claude -p --model <alias> --output-format json "Reply with the single word OK."` with cwd set to a fresh empty temp dir, and removes the dir afterwards. Only `modelUsage` keys are read. The response text is never printed.
+  - Pin patterns: `claude-(fable|opus|sonnet|haiku)-(\d{1,2})(?:-(\d{1,2}))?(?:-(\d{8}))?` ending on a word boundary, plus the older shape `claude-(\d)(?:-(\d))?-(opus|sonnet|haiku)(?:-(\d{8}))?`. Alias patterns: `^\s*model:\s*(fable|opus|sonnet|haiku)\s*$`, `"model"\s*:\s*"(fable|opus|sonnet|haiku)"`, and `--model[ =](fable|opus|sonnet|haiku)\b`.
+  - `DEFAULT_EXCLUDES = [".git", "node_modules", "runs", "worktrees", "projects", "file-history", "plugins", "debug", "backups", "superpowers"]` are directory names skipped at any depth. Files named `*.jsonl` or `*.bak*`, over 2 MB, or holding a NUL byte are skipped too. A `--root` may name a file.
+  - Latest source order: the Models API (`GET https://api.anthropic.com/v1/models?limit=1000` with headers `x-api-key` and `anthropic-version: 2023-06-01`), then the `--latest` JSON file, then the live alias resolutions with source `alias`. The first output line names the source. For `alias` it adds `(unverified: an alias can itself resolve to an older model)`.
+  - The default `ClaudeRunner` runs `claude -p --model <alias> --output-format json "Reply with the single word OK."` with cwd set to a fresh empty temp dir, then removes the dir. Only `modelUsage` keys are read, and the response text is never printed.
   - Output rows: `<status>\t<file>:<line>\t<value>\t<latest or ->`.
-  - Exit 1 when any row is `behind` or `stale-alias`, else 2 when any row is `unknown` or no latest source was found, else 0.
+  - Exit 1 when any row is `behind` or `stale-alias`. Otherwise exit 2 when any row is `unknown`, the source is `alias`, or no source was found. Otherwise exit 0.
   - README row: `| tools/model-currency/ | The kernel's model currency check: every exact model ID and tier alias under the roots given, against the latest models, with aliases resolved live. Run by hand. Nothing installs it |`
 
-- [ ] **Step 4: Run to verify they pass.** `bun test`. Expected: all PASS. Then `bun tools/model-currency/check.ts --root . --no-resolve` from the worktree root. Expected: exit 2 with `latest unknown` (no key, no file), and the `claude-sonnet-5` pin at `install/Start-CappedCopilot.ps1:59` listed.
+- [ ] **Step 4: Run to verify they pass.** `bun test`. Expected: all PASS.
 
 - [ ] **Step 5: Commit.**
 
@@ -269,167 +269,283 @@ git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit
 
 ### Task 4: Stale model prose and the kernel pointer (coordinator, operator's machine)
 
-The edits are under `~/.claude`, so the coordinator does them on the operator's machine, in the main clone, on branch `feat/310-model-currency` after Task 3's commit.
+In the main clone on `feat/310-kernel` after Task 3's commit.
 
 **Files:**
 - Modify (source): `~/.claude/skills/subagent-prompting/SKILL.md`, `~/.claude/rules/subagent-prompting.md`, `~/.claude/rules/agent-usage.md`
-- Modify (repo, after export): `account/claude/skills/subagent-prompting/SKILL.md`, `account/claude/rules/subagent-prompting.md`, `account/claude/rules/agent-usage.md`
 - Maybe modify: `install/Start-CappedCopilot.ps1:59`
 
 **Interfaces:**
 - Consumes: Task 3's CLI.
 - Produces: nothing later tasks call.
 
-- [ ] **Step 1: Dispatch the source read.** `research-scout` (it holds Write scoped to scratch), `model: sonnet`. Until group A1 merges, the worktree gate still requires isolation for this type, so the dispatch carries an `ISOLATION-OVERRIDE:` line naming its scratch-only write scope. Brief: read Anthropic's current model documentation for Haiku 5.5, Sonnet 5.5, Opus 5.5 and Fable 5.2, and report for each: effort support and levels, adaptive or extended thinking support, and any published guidance on delegation or self-verification behaviour, each with the URL and a quoted line. The report goes to `<scratchpad>/model-docs-report.md`.
-
+- [ ] **Step 1: Dispatch the source read.** Use `research-scout` (it holds Write scoped to scratch) with `model: sonnet`. If group A1 has not merged, add an `ISOLATION-OVERRIDE:` line naming its scratch-only write scope. The brief: read Anthropic's current model documentation for Haiku 5.5, Sonnet 5.5, Opus 5.5 and Fable 5.2. For each, report effort support and levels, adaptive or extended thinking support, and any published guidance on delegation or self-verification, with the URL and a quoted line. The report goes to `<scratchpad>/model-docs-report.md`.
 - [ ] **Step 2: Apply the findings in `~/.claude`.**
-  - `skills/subagent-prompting/SKILL.md`: rewrite the Haiku 4.5 row (lines near 3, 77 and 79) for Haiku 5.5 from the report. Relabel the Fable 5, Opus 5 and Sonnet 5 tables (lines near 74-76, 83-99, 114-116) to the current point releases where the report confirms the claim, and label the rest "measured on 5.0, unverified on 5.x". Leave the historical Opus 4.x comparisons alone.
-  - `rules/subagent-prompting.md:15` and `rules/agent-usage.md:24`: "Opus 5" becomes "Opus 5.x" when the report confirms the over-delegation and self-verification claims for Opus 5.5, otherwise add "(measured on Opus 5.0)".
-  - `rules/agent-usage.md`, after the sentence that starts "Verify what an alias resolves to": add "The core repo's `tools/model-currency/check.ts` runs that check for every alias and exact model ID under the roots it is given, against the latest models."
+  - In `skills/subagent-prompting/SKILL.md`, rewrite the Haiku 4.5 row (lines near 3, 77 and 79) for Haiku 5.5.
+  - Relabel the Fable 5, Opus 5 and Sonnet 5 tables (near 74-76, 83-99 and 114-116) to the current point releases where the report confirms each claim. Label the rest "measured on 5.0, unverified on 5.x". The Opus 4.x history stays.
+  - At `rules/subagent-prompting.md:15` and `rules/agent-usage.md:24`, "Opus 5" becomes "Opus 5.x" when the report confirms the claim for Opus 5.5. Otherwise add "(measured on Opus 5.0)".
+  - In `rules/agent-usage.md`, after the sentence starting "Verify what an alias resolves to", add: "The core repo's `tools/model-currency/check.ts` runs that check for every alias and exact model ID under the roots it is given, against the latest models."
+- [ ] **Step 3: Copilot pin.** Run Copilot CLI's model listing (`copilot help config`). If it names a Sonnet 5.5 model, change the `--model` example at `install/Start-CappedCopilot.ps1:59` to that name. The fixture at `install/Start-CappedCopilot.Tests.ps1:71` is an arbitrary passthrough value and stays. If no listing is available, change nothing and say so in the PR body.
+- [ ] **Step 4: Run the check.** Run two commands:
+  - `bun tools/model-currency/check.ts --root "$USERPROFILE/.claude/rules" --root "$USERPROFILE/.claude/agents" --root "$USERPROFILE/.claude/skills" --root "$USERPROFILE/.claude/hooks" --root "$USERPROFILE/.claude/settings.json"`
+  - `bun tools/model-currency/check.ts --root . --exclude test --exclude Start-CappedCopilot.Tests.ps1`
 
-- [ ] **Step 3: Copilot pin.** Run `copilot help config` (or the Copilot CLI's model listing). If it names a Sonnet 5.5 model, change the `--model` example at `install/Start-CappedCopilot.ps1:59` to that name. Leave the test fixture at `install/Start-CappedCopilot.Tests.ps1:71`: its value is an arbitrary passthrough. If the listing is unavailable, change nothing and record it in the PR body.
+  The expected residual `behind` rows are:
+  - the `claude-opus-5` key in `~/.claude/settings.json` (kept by choice, audit item 3)
+  - the third-party example under `~/.claude/skills/synced/` (overwritten on sync)
+  - `install/Start-CappedCopilot.ps1:59`, if Step 3 could not confirm a name
 
-- [ ] **Step 4: Export and stage.** `pwsh -NoProfile -File install/Export-Account.ps1`, then `git diff --stat account/claude`. Stage only the three paths above (and the Copilot file if changed).
+  Any other `behind` or `stale-alias` row in rules, agents, skills, hooks or source is fixed before commit.
+- [ ] **Step 5: Export, stage and commit** together with Task 5 (Task 5 Step 3).
 
-- [ ] **Step 5: Run the check.** `bun tools/model-currency/check.ts --root "$USERPROFILE/.claude" --root .`. Expected residual rows: `behind` for the `claude-opus-5` key in `~/.claude/settings.json` (harmless, audit item 3, kept by choice) and for the third-party example under `~/.claude/skills/synced/` (overwritten on sync). Any other `behind` or `stale-alias` row is fixed before commit.
+---
 
-- [ ] **Step 6: Commit.**
+### Task 5: Kernel rule additions (coordinator, operator's machine)
 
-```bash
-git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "docs(account): current model names in the briefing guidance (#310)"
+The same branch as Task 4. These are `~/.claude` edits that land through one export.
+
+**Files:**
+- Modify (source): `~/.claude/rules/no-overclaim.md`, `~/.claude/rules/challenge-mandate.md`
+- Create (source): `~/.claude/rules/decision-log.md`
+
+**Interfaces:**
+- Consumes: nothing.
+- Produces: the kernel file `rules/decision-log.md`, which Plan B may pair with a template.
+
+- [ ] **Step 1: Write the rule text.**
+  - In `no-overclaim.md`, a new section before "How to apply":
+
+```markdown
+## Absence is a claim too
+
+A failed fetch, an empty search or a thin result supports only "could not find it, tried X, Y and Z", never "it does not exist". Name what was tried.
+
+Before stating that a human step did not happen (a spot check, a review, a call), ask the operator. Offline human work leaves no transcript, so missing evidence of it is not evidence it was skipped.
 ```
+
+  - In `challenge-mandate.md`, a new last bullet under "How to apply": `- After repeated additions or rework rounds on one part of the work, volunteer a keep-or-drop challenge for that part, with the cost so far.`
+  - The new `decision-log.md`:
+
+```markdown
+# Decision Log
+
+Each project keeps a decision log at `docs/decision-log.md`, or at `decision-log.md` in the project root when there is no `docs/` folder. A project's own rules may name another path.
+
+Append one entry per consequential choice: the UTC date, the choice in one sentence, the options rejected, who drafted it and who decided it. Name roles, never people: `operator`, `coordinator`, or an agent type such as `task-reviewer`. That is what keeps the log safe in a public repository.
+
+Write the entry when the choice is made. An entry reconstructed at the close records what the coordinator remembers, which is the failure the log exists to prevent.
+```
+
+- [ ] **Step 2: Mirror the principle.** `harness-core.md` says a principle change in no-overclaim or challenge-mandate updates `skills/engineering-method/SKILL.md` in the same change. Add one line for each addition there.
+- [ ] **Step 3: Export, stage and commit.** `pwsh -NoProfile -File install/Export-Account.ps1`, then `git diff --stat account/claude`. Stage only the files Tasks 4 and 5 changed: `rules/agent-usage.md`, `rules/subagent-prompting.md`, `rules/no-overclaim.md`, `rules/challenge-mandate.md`, `rules/decision-log.md`, `skills/subagent-prompting/SKILL.md` and `skills/engineering-method/SKILL.md`, plus the Copilot file if it changed. Commit with `-m "docs(account): kernel absence rules, decision log, current model names (#310)"`.
 
 PR A2 body: `Docs: README updated: tools/model-currency row`.
 
 ---
 
-### Task 5: Preflight for the rule move (coordinator, operator's machine)
+### Task 6: Preflight for the rule move (coordinator, operator's machine)
 
-- [ ] **Step 1: Export.** In the main clone on an up-to-date `master`: `pwsh -NoProfile -File install/Export-Account.ps1`, then `git diff --stat account/claude/rules`.
-- [ ] **Step 2: Land any drift first.** If the diff is not empty, it lands through its own PR before group A3 starts. The rule files the move copies must be the operator's current text.
-- [ ] **Step 3: Record the base.** After that merge, a second export shows no diff under `account/claude/rules`. That `master` sha is the `BASE-SHA` for Task 6. From here until Task 10, edits to the four moving files in `~/.claude/rules` are held, or ported into `core/claude/rules` by a follow-up commit. Task 6's transition test turns red on any divergence.
+- [ ] **Step 1: Export.** In the main clone on an up-to-date `master`, run `pwsh -NoProfile -File install/Export-Account.ps1`, then `git diff --stat account/claude/rules`.
+- [ ] **Step 2: Land any drift first.** If the diff is not empty, it lands through its own PR before Task 7 starts.
+- [ ] **Step 3: Record the base.** After that merge, a second export shows no diff under `account/claude/rules`. That `master` sha is the `BASE-SHA` for Task 7. From here until Task 12, `change-management.md` and `fix-quality.md` in `~/.claude/rules` are frozen. Task 7's split test turns red on any edit to them.
 
 ---
 
-### Task 6: Copy the code-layer rules into core
+### Task 7: Copy the code-layer rules into core
 
 **Files:**
-- Create: `core/claude/rules/change-management.md`, `core/claude/rules/coordinator-output.md`, `core/claude/rules/fix-quality.md`, `core/claude/rules/writing-style.md`, `core/claude/rules/layers.json`
-- Create: `test/layer-rules.test.ts`
+- Create: `core/claude/rules/change-management-code.md`, `core/claude/rules/fix-quality.md`, `core/claude/rules/layers.json`
+- Create: `test/fixtures/rules-premove/change-management.md`, `test/fixtures/rules-premove/fix-quality.md`, `test/layer-rules.test.ts`
 - Modify: `.github/CODEOWNERS`, `tools/pr-review/types.ts` (`TRUSTED_CONTEXT_PATHS`), `README.md` ("What's here")
 
 **Interfaces:**
-- Consumes: the `BASE-SHA` from Task 5.
-- Produces: `core/claude/rules/layers.json` with shape `{ "schemaVersion": 1, "rules": { "<file>.md": ["code" | "documents" | "physical", ...] } }`. Task 7 adds a `settings` key. Exported from `test/layer-rules.test.ts`: `KERNEL_SECTIONS: Record<string, string[]>` and `withoutSections(text: string, headings: string[]): string`.
+- Consumes: the `BASE-SHA` from Task 6.
+- Produces:
+  - `core/claude/rules/layers.json`, shaped `{ "schemaVersion": 1, "rules": { "<file>.md": ["code" | "documents" | "physical", ...] } }`. Task 8 adds `settings`.
+  - Exported from `test/layer-rules.test.ts`: `SPLITS` and `sectionsOf(text: string): { preamble: string; sections: { heading: string; body: string }[] }`. Task 12 runs the test, and Task 14 deletes it with the fixtures.
 
-- [ ] **Step 1: Write the failing test** `test/layer-rules.test.ts`:
-  - "every rule listed in layers.json exists in core/claude/rules"
-  - "every .md file in core/claude/rules is listed in layers.json"
-  - "layer names are only code, documents and physical, and every list is non-empty"
-  - "while the account copy exists, the core copy is the account copy minus its kernel sections": for each listed file, when `account/claude/rules/<file>` exists, `normalise(core)` equals `withoutSections(normalise(account), KERNEL_SECTIONS[file] ?? [])`, where `normalise` turns `\r\n` into `\n`. When the account copy is absent the case is skipped with a message naming Task 11.
+- [ ] **Step 1: Write the failing test** `test/layer-rules.test.ts`.
 
 ```ts
-export const KERNEL_SECTIONS: Record<string, string[]> = {
-  "change-management.md": ["## Deliverables Do Not Live in the Scratchpad"],
-  "fix-quality.md": ["## Work has to be able to end"],
-};
+export const SPLITS = {
+  "change-management.md": {
+    kernelFile: "change-management.md", codeFile: "change-management-code.md", preambleStaysIn: "kernel",
+    newPreamble: "# Change Management: Code Projects\n\nThe code-repo half of `change-management.md`. The confirmation list, backups, commit identity, decision notes, invariant promotion and script hygiene stay in the kernel file of that name.",
+    codeSections: ["## Decision Documentation", "## Session Close Protocol"],
+  },
+  "fix-quality.md": {
+    kernelFile: "bounded-review.md", codeFile: "fix-quality.md", preambleStaysIn: "code",
+    newPreamble: "# Bounded Review",
+    codeSections: ["## Fix the producer, not the consumer", "## Prove the premise before replacing a mechanism",
+      "## Complexity needs a receipt", "## A dirty cache is only as complete as its enumerated inputs",
+      "## Review with a joint verdict, not a separate simplicity gate", "## Pin the correctness baseline", "## Set the right target"],
+  },
+} as const;
 ```
 
-`withoutSections` splits on `"\n"`, and for each heading removes the lines from the exact heading line up to, not including, the next line that starts with `## `, or to the end. It throws when a heading is absent, so a renamed section fails the test instead of passing vacuously.
+`sectionsOf` normalises `\r\n` to `\n`, takes the text before the first line starting `## ` as the preamble, and cuts each section from its `## ` heading line to the line before the next one. Preamble and bodies are compared with trailing newlines trimmed. A listed heading missing from the fixture throws, so a renamed section fails instead of passing vacuously.
 
-- [ ] **Step 2: Run to verify it fails.** `bun test test/layer-rules.test.ts`. Expected: FAIL, `layers.json` missing.
+Cases:
+- "every rule listed in layers.json exists in core/claude/rules", and "every .md file in core/claude/rules is listed in layers.json".
+- "layer names are only code, documents and physical, and every list is non-empty".
+- "the split loses and adds nothing". For each entry in `SPLITS`, the fixture is the original. Before cutover, `account/claude/rules/<original>` equals the fixture. Then the core code file must be `newPreamble` (or the original preamble, per `preambleStaysIn`) followed by exactly the `codeSections`, in original order and byte-identical. After cutover, the account copy differs and `account/claude/rules/<kernelFile>` holds the kernel half. Then the kernel file's sections plus the code file's sections must equal the fixture's sections: each fixture section appears exactly once across the two files, byte-identical, each file keeps the original order, and the preambles follow `preambleStaysIn` and `newPreamble`. An account copy that matches neither shape fails with a message saying the source changed since the move and must be ported into core.
 
-- [ ] **Step 3: Create the files.**
-  - `coordinator-output.md` and `writing-style.md`: `git show <BASE-SHA>:account/claude/rules/<file> > core/claude/rules/<file>`.
-  - `change-management.md` and `fix-quality.md`: the same, then delete the kernel section named in `KERNEL_SECTIONS` by the rule `withoutSections` applies. Change nothing else.
+- [ ] **Step 2: Run to verify it fails.** `bun test test/layer-rules.test.ts`. Expected: FAIL, files missing.
+
+- [ ] **Step 3: Create the files** (Git Bash for every redirect).
+  - Fixtures: `git show <BASE-SHA>:account/claude/rules/<file> > test/fixtures/rules-premove/<file>` for both files.
+  - Build `change-management-code.md` and the core `fix-quality.md` from the fixture by keeping the preamble that `SPLITS` assigns to the code side and the listed `codeSections`, in their original order. Change nothing else.
   - `layers.json`:
 
 ```json
 {
   "schemaVersion": 1,
   "rules": {
-    "change-management.md": ["code"],
-    "coordinator-output.md": ["code"],
-    "fix-quality.md": ["code"],
-    "writing-style.md": ["code", "documents", "physical"]
+    "change-management-code.md": ["code"],
+    "fix-quality.md": ["code"]
   }
 }
 ```
 
-  - `.github/CODEOWNERS`: add `/core/claude/rules/                         @Cringely` after the templates line. The rules are owned in the account layer today, and the move must not leave them unowned.
-  - `tools/pr-review/types.ts`: add `"core/claude/rules/fix-quality.md"` to `TRUSTED_CONTEXT_PATHS`, keeping the account entry until Task 11.
+  - `.github/CODEOWNERS`: add `/core/claude/rules/                         @Cringely` after the templates line. The account rules are owned today, and the move must not leave the code half unowned.
+  - `tools/pr-review/types.ts`: add `"core/claude/rules/fix-quality.md"` to `TRUSTED_CONTEXT_PATHS`, keeping the account entry until Task 13.
   - README "What's here": `| core/claude/rules/ | Layer rule files and layers.json, which assigns each file to the code, documents or physical layer and defines the project settings. The installer copies the layers a project records into its .claude/rules/harness/ |`
 
-- [ ] **Step 4: Verify.** `bun test`. Expected: all PASS, including the transition case for all four files. Then for the two whole-file moves, after `git add`, the index blob `git rev-parse :core/claude/rules/<file>` equals `git rev-parse <BASE-SHA>:account/claude/rules/<file>`.
+- [ ] **Step 4: Verify.** Run `bun test`. Expected: all PASS, with the split case in its before-cutover mode for both files.
 
 - [ ] **Step 5: Commit.**
 
 ```bash
-git add core/claude/rules test/layer-rules.test.ts .github/CODEOWNERS tools/pr-review/types.ts README.md
-git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "feat(rules): code-layer rule files in core, unchanged from the account layer (#310)"
+git add core/claude/rules test/fixtures/rules-premove test/layer-rules.test.ts .github/CODEOWNERS tools/pr-review/types.ts README.md
+git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "feat(rules): code-repo halves of two account rules in core, byte-identical (#310)"
 ```
 
 ---
 
-### Task 7: Manifest v3, layers and settings in the installer
+### Task 8: Manifest v3, layers and settings in the installer
 
 **Files:**
 - Modify: `install/Install-Harness.ps1` (param block and comment help, the `-Quiet` guard area, manifest load, `Get-CoreFilesMap`, the `-Audit` block, the install loops, the provenance block)
 - Modify: `core/claude/rules/layers.json` (add `settings`)
 - Create: `core/claude/templates/project-settings.template.md`
 - Test: `install/Install-Harness.Tests.ps1`, `test/layer-rules.test.ts`
-- Modify: `README.md` (Install section)
+- Modify: `README.md` (Install section, the templates row at line 17, the Layering model section)
 
 **Interfaces:**
-- Consumes: `core/claude/rules/layers.json` and the four rule files from Task 6.
+- Consumes: `core/claude/rules/layers.json` and the two rule files from Task 7.
 - Produces:
-  - Params `[ValidateSet('code','documents','physical','none')][string[]]$Layers`, `[ValidateSet('silent','heartbeat')][string]$StatusCadence`, `[ValidateSet('peer-engineer','plain-all-roles')][string]$Audience`, `[ValidateRange(0,100000)][int]$LengthBudget`.
-  - Functions inside the script: `Get-LayerRegistry` (returns the parsed, validated `layers.json`), `ConvertTo-ManifestV3 -Loaded`, `Resolve-ProjectLayers -Requested -Recorded` (returns `string[]` in the order code, documents, physical), `Get-DefaultProjectSettings -Layers`, `Resolve-ProjectSettings -Recorded -Defaults -Bound`, `Get-ProjectSettingsText -Layers -Settings -Registry`.
+  - Params `[string[]]$Layers` (no ValidateSet, since the script validates), `[ValidateSet('silent','heartbeat')][string]$StatusCadence`, `[ValidateSet('peer-engineer','plain-all-roles')][string]$Audience`, and `[ValidateRange(0,100000)][int]$LengthBudget`.
+  - Functions inside the script:
+    - `Get-LayerRegistry` returns the parsed and validated `layers.json`.
+    - `ConvertTo-ManifestV3 -Loaded`
+    - `ConvertTo-LayerList -Requested` turns the `-Layers` tokens into a `string[]` in the order code, documents, physical.
+    - `Resolve-ProjectLayers -Requested -Manifest` returns `string[]`.
+    - `Get-DefaultProjectSettings -Layers`
+    - `Resolve-ProjectSettings -Recorded -Defaults -Bound`
+    - `Get-ProjectSettingsText -Layers -Settings -Registry`
   - Manifest shape `{ schemaVersion: 3, files, accepted, coreCommit, layers: string[], settings: { statusCadence, audience, lengthBudgetDefault } }`.
-  - Installed paths `.claude/rules/harness/<file>.md` under manifest keys `rules/harness/<file>.md`, and the generated `.claude/rules/harness/project-settings.md`, never tracked in `files`.
-  - Audit statuses `not-installed (layer not selected)` (not counted), `installed (layer not selected)`, `settings-missing`, `settings-stale` (all three counted).
+  - Installed paths are `.claude/rules/harness/<file>.md` under keys `rules/harness/<file>.md`. The generated `.claude/rules/harness/project-settings.md` is never tracked in `files`.
+  - New audit statuses:
+    - `not-installed (layer not selected)`, which is not counted
+    - `installed (layer not selected)`, `settings-missing`, `settings-stale` and `manifest-invalid`, which are counted
 
-- [ ] **Step 1: Write the failing Pester tests** in `install/Install-Harness.Tests.ps1`, in a new `Context 'layers and settings'`:
-  - "records schemaVersion 3 and layers code on a fresh install and installs the code rules": the four `.claude/rules/harness/*.md` files exist, `layers` is `@('code')`, the raw manifest text matches `'"layers":\s*\[\s*"code"\s*\]'` (a one-element array that PowerShell unrolled to a scalar would serialise as a string and fail the next load), `settings.statusCadence` is `silent`, `audience` is `peer-engineer`, `lengthBudgetDefault` is `$null`, and `project-settings.md` matches ``'Status cadence, `silent`'``.
-  - "migrates a v2 manifest with no layers as the code layer": install, remove `schemaVersion`, `layers` and `settings` from the manifest, re-run, then `layers` is `@('code')` and the rule files are present.
-  - "-Layers documents installs only documents rules and derives heartbeat and plain-all-roles": `writing-style.md` present, `coordinator-output.md` absent, `statusCadence` `heartbeat`, `audience` `plain-all-roles`.
-  - "-Layers none records an empty list and installs no layer rules": `@($m.layers).Count` is 0, no file under `.claude/rules/harness/` except `project-settings.md`, which matches `no project layers`.
-  - "rejects none combined with a layer, and rejects kernel": `-Layers none,code` throws, `-Layers kernel` throws, and the target has no `.claude` afterwards.
-  - "keeps recorded settings when -Layers changes and sets them when a flag is given": install `-Layers code`, re-run `-Layers code,documents`, `statusCadence` stays `silent`. Re-run `-StatusCadence heartbeat -LengthBudget 1200`: `heartbeat`, `1200`. Re-run `-LengthBudget 0`: `$null`.
-  - "a dropped layer's rule file is left in place, warned about, and counted by the audit": install `-Layers code,documents`, re-run `-Layers documents`. `coordinator-output.md` still exists, output matches `layer not selected`, and `-Audit` output has a row `installed (layer not selected)` for `rules/harness/coordinator-output.md`. Delete the file, re-run, and the manifest `files` no longer holds the key.
-  - Review Focus 4, "a dropped layer's edited rule file is left in place too": as above with `"PROJECT EDIT"` appended before the re-run, and the file still contains it afterwards.
-  - Review Focus 3, "an invalid recorded layers value fails before any write": after a clean install, set `layers` to the string `"code"`, then to `@("kernel")`, then to `@("prose")`. Each re-run throws a message matching `layers`, and the SHA256 of `.harness-manifest.json` and `settings.json` is unchanged.
-  - "a hand-written rule file at the install path is kept and reported": create `.claude/rules/harness/fix-quality.md` with other content before the first install. It is unchanged after, and the output matches `Skipping 'rules/harness/fix-quality.md'`.
-  - "audit reports settings-stale after a hand edit, in-sync after CRLF conversion, and writes nothing": convert `project-settings.md` to CRLF, `-Audit` shows no `settings-stale`. Append a line, `-Audit` shows `settings-stale`, and the manifest hash is unchanged.
-  - "audit lists rules of unselected layers as not-installed (layer not selected) and does not count them": `-Layers documents`, then `-Audit` prints `All managed files in sync with core.`
+- [ ] **Step 1: Write the failing Pester tests** in a new `Context 'layers and settings'`.
+  - "records schemaVersion 3 and layers code on a fresh install and installs the code rules":
+    - `.claude/rules/harness/change-management-code.md` and `fix-quality.md` exist, and `layers` is `@('code')`.
+    - The raw manifest text matches `'"layers":\s*\[\s*"code"\s*\]'`. A one-element array unrolled to a scalar would serialise as a string and fail the next load.
+    - `statusCadence` is `silent`, `audience` is `peer-engineer` and `lengthBudgetDefault` is `$null`.
+    - `project-settings.md` matches ``'Status cadence, `silent`'``.
+  - "a comma list binds from a spawned shell": `pwsh -NoProfile -File install/Install-Harness.ps1 -Target <t> -Layers code,documents` records `@('code','documents')`.
+  - "migrates a v2 manifest with no layers key as the code layer": install, delete the `schemaVersion`, `layers` and `settings` keys, re-run. `layers` is `@('code')` and the rule files are present.
+  - "-Layers documents installs no code rules and derives heartbeat and plain-all-roles". `fix-quality.md` is absent, `statusCadence` is `heartbeat`, and `audience` is `plain-all-roles`.
+  - "-Layers none records an empty list and installs no layer rules":
+    - `@($m.layers).Count` is 0.
+    - Nothing is under `.claude/rules/harness/` except `project-settings.md`, which matches `no project layers`.
+  - Review Focus 4, "an empty layer list survives a re-run with no flags": install `-Layers none` and re-run bare. `@($m.layers).Count` is still 0 and `fix-quality.md` is absent. Ablate the fix by switching the presence check to truthiness, and confirm the test fails.
+  - "rejects none combined with a layer, kernel, and an unknown name":
+    - `-Layers none,code`, `-Layers kernel` and `-Layers prose` each throw a message naming the valid values.
+    - The target has no `.claude` afterwards.
+  - "keeps recorded settings when -Layers changes and sets them when a flag is given":
+    - Install `-Layers code`, then re-run `-Layers code,documents`. `statusCadence` stays `silent`.
+    - Re-run `-StatusCadence heartbeat -LengthBudget 1200`. The settings become `heartbeat` and `1200`.
+    - Re-run `-LengthBudget 0`. `lengthBudgetDefault` becomes `$null`.
+  - "a dropped layer's rule file is left in place, warned about, and counted by the audit":
+    - Install `-Layers code`, append `"PROJECT EDIT"` to `fix-quality.md`, and re-run `-Layers documents`.
+    - The file still exists with the edit, the output matches `layer not selected`, and `-Audit` has an `installed (layer not selected)` row for `rules/harness/fix-quality.md`.
+    - Delete the file and re-run. The manifest `files` no longer holds the key.
+  - Review Focus 3, "an invalid recorded layers value fails before any write and is reported under -Quiet":
+    - After a clean install, set `layers` to the string `"code"`, then `@("kernel")`, then `@("prose")`.
+    - Each install re-run throws a message matching `layers`, and the SHA256 of `.harness-manifest.json` and `settings.json` is unchanged.
+    - `-Audit -Quiet` prints a `manifest-invalid` row and does not throw.
+  - "a hand-written rule file at the install path is kept and reported": create `.claude/rules/harness/fix-quality.md` before the first install. It is unchanged afterwards, and the output matches `Skipping 'rules/harness/fix-quality.md'`.
+  - "audit reports settings-stale after a hand edit but not after CRLF conversion, and writes nothing":
+    - CRLF-convert `project-settings.md`. `-Audit` shows no `settings-stale`.
+    - Append a line. `-Audit` shows `settings-stale`.
+    - The manifest hash is unchanged.
+  - "audit leaves rules of unselected layers uncounted": `-Layers documents`, then `-Audit` prints `All managed files in sync with core.`
   - "the layer and settings flags are refused with -Audit": `-Audit -Layers code` throws.
 
-  In `test/layer-rules.test.ts` add "settings define exactly the values the installer accepts": `statusCadence` keys `silent` and `heartbeat`, `audience` keys `peer-engineer` and `plain-all-roles`, `lengthBudgetDefault` keys `none` and `words`, and `words` contains `{{WORDS}}`.
+  In `test/layer-rules.test.ts`, add "settings define exactly the values the installer accepts". The `settings` keys are:
+  - `statusCadence`, with keys `silent` and `heartbeat`
+  - `audience`, with keys `peer-engineer` and `plain-all-roles`
+  - `lengthBudgetDefault`, with keys `none` and `words`. The `words` text contains `{{WORDS}}`.
 
-- [ ] **Step 2: Run to verify they fail.** `pwsh -NoProfile -File install/Install-Harness.Tests.ps1`. Expected: the new cases FAIL, the existing ones PASS.
+- [ ] **Step 2: Run to verify they fail.** `pwsh -NoProfile -File install/Install-Harness.Tests.ps1`. Expected: the new cases FAIL, and the existing ones PASS.
 
 - [ ] **Step 3: Implement.**
-  - Guard near the `-Quiet` guard: any of `-Layers`, `-StatusCadence`, `-Audience`, `-LengthBudget` (checked through `$PSBoundParameters`) with `-Audit`, `-Accept`, `-Unaccept` or `-Prune` throws "applies to an install run only". `none` together with another value throws.
-  - `Get-LayerRegistry` reads `core/claude/rules/layers.json` and throws when the file is missing, `schemaVersion` is not 1, `rules` is empty, a listed file is missing, a layer name is outside the three, or `settings` lacks a value Step 1 names. An empty registry would make every installed rule file read as orphaned, so it refuses rather than answering "core ships no rules".
-  - `ConvertTo-ManifestV3` calls `ConvertTo-ManifestV2`, then sets `schemaVersion = 3`. An absent `layers` becomes `@('code')`, which covers both a v2 manifest and a fresh install. A present `layers` that is not an array, or holds a value outside the three, throws with a message naming the valid values. A present `settings` with a value outside the accepted set throws the same way. It replaces every existing `ConvertTo-ManifestV2` call site, so `-Accept`, `-Unaccept` and `-Prune` carry layers and settings through. The load sits above every write, so a throw leaves disk untouched.
-  - `Get-DefaultProjectSettings`: `statusCadence` is `heartbeat` when the layers include `documents` or `physical`, else `silent`. `audience` is `plain-all-roles` when the layers include `documents` and not `code`, else `peer-engineer`. `lengthBudgetDefault` is `$null`.
-  - `Resolve-ProjectSettings`: a bound flag wins, then the recorded value, then the default. `-LengthBudget 0` records `$null`. Changing `-Layers` alone never re-derives a recorded setting.
-  - `Get-CoreFilesMap` adds `rules/harness/<file>` for every registry rule, pointing at `core/claude/rules/<file>`.
-  - Install: create `.claude/rules/harness` with the other directories. For each registry rule whose layers intersect the selected layers, call `Install-ManagedFile` with key `rules/harness/<file>`. For a rule whose layers do not intersect: when the file is on disk, add result `left-in-place (layer not selected)` and warn "'<key>' belongs to a layer this project no longer records. It was left in place. Delete it by hand if the layer is gone for good, and the next install drops its record." When it is absent and the key is in `files`, remove the key and add `record-dropped (layer not selected)`. The installer never deletes a file.
-  - Render `project-settings.md` from `core/claude/templates/project-settings.template.md` with `Get-ProjectSettingsText`, write it with LF line endings every install, add result `generated`, and print the `Layers: ... Settings: ...` line from the Interfaces section.
-  - Audit: read layers and settings through `ConvertTo-ManifestV3`, using the defaults for absent settings and writing nothing. For a `rules/harness/` key whose layer is not selected: present on disk gives `installed (layer not selected)`, absent gives `not-installed (layer not selected)`. Add a `rules/harness/project-settings.md` row: `settings-missing` when absent, `settings-stale` when its LF-normalised text differs from the render, else `in-sync`. Add `not-installed (layer not selected)` to the uncounted list. Extend the attention line: "installed (layer not selected) = delete the file by hand, and the next install drops its record. settings-missing/settings-stale = re-run the installer, which rewrites .claude/rules/harness/project-settings.md from the manifest."
-  - Comment help: document the four params and add the four statuses, with those responses, to `.PARAMETER Audit`. Note in `.DESCRIPTION` that a manifest gains `schemaVersion`, `layers` and `settings` without dropping any v2 field, so an older installer reading a v3 manifest keeps them.
+  - **Parameter guard** (near the `-Quiet` guard):
+    - `ConvertTo-LayerList` splits every `-Layers` element on `,`, trims, and drops empties.
+    - A token outside `code`, `documents`, `physical` or `none` throws `-Layers takes code, documents, physical, or none. The kernel is always on and is never listed.`
+    - `none` with any other token throws.
+    - Any of `-Layers`, `-StatusCadence`, `-Audience` or `-LengthBudget` (checked through `$PSBoundParameters`) combined with `-Audit`, `-Accept`, `-Unaccept` or `-Prune` throws "applies to an install run only".
+  - **`Get-LayerRegistry`** throws when:
+    - the file is missing, `schemaVersion` is not 1, or `rules` is empty
+    - a listed file is missing, or a layer name is outside the three
+    - `settings` lacks a value that Step 1 names
+
+    An empty registry would read every installed rule file as orphaned, so it refuses instead.
+  - **`ConvertTo-ManifestV3`** calls `ConvertTo-ManifestV2`, then sets `schemaVersion = 3`.
+    - `layers` is absent only when `-not $m.Contains('layers')`, and then becomes `@('code')`. A present empty array stays empty.
+    - A present `layers` that is not an array, or that holds a value outside the three, throws with a message naming the valid values. A present `settings` value outside the accepted set throws the same way.
+    - It replaces every `ConvertTo-ManifestV2` call site, so `-Accept`, `-Unaccept` and `-Prune` carry layers and settings through.
+    - The load sits above every write, so a throw leaves disk untouched. Under `-Audit -Quiet` the throw is caught, and the script prints `manifest-invalid<TAB>.harness-manifest.json` and returns.
+  - **Writing the manifest:** assign `layers` as a `[string[]]` built with `,@(...)` where a single element could unroll.
+  - **`Get-DefaultProjectSettings`:**
+    - `statusCadence` is `heartbeat` when the layers include `documents` or `physical`, else `silent`.
+    - `audience` is `plain-all-roles` when the layers include `documents` and not `code`, else `peer-engineer`.
+    - `lengthBudgetDefault` is `$null`.
+  - **`Resolve-ProjectSettings`:** a bound flag wins, then the recorded value, then the default. `-LengthBudget 0` records `$null`. Changing `-Layers` alone never re-derives a recorded setting.
+  - **`Get-CoreFilesMap`** adds `rules/harness/<file>` for every registry rule.
+  - **Install:**
+    - Create `.claude/rules/harness` with the other directories.
+    - For each registry rule whose layers intersect the selected ones, call `Install-ManagedFile` with key `rules/harness/<file>`.
+    - For a rule whose layers do not intersect, when the file is on disk, add result `left-in-place (layer not selected)` and warn: "'<key>' belongs to a layer this project no longer records. It was left in place. Delete it by hand if the layer is gone for good, and the next install drops its record."
+    - When the file is absent and the key is in `files`, remove the key and add `record-dropped (layer not selected)`.
+    - The installer never deletes a file.
+  - **Settings file:**
+    - Render `project-settings.md` from the template with `Get-ProjectSettingsText`.
+    - Write it with LF endings on every install and add result `generated`.
+    - Print the `Layers: ... Settings: ...` line.
+  - **Audit:**
+    - Read layers and settings through `ConvertTo-ManifestV3`, defaulting absent settings and writing nothing.
+    - A `rules/harness/` key whose layer is not selected is `installed (layer not selected)` when present and `not-installed (layer not selected)` when absent.
+    - A `rules/harness/project-settings.md` row is `settings-missing` when the file is absent, `settings-stale` when its LF-normalised text differs from the render, and `in-sync` otherwise.
+    - Add `not-installed (layer not selected)` to the uncounted list.
+    - Extend the attention line with: "installed (layer not selected) = delete the file by hand, and the next install drops its record. settings-missing/settings-stale = re-run the installer, which rewrites .claude/rules/harness/project-settings.md from the manifest. manifest-invalid = fix the layers or settings value the error names."
+  - **Comment help:**
+    - Document the four params, and add the five statuses with those responses to `.PARAMETER Audit`.
+    - `.DESCRIPTION` says a manifest gains `schemaVersion`, `layers` and `settings` without dropping any v2 field. It also says `project-settings.md` is regenerated every install, so a hand edit there is lost and `settings-stale` is the only signal.
   - `layers.json` gains:
 
 ```json
 "settings": {
   "statusCadence": {
-    "silent": "Say nothing between tool calls on long runs and report once at the close.",
+    "silent": "Between tool calls, and on any turn opened by an agent or workflow completion notification, emit no text. Read the report file, update the Needs-you queue, and continue. Explanatory-style insights are held until the close, not printed beside the code they explain.",
     "heartbeat": "During long work, post one line each time the work moves to a new phase, and never end a turn without text. The operator should not have to ask for status."
   },
   "audience": {
-    "peer-engineer": "Write for engineers who share this project's vocabulary.",
-    "plain-all-roles": "Write anything the operator or their readers will see for people in any role. Gloss or drop internal IDs, issue numbers, agent names and house vocabulary."
+    "peer-engineer": "Write for engineers who share this project's vocabulary, as writing-style.md describes.",
+    "plain-all-roles": "Write anything the operator or their readers will see for people in any role. Gloss or drop internal IDs, issue numbers, agent names and house vocabulary. For this project this replaces writing-style.md's \"senior engineer talking to peers\" principle and its Scannable Structure section."
   },
   "lengthBudgetDefault": {
     "none": "No default length budget. Follow the length the operator asks for.",
@@ -454,8 +570,11 @@ Layers: kernel (always on), {{LAYERS}}.
 - Length budget: {{LENGTH_BUDGET_TEXT}}
 ```
 
-  `{{LAYERS}}` is the comma-joined list, or `no project layers` when empty.
-  - README Install section: the four flags, the defaults (fresh install and v2 manifest record `code`), what lands in `.claude/rules/harness/`, the generated settings file, the dropped-layer behaviour, and the four new audit statuses.
+  `{{LAYERS}}` is the comma-joined list, or `no project layers` when the list is empty.
+  - README:
+    - The Install section gets the four flags, the defaults (a fresh install and a v2 manifest record `code`), what goes into `.claude/rules/harness/`, the generated settings file, the dropped-layer behaviour and the new audit statuses.
+    - The templates row (line 17) names `project-settings.template.md` as applied on every run.
+    - The Layering model section gets one sentence: the account layer is the kernel, and layer rules ship from core into each project.
 
 - [ ] **Step 4: Run to verify they pass.** `pwsh -NoProfile -File install/Install-Harness.Tests.ps1` and `bun test`. Expected: all PASS.
 
@@ -468,9 +587,9 @@ git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit
 
 ---
 
-### Task 8: One-time nudge for folders with no project layer
+### Task 9: One-time nudge for folders with no project layer
 
-The script is authored in the payload copy so it can be tested in the worktree, then the coordinator applies it to the source in `~/.claude` before the next export. That is the one exception to "never hand-edit `account/claude/`", and Step 6 closes it with an export whose diff for this file is empty.
+The script is authored in the payload copy so it can be tested in the worktree. The coordinator then applies it to the source in `~/.claude` before the next export. That is the one exception to "never hand-edit `account/claude/`", and Step 6 closes it with an export whose diff for this file is empty.
 
 **Files:**
 - Modify: `account/claude/hooks/harness-core-reminder.sh`
@@ -478,23 +597,26 @@ The script is authored in the payload copy so it can be tested in the worktree, 
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: the nudge text below, and the state file `<CLAUDE_HOME>/state/harness-nudged.txt` holding one folder path per line. `state/` is outside the exporter's allowlist, so these folder paths are never exported.
+- Produces: the nudge text below, and the state file `<CLAUDE_HOME>/state/harness-nudged.txt` with one folder path per line. `state/` is outside the exporter's allowlist, so these paths are never exported.
 
-- [ ] **Step 1: Write the failing test.** Copy the payload script into `<tmp>/home/hooks/harness-core-reminder.sh` and run it with `posixBash()` from `test/posix-sh.ts`, `CLAUDE_PROJECT_DIR=<folder>`:
+- [ ] **Step 1: Write the failing test.** Copy the payload script into `<tmp>/home/hooks/harness-core-reminder.sh`, then run it with `posixBash()` from `test/posix-sh.ts` and `CLAUDE_PROJECT_DIR=<folder>`:
   - "a folder with no manifest and no .git gets the nudge once": stdout contains `no agent-harness-core project layer`, and `<tmp>/home/state/harness-nudged.txt` holds the folder line.
-  - "the same folder is silent on the second run": stdout is empty bytes.
+  - "the same folder is silent on the second run": stdout is zero bytes.
   - "a different folder still gets it".
   - "a folder with .claude/.harness-manifest.json is silent and writes no state".
   - "a path containing agent-harness-core is silent".
-  - "an unwritable state location still prints the nudge": create `<tmp>/home/state` as a file. Stdout holds the nudge.
+  - "an unwritable state location still prints the nudge": `<tmp>/home/state` is created as a file.
   - Every case exits 0.
 
-- [ ] **Step 2: Run to verify it fails.** `bun test test/harness-core-reminder.test.ts`. Expected: FAIL (today a folder without `.git` is silent, and nothing is recorded).
+- [ ] **Step 2: Run to verify it fails.** `bun test test/harness-core-reminder.test.ts`. Expected: FAIL.
 
-- [ ] **Step 3: Implement.** Keep the shebang, the `CLAUDE_PROJECT_DIR` fallback to `$PWD`, the `*agent-harness-core*` exit and the manifest check. Drop the `.git` requirement. Derive the state directory from the script's own location (`$(dirname "$0")/../state`), never from `$HOME`, which Git Bash on this workstation points at the wrong folder. Exit silently when `LC_ALL=C grep -Fxq -- "$d"` finds the folder in the state file. Otherwise append the folder (errors ignored) and print:
+- [ ] **Step 3: Implement.**
+  - Keep the shebang, the `CLAUDE_PROJECT_DIR` fallback to `$PWD`, the `*agent-harness-core*` exit and the manifest check. Drop the `.git` requirement.
+  - Take the state directory from the script's own location (`$(dirname "$0")/../state`), never from `$HOME`, which Git Bash on this workstation points at the wrong folder.
+  - Exit silently when `LC_ALL=C grep -Fxq -- "$d"` finds the folder in the state file. Otherwise append the folder, ignoring errors, and print:
 
 ```text
-This folder has no agent-harness-core project layer (.claude/.harness-manifest.json is missing), so only the kernel rules from your account apply here. To add the code, documents or physical layer, run: pwsh {{CORE_REPO}}/install/Install-Harness.ps1 -Target <folder> -Layers <code,documents,physical>. Offer this once if the session starts real work here, and do not run it unasked. This reminder does not repeat for this folder.
+This folder has no agent-harness-core project layer (.claude/.harness-manifest.json is missing), so only the kernel rules from your account apply here. To add a project layer, run: pwsh {{CORE_REPO}}/install/Install-Harness.ps1 -Target <folder> -Layers <code,documents,physical>. Offer this once if the session starts real work here, and do not run it unasked. This reminder does not repeat for this folder.
 ```
 
 - [ ] **Step 4: Run to verify it passes.** `bun test`. Expected: all PASS.
@@ -506,35 +628,50 @@ git add account/claude/hooks/harness-core-reminder.sh test/harness-core-reminder
 git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "feat(account): nudge any folder without a project layer, once (#310)"
 ```
 
-- [ ] **Step 6 (coordinator, operator's machine, before pushing A3).** Copy the payload script to `~/.claude/hooks/harness-core-reminder.sh` with `{{CORE_REPO}}` replaced by the core checkout path. Run `pwsh -NoProfile -File install/Export-Account.ps1`. Expected: `git diff account/claude/hooks/harness-core-reminder.sh` is empty. Stage nothing else from the export.
+- [ ] **Step 6 (coordinator, operator's machine, before pushing A3).** Copy the payload script to `~/.claude/hooks/harness-core-reminder.sh`, with `{{CORE_REPO}}` replaced by the core checkout path in the forward-slash form `Get-MainCheckout` returns (`E:/projects/...`). Run `pwsh -NoProfile -File install/Export-Account.ps1`. Expected: `git diff account/claude/hooks/harness-core-reminder.sh` is empty. Stage nothing else from the export.
 
 ---
 
-### Task 9: Install-Account retires files the account layer no longer ships
-
-`Install-Account.ps1` says removal does not propagate to a receiver. That leaves every earlier receiver loading the operator's code rules globally after the move, which is the bleed #308 reported. This task adds a retire list that renames, never deletes. The list ships empty here and gains its entries in Task 11, in the same PR as the export that drops the files.
+### Task 10: Install-Account retires files the account layer no longer ships
 
 **Files:**
 - Create: `install/account-retired.json`
-- Modify: `install/Install-Account.ps1`
+- Modify: `install/Install-Account.ps1` (including the `.DESCRIPTION` sentence "Removal does not propagate to a receiver")
 - Test: `install/Install-Account.Tests.ps1`
 - Modify: `README.md` (Account layer section)
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `install/account-retired.json` shape `{ "schemaVersion": 1, "retired": [ { "path": "rules/<file>.md", "reason": "<one sentence>" } ] }`, the param `-RetiredListPath` (default `install/account-retired.json` beside the script), and the function `Invoke-AccountRetirement -ClaudeHome <string> -PayloadRoot <string> -ListPath <string>`.
+- Produces:
+  - `install/account-retired.json`, shaped `{ "schemaVersion": 1, "retired": [ { "path": "rules/<file>.md", "reason": "<one sentence>" } ] }`
+  - The param `-RetiredListPath`, which defaults to `install/account-retired.json` beside the script.
+  - The function `Invoke-AccountRetirement -ClaudeHome <string> -PayloadRoot <string> -ListPath <string>`.
 
-- [ ] **Step 1: Write the failing tests** in a new `Context 'retired paths'`, using the suite's existing sandbox pattern (`-PayloadRoot`, `-ClaudeHome`, `-ClaudeJson`, `-SkipPreflight`) plus `-RetiredListPath`:
-  - "renames a retired file on the receiver and keeps its content": the sandbox home has `rules/old.md`, the list names it, the payload does not carry it. Afterwards `rules/old.md` is gone, exactly one `rules/old.md.retired-*` exists with the original content, and the output matches `Retired rules/old.md`.
-  - "refuses before copying anything when the payload still carries a retired path": the throw message names the path, and a payload file absent from the home beforehand is still absent.
-  - "rejects an entry that escapes the account home or names another tree": `../x.md`, an absolute path, and `tools/x.md` each throw.
+- [ ] **Step 1: Write the failing tests** in a new `Context 'retired paths'`. Use the suite's sandbox pattern (`-PayloadRoot`, `-ClaudeHome`, `-ClaudeJson`, `-SkipPreflight`) plus `-RetiredListPath`.
+  - "renames a retired file on the receiver, keeps its content, and says what to run next":
+    - The sandbox home has `rules/old.md`, the list names it, and the payload does not carry it.
+    - Afterwards `rules/old.md` is gone, and exactly one `rules/old.md.retired-*` exists with the original content.
+    - The output matches `Retired rules/old.md` and `Install-Harness.ps1 -Target`.
+  - "refuses before copying anything when the payload still carries a retired path": the message names the path, and a payload file that was absent from the home is still absent.
+  - "rejects an entry that escapes the account home or names another tree": `../x.md`, an absolute path and `tools/x.md` each throw.
   - "-WhatIf renames nothing".
-  - "an empty list changes nothing".
+  - "an empty list changes nothing and prints no Install-Harness advice".
   - "a missing list file throws".
 
 - [ ] **Step 2: Run to verify they fail.** `pwsh -NoProfile -File install/Install-Account.Tests.ps1`. Expected: the new cases FAIL.
 
-- [ ] **Step 3: Implement** `Invoke-AccountRetirement` and call it after the path canonicalisation and before the first copy. Validate every entry first: a relative path with no `..` segment, under `rules/`, `agents/`, `skills/` or `hooks/`, and absent from the payload. Then for each entry present under `-ClaudeHome`, `Move-Item` it to `<path>.retired-<yyyyMMddTHHmmssZ>` (UTC) and print `Retired <path> (now <new name>): <reason>`. `Move-Item` honours `-WhatIf` on its own. `install/account-retired.json` ships as `{ "schemaVersion": 1, "retired": [] }`. README Account layer section: one paragraph on the retire list, that it renames rather than deletes, and that Claude Code loads only `*.md` from `rules/`, so a renamed file stops loading.
+- [ ] **Step 3: Implement.**
+  - Call `Invoke-AccountRetirement` after the path canonicalisation and before the first copy.
+  - Validate every entry first. It must be a relative path with no `..` segment, sit under `rules/`, `agents/`, `skills/` or `hooks/`, and be absent from the payload.
+  - For each entry present under `-ClaudeHome`:
+    - `Move-Item` it to `<path>.retired-<yyyyMMddTHHmmssZ>` (UTC). `Move-Item` honours `-WhatIf` on its own.
+    - Print `Retired <path> (now <new name>): <reason>`.
+  - After one or more renames, warn: `Rule files moved out of the account layer into project layers. Run pwsh <core>/install/Install-Harness.ps1 -Target <project> in each project on this machine that uses the harness, so each keeps its copy.`
+  - Ship `install/account-retired.json` as `{ "schemaVersion": 1, "retired": [] }`.
+  - Replace the `.DESCRIPTION` removal sentence with one stating that the retire list is how removal reaches a receiver.
+  - README Account layer section:
+    - The retire list renames rather than deletes, and Claude Code loads only `*.md` from `rules/`.
+    - Update order on a receiver: `git pull`, then `Install-Harness.ps1` on each project, then `Install-Account.ps1`.
 
 - [ ] **Step 4: Run to verify they pass.** `pwsh -NoProfile -File install/Install-Account.Tests.ps1`. Expected: all PASS.
 
@@ -545,97 +682,162 @@ git add install/account-retired.json install/Install-Account.ps1 install/Install
 git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "feat(install-account): rename files the account layer has retired (#310)"
 ```
 
-PR A3 body: `Docs: README updated: core/claude/rules row, Install section for layers and settings, Account layer retire list`.
+PR A3 body: `Docs: README updated: core/claude/rules row, Install section for layers and settings, templates row, Layering model, Account layer retire list and update order`.
 
 ---
 
-### Task 10: Cutover (coordinator, operator's machine)
+### Task 11: Reinstall projects and check what isolated agents see (coordinator, operator's machine, gates Task 12)
 
-Runs after A3 merges, in the main clone on `feat/310-cutover` from `origin/master`. Order matters: every installed project gets its copy before the account copy goes.
+This runs after A1 and A3 merge. Until it passes, nothing leaves `~/.claude/rules`.
 
-- [ ] **Step 1: Confirm the copies still match.** Export, then `bun test test/layer-rules.test.ts`. Expected: PASS. A red transition case means a source edit since Task 5. Port it into `core/claude/rules` first.
+- [ ] **Step 1: Confirm the copies still match.** Export, then run `bun test test/layer-rules.test.ts`. Expected: PASS in before-cutover mode. A red split case means a source edit since Task 6, which gets ported into core first.
 
-- [ ] **Step 2: Reinstall every installed project.** Glob `E:/projects/*/.claude/.harness-manifest.json`, and ask the operator in the same message as Step 3's confirmation whether projects live anywhere else. For each project, including this repo: `pwsh -NoProfile -File install/Install-Harness.ps1 -Target <project>`. Expected per project: `.claude/rules/harness/fix-quality.md` exists and the printed line reads `Layers: code.` Collect each project's `git status --short`.
+- [ ] **Step 2: Reinstall every installed project.**
+  - Glob `E:/projects/*/.claude/.harness-manifest.json`.
+  - For each project, including this repo, run `pwsh -NoProfile -File install/Install-Harness.ps1 -Target <project>`.
+  - Expected per project: `.claude/rules/harness/fix-quality.md` exists and the printed line reads `Layers: code.`
+  - Collect each project's `git status --short`.
 
-- [ ] **Step 3: Confirm with the operator.** Send one message with the project list, each project's pending changes, and the request to commit them in those repositories (repositories outside this one, with their own owners and gates). Committing there waits on the answer. Steps 4 to 7 do not.
+- [ ] **Step 3: Ask the operator once.** The message carries:
+  - the project list and each project's pending changes
+  - whether projects live anywhere else
+  - the request to commit and push the reinstalled `.claude/rules/harness/` files in those repositories, which have their own owners and gates
 
-- [ ] **Step 4: Split and remove in `~/.claude/rules`.**
-  - Back up the four files to `~/.claude-backups/rules-<yyyyMMddTHHmmssZ>/`, which is outside `~/.claude/rules`, so nothing there loads.
-  - Create `durable-deliverables.md` as `# Durable Deliverables`, a blank line, then the "Deliverables Do Not Live in the Scratchpad" section copied verbatim from `change-management.md`, heading included. Create `bounded-review.md` as `# Bounded Review`, a blank line, then the "Work has to be able to end" section from `fix-quality.md`.
-  - Remove `change-management.md`, `coordinator-output.md`, `fix-quality.md` and `writing-style.md` from `~/.claude/rules`. The `*.local.md` overlays stay.
+  Committing there waits on the answer.
 
-- [ ] **Step 5: Update the kernel's own instructions.** In `~/.claude/rules/harness-core.md`, at the end of "Account layer, on this machine and on any other", add: "Layer rules are not authored here any more. `change-management.md`, `coordinator-output.md`, `fix-quality.md` and `writing-style.md` live in `core/claude/rules/` in the core repo and are edited there, and `Install-Harness.ps1` copies the layers a project records into its `.claude/rules/harness/`. A project picks up a rule change when it is reinstalled. The account layer keeps the kernel, including `durable-deliverables.md` and `bounded-review.md`, the two kernel sections split out of the moved files." In `~/.claude/skills/memory-system/SKILL.md:78`, `~/.claude/rules/change-management.md` becomes "the code layer's `change-management.md`". Other references to the moved files name the file without a path and stay.
+- [ ] **Step 4: Run the live check.** Do this in this repo, which gitignores `/.claude/`, and in one reinstalled project that tracks `.claude/` and has had its rule files committed and pushed.
+  - The marker is the line `Layers: kernel (always on), code.`. It exists only in `.claude/rules/harness/project-settings.md` and in no account file, so it discriminates.
+  - Positive control: in the main session, quote that line from context without reading a file. It must appear. This also confirms Claude Code loads `.claude/rules/` subfolders.
+  - Test: dispatch a fresh `general-purpose` agent (`model: haiku`, `isolation: "worktree"`, with the `BASE-SHA` line). The brief says: "Without reading any file, quote the line that starts with `Layers:` from the project rules in your context, or reply NOT IN CONTEXT."
+  - Predictions: visible means it quotes the marker. Not visible means `NOT IN CONTEXT`.
 
-- [ ] **Step 6: Export and check the diff.** `pwsh -NoProfile -File install/Export-Account.ps1`, then `git diff --stat account/claude`. Expected and staged: four rule files deleted, `rules/durable-deliverables.md` and `rules/bounded-review.md` added, `rules/harness-core.md` and `skills/memory-system/SKILL.md` modified. Anything else is unrelated drift and waits for its own PR.
+- [ ] **Step 5: Gate.**
+  - If the isolated agent quotes the marker in both repos, Task 12 runs.
+  - If it does not in a repo that tracks `.claude/`, that repo's rule files are committed and pushed and the check repeats.
+  - If it does not in this repo (`/.claude/` ignored), or still does not after committing elsewhere, Task 12 does not remove the code halves from the account layer. The fallback is that both copies stay: the kernel changes in Task 12 Steps 1 and 3 still run, and the account `fix-quality.md` and the code sections of `change-management.md` stay in `~/.claude/rules` beside the project copies. The coordinator then raises a Needs-you item. Option A: change this repo's `.gitignore` from `/.claude/` to `/.claude/*` plus `!/.claude/rules/`, so installed rules travel with worktrees. Option B: keep the duplication.
 
-- [ ] **Step 7: Commit.**
+---
 
-```bash
-git add account/claude/rules account/claude/skills/memory-system/SKILL.md
-git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "refactor(account): the account layer keeps the kernel, layer rules live in core (#310)"
+### Task 12: Cutover (coordinator, operator's machine)
+
+In the main clone, on `feat/310-cutover` from `origin/master`, after Task 11 passes. Step 2 is skipped under Task 11's fallback.
+
+- [ ] **Step 1: Coordinator output in the kernel.** Edit `~/.claude/rules/coordinator-output.md`:
+  - The title becomes `# Coordinator Output: One Self-Contained Close`.
+  - Replace the section "Mid-run: say nothing" with the two sections below. The "Decisions" section's "as above" still points at the second.
+
+```markdown
+## Mid-run cadence
+
+How much to say between tool calls is the project's `statusCadence` setting in `.claude/rules/harness/project-settings.md`. Where a folder has no project settings, stay silent between tool calls and hold explanatory insights for the close.
+
+## Stop and ask before a risky step
+
+Whatever the cadence, ask before any action on the `change-management.md` confirmation list (Risky Operations Requiring Confirmation), reversible or not, any other irreversible action, and any step that would introduce a known security weakness (`security.md`, Default Posture: flag before proceeding). Ask immediately, and make the question complete under the restating rule below.
 ```
 
-The sha of this commit is the `BASE-SHA` for Tasks 11 and 12.
+- [ ] **Step 2: Split in `~/.claude/rules`.**
+  - Back up `change-management.md` and `fix-quality.md` to `~/.claude-backups/rules-<yyyyMMddTHHmmssZ>/`.
+  - In `change-management.md`, delete the two `codeSections` that `SPLITS` lists ("Decision Documentation", "Session Close Protocol"). Change nothing else.
+  - Create `bounded-review.md` as `# Bounded Review`, a blank line, then the "Work has to be able to end" section copied verbatim from `fix-quality.md`.
+  - Remove `fix-quality.md`.
+  - The `*.local.md` overlays stay.
+
+- [ ] **Step 3: Repoint kernel pointers.**
+  - In `~/.claude/rules/harness-core.md`, at the end of "Account layer, on this machine and on any other", add: "Code-layer rules are not authored here. `fix-quality.md` and `change-management-code.md` live in `core/claude/rules/` in the core repo and are edited there, and `Install-Harness.ps1` copies them into each code project's `.claude/rules/harness/`. A project picks up a rule change when it is reinstalled. The kernel keeps `bounded-review.md`, split out of `fix-quality.md`, and the rest of `change-management.md`."
+  - In `~/.claude/agents/senior-developer.md:16`, `~/.claude/rules/fix-quality.md` becomes "`.claude/rules/harness/fix-quality.md` in a code project, and `~/.claude/rules/bounded-review.md`". At `:18`, add "and, in a code project, `.claude/rules/harness/change-management-code.md`".
+  - Make the same addition at `~/.claude/agents/project-lead.md:19`.
+  - The other `change-management.md` pointers (`governance-sme.md:23` and `:93`, `memory-system/SKILL.md:78`, `subagent-prompting/SKILL.md:55`, `senior-developer.md:64`, `core/claude/hooks/commit-msg`) name content the kernel keeps, and they stay.
+
+- [ ] **Step 4: Export and check the diff.** Run `pwsh -NoProfile -File install/Export-Account.ps1`, then `git diff --stat account/claude`. Expected, and the only paths staged:
+  - `rules/fix-quality.md` deleted
+  - `rules/bounded-review.md` added
+  - `rules/change-management.md`, `rules/coordinator-output.md` and `rules/harness-core.md` modified
+  - `agents/senior-developer.md` and `agents/project-lead.md` modified
+
+  Then run `bun test test/layer-rules.test.ts`. Expected: PASS in after-cutover mode, which proves the kernel and code halves reassemble the original sections exactly.
+
+- [ ] **Step 5: Commit.**
+
+```bash
+git add account/claude/rules account/claude/agents/senior-developer.md account/claude/agents/project-lead.md
+git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "refactor(account): the account layer keeps the kernel, code-repo rules live in core (#310)"
+```
+
+This commit's sha is the `BASE-SHA` for Task 13.
 
 ---
 
-### Task 11: Repoint references and fill the retire list
+### Task 13: Repoint references, fill the retire list, pin the pointers
 
 **Files:**
 - Modify: `install/account-retired.json`, `tools/pr-review/types.ts` (comment near line 6 and `TRUSTED_CONTEXT_PATHS`), `tools/pr-review/reviewer-prompt.md:79`, `tools/pr-review/README.md:7`, `install/Install-Harness.Tests.ps1:45` (comment), `test/layer-rules.test.ts`, `README.md` (Account layer section)
 
 **Interfaces:**
-- Consumes: Task 10's commit, Task 9's list shape, Task 6's test.
-- Produces: nothing later tasks call.
+- Consumes: Task 12's commit, Task 10's list shape, Task 7's test.
+- Produces: `DANGLING_RULE_POINTER: RegExp`, exported from `test/layer-rules.test.ts`.
 
-- [ ] **Step 1: Retire list.** Add four entries to `install/account-retired.json`: `rules/change-management.md`, `rules/coordinator-output.md`, `rules/fix-quality.md`, `rules/writing-style.md`, each with reason "Moved to core/claude/rules. Install-Harness.ps1 copies it into projects that record its layer."
-- [ ] **Step 2: Reviewer standards.** In `TRUSTED_CONTEXT_PATHS`, replace `"account/claude/rules/fix-quality.md"` with `"account/claude/rules/bounded-review.md"`. `core/claude/rules/fix-quality.md` stays from Task 6. In the `types.ts` comment, `reviewer-prompt.md:79`, `tools/pr-review/README.md:7` and the `Install-Harness.Tests.ps1:45` comment, the citation of `account/claude/rules/fix-quality.md`'s "Work has to be able to end" becomes `account/claude/rules/bounded-review.md`.
-- [ ] **Step 3: Retire the transition case.** Delete the "while the account copy exists" test, `KERNEL_SECTIONS` and `withoutSections` from `test/layer-rules.test.ts`. The account copies are gone, so the case can only skip from here on.
-- [ ] **Step 4: README.** Account layer section: one sentence that the account layer carries the kernel and that layer rules ship from `core/claude/rules`.
-- [ ] **Step 5: Verify.** `bun test`, `pwsh -NoProfile -File install/Install-Account.Tests.ps1`, `pwsh -NoProfile -File install/Install-Harness.Tests.ps1`. Expected: all PASS. Then a dry run against a temp home whose `rules/` holds the four files from `git show <Task 10 parent>:account/claude/rules/<file>`: `pwsh -NoProfile -File install/Install-Account.ps1 -ClaudeHome <tmp-home> -ClaudeJson <tmp-home>/claude.json -SkipPreflight -WhatIf`. Expected: four `What if` move lines, one per retired rule file, and the four files still in place.
-- [ ] **Step 6: Commit.**
+- [ ] **Step 1: Write the failing test** in `test/layer-rules.test.ts`: "no account or core file points at a moved rule by its account path". Use `DANGLING_RULE_POINTER = /(?:~\/\.claude|\{\{CLAUDE_HOME\}\})\/rules\/fix-quality\.md/` and scan every text file under `account/claude` and `core/claude`. Expect zero hits. A canary asserts the regex matches the literal string `` `~/.claude/rules/fix-quality.md` `` built at runtime, so a broken matcher cannot pass.
+- [ ] **Step 2: Run.** `bun test test/layer-rules.test.ts`. Expected: PASS, since Task 12 Step 3 repointed `senior-developer.md`. To ablate, restore the old pointer in a scratch copy of the file and confirm the test fails.
+- [ ] **Step 3: Retire list.** Add `{ "path": "rules/fix-quality.md", "reason": "Split: the code-repo rules moved to core/claude/rules and the review-termination rule to rules/bounded-review.md." }`.
+- [ ] **Step 4: Reviewer standards.**
+  - In `TRUSTED_CONTEXT_PATHS`, replace `"account/claude/rules/fix-quality.md"` with `"account/claude/rules/bounded-review.md"`. `core/claude/rules/fix-quality.md` stays from Task 7.
+  - Repoint the citation of `account/claude/rules/fix-quality.md`'s "Work has to be able to end" to `account/claude/rules/bounded-review.md` in four places: the `types.ts` comment, `reviewer-prompt.md:79`, `tools/pr-review/README.md:7`, and the `Install-Harness.Tests.ps1:45` comment.
+- [ ] **Step 5: README.** Add one sentence to the Account layer section: the account layer carries the kernel, and code-layer rules ship from `core/claude/rules`.
+- [ ] **Step 6: Verify.**
+  - Run `bun test`, `pwsh -NoProfile -File install/Install-Account.Tests.ps1` and `pwsh -NoProfile -File install/Install-Harness.Tests.ps1`. Expected: all PASS.
+  - Dry run: seed a temp home's `rules/` with `fix-quality.md` from `git show <Task 12 parent>:account/claude/rules/fix-quality.md` (Git Bash). Run `pwsh -NoProfile -File install/Install-Account.ps1 -ClaudeHome <tmp-home> -ClaudeJson <tmp-home>/claude.json -SkipPreflight -WhatIf`. Expected: one `What if` move line for `rules/fix-quality.md`, and the file still in place.
+- [ ] **Step 7: Commit.**
 
 ```bash
 git add install/account-retired.json tools/pr-review/types.ts tools/pr-review/reviewer-prompt.md tools/pr-review/README.md install/Install-Harness.Tests.ps1 test/layer-rules.test.ts README.md
-git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "chore(rules): point the reviewer at the kernel split, retire moved account rules (#310)"
+git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "chore(rules): point the reviewer at the kernel split, retire the moved account rule (#310)"
 ```
+
+PR A4 body: `Docs: README updated: Account layer section says the account layer carries the kernel`.
 
 ---
 
-### Task 12: Session close skips the push when there is no remote
+### Task 14: Session close skips the push without a remote and cleans up worktrees
 
-This edit comes after the cutover because Task 6's transition case pins the core copy to the account copy until Task 11 removes it.
+This runs after A4 merges. The split test's job ends when A4 merges with it green, and this edit changes a code section the test pins.
 
 **Files:**
-- Modify: `core/claude/rules/change-management.md` ("Session Close Protocol", step 2)
+- Modify: `core/claude/rules/change-management-code.md` ("Session Close Protocol")
+- Delete: `test/fixtures/rules-premove/`, and the split case, `SPLITS` and `sectionsOf` from `test/layer-rules.test.ts`
 
 **Interfaces:**
-- Consumes: Task 11's commit (transition case gone).
+- Consumes: A4 merged.
 - Produces: nothing.
 
-- [ ] **Step 1: Edit.** Replace step 2 with:
+- [ ] **Step 1: Retire the split test.** Delete the fixtures and the split case, and keep the registry and pointer cases.
+- [ ] **Step 2: Edit.** Replace step 2 of the Session Close Protocol and add a step 4.
 
 ```markdown
 2. **Push to remote** — ensure the commit is on GitHub, not just local. Run `git remote` first. When it prints nothing, the project has no remote: skip this step and say "No remote configured, push skipped" in the close. When the folder is not a git repository at all, skip steps 1 and 2 the same way and say so.
+4. **Remove finished agent worktrees** — for each worktree under `.claude/worktrees/`, remove it only when `git -C <worktree> status --porcelain` prints nothing and `git log <worktree-branch> --not --exclude=<worktree-branch> --branches --remotes --tags --oneline` prints nothing, which means no commit on it is unreachable from another ref. Report how many were removed and how many were kept, and why.
 ```
 
-The em dash after the bold label matches steps 1 and 3 and is kept for that reason. The colon replaces what would otherwise be a semicolon.
+The em dash after each bold label matches steps 1 and 3.
 
-- [ ] **Step 2: Verify.** `bun test`. Expected: PASS. Then `pwsh -NoProfile -File install/Install-Harness.ps1 -Target <tmp project>` and confirm `.claude/rules/harness/change-management.md` contains `No remote configured, push skipped`.
+- [ ] **Step 3: Verify.**
+  - Run `bun test`. Expected: PASS.
+  - Run `pwsh -NoProfile -File install/Install-Harness.ps1 -Target <tmp project>`. `.claude/rules/harness/change-management-code.md` contains `No remote configured, push skipped` and `Remove finished agent worktrees`.
+  - In a temp repo with two worktrees, one clean and merged and one holding an unpushed commit, run the step 4 `git log` command for each. It prints nothing for the first and the commit for the second.
 
-- [ ] **Step 3: Commit.**
+- [ ] **Step 4: Commit.**
 
 ```bash
-git add core/claude/rules/change-management.md
-git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "docs(rules): session close skips the push when there is no remote (#310)"
+git add -A core/claude/rules/change-management-code.md test/layer-rules.test.ts test/fixtures/rules-premove
+git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "docs(rules): session close skips the push without a remote and removes finished worktrees (#310)"
 ```
 
-PR A4 body: `Docs: README updated: Account layer section says the account layer carries the kernel`. After the merge, the coordinator reinstalls every project from Task 10 Step 2 once more so each picks up Task 12's text.
+PR A5 body: `Docs: README still accurate: no README section describes the session close`. After the merge, the coordinator reinstalls every project from Task 11 Step 2 once more.
 
 ## Out of scope, recorded
 
-- Plan B (the init interview) and Plan C (documents and physical rule content, heartbeat wording beyond the setting text, the office toolchain probe).
+- Plan B (the init interview, and a decision-log template if one is wanted) and Plan C (documents and physical rule content, and the office toolchain probe).
 - Gating agents and hooks by layer. Plan A installs them for every layer and relies on the self-checks.
-- The kernel rule additions the spec names (absence claims, asking before claiming a human step was skipped, the decision log, the scope-accumulation challenge) and worktree cleanup at session close. No plan in the A, B, C split owns them yet.
 - Mirroring the `subagent-prompting` skill fix into the separate `agent-skills-core` repository.
 - The #294 report that the model-tier hook demands xhigh effort. The spec files it separately.
+- An `eol` rule for `core/claude/rules/` in `.gitattributes`. It is a pre-existing pattern shared with `core/claude/agents/`, and any `.gitattributes` change is an admin-bypass merge.
