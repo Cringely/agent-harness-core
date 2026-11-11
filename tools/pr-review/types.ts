@@ -144,10 +144,10 @@ export const WORKFLOW_PATH = ".github/workflows/test.yml";
 // MAX_DIFF_BYTES: larger diffs get COMMENT without a model run. Round one of #98, the largest
 // acceptance case, is 41,893 bytes.
 export const MAX_DIFF_BYTES = 600_000;
-// Post-change file content gives the reviewer context the diff's three lines do not. 60 KB keeps
-// round one's four TypeScript and shell files (9 to 21 KB each) and drops its two PowerShell files
-// (72 and 85 KB) whose changes are one-line comment edits the diff already shows in full.
-export const MAX_HEAD_FILE_BYTES = 60_000;
+// Post-change file content gives the reviewer context the diff's three lines do not. 128 KB
+// (raised from 60 KB, #156) lets the installer scripts, which run 72 to 85 KB, reach the model
+// whole. The 250 KB total below still bounds what one review can cost.
+export const MAX_HEAD_FILE_BYTES = 128_000;
 export const MAX_HEAD_FILES_TOTAL_BYTES = 250_000;
 // A description can name any number of issues. #131, the most in the retro set, closes three.
 export const MAX_LINKED_ISSUES = 3;

@@ -1041,6 +1041,24 @@ identity_load() {
     names=$(identity_json_array "$raw" names) || return 1
     emails=$(identity_json_array "$raw" emails) || return 1
 
+    # An absent names key refuses (issue #91, operator ruling 2026-11-11). The
+    # name is the channel that leaked, and a file that never mentions the key
+    # reads exactly like a hand-edit that dropped it, so silence cannot be a
+    # choice. An explicit empty list ("names": []) is the deliberate opt-out
+    # and stays accepted. identity_json_array has already refused every
+    # malformed or escaped spelling of the key, so a key word still missing
+    # from the text here means the key was never declared. Bracket classes,
+    # not a case fold, for the same locale reason as identity_json_array.
+    if [ -z "$names" ]; then
+        case $raw in
+            *[Nn][Aa][Mm][Ee][Ss]*) ;;
+            *)
+                echo "identity gate: '$identity_file' has no \"names\" key. The name is the channel this gate exists to protect, so a file that omits it is refused rather than read as declaring none. Add \"names\": [\"...\"], or write \"names\": [] to opt out explicitly." >&2
+                return 1
+                ;;
+        esac
+    fi
+
     # Both empty is fail-closed, and the count check further down does not
     # cover it. That check fires only when the WHOLE pattern set is empty, and
     # the username and hostname arms below always contribute because they are

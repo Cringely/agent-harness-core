@@ -126,9 +126,9 @@ its final message; nothing else records that the work happened.
 
 The rule the four silences do support is independent of the cause: a dispatch that returned nothing
 must not read the same as a dispatch that found nothing. This repo's opt-in commit gate,
-`core/claude/hooks/review-gate.ts`, is where they read the same. It clears a staged file once a
-dispatch to a reviewer type appears after that file's last edit and never reads what came back, so a
-reviewer that went idle clears the commit exactly as one that filed findings does. That puts the
+`review-gate.ts` (retired in #37), was where they read the same. It cleared a staged file once a
+dispatch to a reviewer type appeared after that file's last edit and never read what came back, so a
+reviewer that went idle cleared the commit exactly as one that filed findings did. That put the
 silence-as-approval reading into code instead of leaving it to a dispatcher in a hurry. A gate that
 answers "was this reviewed" needs evidence the review returned, not evidence it was requested.
 
