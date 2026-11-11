@@ -65,7 +65,8 @@
 // treats as "no opinion" — the normal permission flow proceeds. Only a
 // well-formed deny emits JSON. If `bun` itself is missing from PATH the hook
 // command fails non-zero-but-not-2, which Claude Code also treats as
-// non-blocking. No network, no git, no mutation. Input is the stdin payload alone.
+// non-blocking. No network, no git binary, no mutation. Input is the stdin payload, the environment,
+// and the few filesystem reads the git probe and the scoped-writer check make.
 // (An unreadable agent-definition file is NOT a hook error — it resolves to
 // "requires isolation" for that type, see above.)
 //
@@ -76,18 +77,41 @@
 // `BASE-SHA: <hex>`, 7 to 40 hex digits, at the start of a prompt line (leading spaces allowed). The
 // agent compares it with its worktree HEAD before touching a file and aborts on a mismatch. The gate
 // checks only that the line is present, since the worktree does not exist yet.
-// The gate reads no git state and compares nothing. An earlier version denied only when the
-// dispatcher HEAD differed from origin's default branch and let an equal pair through, but the local
-// origin ref can be stale, so equal-HEAD was not a safe allow (operator ruling on #36, 2026-11-11).
+// The base check compares nothing. An earlier version denied only when the dispatcher HEAD differed
+// from origin's default branch and let an equal pair through, but the local origin ref can be stale,
+// so equal-HEAD was not a safe allow (operator ruling on #36, 2026-11-11).
+//
+// Git probe (#310). A worktree cannot exist outside a git repository, so denying a write dispatch
+// there with "re-dispatch isolated" asks for the impossible. When the project root is provably not
+// a repository, the gate allows the dispatch and attaches a note naming the cost and the `git init`
+// remedy. The probe reads the filesystem only and spawns no git binary: GIT_DIR or GIT_WORK_TREE in
+// the environment, or a `.git` entry (file or directory) at the path or any ancestor, means "repo".
+// The project root decides (CLAUDE_PROJECT_DIR, else two levels above this script), and a payload
+// `cwd` must agree with it. Any answer short of "not-repo" for either, "unknown" included, keeps the
+// behaviour above, so a probe that cannot answer never widens what is allowed.
+//
+// Scoped writers (#310). A definition that declares `writeScope: scratch` and grants no shell is not
+// a repo writer: agent-write-scope.ts reads the same file with the same parser and confines its
+// Write and Edit calls to a scratch directory, and with no shell nothing else reaches the checkout.
+// The gate trusts that only when the parser module loads, the installed write-scope gate is at the
+// required version (it carries the scratch-parent containment fix) and settings.json registers it
+// under a PreToolUse matcher covering Write and Edit. Anything less leaves the type requiring
+// isolation, because a scoped writer behind two gates that do not both hold is an unconfined one.
+// The modules load through a guarded dynamic import: a static import that fails to link exits the
+// process before the entrypoint's try, which Claude Code reads as no opinion.
 //
 // Decision logic lives in the exported `decide()`, exercised offline by
 // test/agent-worktree-gate.test.ts without spawning a process. The stdin/stdout
 // contract itself IS spawn-tested (#78): see the
 // "spawned process" describe block at the end of that file.
 
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { isValidAgentName } from "./agent-name";
+// Type only: erased at build, so nothing here can fail to link. The module itself loads through
+// loadWriteScopeParser() below.
+import type { WriteScopeParser } from "./write-scope-parse";
 
 /**
  * Project-specific escape hatch: subagent_type values this project has
@@ -121,7 +145,18 @@ const READ_ONLY_TOOLS = new Set([
  * and fork carry all tools and deliberately have no entry here — they fall
  * through to the requires-isolation default, exactly like unknown types.
  */
-const BUILTIN_READ_ONLY = new Set(["explore", "plan"]);
+const BUILTIN_READ_ONLY = new Set(["explore", "plan", "web-fetch"]);
+
+/**
+ * Write tools a `writeScope: scratch` definition may hold and still be trusted without isolation.
+ * agent-write-scope.ts reads the same definition with the same parser and confines Write and Edit
+ * to a scratch directory, and SendMessage writes no file. With no shell in the grant, nothing else
+ * reaches the checkout. NotebookEdit stays out, and so does everything not named here.
+ */
+const SCOPED_WRITE_TOOLS = new Set(["write", "edit", "sendmessage"]);
+
+/** The write-scope gate version that carries the scratch-parent containment fix (Task 1). */
+export const REQUIRED_WRITE_SCOPE_GATE_VERSION = 2;
 
 /** Where the agent definitions live, relative to this script. */
 export const DEFAULT_AGENTS_DIR = join(import.meta.dir, "..", "agents");
@@ -149,8 +184,130 @@ export const BASE_SHA_TOKEN = "BASE-SHA:";
 const BASE_SHA_RE = /^[ \t]*BASE-SHA:[ \t]*[0-9a-f]{7,40}\b/im;
 
 export type GateDecision =
-  | { action: "allow" }
+  | { action: "allow"; note?: string }
   | { action: "deny"; reason: string };
+
+export type GitProbe = "repo" | "not-repo" | "unknown";
+
+/**
+ * Is `dir` inside a git work tree? Filesystem only, no git binary. `repo` when GIT_DIR or
+ * GIT_WORK_TREE is set, or when `dir` or an ancestor holds a `.git` entry (a directory, or the file
+ * a linked worktree uses). `unknown` when `dir` is not an existing directory or a read fails for any
+ * reason but absence. `not-repo` only when the walk reaches the filesystem root (`/` or a drive
+ * root) having found nothing. Unknown fails closed in the caller: the gate behaves as it did.
+ */
+export function probeGitWorkTree(
+  dir: string,
+  env: Record<string, string | undefined> = process.env,
+): GitProbe {
+  if (env.GIT_DIR || env.GIT_WORK_TREE) return "repo";
+  try {
+    if (!statSync(dir).isDirectory()) return "unknown";
+    let p = resolve(dir);
+    for (;;) {
+      try {
+        lstatSync(join(p, ".git"));
+        return "repo";
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        // Absent here (or the parent is a file): keep climbing. Anything else, such as a denied
+        // read, means the answer is not known.
+        if (code !== "ENOENT" && code !== "ENOTDIR") return "unknown";
+      }
+      const parent = dirname(p);
+      if (parent === p) return "not-repo";
+      p = parent;
+    }
+  } catch {
+    return "unknown";
+  }
+}
+
+/** The note attached to an allow when the project root is not a git repository. */
+export function nonGitNote(projectRoot: string): string {
+  return (
+    `Worktree gate: ${projectRoot} is not a git repository, so worktree isolation is not available ` +
+    `and this dispatch runs in the shared folder. A git repository in a subfolder of it is not ` +
+    `isolated either. If this work should be versioned, run \`git init\` here and the gate will ` +
+    `isolate concurrent writers.`
+  );
+}
+
+/** The project root: CLAUDE_PROJECT_DIR when set, else two levels above this script's directory. */
+export function projectRootOf(env: Record<string, string | undefined>): string {
+  return env.CLAUDE_PROJECT_DIR || join(import.meta.dir, "..", "..");
+}
+
+/**
+ * Does a settings.json matcher cover `tool`? Claude Code treats an empty or `*` matcher as every
+ * tool and anything else as a regular expression over the tool name. Anchored, so `WriteFile` does
+ * not cover `Write`. An invalid expression covers nothing.
+ */
+function matcherCovers(matcher: unknown, tool: string): boolean {
+  if (matcher === undefined || matcher === "" || matcher === "*") return true;
+  if (typeof matcher !== "string") return false;
+  try {
+    return new RegExp(`^(?:${matcher})$`).test(tool);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True when settings.json registers a command containing `agent-write-scope.ts` under ONE
+ * PreToolUse group whose matcher covers both Write and Edit. Two groups that each cover one tool
+ * leave the other unguarded, so they do not count.
+ */
+function registersWriteScopeGate(settingsPath: string): boolean {
+  const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as unknown;
+  const groups = (settings as { hooks?: { PreToolUse?: unknown } } | null)?.hooks?.PreToolUse;
+  if (!Array.isArray(groups)) return false;
+  return groups.some((g: unknown) => {
+    if (typeof g !== "object" || g === null) return false;
+    const group = g as { matcher?: unknown; hooks?: unknown };
+    if (!matcherCovers(group.matcher, "Write") || !matcherCovers(group.matcher, "Edit")) return false;
+    if (!Array.isArray(group.hooks)) return false;
+    return group.hooks.some((h: unknown) => {
+      const command = (h as { command?: unknown } | null)?.command;
+      return typeof command === "string" && command.includes("agent-write-scope.ts");
+    });
+  });
+}
+
+/** An import specifier for a path: absolute paths become file URLs, relative ones pass through. */
+function specifier(p: string): string {
+  return isAbsolute(p) ? pathToFileURL(p).href : p;
+}
+
+/**
+ * Loads the write-scope parser, or null when trusting `writeScope` would be unsafe. Null on any
+ * load error, and also unless the write-scope gate beside it exports WRITE_SCOPE_GATE_VERSION at or
+ * above REQUIRED_WRITE_SCOPE_GATE_VERSION and settings.json registers that gate for Write and Edit.
+ * A project that modified or pinned agent-write-scope.ts keeps its old copy across a reinstall,
+ * and that copy still has the scratch-parent gap, so trusting `writeScope` beside it would let a
+ * scoped writer through both gates.
+ *
+ * Both imports are dynamic and inside the try. A static import that fails to link exits the process
+ * before the entrypoint's try, which Claude Code reads as no opinion. Importing agent-write-scope.ts
+ * is safe: its entrypoint sits behind `import.meta.main`.
+ */
+export async function loadWriteScopeParser(
+  parserPath: string = "./write-scope-parse",
+  gatePath: string = "./agent-write-scope",
+  settingsPath: string = join(projectRootOf(process.env), ".claude", "settings.json"),
+): Promise<WriteScopeParser | null> {
+  try {
+    const parser = (await import(specifier(parserPath))) as { parseWriteScope?: unknown };
+    const gate = (await import(specifier(gatePath))) as { WRITE_SCOPE_GATE_VERSION?: unknown };
+    if (typeof parser.parseWriteScope !== "function") return null;
+    const version = gate.WRITE_SCOPE_GATE_VERSION;
+    if (typeof version !== "number" || !(version >= REQUIRED_WRITE_SCOPE_GATE_VERSION)) return null;
+    if (!registersWriteScopeGate(settingsPath)) return null;
+    return parser.parseWriteScope as WriteScopeParser;
+  } catch {
+    return null;
+  }
+}
 
 const ALLOW: GateDecision = { action: "allow" };
 
@@ -161,7 +318,7 @@ const classificationCache = new Map<string, boolean>();
  * True unless the frontmatter proves the role read-only: a `tools:` field whose
  * every entry is on the read-only allowlist. Absent/empty field means all tools.
  */
-function frontmatterRequiresIsolation(text: string): boolean {
+function frontmatterRequiresIsolation(text: string, parseScope: WriteScopeParser | null): boolean {
   const fm = text.match(/^---\r?\n([\s\S]*?)\r?\n---/)?.[1];
   if (fm === undefined) return true; // no parseable frontmatter → cannot prove read-only
   const lines = fm.split(/\r?\n/);
@@ -181,7 +338,19 @@ function frontmatterRequiresIsolation(text: string): boolean {
     .map((s) => s.trim().toLowerCase())
     .filter((s) => s !== "");
   if (tokens.length === 0) return true; // empty value = all tools
-  return !tokens.every((tok) => READ_ONLY_TOOLS.has(tok));
+  if (tokens.every((tok) => READ_ONLY_TOOLS.has(tok))) return false;
+  // A shell-less scratch writer is not a repo writer. agent-write-scope.ts reads this same file with
+  // the same parser and confines Write and Edit to a scratch directory, and with no shell in the
+  // grant nothing else reaches the checkout. The memory: check above has already run, and only a
+  // non-null parser (see loadWriteScopeParser) lets this line fire.
+  if (
+    parseScope !== null &&
+    parseScope(text) === "scratch" &&
+    tokens.every((tok) => READ_ONLY_TOOLS.has(tok) || SCOPED_WRITE_TOOLS.has(tok))
+  ) {
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -209,11 +378,13 @@ function frontmatterRequiresIsolation(text: string): boolean {
 export function requiresIsolation(
   subagentType: string,
   agentsDir: string = DEFAULT_AGENTS_DIR,
+  parseScope: WriteScopeParser | null = null,
 ): boolean {
   if (PROJECT_EXCEPTIONS.includes(subagentType)) return false;
   if (!isValidAgentName(subagentType)) return true;
 
-  const key = `${agentsDir} ${subagentType}`;
+  // The answer depends on whether a parser was supplied, so the key says so.
+  const key = `${agentsDir} ${subagentType} ${parseScope === null ? "plain" : "scoped"}`;
   const cached = classificationCache.get(key);
   if (cached !== undefined) return cached;
 
@@ -221,7 +392,7 @@ export function requiresIsolation(
   const defFile = join(agentsDir, `${subagentType}.md`);
   if (existsSync(defFile)) {
     try {
-      result = frontmatterRequiresIsolation(readFileSync(defFile, "utf8"));
+      result = frontmatterRequiresIsolation(readFileSync(defFile, "utf8"), parseScope);
     } catch {
       // Definition exists but can't be read: cannot prove read-only, so this
       // TYPE requires isolation. Not a hook-level fail-open — that is reserved
@@ -241,10 +412,16 @@ export function requiresIsolation(
 
 /**
  * Decision over the PreToolUse stdin payload. Unrecognizable input allows.
+ *
+ * `projectRoot` null or omitted means no root is known: the probe is not called and the non-git
+ * allow never fires. `parseScope` null or omitted means no scoped-writer trust.
  */
 export function decide(
   payload: unknown,
   agentsDir: string = DEFAULT_AGENTS_DIR,
+  projectRoot: string | null = null,
+  probe: (dir: string) => GitProbe = (dir) => probeGitWorkTree(dir),
+  parseScope: WriteScopeParser | null = null,
 ): GateDecision {
   if (typeof payload !== "object" || payload === null) return ALLOW;
   const p = payload as Record<string, unknown>;
@@ -267,7 +444,16 @@ export function decide(
       ? t.subagent_type.trim().toLowerCase()
       : "general-purpose";
 
-  if (!requiresIsolation(subagentType, agentsDir)) return ALLOW;
+  if (!requiresIsolation(subagentType, agentsDir, parseScope)) return ALLOW;
+
+  // Nothing to isolate into: the project root is provably not a repository, and the session cwd
+  // (when the payload names one) agrees. Allow and say so. Any other probe answer, "unknown"
+  // included, falls through to the logic below.
+  if (typeof projectRoot === "string" && projectRoot !== "" && probe(projectRoot) === "not-repo") {
+    if (typeof p.cwd !== "string" || probe(p.cwd) === "not-repo") {
+      return { action: "allow", note: nonGitNote(projectRoot) };
+    }
+  }
 
   if (typeof t.isolation === "string" && ISOLATED.has(t.isolation)) {
     if (typeof t.prompt === "string" && BASE_SHA_RE.test(t.prompt)) return ALLOW;
@@ -305,7 +491,22 @@ if (import.meta.main) {
     // Copilot CLI also runs .claude/settings.json hooks and fails closed on them (#227). Stand
     // down there, but never while CLAUDECODE is set, so a Claude Code session always runs the rest.
     if (process.env.COPILOT_CLI && !process.env.CLAUDECODE) process.exit(0);
-    const decision = decide(JSON.parse(raw));
+    const payload = JSON.parse(raw);
+    const decision = decide(
+      payload,
+      DEFAULT_AGENTS_DIR,
+      projectRootOf(process.env),
+      undefined,
+      await loadWriteScopeParser(),
+    );
+    if (decision.action === "allow" && decision.note !== undefined) {
+      console.log(
+        JSON.stringify({
+          systemMessage: decision.note,
+          hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: decision.note },
+        }),
+      );
+    }
     if (decision.action === "deny") {
       console.log(
         JSON.stringify({

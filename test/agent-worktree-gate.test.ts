@@ -9,26 +9,50 @@
 // this file is what makes that claim true now.
 
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   BASE_SHA_TOKEN,
   decide,
+  type GitProbe,
+  loadWriteScopeParser,
+  nonGitNote,
   OVERRIDE_TOKEN,
+  probeGitWorkTree,
   PROJECT_EXCEPTIONS,
+  projectRootOf,
+  REQUIRED_WRITE_SCOPE_GATE_VERSION,
   requiresIsolation,
 } from "../core/claude/hooks/agent-worktree-gate";
+import { parseWriteScope } from "../core/claude/hooks/write-scope-parse";
 
-const HOOK = join(import.meta.dir, "..", "core", "claude", "hooks", "agent-worktree-gate.ts");
+const REPO_ROOT = join(import.meta.dir, "..");
+const HOOKS_SRC = join(REPO_ROOT, "core", "claude", "hooks");
+const HOOK = join(HOOKS_SRC, "agent-worktree-gate.ts");
 
-/** Runs the hook as a real process with `stdinText` on stdin. Never goes through a shell. */
-function runHook(stdinText: string) {
+/**
+ * Runs a hook as a real process with `stdinText` on stdin. Never goes through a shell. The project
+ * root defaults to this repository so the git probe answers "repo" whatever the caller's shell
+ * exported, and GIT_DIR / GIT_WORK_TREE are dropped so a git hook running this suite cannot turn a
+ * non-git temp dir into a repo. `env` entries override, and an undefined value removes the key.
+ */
+function runHook(stdinText: string, env: Record<string, string | undefined> = {}, hook: string = HOOK) {
+  const merged: Record<string, string | undefined> = {
+    ...process.env,
+    CLAUDE_PROJECT_DIR: REPO_ROOT,
+    GIT_DIR: undefined,
+    GIT_WORK_TREE: undefined,
+    ...env,
+  };
+  const clean: Record<string, string> = {};
+  for (const [k, v] of Object.entries(merged)) if (v !== undefined) clean[k] = v;
   const proc = Bun.spawnSync({
-    cmd: [process.execPath, HOOK],
+    cmd: [process.execPath, hook],
     stdin: new TextEncoder().encode(stdinText),
     stdout: "pipe",
     stderr: "pipe",
+    env: clean,
   });
   return { exitCode: proc.exitCode, stdout: proc.stdout.toString(), stderr: proc.stderr.toString() };
 }
@@ -491,5 +515,570 @@ describe("spawned process — the fail-open path stays open and says why", () =>
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe("");
     expect(result.stderr).toBe("");
+  });
+});
+
+// --- #310: the gate checks its own preconditions -----------------------------------------------
+//
+// Outside a git repository a worktree cannot exist, so a deny that says "re-dispatch isolated"
+// sends the dispatcher to an impossible fix. The gate asks the filesystem (no git binary) and, when
+// the project root is provably not a repository, lets the dispatch through with a note. Every
+// answer short of "not-repo" keeps today's behaviour.
+
+/** True when a `.git` entry exists at `dir` or any ancestor, so a temp dir there is not a clean non-repo. */
+function hasGitAncestor(dir: string): boolean {
+  let p = resolve(dir);
+  for (;;) {
+    if (existsSync(join(p, ".git"))) return true;
+    if (dirname(p) === p) return false;
+    p = dirname(p);
+  }
+}
+const TMP_UNDER_GIT = hasGitAncestor(tmpdir());
+
+const scratchDirs: string[] = [];
+function tmpRoot(prefix: string): string {
+  const d = mkdtempSync(join(tmpdir(), prefix));
+  scratchDirs.push(d);
+  return d;
+}
+function gitTmpRoot(prefix: string): string {
+  const d = tmpRoot(prefix);
+  mkdirSync(join(d, ".git"));
+  return d;
+}
+afterAll(() => {
+  for (const d of scratchDirs) rmSync(d, { recursive: true, force: true });
+});
+
+describe("probeGitWorkTree() — filesystem only, no git binary", () => {
+  test("a dir holding a .git directory is a repo, and so is a subfolder of it", () => {
+    const root = gitTmpRoot("wg-probe-dir-");
+    mkdirSync(join(root, "a", "b"), { recursive: true });
+    expect(probeGitWorkTree(root, {})).toBe("repo");
+    expect(probeGitWorkTree(join(root, "a", "b"), {})).toBe("repo");
+  });
+
+  test("a .git FILE (the linked-worktree shape) is a repo", () => {
+    const root = tmpRoot("wg-probe-file-");
+    writeFileSync(join(root, ".git"), "gitdir: /elsewhere/.git/worktrees/x\n");
+    expect(probeGitWorkTree(root, {})).toBe("repo");
+  });
+
+  test("a path that does not exist is unknown", () => {
+    expect(probeGitWorkTree(join(tmpdir(), "wg-probe-no-such-dir-xyz"), {})).toBe("unknown");
+  });
+
+  test("a path that is a file, not a directory, is unknown", () => {
+    const root = tmpRoot("wg-probe-notdir-");
+    const f = join(root, "plain.txt");
+    writeFileSync(f, "x");
+    expect(probeGitWorkTree(f, {})).toBe("unknown");
+  });
+
+  test.each([["GIT_DIR"], ["GIT_WORK_TREE"]])("%s set makes any dir a repo", (key) => {
+    const root = tmpRoot("wg-probe-env-");
+    expect(probeGitWorkTree(root, { [key]: "/x" })).toBe("repo");
+  });
+
+  test("an empty GIT_DIR does not count", () => {
+    expect(probeGitWorkTree(join(tmpdir(), "wg-probe-no-such-dir-xyz"), { GIT_DIR: "" })).toBe("unknown");
+  });
+
+  test.skipIf(TMP_UNDER_GIT)("a fresh temp dir with no .git in any ancestor is not-repo", () => {
+    const root = tmpRoot("wg-probe-none-");
+    expect(probeGitWorkTree(root, {})).toBe("not-repo");
+  });
+});
+
+describe("projectRootOf() and nonGitNote()", () => {
+  test("CLAUDE_PROJECT_DIR wins", () => {
+    expect(projectRootOf({ CLAUDE_PROJECT_DIR: "/some/proj" })).toBe("/some/proj");
+  });
+
+  test("without it the root is two levels above the hooks dir", () => {
+    expect(projectRootOf({})).toBe(join(HOOKS_SRC, "..", ".."));
+    expect(projectRootOf({ CLAUDE_PROJECT_DIR: "" })).toBe(join(HOOKS_SRC, "..", ".."));
+  });
+
+  test("the note names the root and the git init remedy", () => {
+    const note = nonGitNote("/p");
+    expect(note).toContain("/p is not a git repository");
+    expect(note).toContain("`git init`");
+    expect(note).toBe(
+      "Worktree gate: /p is not a git repository, so worktree isolation is not available and this " +
+        "dispatch runs in the shared folder. A git repository in a subfolder of it is not isolated " +
+        "either. If this work should be versioned, run `git init` here and the gate will isolate " +
+        "concurrent writers.",
+    );
+  });
+});
+
+/** A probe that answers from a table and records every directory it was asked about. */
+function stubProbe(table: Record<string, GitProbe>) {
+  const calls: string[] = [];
+  const probe = (dir: string): GitProbe => {
+    calls.push(dir);
+    return table[dir] ?? "unknown";
+  };
+  return { calls, probe };
+}
+
+const writerDispatch = (extra: Record<string, unknown> = {}, tool: Record<string, unknown> = {}) => ({
+  tool_name: "Agent",
+  tool_input: { subagent_type: "writer", prompt: "do a thing", ...tool },
+  ...extra,
+});
+
+describe("decide() — a project root that is not a git repository (#310)", () => {
+  test("root not-repo and no payload cwd: allow with the note", () => {
+    const { probe } = stubProbe({ "/p": "not-repo" });
+    const v = decide(writerDispatch(), agentsDir, "/p", probe);
+    expect(v).toEqual({ action: "allow", note: nonGitNote("/p") });
+    if (v.action === "allow") {
+      expect(v.note).toContain("is not a git repository");
+      expect(v.note).toContain("git init");
+    }
+  });
+
+  test("root not-repo and payload cwd also not-repo: allow with the note", () => {
+    const { probe } = stubProbe({ "/p": "not-repo", "/p/sub": "not-repo" });
+    expect(decide(writerDispatch({ cwd: "/p/sub" }), agentsDir, "/p", probe)).toEqual({
+      action: "allow",
+      note: nonGitNote("/p"),
+    });
+  });
+
+  test("root not-repo but payload cwd is a repo: deny", () => {
+    const { probe } = stubProbe({ "/p": "not-repo", "/p/nested": "repo" });
+    expect(decide(writerDispatch({ cwd: "/p/nested" }), agentsDir, "/p", probe).action).toBe("deny");
+  });
+
+  test("root a repo but payload cwd not-repo: deny", () => {
+    const { probe } = stubProbe({ "/p": "repo", "/elsewhere": "not-repo" });
+    expect(decide(writerDispatch({ cwd: "/elsewhere" }), agentsDir, "/p", probe).action).toBe("deny");
+  });
+
+  test("root not-repo but payload cwd unknown: deny", () => {
+    const { probe } = stubProbe({ "/p": "not-repo" });
+    expect(decide(writerDispatch({ cwd: "/gone" }), agentsDir, "/p", probe).action).toBe("deny");
+  });
+
+  test("root unknown: deny", () => {
+    const { probe } = stubProbe({ "/p": "unknown" });
+    expect(decide(writerDispatch(), agentsDir, "/p", probe).action).toBe("deny");
+  });
+
+  test("root a repo: today's logic, deny without isolation and an override", () => {
+    const { probe } = stubProbe({ "/p": "repo" });
+    expect(decide(writerDispatch(), agentsDir, "/p", probe).action).toBe("deny");
+  });
+
+  test("projectRoot null: deny, and the probe is never called", () => {
+    const { calls, probe } = stubProbe({ "/p": "not-repo" });
+    expect(decide(writerDispatch(), agentsDir, null, probe).action).toBe("deny");
+    expect(calls).toEqual([]);
+  });
+
+  test("projectRoot omitted behaves like null", () => {
+    expect(decide(writerDispatch(), agentsDir).action).toBe("deny");
+  });
+
+  test("a read-only type outside git: plain allow, no note, probe not called", () => {
+    const { calls, probe } = stubProbe({ "/p": "not-repo" });
+    const v = decide({ tool_name: "Agent", tool_input: { subagent_type: "reader" } }, agentsDir, "/p", probe);
+    expect(v).toEqual({ action: "allow" });
+    expect("note" in v).toBe(false);
+    expect(calls).toEqual([]);
+  });
+
+  // The non-git allow replaces the isolation demand only where isolation is impossible. In a repo
+  // an isolated write dispatch still has to name its base.
+  test("in a repo an isolated write dispatch with no base sha is still denied", () => {
+    const { probe } = stubProbe({ "/p": "repo" });
+    const v = decide(writerDispatch({}, { isolation: "worktree" }), agentsDir, "/p", probe);
+    expect(v.action).toBe("deny");
+    if (v.action === "deny") expect(v.reason).toContain(BASE_SHA_TOKEN);
+  });
+});
+
+// --- scoped writers: shell-less scratch agents are not repo writers ------------------------------
+
+const scopedDir = mkdtempSync(join(tmpdir(), "worktree-gate-scoped-"));
+scratchDirs.push(scopedDir);
+function writeScopedDef(type: string, lines: string[], body: string[] = []) {
+  writeFileSync(join(scopedDir, `${type}.md`), ["---", `name: ${type}`, ...lines, "---", "", ...body].join("\n"));
+}
+const SCOPED_TOOLS = "tools: Read, Grep, Glob, WebFetch, WebSearch, Write, SendMessage";
+writeScopedDef("scoped", [SCOPED_TOOLS, "writeScope: scratch"]);
+writeScopedDef("scoped-edit", ["tools: Read, Edit, Write", "writeScope: scratch"]);
+writeScopedDef("scoped-readonly", ["tools: Read, Grep", "writeScope: scratch"]);
+writeScopedDef("unscoped", [SCOPED_TOOLS]);
+writeScopedDef("scoped-repo", [SCOPED_TOOLS, "writeScope: repo"]);
+writeScopedDef("scoped-memory", [SCOPED_TOOLS, "writeScope: scratch", "memory: user"]);
+writeScopedDef("dup-repo-first", [SCOPED_TOOLS, "writeScope: repo", "writeScope: scratch"]);
+writeScopedDef("scoped-in-body", [SCOPED_TOOLS], ["writeScope: scratch"]);
+const EXTRA_TOOLS: Array<[string, string]> = [
+  ["scoped-plus-notebookedit", "NotebookEdit"],
+  ["scoped-plus-bash", "Bash"],
+  ["scoped-plus-powershell", "PowerShell"],
+  ["scoped-plus-agent", "Agent"],
+  ["scoped-plus-skill", "Skill"],
+  ["scoped-plus-mcp", "mcp__x__y"],
+  ["scoped-plus-star", "*"],
+];
+for (const [name, tool] of EXTRA_TOOLS) writeScopedDef(name, [`${SCOPED_TOOLS}, ${tool}`, "writeScope: scratch"]);
+writeScopedDef("web-fetch", ["tools: Write"]);
+
+describe("requiresIsolation() — a shell-less scratch writer is trusted only with the parser (#310)", () => {
+  test("scratch scope, Write + Edit + SendMessage, no shell: not an isolation case", () => {
+    expect(requiresIsolation("scoped", scopedDir, parseWriteScope)).toBe(false);
+    expect(requiresIsolation("scoped-edit", scopedDir, parseWriteScope)).toBe(false);
+  });
+
+  test("the same def with parseScope null or omitted still requires isolation", () => {
+    expect(requiresIsolation("scoped", scopedDir, null)).toBe(true);
+    expect(requiresIsolation("scoped", scopedDir)).toBe(true);
+  });
+
+  test("a read-only grant stays exempt with or without the parser", () => {
+    expect(requiresIsolation("scoped-readonly", scopedDir, null)).toBe(false);
+    expect(requiresIsolation("scoped-readonly", scopedDir, parseWriteScope)).toBe(false);
+  });
+
+  test.each(EXTRA_TOOLS)("%s: adding %s to the grant requires isolation again", (type) => {
+    expect(requiresIsolation(type, scopedDir, parseWriteScope)).toBe(true);
+  });
+
+  test("no writeScope declared: requires isolation", () => {
+    expect(requiresIsolation("unscoped", scopedDir, parseWriteScope)).toBe(true);
+  });
+
+  test("writeScope: repo: requires isolation", () => {
+    expect(requiresIsolation("scoped-repo", scopedDir, parseWriteScope)).toBe(true);
+  });
+
+  test("a memory: line puts the scratch writer back under isolation", () => {
+    expect(requiresIsolation("scoped-memory", scopedDir, parseWriteScope)).toBe(true);
+  });
+
+  test("duplicate keys: the first one wins, so repo-then-scratch requires isolation", () => {
+    expect(requiresIsolation("dup-repo-first", scopedDir, parseWriteScope)).toBe(true);
+  });
+
+  test("a writeScope line in the body is prose, not a declaration", () => {
+    expect(requiresIsolation("scoped-in-body", scopedDir, parseWriteScope)).toBe(true);
+  });
+
+  test("web-fetch with no def file is a read-only built-in", () => {
+    expect(requiresIsolation("web-fetch", join(scopedDir, "no-such-dir"))).toBe(false);
+  });
+
+  test("a web-fetch.md def granting Write with no writeScope requires isolation", () => {
+    expect(requiresIsolation("web-fetch", scopedDir, parseWriteScope)).toBe(true);
+  });
+
+  test("the classification cache keeps the with-parser and without-parser answers apart", () => {
+    // Same agentsDir + type, asked both ways, in both orders: neither answer may leak to the other.
+    expect(requiresIsolation("scoped-edit", scopedDir, null)).toBe(true);
+    expect(requiresIsolation("scoped-edit", scopedDir, parseWriteScope)).toBe(false);
+    expect(requiresIsolation("scoped-edit", scopedDir, null)).toBe(true);
+  });
+
+  test("a scoped writer dispatched end to end: allowed with the parser, denied without", () => {
+    const d = { tool_name: "Agent", tool_input: { subagent_type: "scoped", prompt: "go" } };
+    expect(decide(d, scopedDir, null, undefined, parseWriteScope)).toEqual({ action: "allow" });
+    expect(decide(d, scopedDir, null, undefined, null).action).toBe("deny");
+    expect(decide(d, scopedDir).action).toBe("deny");
+  });
+});
+
+// --- loadWriteScopeParser(): the guarded dynamic import ----------------------------------------
+
+function settingsJson(groups: Array<{ matcher?: string; command: string }>): string {
+  return JSON.stringify({
+    hooks: {
+      PreToolUse: groups.map((g) => ({
+        ...(g.matcher === undefined ? {} : { matcher: g.matcher }),
+        hooks: [{ type: "command", command: g.command }],
+      })),
+    },
+  });
+}
+const SCOPE_CMD = 'bun "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-write-scope.ts"';
+
+/**
+ * Builds an installed-layout project: `<root>/.claude/{hooks,agents}`, a settings file and a git
+ * marker. `gate` is "real" (a copy of the shipped agent-write-scope.ts), a stub source string, or
+ * null for none.
+ */
+function makeInstall(opts: { parser?: boolean; gate?: "real" | string | null; settings?: string | null }) {
+  const root = gitTmpRoot("wg-install-");
+  const hooks = join(root, ".claude", "hooks");
+  mkdirSync(hooks, { recursive: true });
+  mkdirSync(join(root, ".claude", "agents"), { recursive: true });
+  copyFileSync(join(HOOKS_SRC, "agent-name.ts"), join(hooks, "agent-name.ts"));
+  copyFileSync(HOOK, join(hooks, "agent-worktree-gate.ts"));
+  if (opts.parser !== false) copyFileSync(join(HOOKS_SRC, "write-scope-parse.ts"), join(hooks, "write-scope-parse.ts"));
+  if (opts.gate === "real") copyFileSync(join(HOOKS_SRC, "agent-write-scope.ts"), join(hooks, "agent-write-scope.ts"));
+  else if (typeof opts.gate === "string") writeFileSync(join(hooks, "agent-write-scope.ts"), opts.gate);
+  if (opts.settings !== null) {
+    writeFileSync(
+      join(root, ".claude", "settings.json"),
+      opts.settings ?? settingsJson([{ matcher: "Write|Edit|NotebookEdit", command: SCOPE_CMD }]),
+    );
+  }
+  writeFileSync(
+    join(root, ".claude", "agents", "scoped.md"),
+    ["---", "name: scoped", SCOPED_TOOLS, "writeScope: scratch", "---", "", "Body."].join("\n"),
+  );
+  return {
+    root,
+    parserPath: join(hooks, "write-scope-parse.ts"),
+    gatePath: join(hooks, "agent-write-scope.ts"),
+    settingsPath: join(root, ".claude", "settings.json"),
+    gate: join(hooks, "agent-worktree-gate.ts"),
+  };
+}
+
+const VERSION_STUB = (v: string | null) =>
+  v === null ? "export const SOMETHING_ELSE = 1;\n" : `export const WRITE_SCOPE_GATE_VERSION = ${v};\n`;
+
+describe("loadWriteScopeParser() — trusts a parser only beside a current, registered scope gate", () => {
+  test("the required version is 2", () => {
+    expect(REQUIRED_WRITE_SCOPE_GATE_VERSION).toBe(2);
+  });
+
+  test("a module that does not exist resolves to null and does not throw", async () => {
+    await expect(loadWriteScopeParser("./no-such-module")).resolves.toBeNull();
+  });
+
+  test("the shipped modules, registered under Write|Edit|NotebookEdit, load", async () => {
+    const inst = makeInstall({ gate: "real" });
+    const parser = await loadWriteScopeParser(undefined, undefined, inst.settingsPath);
+    expect(typeof parser).toBe("function");
+    expect(parser!("---\nwriteScope: scratch\n---\n")).toBe("scratch");
+  });
+
+  test("installed copies of all three modules load from an absolute path", async () => {
+    const inst = makeInstall({ gate: "real" });
+    const parser = await loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath);
+    expect(typeof parser).toBe("function");
+  });
+
+  test("a scope gate with no version export gives null", async () => {
+    const inst = makeInstall({ gate: VERSION_STUB(null) });
+    await expect(loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath)).resolves.toBeNull();
+  });
+
+  test("a scope gate at version 1 gives null", async () => {
+    const inst = makeInstall({ gate: VERSION_STUB("1") });
+    await expect(loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath)).resolves.toBeNull();
+  });
+
+  test('a version that is not a number ("2") gives null', async () => {
+    const inst = makeInstall({ gate: VERSION_STUB('"2"') });
+    await expect(loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath)).resolves.toBeNull();
+  });
+
+  test("a scope gate at version 2 gives a parser", async () => {
+    const inst = makeInstall({ gate: VERSION_STUB("2") });
+    expect(typeof (await loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath))).toBe("function");
+  });
+
+  test("a later version also gives a parser", async () => {
+    const inst = makeInstall({ gate: VERSION_STUB("3") });
+    expect(typeof (await loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath))).toBe("function");
+  });
+
+  test("a missing scope gate module gives null", async () => {
+    const inst = makeInstall({ gate: null });
+    await expect(loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath)).resolves.toBeNull();
+  });
+
+  test("a missing parser module gives null", async () => {
+    const inst = makeInstall({ parser: false, gate: VERSION_STUB("2") });
+    await expect(loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath)).resolves.toBeNull();
+  });
+
+  test("a parser module that exports no parseWriteScope function gives null", async () => {
+    const inst = makeInstall({ gate: VERSION_STUB("2") });
+    writeFileSync(inst.parserPath, "export const parseWriteScope = 5;\n");
+    await expect(loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath)).resolves.toBeNull();
+  });
+
+  test("a scope gate that throws on import gives null", async () => {
+    const inst = makeInstall({ gate: 'throw new Error("boom");\nexport const WRITE_SCOPE_GATE_VERSION = 2;\n' });
+    await expect(loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath)).resolves.toBeNull();
+  });
+
+  test("a settings file that does not register the scope gate gives null", async () => {
+    const inst = makeInstall({
+      gate: VERSION_STUB("2"),
+      settings: settingsJson([{ matcher: "Agent|Task", command: 'bun "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-worktree-gate.ts"' }]),
+    });
+    await expect(loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath)).resolves.toBeNull();
+  });
+
+  test.each(["Write", "Edit", "NotebookEdit"])("registered only under %s gives null", async (matcher) => {
+    const inst = makeInstall({ gate: VERSION_STUB("2"), settings: settingsJson([{ matcher, command: SCOPE_CMD }]) });
+    await expect(loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath)).resolves.toBeNull();
+  });
+
+  test("a matcher naming other tools that merely contain Write and Edit does not count", async () => {
+    const inst = makeInstall({
+      gate: VERSION_STUB("2"),
+      settings: settingsJson([{ matcher: "WriteFile|EditFile", command: SCOPE_CMD }]),
+    });
+    await expect(loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath)).resolves.toBeNull();
+  });
+
+  test.each(["Write|Edit", "Edit|Write", "Write|Edit|NotebookEdit", "*", ""])(
+    "registered under a matcher that covers both (%p) gives a parser",
+    async (matcher) => {
+      const inst = makeInstall({ gate: VERSION_STUB("2"), settings: settingsJson([{ matcher, command: SCOPE_CMD }]) });
+      expect(typeof (await loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath))).toBe("function");
+    },
+  );
+
+  test("a group with no matcher at all covers every tool", async () => {
+    const inst = makeInstall({ gate: VERSION_STUB("2"), settings: settingsJson([{ command: SCOPE_CMD }]) });
+    expect(typeof (await loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath))).toBe("function");
+  });
+
+  test("the registration must be under PreToolUse, not PostToolUse", async () => {
+    const inst = makeInstall({
+      gate: VERSION_STUB("2"),
+      settings: JSON.stringify({
+        hooks: { PostToolUse: [{ matcher: "Write|Edit", hooks: [{ type: "command", command: SCOPE_CMD }] }] },
+      }),
+    });
+    await expect(loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath)).resolves.toBeNull();
+  });
+
+  test.each([
+    ["a missing settings file", null],
+    ["malformed JSON", "{not json"],
+    ["a non-object", "5"],
+    ["hooks that is not an object", '{"hooks": 5}'],
+    ["PreToolUse that is not an array", '{"hooks": {"PreToolUse": {}}}'],
+    ["a group that is null", '{"hooks": {"PreToolUse": [null]}}'],
+    ["a hooks entry that is not an array", '{"hooks": {"PreToolUse": [{"matcher": "Write|Edit", "hooks": 3}]}}'],
+    ["an invalid matcher regex", settingsJson([{ matcher: "Write|(Edit", command: SCOPE_CMD }])],
+  ])("%s gives null and does not throw", async (_label, settings) => {
+    const inst = makeInstall({ gate: VERSION_STUB("2"), settings });
+    await expect(loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath)).resolves.toBeNull();
+  });
+
+  test("a registration split across two groups, one per tool, does not count", async () => {
+    // Each group alone leaves one tool unguarded, so a scoped writer's Edit would go unconfined.
+    const inst = makeInstall({
+      gate: VERSION_STUB("2"),
+      settings: settingsJson([
+        { matcher: "Write", command: SCOPE_CMD },
+        { matcher: "Edit", command: SCOPE_CMD },
+      ]),
+    });
+    await expect(loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath)).resolves.toBeNull();
+  });
+});
+
+describe("requiresIsolation() — an old scope gate beside the new parser keeps the scoped writer isolated", () => {
+  test.each([
+    ["no version export", VERSION_STUB(null), true],
+    ["version 1", VERSION_STUB("1"), true],
+    ["version 2", VERSION_STUB("2"), false],
+  ])("%s", async (_label, gateSrc, isolated) => {
+    const inst = makeInstall({ gate: gateSrc });
+    const parser = await loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath);
+    expect(parser === null).toBe(isolated);
+    expect(requiresIsolation("scoped", scopedDir, parser)).toBe(isolated);
+  });
+
+  test("an unregistered scope gate keeps the scoped writer isolated", async () => {
+    const inst = makeInstall({ gate: VERSION_STUB("2"), settings: settingsJson([{ matcher: "Write", command: SCOPE_CMD }]) });
+    const parser = await loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath);
+    expect(parser).toBeNull();
+    expect(requiresIsolation("scoped", scopedDir, parser)).toBe(true);
+  });
+});
+
+// --- spawned process: the #310 entrypoint behaviour ----------------------------------------------
+
+const GP = (cwd?: string) =>
+  JSON.stringify({
+    tool_name: "Agent",
+    tool_input: { subagent_type: "general-purpose", prompt: "do a thing" },
+    ...(cwd === undefined ? {} : { cwd }),
+  });
+
+describe("spawned process — project root and git probe (#310)", () => {
+  test("project root a repo, payload cwd a non-git dir: deny JSON", () => {
+    const repo = gitTmpRoot("wg-spawn-repo-");
+    const plain = tmpRoot("wg-spawn-plain-");
+    const result = runHook(GP(plain), { CLAUDE_PROJECT_DIR: repo });
+    expect(result.exitCode).toBe(0);
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+  });
+
+  test.skipIf(TMP_UNDER_GIT)("project root not a git repo: allow with systemMessage and additionalContext, no permissionDecision", () => {
+    const plain = tmpRoot("wg-spawn-nongit-");
+    const result = runHook(GP(), { CLAUDE_PROJECT_DIR: plain });
+    expect(result.exitCode).toBe(0);
+    const parsed = JSON.parse(result.stdout);
+    const note = nonGitNote(plain);
+    expect(parsed.systemMessage).toBe(note);
+    expect(parsed.hookSpecificOutput.hookEventName).toBe("PreToolUse");
+    expect(parsed.hookSpecificOutput.additionalContext).toBe(note);
+    expect("permissionDecision" in parsed.hookSpecificOutput).toBe(false);
+    expect(result.stderr).toBe("");
+  });
+
+  test.skipIf(TMP_UNDER_GIT)("GIT_DIR in the environment makes the same non-git root a repo: deny", () => {
+    const plain = tmpRoot("wg-spawn-gitdir-");
+    const result = runHook(GP(), { CLAUDE_PROJECT_DIR: plain, GIT_DIR: join(plain, "x") });
+    expect(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+  });
+});
+
+describe("spawned process — installed layout and the guarded dynamic import (#310)", () => {
+  const scopedDispatch = (root: string) =>
+    JSON.stringify({ tool_name: "Agent", tool_input: { subagent_type: "scoped", prompt: "go" }, cwd: root });
+
+  test("write-scope-parse.ts missing: exit 0 and a deny JSON, not silence", () => {
+    const inst = makeInstall({ parser: false, gate: VERSION_STUB("2") });
+    const result = runHook(scopedDispatch(inst.root), { CLAUDE_PROJECT_DIR: inst.root }, inst.gate);
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+  });
+
+  test("agent-write-scope.ts missing entirely: exit 0 and a deny JSON", () => {
+    const inst = makeInstall({ gate: null });
+    const result = runHook(scopedDispatch(inst.root), { CLAUDE_PROJECT_DIR: inst.root }, inst.gate);
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+  });
+
+  test("an old agent-write-scope.ts without the version export: exit 0 and a deny JSON", () => {
+    const inst = makeInstall({ gate: VERSION_STUB(null) });
+    const result = runHook(scopedDispatch(inst.root), { CLAUDE_PROJECT_DIR: inst.root }, inst.gate);
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+  });
+
+  test("all three modules at version 2 and the gate registered: exit 0, no stdout", () => {
+    const inst = makeInstall({ gate: "real" });
+    const result = runHook(scopedDispatch(inst.root), { CLAUDE_PROJECT_DIR: inst.root }, inst.gate);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("");
+  });
+
+  test("the same layout with the gate registered only under Write: deny JSON", () => {
+    const inst = makeInstall({ gate: "real", settings: settingsJson([{ matcher: "Write", command: SCOPE_CMD }]) });
+    const result = runHook(scopedDispatch(inst.root), { CLAUDE_PROJECT_DIR: inst.root }, inst.gate);
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
   });
 });
