@@ -70,6 +70,7 @@ Agents and hooks installed by `Install-Harness.ps1` stay ungated by layer in Pla
 - Manifest `.claude/.harness-manifest.json` fields `schemaVersion` (3), `layers` (string array), `settings` (`statusCadence`, `audience`, `lengthBudgetDefault`). The interview reads these as its recommended answers.
 - `core/claude/rules/layers.json`: `rules` maps file name to layer list, and `settings` holds each setting's values and rule text. Plan C adds documents and physical rule files here. Plan B reads the settings values for its questions, and adds a decision-log template if one is wanted.
 - `account/claude/hooks/harness-core-reminder.sh` nudge text. Plan B replaces the installer command in it with the interview skill's name.
+- `core/claude/deps.json` and `-InstallDeps` (Task 15). Plan C adds the documents and physical dependencies. Plan B's interview can offer `-InstallDeps` when the preflight reports something missing.
 
 ## Task groups
 
@@ -77,7 +78,7 @@ Agents and hooks installed by `Install-Harness.ps1` stay ungated by layer in Pla
 |---|---|---|---|
 | A1 gates | `feat/310-gates` | 1, 2 | agents |
 | A2 model currency and kernel rules | `feat/310-kernel` | 3, 4, 5 | agent, then coordinator |
-| A3 layers | `feat/310-layers` | 6, 7, 8, 9, 10 | coordinator preflight, then agents |
+| A3 layers | `feat/310-layers` | 6, 7, 8, 15, 9, 10 (Task 15 runs after Task 8) | coordinator preflight, then agents |
 | A4 cutover | `feat/310-cutover` | 11, 12, 13 | coordinator on the operator's machine, then an agent |
 | A5 session close | `feat/310-session-close` | 14 | agent |
 
@@ -850,6 +851,102 @@ git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit
 ```
 
 PR A5 body: `Docs: README still accurate: no README section describes the session close`. After the merge, the coordinator reinstalls every project from Task 11 Step 2 once more.
+
+### Task 15: Declared dependencies, a refusing preflight, and opt-in installs
+
+Group A3, after Task 8, which it shares `Install-Harness.ps1` with. It is numbered last because it was added last.
+
+**Files:**
+- Create: `core/claude/deps.json`, `install/Deps.ps1` (dot-sourced by both installers)
+- Modify: `install/Install-Harness.ps1` (replaces the bun-only probe and its warning), `install/Install-Account.ps1` (replaces the `$wanted` list at line 232, and drops `pwsh` and `uvx`)
+- Test: `install/Install-Harness.Tests.ps1` (new `Context 'dependencies'`), `install/Install-Account.Tests.ps1` (two cases). The cases sit in suites CI already runs, so `.github/workflows/test.yml` does not change.
+- Modify: `README.md` (Install and Account layer sections)
+
+**Interfaces:**
+- Consumes: `ConvertTo-LayerList` and `Resolve-ProjectLayers` (Task 8).
+- Produces:
+  - `core/claude/deps.json`, shaped `{ "schemaVersion": 1, "deps": [ { "name", "layers": ["kernel" | "code" | "documents" | "physical"], "platforms"?: ["windows" | "linux"], "minVersion", "severity": "hard" | "optional", "failMode", "probe": [argv...], "install": { "windows"?: { "winget", "version" }, "linux"?: { "apt" | "brew" | "npm", "version" } } } ] }`. An absent `platforms` means both.
+  - In `install/Deps.ps1`:
+    - `Get-DepsManifest -Path <string>` returns the validated manifest.
+    - `Get-RequiredDeps -Manifest -Layers <string[]> -IsWindows <bool>` returns the kernel entries plus the chosen layers' entries for this platform.
+    - `Test-Dep -Dep -Runner <scriptblock>` returns `[pscustomobject]@{ Name; Present; Version; MeetsMin }`.
+    - `Get-DepInstallCommand -Dep -IsWindows <bool>` returns `string[]` or `$null`.
+    - `Invoke-DepsPreflight -Manifest -Layers -IsWindows -InstallDeps <bool> -Runner <scriptblock>`
+  - The runner contract is `& $Runner $argv` returning `[pscustomobject]@{ ExitCode; Output }`. The default runner runs the argv and joins its output. A command that is not on PATH returns `ExitCode` 127 instead of throwing.
+  - New params on both installers: `[switch]$InstallDeps`, plus the test seams `[string]$DepsManifestPath` and `[scriptblock]$DepsRunner`.
+
+- [ ] **Step 1: Write the failing tests.** Each uses a fixture manifest through `-DepsManifestPath` and a recording mock `-DepsRunner`, so no real tool is probed or installed. The fixture's hard dep `harness-fake-hard` (probe `harness-fake-hard --version`, `minVersion` `1.2.0`) has install entries `{ "winget": "Example.FakeHard", "version": "1.2.3" }` and `{ "apt": "fake-hard", "version": "1.2.3" }`.
+  - "a missing hard dependency refuses before any write and prints the pinned command":
+    - The mock returns 127 for the probe.
+    - The install throws a message containing the platform's command: `winget install --id Example.FakeHard --version 1.2.3 --exact --source winget` on Windows, `sudo apt-get install -y fake-hard=1.2.3` on Linux.
+    - The target has no `.claude`, and the mock recorded no install argv.
+  - "a missing optional dependency warns and the install completes": the output matches the optional dep's name and command, and `.claude/.harness-manifest.json` exists.
+  - "-InstallDeps runs the pinned command, re-probes, and proceeds": the first probe returns 127, the install returns 0, and the second probe prints `harness-fake-hard 1.2.3`. The recorded calls are exactly probe, install argv, probe, and the install completes.
+  - "-InstallDeps refuses when the re-probe still fails": the message names the dependency and says the install did not verify.
+  - "a version below minVersion counts as missing": a probe printing `harness-fake-hard 1.1.9` refuses.
+  - "a hard dependency with no pinned install for this platform refuses with install-by-hand guidance", even with `-InstallDeps`. The mock records no install.
+  - "the dependency preflight is skipped by -Audit": `-Audit` with the failing fixture does not throw.
+  - "the shipped deps.json validates":
+    - `Get-DepsManifest` on the real file passes.
+    - `bun` and `git-bash` are `hard` kernel entries, with `git-bash` Windows-only.
+    - `git` is `hard` for `code` and `optional` in the kernel.
+    - No entry is named `uvx`.
+    - Every install entry carries an exact version.
+  - "Get-DepsManifest rejects a range or tag": `latest`, `1.x`, `>=1.2` and an empty version each throw.
+  - In `install/Install-Account.Tests.ps1`, "a missing hard kernel dependency refuses the account install" (same fixture and mock), and "uvx is no longer probed" (no recorded probe argv starts with `uvx`).
+
+- [ ] **Step 2: Run to verify they fail.** `pwsh -NoProfile -File install/Install-Harness.Tests.ps1` and `pwsh -NoProfile -File install/Install-Account.Tests.ps1`. Expected: the new cases FAIL.
+
+- [ ] **Step 3: Implement.**
+  - **`deps.json`.** It declares the following. Each `minVersion` comes from the version the repo is tested on (Bun 1.3.14 per the bun-autoload note).
+
+    | Dependency | Layer | Severity | Applies to |
+    |---|---|---|---|
+    | bun | kernel | hard | both platforms |
+    | git-bash | kernel | hard | Windows only. Probe `bash --version`, resolved from Git's `usr/bin` |
+    | git | kernel | optional | both |
+    | git | code | hard | both |
+    | vale | kernel | optional | both |
+    | python3 | kernel | optional | both. The not-ai gate, stdlib only |
+    | node and npm | kernel | optional | both. For ccstatusline |
+    | ccstatusline | kernel | optional | both. npm package |
+    | op | kernel | optional | both |
+    | jq | kernel | optional | Linux only. The statusline fallback |
+    | gh, claude | code | optional | both. The pr-review and model-currency tools |
+
+    Each `failMode` is one sentence. For bun and git-bash it reads "every TypeScript (or shell) gate fails open".
+  - **Install ids.** Fill winget ids and versions from `winget show --id <id> --versions` output taken while implementing, never from memory. Fill apt versions from `apt-cache policy <pkg>` and npm versions from `npm view <pkg> versions`. Per `security.md`, each pinned version's release is at least 30 days old.
+  - **Tools with no pinned package source on a platform.** bun and vale on Linux get no `install.linux` entry. Their refusal says to install by hand per the README.
+  - **Install commands.** Built as argv arrays, never strings:
+    - `winget install --id <id> --version <v> --exact --source winget --silent --accept-package-agreements --accept-source-agreements`
+    - `sudo apt-get install -y <pkg>=<v>`
+    - `brew install <versioned-formula>`, accepted only when the formula name carries the version
+    - `npm install -g <pkg>@<v>`
+
+    No download-and-execute form is accepted.
+  - **`Get-DepsManifest`** throws on:
+    - an unknown severity or layer
+    - an empty probe
+    - a version that is not an exact dotted number
+
+    Every refusal comes before any write.
+  - **Version parsing.** Take the first `\d+(\.\d+)+` in the probe output and compare as `[version]`. Unparsable output from a present tool counts as below the minimum.
+  - **`Invoke-DepsPreflight`** collects every problem before deciding:
+    - Without `-InstallDeps`, a missing or old hard dependency throws one message listing each with its command, or with "no pinned install for <platform>, install by hand (README, Install)". A missing optional one gets `Write-Warning` with its command.
+    - With `-InstallDeps`, it runs each available command through the runner and re-probes. A hard dependency that still fails throws, and an optional one warns.
+    - Nothing is installed without `-InstallDeps`.
+  - **`Install-Harness.ps1`** calls the preflight with `@('kernel') + <resolved layers>` after the layer and manifest load and before the sidecar plan, which is the first write. It never calls it on `-Audit`, `-Accept`, `-Unaccept` or `-Prune`. The bun warning block goes.
+  - **`Install-Account.ps1`** calls it with the kernel only, in place of `Test-Prerequisite`'s fixed list. The `-NeedJq` condition becomes the `jq` entry's Linux platform scope. `-SkipPreflight` keeps working.
+  - **README.** The Install and Account sections list the hard dependencies, the refusal, `-InstallDeps` and its pinned sources. The sentence saying the installers only warn goes.
+
+- [ ] **Step 4: Run to verify they pass.** Both Pester suites and `bun test`. Expected: all PASS. Then check by hand on this machine that `pwsh -NoProfile -File install/Install-Harness.ps1 -Target <tmp>` passes the real preflight with no warning about bun or Git Bash.
+
+- [ ] **Step 5: Commit.**
+
+```bash
+git add core/claude/deps.json install/Deps.ps1 install/Install-Harness.ps1 install/Install-Account.ps1 install/Install-Harness.Tests.ps1 install/Install-Account.Tests.ps1 README.md
+git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "feat(install): declared layer dependencies, a refusing preflight, opt-in installs (#310)"
+```
 
 ## Out of scope, recorded
 

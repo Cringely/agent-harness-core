@@ -58,6 +58,20 @@ These would make the work a failure even if every layer ships:
 - **Layer rules move into the project.** The account layer keeps only the kernel. Code, document and physical rules move into core, and `Install-Harness` copies the chosen layers into each project's `.claude/rules`. Settings travel with the project, not the person. A rule update reaches a project when it is reinstalled, and the existing drift check flags a project whose copy is stale. (Operator, 2026-11-11.)
 - **Defaults for a project with no layer recorded.** A project installed before this change migrates as the code layer and keeps every protection it has. A folder that never ran the installer gets the kernel only, plus a one-time nudge to run the init interview. (Operator, 2026-11-11.)
 - **Several layers per project.** Layers only add gates and conventions, and they combine, so a code repo with reports can carry both the code and documents layers. The settings that layers would otherwise fight over (status cadence, audience and register, length budgets) are single-value project settings chosen once in the interview, so no conflict rule is needed. (Operator, 2026-11-11.)
+- **Dependencies are declared, checked and installed only on request.**
+  - The kernel and each layer declare the external tools they need in one dependency manifest (`core/claude/deps.json`). Each entry gives:
+    - the tool
+    - its minimum version
+    - whether it is hard or optional
+    - what fails without it
+    - a probe command
+    - install ids pinned to an exact version per platform (winget on Windows, apt or brew on Linux)
+  - The installer preflight checks the dependencies of the chosen layers. A missing hard dependency refuses the install and prints the exact install command. A missing optional one warns.
+  - An opt-in `-InstallDeps` flag installs what is missing from the pinned ids, then re-runs the probe to verify. Nothing is ever installed without it.
+  - bun and Git Bash are hard for every gate, because without them every TypeScript and shell gate fails open. git is probed. uvx leaves the preflight until something shipped uses it.
+  - Installs follow `security.md`'s supply-chain rules: exact pinned versions, no curl-to-shell, and verification after install.
+
+  The audit behind this found that no installer installed anything, that python3, gh, the claude CLI, op, the ccstatusline package and git were neither declared nor probed, and that a missing bun or Git Bash fails every gate open. (Operator, 2026-11-11.)
 
 ## The coordinator's calls
 
@@ -107,6 +121,13 @@ The full inventory of which rule, hook and agent def moves to which layer is the
 - an evidence ladder for goods: field measurement, spec sheet, listing image, retailer page, search snippet.
 - parametric models carry self-checks with negative controls.
 - offer a local `git init` at the first real work.
+
+Layers carry more than rules. Plan C moves skills, agents and tools into layers as well:
+- **Documents:** the not-ai and prose-lint skills. not-ai's `gate.py` moves under the skill's `scripts` folder and is called through `CLAUDE_SKILL_DIR`.
+- **Code:** the OWASP skills, secure-by-design, reviewing-container-images, the appsec, governance and senior-developer agents, and the code-context MCP server.
+- **Physical:** wiring-diagram, plus the pcb-dfm, power-analog and schematic reviewers.
+
+User-scope copies keep loading wherever they exist, so moving one of these means removing its account copy. Binaries such as vale and bun stay machine installs, declared in the dependency manifest rather than copied into projects.
 
 Flips if: the operator sees documents and physical work as one layer ("non-code"). They share the heartbeat and the git offer, but their other rules do not overlap.
 
