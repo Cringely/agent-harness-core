@@ -21,7 +21,17 @@ describe("doc-steward tool grant", () => {
   });
 
   test("script-running checklist items are dispatcher-run or recorded skipped", () => {
-    expect(text).toMatch(/dispatcher/i);
-    expect(text).toMatch(/skipped/i);
+    const i4 = text.search(/^4\. \*\*/m);
+    const i5 = text.search(/^5\. \*\*/m);
+    const i7 = text.search(/^7\. \*\*/m);
+    const iSize = text.search(/^## Size discipline/m);
+    expect(i4).toBeGreaterThan(-1);
+    expect(i5).toBeGreaterThan(i4);
+    expect(i7).toBeGreaterThan(i5);
+    expect(iSize).toBeGreaterThan(i7);
+    for (const slice of [text.slice(i4, i5), text.slice(i7, iSize)]) {
+      expect(slice).toMatch(/dispatcher/i);
+      expect(slice).toMatch(/skipped/i);
+    }
   });
 });
