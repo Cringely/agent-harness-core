@@ -54,7 +54,10 @@ These would make the work a failure even if every layer ships:
 - The primary audience is the operator, and others will install it on their own projects. (Operator, 2026-11-11.)
 - What runs all the time is left to the coordinator's judgment, based on #294, #308 and the session's evidence. (Operator, 2026-11-11.)
 - superpowers:brainstorming owns the start of new efforts and features. The operator found this session's brainstorming closest to the experience wanted. grill-me stays available on request. (Operator, 2026-11-11.)
-- A grill-style interview runs at harness init for a new project. (Operator, 2026-11-11.)
+- A grill-style interview runs at harness init for a new project, and it can be re-run ad hoc at any time to change layers and settings. (Operator, 2026-11-11.)
+- **Layer rules move into the project.** The account layer keeps only the kernel. Code, document and physical rules move into core, and `Install-Harness` copies the chosen layers into each project's `.claude/rules`. Settings travel with the project, not the person. A rule update reaches a project when it is reinstalled, and the existing drift check flags a project whose copy is stale. (Operator, 2026-11-11.)
+- **Defaults for a project with no layer recorded.** A project installed before this change migrates as the code layer and keeps every protection it has. A folder that never ran the installer gets the kernel only, plus a one-time nudge to run the init interview. (Operator, 2026-11-11.)
+- **Several layers per project.** Layers only add gates and conventions, and they combine, so a code repo with reports can carry both the code and documents layers. The settings that layers would otherwise fight over (status cadence, audience and register, length budgets) are single-value project settings chosen once in the interview, so no conflict rule is needed. (Operator, 2026-11-11.)
 
 ## The coordinator's calls
 
@@ -66,23 +69,27 @@ Each of these is a judgment the operator delegated. Each names what would flip i
 2. **Credential separation.** An agent that reads untrusted content holds no credential (`security.md`, "Untrusted Content and Credentials"). Held in both reports.
 3. **No-overclaim, extended twice.** A failed fetch or thin search supports only "could not find, tried X, Y, Z", never "does not exist" (#294, two disproved absence claims). And before stating that a human step did not happen, ask the operator, because offline human work leaves no transcript (#308, a false "spot check skipped" in a deliverable). Both reports show the same failure, a claim of absence made from missing evidence.
 4. **Durable deliverables.** Nothing the operator keeps ends its life in the scratchpad. Held in both reports.
-5. **Decision log.** Who drafted and who decided each choice. #308 called it the most useful artifact. It costs one file.
+5. **Decision log.** Who drafted and who decided each choice. #308 called it the most useful artifact. It costs one file. It lives in the project and names roles (operator, coordinator, a named agent type), never people, so it is safe in a public repo under the identity rule. (Coordinator's call.)
 6. **Bounded review.** Where review runs, one round with a severity floor (`fix-quality.md`, "Work has to be able to end"). Both reports kept it.
 7. **Challenge mandate, with a scope trigger.** After repeated additions or rework rounds on one part, the coordinator volunteers a keep-or-drop challenge with the cost so far (#294, the vise). Seen once. It ships as a sentence in the existing `challenge-mandate.md`, which is a rule edit, not a new artifact, so the graduation bar does not block it.
+8. **Model-tier routing.** `model-tier-gate.ts` is registered in both the account settings and the project hook template, so it already fires on every project. It moves to the kernel rather than the code layer, which matches how it is wired. (Coordinator's call.)
 
 Flips if: the operator wants a smaller kernel. The natural cut is items 5 and 7, which are process rather than protection.
 
 ### Gates that check their own preconditions
 
-- **Worktree gate.** Today `core/claude/hooks/agent-worktree-gate.ts` reads no git state and does not look at an agent's `writeScope`. It denies a write-capable dispatch without isolation everywhere. Proposed: when the working directory is not a git repository, isolation is impossible, so the gate allows with a one-line note and offers `git init` (#294). When an agent type holds no shell and a declared write scope (for example `research-scout`, `writeScope: scratch`, already enforced by `agent-write-scope.ts`), the gate treats it as a scoped writer, not a repo writer (#308 E1). The BASE-SHA rule merged for #36 still applies whenever isolation does.
-- **Session close.** The push step is skipped, and says so, when `git remote` is empty (#308 E10, #294 had no repo at all). Today `change-management.md` "Session Close Protocol" step 2 is unconditional.
-- **Worktree cleanup.** At session close, remove agent worktrees with no changes and report the count (#308 E3, nine orphans). This session also ended with dozens.
+- **Worktree gate.** Today `core/claude/hooks/agent-worktree-gate.ts` reads no git state and does not look at an agent's `writeScope`. It denies a write-capable dispatch without isolation everywhere. Proposed: when the working directory is not a git repository, isolation is impossible, so the gate allows with a one-line note and offers `git init` (#294). When an agent type holds no shell and a declared write scope (for example `research-scout`, `writeScope: scratch`, enforced by `agent-write-scope.ts`), the gate treats it as a scoped writer, not a repo writer (#308 E1). The BASE-SHA rule merged for #36 still applies whenever isolation does.
+  - **Precondition (coordinator's call).** The gate trusts `writeScope` only after a known gap in `agent-write-scope.ts` is fixed: today any parent folder named `scratch`, `scratchpad` or `.scratch` puts every write in scope. Until that is fixed, the worktree gate is the backstop, and trusting `writeScope` first would let a code repo inside such a folder pass both gates, which the anti-goals forbid. The fix comes first in the plan.
+- **Session close.** The push step is skipped, and says so, when `git remote` is empty (#308 E10, #294 had no repo at all). Today `change-management.md` "Session Close Protocol" step 2 is unconditional. This becomes rule text in the layer rules, not a new hook, so it needs no registration and does not meet the graduation bar for hooks. (Coordinator's call.)
+- **Worktree cleanup.** At session close, remove agent worktrees and report the count (#308 E3, nine orphans). This session also ended with dozens. A worktree is removed only when its tree is clean and it holds no commit unreachable from any other ref, so a worktree carrying unpushed work is never lost. (Coordinator's call.)
 
 Flips if: the operator prefers a denial with an explicit remedy over an allow with a note on non-git directories. That trade is noise against an occasional missed setup step.
 
 ### Project layers: chosen at init, recorded in the project manifest
 
-**Code.** Everything the harness does today for software: worktree isolation for concurrent writers, the App reviewer, TDD, plans as contracts, model-tier routing, the prose lint on committed docs.
+**Code.** Everything the harness does today for software: worktree isolation for concurrent writers, the App reviewer, TDD, plans as contracts, the prose lint on committed docs. Model-tier routing sits in the kernel (item 8).
+
+The full inventory of which rule, hook and agent def moves to which layer is the plan's first deliverable. This document gives the shape and the examples, and the plan lists every file. (Coordinator's call.)
 
 **Documents and analysis** (from #308, which has one report, so built as layer settings, not new hooks, until a second project confirms):
 
@@ -105,22 +112,23 @@ Flips if: the operator sees documents and physical work as one layer ("non-code"
 
 ### Interview
 
-- **At init.** A short interview in numbered rounds, each question with a recommended answer, picks the layers and settings and writes them into `.harness-manifest.json`. Written for someone who does not know the harness. Detection (git present, remote present, file types) proposes the defaults.
-- **At feature start.** superpowers:brainstorming, as decided. The interview does not run again for features.
+- **At init.** A short interview in numbered rounds, each question with a recommended answer, picks the layers and settings and writes them into `.harness-manifest.json`. Written for someone who does not know the harness. Detection (git present, remote present, file types) proposes the defaults. Several layers may be picked.
+- **Ad hoc.** The same interview can be re-run at any time to add or drop a layer or change a setting. It shows the current choices as the recommended answers, so a re-run changes only what the person changes. (Operator, 2026-11-11.)
+- **At feature start.** superpowers:brainstorming, as decided. The interview does not run for features.
 
-### Where settings live
+### Where rules and settings live
 
-Project choices (layers, audience, budgets, heartbeat) go in the committed manifest, so they travel with the project and not with whoever installed it. The account layer keeps only the operator's personal preferences, and a project setting wins over an account preference when they differ. This fixes the bleed #308 shows.
+Decided by the operator (above): layer rules are copied into each project's `.claude/rules` by `Install-Harness`, and the account layer keeps only the kernel. Project settings (layers, audience, length budgets, status cadence) go in the committed manifest, so they travel with the project and not with whoever installed it. Because the layer rules are files in the project rather than conditional text in a global rule, nothing depends on the model reading a manifest correctly every turn. This is what stops the bleed #308 shows: another person's install no longer receives the operator's register or silent mid-run style as project behaviour.
 
-Flips if: the operator wants personal preferences to win on their own projects. The answer then is a precedence rule that names whose project it is, which is harder to get right.
+A setting that exists in both places (the operator's personal preference and a project setting) resolves to the project setting. (Coordinator's call.) Flips if: the operator wants personal preferences to win on their own projects. The answer then is a precedence rule that names whose project it is, which is harder to get right.
 
 ## Mapping of the field-report proposals
 
 | Item | Proposal | Where it lands | Note |
 |---|---|---|---|
-| #308 E1 | Write-scoped agents pass the worktree gate | Self-check | Reads the agent's existing `writeScope`. Two reports hit the gate. |
+| #308 E1 | Write-scoped agents pass the worktree gate | Self-check | Reads the agent's existing `writeScope`, after the scratch-parent gap in `agent-write-scope.ts` is fixed. Two reports hit the gate. |
 | #308 E2 | No isolation for single writers on analysis projects | Rejected as written | Covered by E1 plus the non-git check. A profile switch would weaken the gate on a code project mislabelled as analysis. |
-| #308 E3 | Remove unchanged worktrees at session close | Self-check | Kernel housekeeping. |
+| #308 E3 | Remove unchanged worktrees at session close | Self-check | Kernel housekeeping. Clean tree and no unreachable commits only. |
 | #308 E4 | Heartbeat status | Layer (documents and physical) | Two reports. Code projects keep silent mid-run. |
 | #308 E5 | Audience parameter for register | Layer (documents) | Default per layer, override per project. |
 | #308 E6 | Ask before claiming a human step was skipped | Kernel | Joined with #294's absence-claim rule. |
@@ -151,12 +159,13 @@ This session loads `subagent-prompting`, `council` and `handoff` twice: once fro
 
 ## Left to the builder
 
-- The manifest schema for layers and settings, including how an existing v2 manifest gains them without a version break.
-- How the installer generalizes `-IncludeCeremonies` into layer selection, and whether the interview runs inside the installer or as a skill that writes the manifest.
-- How rules read the project's layer at run time (session-start injection, a guardrails section, or a hook that reads the manifest).
+- The manifest schema for layers and settings, including how an existing v2 manifest gains them without a version break, and how a v2 manifest with no layers reads as the code layer.
+- How the installer generalizes `-IncludeCeremonies` into layer selection, and whether the interview runs inside the installer or as a skill that writes the manifest and then calls the installer.
+- How the layer rule files are laid out in core and copied into `.claude/rules`, and how the drift check reports a stale or missing layer rule.
+- The migration that moves layer rules out of the account layer at the source in `~/.claude/rules`, followed by an export, without leaving a machine with neither copy.
 - The exact non-git and no-remote probes, including Windows and Linux behaviour and fail-closed handling of an unknown answer.
 - Test shape for each changed gate, following `CONTRIBUTING.md`'s rule that a gate's test pins its refusal and its allow.
-- Order of work. A sensible first slice is the two self-checks with two reports behind them (worktree gate on non-git and write-scoped agents, push skipped without a remote) plus the kernel's absence-claim rule.
+- Order of work. A sensible first slice is the `agent-write-scope.ts` scratch-parent fix, then the two self-checks with two reports behind them (worktree gate on non-git and write-scoped agents, push skipped without a remote), then the kernel's absence-claim rule.
 
 ## Open questions for the operator
 
