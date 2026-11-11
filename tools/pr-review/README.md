@@ -20,7 +20,7 @@ The App ID is passed as `--app-id <id>` or read from the `PR_REVIEW_APP_ID` envi
 
 The `claude` CLI must be logged in. The CLI hands the reviewing model the logged-in account's email in a `# userEmail` block, and no flag removes it, so the tool's identity scan reads that exact address from the CLI's account state (`.claude.json`) on every run and adds it to the strings the scan looks for. The address is never printed, logged or placed in a refusal message. A posting run refuses when the account state names no email address, as it would after an API-key login. An email declared in the identity file does not stand in for it, because that is not the address the CLI gives the model.
 
-`~/.claude-account-identity.json`, in the shape the identity gate uses (`{ "names": [...], "emails": [...] }`), is recommended so the scan also checks names and any other addresses. Without it the tool warns and checks the workstation username, the machine hostname and the account email alone. A file that is present but unreadable, malformed or declaring nothing is a refusal, not a skip.
+`~/.claude-account-identity.json`, in the shape the identity gate uses (`{ "names": [...], "emails": [...] }`), is recommended so the scan also checks names and any other addresses. Without it the tool warns and checks the workstation username, the machine hostname and the account email alone. A file that is present but unreadable, malformed, declaring nothing or missing its `names` key is a refusal, not a skip. An explicit `"names": []` is the deliberate opt-out of the name channel.
 
 ## Commands
 
@@ -60,7 +60,7 @@ A refusal exits 2 and posts nothing. The reasons, roughly in the order the tool 
 - The App holds a permission outside the allowlist, holds a write where the list grants read, or lacks `pull_requests: write`; the installation's `repository_selection` is not `selected`; or the minted token holds a write other than `pull_requests` or is not scoped to exactly this repository.
 - The pull request comes from a fork or a deleted repository, or targets a branch other than the repository's default.
 - The pull request changed under the tool: its head moved or its changed-file count changed while the tool was reading it; or, on a posting run, its head SHA, base branch, base SHA or changed-file count at post time differs from what was reviewed. Nothing is posted.
-- The identity scan cannot be built: the identity file exists but cannot be read, `.claude.json` exists but is not JSON, or `CLAUDE_CONFIG_DIR` is set but empty or relative.
+- The identity scan cannot be built: the identity file exists but cannot be read or has no `names` key, `.claude.json` exists but is not JSON, or `CLAUDE_CONFIG_DIR` is set but empty or relative.
 - A posting run with no account email to scan for.
 - A posting run from a checkout with uncommitted changes.
 - The rendered body, or any string the model wrote, carries an identifying string: a declared name or email, the account email, the workstation username or the machine hostname. This applies to dry runs too. The refusal names only the hit's class (`declared name #1`, `email #2`, and so on), and the body and findings are blanked, so nothing caught is republished.

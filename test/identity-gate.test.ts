@@ -277,6 +277,21 @@ describe("identity gate — pre-commit (cheap stage: content, path, pending auth
     expect(result.exitCode).toBe(0);
   });
 
+  // The word "names" appearing somewhere is not a declared names key. identity_json_array refuses
+  // every spelling below before the absent-key check runs, so none may load with an empty name channel.
+  test.each([
+    ["the word inside an email value", '{"emails": ["names@example.test"]}'],
+    ["the word inside another key", '{"surnames": ["Fictional"], "emails": ["fixture@example.test"]}'],
+    ["a string where the list belongs", '{"names": "Fictional Persona", "emails": ["fixture@example.test"]}'],
+    ["a comment between the colon and the list", '{"names": /* c */ ["Fictional"], "emails": ["fixture@example.test"]}'],
+  ])("gate refuses a file that only mentions the word names: %s", (_label, body) => {
+    const dir = initPreCommitRepo();
+    const home = makeIdentityHome(body);
+    stageClean(dir);
+    const result = runPreCommit(dir, envWith({ USERPROFILE: home, HOME: home }));
+    expect(result.exitCode).not.toBe(0);
+  });
+
   test("gate accepts a populated names list with no emails key", () => {
     const dir = initPreCommitRepo();
     const home = makeIdentityHome(JSON.stringify({ names: ["Fictional Persona"] }));
