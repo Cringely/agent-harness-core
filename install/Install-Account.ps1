@@ -321,14 +321,19 @@ try {
     # this host: Join-Path against an absent drive letter throws "Cannot find drive", while
     # Test-Path -LiteralPath on the equivalent string (built without Join-Path) returns $false
     # for both backslash- and forward-slash-separated forms.
-    $gateSrc = "$CoreRepo/core/claude/hooks/model-tier-gate.ts"
-    if (Test-Path -LiteralPath $gateSrc) {
-        $null = New-Item -ItemType Directory -Path (Join-Path $ClaudeHome 'hooks') -Force
-        Copy-Item -LiteralPath $gateSrc -Destination (Join-Path $ClaudeHome 'hooks/model-tier-gate.ts') -Force
-        Write-Host "  hooks/model-tier-gate.ts: from core$dryRun"
-    }
-    else {
-        Write-Warning "Absent: $gateSrc. The model-tier gate will not be installed, and a model-less Agent dispatch will not be blocked."
+    foreach ($hook in $script:AccountCoreHooks) {
+        $hookSrc = "$CoreRepo/core/claude/hooks/$hook"
+        if (Test-Path -LiteralPath $hookSrc) {
+            $null = New-Item -ItemType Directory -Path (Join-Path $ClaudeHome 'hooks') -Force
+            Copy-Item -LiteralPath $hookSrc -Destination (Join-Path $ClaudeHome "hooks/$hook") -Force
+            Write-Host "  hooks/${hook}: from core$dryRun"
+        }
+        elseif ($hook -eq 'model-tier-gate.ts') {
+            Write-Warning "Absent: $hookSrc. The model-tier gate will not be installed, and a model-less Agent dispatch will not be blocked."
+        }
+        else {
+            Write-Warning "Absent: $hookSrc. Hook $hook will not be installed, and the settings entry that runs it will fail."
+        }
     }
 
     # Same CommandNotFoundException hazard as npm above, and this one fires on the Windows box
