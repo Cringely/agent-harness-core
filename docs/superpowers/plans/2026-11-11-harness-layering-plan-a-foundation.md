@@ -88,6 +88,8 @@ A1, A2 and A3 are independent. A4 starts after A1 and A3 merge. Task 11's live c
 
 A5 starts after A4 merges on either path.
 
+A1, A2 and A3 run in parallel but are not file-independent. A1 (Task 1) and A3 (Tasks 8, 15) edit the opening lines of `install/Install-Harness.Tests.ps1`. A2 (Task 3) and A3 (Task 7) add rows to the README "What's here" table. Merge A1 first, then A2, then A3. Each later PR rebases on `origin/master` and re-runs both suites before review.
+
 ---
 
 ### Task 1: Close the scratch-parent gap and share one writeScope parser
@@ -126,9 +128,9 @@ Spawned case for the ancestor: build `<tmp>/scratch/proj/.claude/agents/scoped.m
 - [ ] **Step 3: Implement.**
   - `parseWriteScope` in `write-scope-parse.ts` reads only the frontmatter between a leading `---` line and the next `---` line, split on `/\r?\n/`, and returns the value of the first `writeScope:` key. `agent-write-scope.ts` imports it, and `readWriteScope` reads the whole file and calls it.
   - `inScratch` splits the resolved file path and the resolved `projectDir` into segments on `/[\\/]+/`. A segment at index `i` whose lowercased name is in `SCRATCH_SEGMENTS` counts only when the project's segments do not start with the file's segments `0..i`. Compare lowercased on every platform, since case-insensitive containment can only add denies.
-  - The entrypoint passes `process.env.CLAUDE_PROJECT_DIR ?? cwd` as `projectDir`.
+  - The entrypoint passes `process.env.CLAUDE_PROJECT_DIR ?? cwd` as `projectDir`, and reads the target path as `tool_input.file_path ?? tool_input.notebook_path`. Extend the test file's spawned `runHook` helper to take an env, for the `CLAUDE_PROJECT_DIR` cases.
   - Export `WRITE_SCOPE_GATE_VERSION = 2` from `agent-write-scope.ts`, with a comment: it marks the scratch-parent fix and the shared parser. The worktree gate trusts `writeScope` only at this version or later. Bump it whenever a change to this gate alters what `writeScope: scratch` confines.
-  - Header: replace "Second coverage boundary" with three facts. A scratch-named directory counts only when it does not contain the project root. A project whose root sits inside a scratch directory gets denies for scoped writes outside a deeper scratch folder, the fail-closed direction. A tracked subfolder of the project named `scratch`, `scratchpad` or `.scratch` is still in scope.
+  - Header: replace "Second coverage boundary" with three facts. A scratch-named directory counts only when it does not contain the project root. A project whose root sits inside a scratch directory gets denies for scoped writes outside a deeper scratch folder, the fail-closed direction. A tracked subfolder of the project named `scratch`, `scratchpad` or `.scratch` is still in scope. Rewrite the next paragraph, "And it is reachable from the payload ... unchanged from master", which goes stale with the same change.
 
 - [ ] **Step 4: Run to verify they pass.** `bun test`. Expected: all PASS.
 
@@ -149,7 +151,7 @@ git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit
 
 **Interfaces:**
 - Consumes: `WriteScopeParser` and the module `./write-scope-parse` (Task 1), and Task 1's containment rule. Task 2 lands after Task 1 in the same PR.
-- Produces: `export const REQUIRED_WRITE_SCOPE_GATE_VERSION = 2` and `export async function loadWriteScopeParser(parserPath?: string, gatePath?: string): Promise<WriteScopeParser | null>`. The defaults are `./write-scope-parse` and `./agent-write-scope`. The function returns `null` on any load error, and also when the installed write-scope gate's `WRITE_SCOPE_GATE_VERSION` is missing, not a number, or below the required version. `requiresIsolation(subagentType: string, agentsDir?: string, parseScope?: WriteScopeParser | null): boolean`, `export type GitProbe = "repo" | "not-repo" | "unknown"`, `export function probeGitWorkTree(dir: string, env?: Record<string, string | undefined>): GitProbe`, `export function nonGitNote(projectRoot: string): string`, `export function projectRootOf(env: Record<string, string | undefined>): string` (the `CLAUDE_PROJECT_DIR` value, else `join(import.meta.dir, "..", "..")`), `GateDecision = { action: "allow"; note?: string } | { action: "deny"; reason: string }`, `decide(payload: unknown, agentsDir?: string, projectRoot?: string | null, probe?: (dir: string) => GitProbe, parseScope?: WriteScopeParser | null): GateDecision`. A `null` or omitted `parseScope` means no scoped-writer trust.
+- Produces: `export const REQUIRED_WRITE_SCOPE_GATE_VERSION = 2` and `export async function loadWriteScopeParser(parserPath?: string, gatePath?: string): Promise<WriteScopeParser | null>`. The defaults are `./write-scope-parse` and `./agent-write-scope`. The function returns `null` on any load error, and also when the installed write-scope gate's `WRITE_SCOPE_GATE_VERSION` is missing, not a number, or below the required version. A third parameter, `settingsPath` (default `<projectRoot>/.claude/settings.json`), names the settings file. The function also returns `null` unless that file registers a command containing `agent-write-scope.ts` under a `PreToolUse` matcher that covers both `Write` and `Edit`. `requiresIsolation(subagentType: string, agentsDir?: string, parseScope?: WriteScopeParser | null): boolean`, `export type GitProbe = "repo" | "not-repo" | "unknown"`, `export function probeGitWorkTree(dir: string, env?: Record<string, string | undefined>): GitProbe`, `export function nonGitNote(projectRoot: string): string`, `export function projectRootOf(env: Record<string, string | undefined>): string` (the `CLAUDE_PROJECT_DIR` value, else `join(import.meta.dir, "..", "..")`), `GateDecision = { action: "allow"; note?: string } | { action: "deny"; reason: string }`, `decide(payload: unknown, agentsDir?: string, projectRoot?: string | null, probe?: (dir: string) => GitProbe, parseScope?: WriteScopeParser | null): GateDecision`. A `null` or omitted `parseScope` means no scoped-writer trust.
 
 - [ ] **Step 1: Write the failing tests.**
 
@@ -169,13 +171,19 @@ Decide (stub probe, write-capable type `writer`, no isolation, no override):
 Write-scope trust (`requiresIsolation` with `parseWriteScope` passed, real def files):
 - `tools: Read, Grep, Glob, WebFetch, WebSearch, Write, SendMessage` plus `writeScope: scratch`: `false`. The same def with `parseScope` `null`: `true`.
 - `loadWriteScopeParser("./no-such-module")` resolves to `null` and does not throw.
-- Old write-scope copy: in a temp hooks dir holding the real `write-scope-parse.ts` and an `agent-write-scope.ts` that has no `WRITE_SCOPE_GATE_VERSION` export, `loadWriteScopeParser(<tmp>/write-scope-parse.ts, <tmp>/agent-write-scope.ts)` resolves to `null`. So does a copy exporting `WRITE_SCOPE_GATE_VERSION = 1`. For the scratch-scoped def, `requiresIsolation` with that result is `true`. The current files give a non-null parser.
+- Old write-scope copy. The temp hooks dir holds the real `agent-name.ts` and `write-scope-parse.ts` plus a stub `agent-write-scope.ts`, and a settings file registering it. Three variants run:
+  - no `WRITE_SCOPE_GATE_VERSION` export, which gives `null`
+  - `WRITE_SCOPE_GATE_VERSION = 1`, which gives `null`
+  - `WRITE_SCOPE_GATE_VERSION = 2`, which gives a non-null parser
+
+  For the scratch-scoped def, `requiresIsolation` with a `null` result is `true`.
+- Unregistered write-scope gate: the version-2 layout with a settings file that does not register `agent-write-scope.ts` (or registers it only under `Write`) gives `null`, and the scoped def requires isolation.
 - The same with `NotebookEdit`, `Bash`, `PowerShell`, `Agent`, `Skill`, `mcp__x__y` or `*` added: `true`.
 - The same tools with no `writeScope`, with `writeScope: repo`, or with `memory: user` added: `true`.
 - Duplicate keys `writeScope: repo` then `writeScope: scratch`: `true`.
 - `web-fetch` with no def file: `false`. A `web-fetch.md` def granting `Write` with no `writeScope`: `true`.
 
-Spawned process: `CLAUDE_PROJECT_DIR` set to a git temp dir and payload `cwd` set to a non-git temp dir, `subagent_type: "general-purpose"`, no isolation: deny JSON. `CLAUDE_PROJECT_DIR` set to a non-git temp dir (same skip guard): exit 0, stdout JSON with `systemMessage` and `hookSpecificOutput.additionalContext` both equal to the note, and no `permissionDecision` key. Missing parser module: copy `agent-worktree-gate.ts` and `agent-name.ts`, but not `write-scope-parse.ts`, into `<tmp>/.claude/hooks/`, and put a scratch-scoped `scoped.md` def (Write, no shell) in `<tmp>/.claude/agents/`. Spawn the copied gate with `CLAUDE_PROJECT_DIR` set to a git temp dir and an unisolated `subagent_type: "scoped"` dispatch. Expected: exit 0 and a deny JSON. Old write-scope gate: the same layout with `write-scope-parse.ts` present and an `agent-write-scope.ts` lacking the version export. Expected: exit 0 and a deny JSON.
+Spawned process: `CLAUDE_PROJECT_DIR` set to a git temp dir and payload `cwd` set to a non-git temp dir, `subagent_type: "general-purpose"`, no isolation: deny JSON. `CLAUDE_PROJECT_DIR` set to a non-git temp dir (same skip guard): exit 0, stdout JSON with `systemMessage` and `hookSpecificOutput.additionalContext` both equal to the note, and no `permissionDecision` key. Missing parser module: copy `agent-worktree-gate.ts` and `agent-name.ts`, but not `write-scope-parse.ts`, into `<tmp>/.claude/hooks/`, and put a scratch-scoped `scoped.md` def (Write, no shell) in `<tmp>/.claude/agents/`. Spawn the copied gate with `CLAUDE_PROJECT_DIR` set to a git temp dir and an unisolated `subagent_type: "scoped"` dispatch. Expected: exit 0 and a deny JSON. Old write-scope gate: the same layout with `write-scope-parse.ts` present and an `agent-write-scope.ts` lacking the version export. Expected: exit 0 and a deny JSON. Spawned allow: the same layout with all three modules at version 2, a settings file registering `agent-write-scope.ts`, and a git temp root. Expected: exit 0 and no stdout, which proves the dynamic load succeeds in an installed layout.
 
 - [ ] **Step 2: Run to verify they fail.** `bun test test/agent-worktree-gate.test.ts`. Expected: FAIL on the new exports and cases.
 
@@ -184,7 +192,7 @@ Spawned process: `CLAUDE_PROJECT_DIR` set to a git temp dir and payload `cwd` se
   - `nonGitNote(root)` returns exactly: `` Worktree gate: ${root} is not a git repository, so worktree isolation is not available and this dispatch runs in the shared folder. A git repository in a subfolder of it is not isolated either. If this work should be versioned, run `git init` here and the gate will isolate concurrent writers. ``
   - In `decide`, after `requiresIsolation` returns true and before the isolation branch: allow with the note only when `projectRoot` is a non-empty string, `probe(projectRoot)` is `"not-repo"`, and either the payload has no string `cwd` or `probe(cwd)` is also `"not-repo"`. Any other answer falls through to today's logic.
   - `BUILTIN_READ_ONLY` gains `"web-fetch"`, whose published grant is WebFetch only.
-  - The gate never imports the parser statically. A static import that fails to link exits the process before the entrypoint's `try`, which Claude Code reads as no opinion. `loadWriteScopeParser` does both `await import(...)` calls inside its own `try` and returns `null` on any error. Importing `agent-write-scope.ts` is safe because its entrypoint sits behind `import.meta.main`. The function also returns `null` unless `WRITE_SCOPE_GATE_VERSION >= REQUIRED_WRITE_SCOPE_GATE_VERSION`. A project that modified or pinned `agent-write-scope.ts` keeps its old copy across a reinstall, and that copy still has the scratch-parent gap, so trusting `writeScope` beside it would let a scoped writer through both gates. The entrypoint calls it inside the existing `try` and passes the result down. The classification cache key includes whether a parser was present.
+  - The gate never imports the parser statically, and it takes the `WriteScopeParser` type with `import type`, which erases at build. A static import that fails to link exits the process before the entrypoint's `try`, which Claude Code reads as no opinion. `loadWriteScopeParser` does both `await import(...)` calls inside its own `try` and returns `null` on any error. Importing `agent-write-scope.ts` is safe because its entrypoint sits behind `import.meta.main`. The function also returns `null` unless `WRITE_SCOPE_GATE_VERSION >= REQUIRED_WRITE_SCOPE_GATE_VERSION`. A project that modified or pinned `agent-write-scope.ts` keeps its old copy across a reinstall, and that copy still has the scratch-parent gap, so trusting `writeScope` beside it would let a scoped writer through both gates. The entrypoint calls it inside the existing `try` and passes the result down. The classification cache key includes whether a parser was present.
   - `frontmatterRequiresIsolation` returns `false` only when `parseScope` is non-null, `parseScope(text) === "scratch"`, there is no `memory:` line, and every tools token is in `READ_ONLY_TOOLS` or in `SCOPED_WRITE_TOOLS = new Set(["write", "edit", "sendmessage"])`. A comment says why. `agent-write-scope.ts` reads this same file with the same parser and confines those writes, and with no shell the confinement holds. NotebookEdit stays out.
   - The entrypoint passes `projectRootOf(process.env)`. On an allow with a note it prints `{"systemMessage": note, "hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": note}}`. A plain allow prints nothing.
   - Header: replace "No network, no git" and "The gate reads no git state" with the probe's contract (filesystem only, no git spawned, the project root decides, unknown keeps today's behaviour). Add one paragraph on the scoped-writer rule, naming Task 1's fix as its precondition.
@@ -252,8 +260,9 @@ expect(latestByFamily(["claude-opus-5", "claude-opus-5-5", "claude-haiku-5-5"]))
 - `fetchLatestFromApi(undefined, spy)` returns `null` and never calls `spy`. A stub returning `{"data":[{"id":"claude-opus-5"},{"id":"claude-opus-5-5"}]}` gives `{ source: "api", models: { opus: "claude-opus-5-5" } }`. A throwing fetch returns `null`.
 - The walker skips every `DEFAULT_EXCLUDES` name (a temp root with `.claude/worktrees/x/a.md`, `projects/t.jsonl`, `docs/superpowers/p.md`, each holding a pin, reports none of them). An `--exclude extra` argument skips `extra/`.
 - `run` over a temp root holding one file with `--model claude-sonnet-5`:
-  - Review Focus 5: no `ANTHROPIC_API_KEY`, no `--latest`, and a stub runner resolving every alias. `exitCode` is 2, and no output row starts with `current`.
-  - The same with `--no-resolve`: `exitCode` 2 and output contains `latest unknown`.
+  - Review Focus 5: no `ANTHROPIC_API_KEY`, no `--latest`, and a stub runner resolving all four family aliases, with `sonnet` resolving to `claude-sonnet-5`. The pin row is `unknown`, `exitCode` is 2, and no output row starts with `current`.
+  - Alias source with a stale pin: the same, but `sonnet` resolves to `claude-sonnet-5-5`. A `behind` row appears and `exitCode` is 1.
+  - The same with `--no-resolve`: `exitCode` 2, and the first output line is exactly `latest source: none (latest unknown)`.
   - `--latest` pointing at `{"sonnet":"claude-sonnet-5-5"}`: `exitCode` 1 and a `behind` row.
   - Every pin current under source `file`: `exitCode` 0.
 
@@ -262,11 +271,12 @@ expect(latestByFamily(["claude-opus-5", "claude-opus-5-5", "claude-haiku-5-5"]))
 - [ ] **Step 3: Implement.**
   - Pin patterns: `claude-(fable|opus|sonnet|haiku)-(\d{1,2})(?:-(\d{1,2}))?(?:-(\d{8}))?` ending on a word boundary, plus the older shape `claude-(\d)(?:-(\d))?-(opus|sonnet|haiku)(?:-(\d{8}))?`. Alias patterns: `^\s*model:\s*(fable|opus|sonnet|haiku)\s*$`, `"model"\s*:\s*"(fable|opus|sonnet|haiku)"`, and `--model[ =](fable|opus|sonnet|haiku)\b`.
   - `DEFAULT_EXCLUDES = [".git", "node_modules", "runs", "worktrees", "projects", "file-history", "plugins", "debug", "backups", "superpowers"]` are directory names skipped at any depth. Files named `*.jsonl` or `*.bak*`, over 2 MB, or holding a NUL byte are skipped too. A `--root` may name a file.
+  - With no API answer and no `--latest`, `run` resolves all four family aliases, not only those found in files. With no source at all, the first output line is `latest source: none (latest unknown)`.
   - Latest source order: the Models API (`GET https://api.anthropic.com/v1/models?limit=1000` with headers `x-api-key` and `anthropic-version: 2023-06-01`), then the `--latest` JSON file, then the live alias resolutions with source `alias`. The first output line names the source. For `alias` it adds `(unverified: an alias can itself resolve to an older model)`.
-  - The default `ClaudeRunner` runs `claude -p --model <alias> --output-format json "Reply with the single word OK."` with cwd set to a fresh empty temp dir, then removes the dir. Only `modelUsage` keys are read, and the response text is never printed.
+  - The default `ClaudeRunner` runs `claude -p --model <alias> --output-format json "Reply with the single word OK."` with cwd set to a fresh empty temp dir and `CLAUDE_PROJECT_DIR` removed from its environment, then removes the dir. Only `modelUsage` keys are read, and the response text is never printed. Each run can still append one dead temp path to the nudge state file (Task 9), and that growth is accepted.
   - Output rows: `<status>\t<file>:<line>\t<value>\t<latest or ->`.
   - Exit 1 when any row is `behind` or `stale-alias`. Otherwise exit 2 when any row is `unknown`, the source is `alias`, or no source was found. Otherwise exit 0.
-  - README row: `| tools/model-currency/ | The kernel's model currency check: every exact model ID and tier alias under the roots given, against the latest models, with aliases resolved live. Run by hand. Nothing installs it |`
+  - README row, with the first cell backticked like every other row: `` | `tools/model-currency/` | The kernel's model currency check: every exact model ID and tier alias under the roots given, against the latest models, with aliases resolved live. Run by hand. Nothing installs it | ``
 
 - [ ] **Step 4: Run to verify they pass.** `bun test`. Expected: all PASS.
 
@@ -297,10 +307,10 @@ In the main clone on `feat/310-kernel` after Task 3's commit.
   - Relabel the Fable 5, Opus 5 and Sonnet 5 tables (near 74-76, 83-99 and 114-116) to the current point releases where the report confirms each claim. Label the rest "measured on 5.0, unverified on 5.x". The Opus 4.x history stays.
   - At `rules/subagent-prompting.md:15` and `rules/agent-usage.md:24`, "Opus 5" becomes "Opus 5.x" when the report confirms the claim for Opus 5.5. Otherwise add "(measured on Opus 5.0)".
   - In `rules/agent-usage.md`, after the sentence starting "Verify what an alias resolves to", add: "The core repo's `tools/model-currency/check.ts` runs that check for every alias and exact model ID under the roots it is given, against the latest models."
-- [ ] **Step 3: Copilot pin.** Run Copilot CLI's model listing (`copilot help config`). If it names a Sonnet 5.5 model, change the `--model` example at `install/Start-CappedCopilot.ps1:59` to that name. The fixture at `install/Start-CappedCopilot.Tests.ps1:71` is an arbitrary passthrough value and stays. If no listing is available, change nothing and say so in the PR body.
+- [ ] **Step 3: Copilot pin.** Run Copilot CLI's model listing (`copilot help config`). If it names a Sonnet 5.5 model, change the `--model` example at `install/Start-CappedCopilot.ps1:59` to that name. The fixture at `install/Start-CappedCopilot.Tests.ps1:71` is an arbitrary passthrough value. Its value stays, and the line gains a trailing `# model-currency: ignore` comment. If no listing is available, change nothing and say so in the PR body.
 - [ ] **Step 4: Run the check.** Run two commands:
   - `bun tools/model-currency/check.ts --root "$USERPROFILE/.claude/rules" --root "$USERPROFILE/.claude/agents" --root "$USERPROFILE/.claude/skills" --root "$USERPROFILE/.claude/hooks" --root "$USERPROFILE/.claude/settings.json"`
-  - `bun tools/model-currency/check.ts --root . --exclude test --exclude Start-CappedCopilot.Tests.ps1`
+  - `bun tools/model-currency/check.ts --root . --exclude test`
 
   The expected residual `behind` rows are:
   - the `claude-opus-5` key in `~/.claude/settings.json` (kept by choice, audit item 3)
@@ -349,7 +359,7 @@ Write the entry when the choice is made. An entry reconstructed at the close rec
 ```
 
 - [ ] **Step 2: Mirror the principle.** `harness-core.md` says a principle change in no-overclaim or challenge-mandate updates `skills/engineering-method/SKILL.md` in the same change. Add one line for each addition there.
-- [ ] **Step 3: Export, stage and commit.** `pwsh -NoProfile -File install/Export-Account.ps1`, then `git diff --stat account/claude`. Stage only the files Tasks 4 and 5 changed: `rules/agent-usage.md`, `rules/subagent-prompting.md`, `rules/no-overclaim.md`, `rules/challenge-mandate.md`, `rules/decision-log.md`, `skills/subagent-prompting/SKILL.md` and `skills/engineering-method/SKILL.md`, plus the Copilot file if it changed. Commit with `-m "docs(account): kernel absence rules, decision log, current model names (#310)"`.
+- [ ] **Step 3: Export, stage and commit.** `pwsh -NoProfile -File install/Export-Account.ps1`, then `git diff --stat account/claude`. Stage only the files Tasks 4 and 5 changed: `rules/agent-usage.md`, `rules/subagent-prompting.md`, `rules/no-overclaim.md`, `rules/challenge-mandate.md`, `rules/decision-log.md`, `skills/subagent-prompting/SKILL.md` and `skills/engineering-method/SKILL.md`, plus the Copilot files if they changed. `skills/engineering-method` is the only member of the `engineering-method` pack in `packs.json`. Bump that pack's `version` from `0.1.0` to `0.1.1`, run `bun tools/packs/cli.ts` in write mode, then stage `packs.json`, `packs/engineering-method/` and `.claude-plugin/marketplace.json`. `bun tools/packs/cli.ts --check` must then pass. Commit with `-m "docs(account): kernel absence rules, decision log, current model names (#310)"`.
 
 PR A2 body: `Docs: README updated: tools/model-currency row`.
 
@@ -400,7 +410,7 @@ export const SPLITS = {
 Cases:
 - "every rule listed in layers.json exists in core/claude/rules", and "every .md file in core/claude/rules is listed in layers.json".
 - "layer names are only code, documents and physical, and every list is non-empty".
-- "the split loses and adds nothing". For each entry in `SPLITS`, the fixture is the original. Before cutover, `account/claude/rules/<original>` equals the fixture. Then the core code file must be `newPreamble` (or the original preamble, per `preambleStaysIn`) followed by exactly the `codeSections`, in original order and byte-identical. After cutover, the account copy differs and `account/claude/rules/<kernelFile>` holds the kernel half. Then the kernel file's sections plus the code file's sections must equal the fixture's sections: each fixture section appears exactly once across the two files, byte-identical, each file keeps the original order, and the preambles follow `preambleStaysIn` and `newPreamble`. Export mirrors the rules directory, so after cutover a removed file is absent rather than different. An absent account copy counts as after-cutover only when `kernelFile` differs from the original name (fix-quality.md, whose kernel half is `bounded-review.md`). For change-management.md, whose kernel file keeps the name, an absent account copy fails. Read with an existence check first, so absence never throws. An account copy that matches neither shape fails with a message saying the source changed since the move and must be ported into core.
+- "the split loses and adds nothing". For each entry in `SPLITS`, the fixture is the original. Every comparison normalises `\r\n` to `\n` on both sides first, since `test/fixtures/` has no eol rule and checks out CRLF on Windows. Before cutover, `account/claude/rules/<original>` equals the fixture. Then the core code file must be `newPreamble` (or the original preamble, per `preambleStaysIn`) followed by exactly the `codeSections`, in original order and byte-identical. After cutover, the account copy differs and `account/claude/rules/<kernelFile>` holds the kernel half. Then the kernel file's sections plus the code file's sections must equal the fixture's sections: each fixture section appears exactly once across the two files, byte-identical, each file keeps the original order, and the preambles follow `preambleStaysIn` and `newPreamble`. Export mirrors the rules directory, so after cutover a removed file is absent rather than different. An absent account copy counts as after-cutover only when `kernelFile` differs from the original name (fix-quality.md, whose kernel half is `bounded-review.md`). For change-management.md, whose kernel file keeps the name, an absent account copy fails. Read with an existence check first, so absence never throws. An account copy that matches neither shape fails with a message saying the source changed since the move and must be ported into core.
 
 - [ ] **Step 2: Run to verify it fails.** `bun test test/layer-rules.test.ts`. Expected: FAIL, files missing.
 
@@ -421,7 +431,7 @@ Cases:
 
   - `.github/CODEOWNERS`: add `/core/claude/rules/                         @Cringely` after the templates line. The account rules are owned today, and the move must not leave the code half unowned.
   - `tools/pr-review/types.ts`: add `"core/claude/rules/fix-quality.md"` to `TRUSTED_CONTEXT_PATHS`, keeping the account entry until Task 13.
-  - README "What's here": `| core/claude/rules/ | Layer rule files and layers.json, which assigns each file to the code, documents or physical layer and defines the project settings. The installer copies the layers a project records into its .claude/rules/harness/ |`
+  - README "What's here", first cell backticked: `` | `core/claude/rules/` | Layer rule files and layers.json, which assigns each file to the code, documents or physical layer and defines the project settings. The installer copies the layers a project records into its .claude/rules/harness/ | ``
 
 - [ ] **Step 4: Verify.** Run `bun test`. Expected: all PASS, with the split case in its before-cutover mode for both files.
 
@@ -497,6 +507,8 @@ git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit
   - "audit leaves rules of unselected layers uncounted": `-Layers documents`, then `-Audit` prints `All managed files in sync with core.`
   - "the layer and settings flags are refused with -Audit": `-Audit -Layers code` throws.
 
+  - "each settings ValidateSet matches layers.json": the `ValidateSet` values of `-StatusCadence` and `-Audience`, read through `(Get-Command install/Install-Harness.ps1).Parameters`, equal the keys of `settings.statusCadence` and `settings.audience` in `layers.json`.
+
   In `test/layer-rules.test.ts`, add "settings define exactly the values the installer accepts". The `settings` keys are:
   - `statusCadence`, with keys `silent` and `heartbeat`
   - `audience`, with keys `peer-engineer` and `plain-all-roles`
@@ -516,12 +528,12 @@ git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit
     - `settings` lacks a value that Step 1 names
 
     An empty registry would read every installed rule file as orphaned, so it refuses instead.
-  - **`ConvertTo-ManifestV3`** calls `ConvertTo-ManifestV2`, then sets `schemaVersion = 3`.
+  - **`ConvertTo-ManifestV3`** calls `ConvertTo-ManifestV2`, then sets `schemaVersion = 3`. `ConvertTo-ManifestV2`'s v1 skip list gains `schemaVersion`, `layers`, `settings` and `allowUnpinnedPlugins`, so its v1 branch never folds them into `files`. The accepted layer names and setting values come from `Get-LayerRegistry`, not from literals. `ConvertTo-LayerList` takes them from there too.
     - `layers` is absent only when `-not $m.Contains('layers')`, and then becomes `@('code')`. A present empty array stays empty.
     - A present `layers` that is not an array, or that holds a value outside the three, throws with a message naming the valid values. A present `settings` value outside the accepted set throws the same way.
     - It replaces every `ConvertTo-ManifestV2` call site, so `-Accept`, `-Unaccept` and `-Prune` carry layers and settings through.
     - The load sits above every write, so a throw leaves disk untouched. Under `-Audit -Quiet` the throw is caught, and the script prints `manifest-invalid<TAB>.harness-manifest.json` and returns.
-  - **Writing the manifest:** assign `layers` as a `[string[]]` built with `,@(...)` where a single element could unroll.
+  - **Writing the manifest:** assign `layers` as `[string[]]@(...)`. Use `,@(...)` only on a function's return, where a single element could unroll.
   - **`Get-DefaultProjectSettings`:**
     - `statusCadence` is `heartbeat` when the layers include `documents` or `physical`, else `silent`.
     - `audience` is `plain-all-roles` when the layers include `documents` and not `code`, else `peer-engineer`.
@@ -530,7 +542,8 @@ git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit
   - **`Get-CoreFilesMap`** adds `rules/harness/<file>` for every registry rule.
   - **Install:**
     - Create `.claude/rules/harness` with the other directories.
-    - For each registry rule whose layers intersect the selected ones, call `Install-ManagedFile` with key `rules/harness/<file>`.
+    - One classifier decides what is selected: `Get-ComponentGate -Key <manifestKey> -Layers <string[]> -IncludeCeremonies <bool>` returns `$null` when selected, else `ceremony-gated` or `layer not selected`. The agent, hook and rule loops, the settings-hook filter, and the audit all ask it. `$ceremonyKeys` feeds it and is no longer consulted directly.
+    - For each registry rule the classifier selects, call `Install-ManagedFile` with key `rules/harness/<file>`.
     - For a rule whose layers do not intersect, when the file is on disk, add result `left-in-place (layer not selected)` and warn: "'<key>' belongs to a layer this project no longer records. It was left in place. Delete it by hand if the layer is gone for good, and the next install drops its record."
     - When the file is absent and the key is in `files`, remove the key and add `record-dropped (layer not selected)`.
     - The installer never deletes a file.
@@ -540,9 +553,9 @@ git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit
     - Print the `Layers: ... Settings: ...` line.
   - **Audit:**
     - Read layers and settings through `ConvertTo-ManifestV3`, defaulting absent settings and writing nothing.
-    - A `rules/harness/` key whose layer is not selected is `installed (layer not selected)` when present and `not-installed (layer not selected)` when absent.
+    - An unselected key that is absent is `not-installed (<reason>)` from the classifier, which keeps the existing `not-installed (ceremony-gated)` string. An unselected `layer not selected` key that is present is `installed (layer not selected)`. A present ceremony file keeps its ordinary status, because `-IncludeCeremonies` is not recorded in the manifest.
     - A `rules/harness/project-settings.md` row is `settings-missing` when the file is absent, `settings-stale` when its LF-normalised text differs from the render, and `in-sync` otherwise.
-    - Add `not-installed (layer not selected)` to the uncounted list.
+    - Both `not-installed (<reason>)` statuses stay uncounted.
     - Extend the attention line with: "installed (layer not selected) = delete the file by hand, and the next install drops its record. settings-missing/settings-stale = re-run the installer, which rewrites .claude/rules/harness/project-settings.md from the manifest. manifest-invalid = fix the layers or settings value the error names."
   - **Comment help:**
     - Document the four params, and add the five statuses with those responses to `.PARAMETER Audit`.
@@ -587,6 +600,7 @@ Layers: kernel (always on), {{LAYERS}}.
     - The Install section gets the four flags, the defaults (a fresh install and a v2 manifest record `code`), what goes into `.claude/rules/harness/`, the generated settings file, the dropped-layer behaviour and the new audit statuses.
     - The templates row (line 17) names `project-settings.template.md` as applied on every run.
     - The Layering model section gets one sentence: the account layer is the kernel, and layer rules ship from core into each project.
+  - **Citations.** These edits shift `install/Install-Harness.ps1:1616-1618`, which `Export-Account.ps1:771`, `Install-Account.ps1:511` and `Install-Account.Tests.ps1:1320` cite. Re-pin each one to the moved lines, or rewrite it to name the construct, then run `bun test test/citation-drift.test.ts`. The suite pins the citation population at 30.
 
 - [ ] **Step 4: Run to verify they pass.** `pwsh -NoProfile -File install/Install-Harness.Tests.ps1` and `bun test`. Expected: all PASS.
 
@@ -673,7 +687,7 @@ git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit
 - [ ] **Step 2: Run to verify they fail.** `pwsh -NoProfile -File install/Install-Account.Tests.ps1`. Expected: the new cases FAIL.
 
 - [ ] **Step 3: Implement.**
-  - Call `Invoke-AccountRetirement` after the path canonicalisation and before the first copy.
+  - Call `Invoke-AccountRetirement` immediately before the first copy, after Task 15's dependency preflight and after its own payload-carries-retired-path check. A receiver that is refused for a missing dependency must not have had its rules renamed first.
   - Validate every entry first. It must be a relative path with no `..` segment, sit under `rules/`, `agents/`, `skills/` or `hooks/`, and be absent from the payload.
   - For each entry present under `-ClaudeHome`:
     - `Move-Item` it to `<path>.retired-<yyyyMMddTHHmmssZ>` (UTC). `Move-Item` honours `-WhatIf` on its own.
@@ -684,6 +698,7 @@ git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit
   - README Account layer section:
     - The retire list renames rather than deletes, and Claude Code loads only `*.md` from `rules/`.
     - Update order on a receiver: `git pull`, then `Install-Harness.ps1` on each project, then `Install-Account.ps1`.
+  - **Citations.** These edits shift `install/Install-Account.ps1:662-673`, which `Install-Account.Tests.ps1:1386` cites. Re-pin it, then run `bun test test/citation-drift.test.ts`.
 
 - [ ] **Step 4: Run to verify they pass.** `pwsh -NoProfile -File install/Install-Account.Tests.ps1`. Expected: all PASS.
 
@@ -761,12 +776,13 @@ Whatever the cadence, ask before any action on the `change-management.md` confir
   - In `~/.claude/rules/harness-core.md`, at the end of "Account layer, on this machine and on any other", add: "Code-layer rules are not authored here. `fix-quality.md` and `change-management-code.md` live in `core/claude/rules/` in the core repo and are edited there, and `Install-Harness.ps1` copies them into each code project's `.claude/rules/harness/`. A project picks up a rule change when it is reinstalled. The kernel keeps `bounded-review.md`, split out of `fix-quality.md`, and the rest of `change-management.md`."
   - In `~/.claude/agents/senior-developer.md:16`, `~/.claude/rules/fix-quality.md` becomes "`.claude/rules/harness/fix-quality.md` in a code project, and `~/.claude/rules/bounded-review.md`". At `:18`, add "and, in a code project, `.claude/rules/harness/change-management-code.md`".
   - Make the same addition at `~/.claude/agents/project-lead.md:19`.
-  - The other `change-management.md` pointers (`governance-sme.md:23` and `:93`, `memory-system/SKILL.md:78`, `subagent-prompting/SKILL.md:55`, `senior-developer.md:64`, `core/claude/hooks/commit-msg`) name content the kernel keeps, and they stay.
+  - In `~/.claude/rules/writing-style.md:31`, the pointer to `change-management.md` for commit-message rationale becomes "`.claude/rules/harness/change-management-code.md` in a code project", because "Decision Documentation" moves there.
+  - The other `change-management.md` pointers (`governance-sme.md:23` and `:93`, `memory-system/SKILL.md:78`, the `subagent-prompting/SKILL.md` sentence naming its Verification Gates, `senior-developer.md:64`, `core/claude/hooks/commit-msg`) name content the kernel keeps, and they stay.
 
 - [ ] **Step 4: Export and check the diff.** Run `pwsh -NoProfile -File install/Export-Account.ps1`, then `git diff --stat account/claude`. Expected, and the only paths staged:
   - `rules/fix-quality.md` deleted
   - `rules/bounded-review.md` added
-  - `rules/change-management.md`, `rules/coordinator-output.md` and `rules/harness-core.md` modified
+  - `rules/change-management.md`, `rules/coordinator-output.md`, `rules/harness-core.md` and `rules/writing-style.md` modified
   - `agents/senior-developer.md` and `agents/project-lead.md` modified
 
   Then run `bun test test/layer-rules.test.ts`. Expected: PASS in after-cutover mode, which proves the kernel and code halves reassemble the original sections exactly.
@@ -774,7 +790,7 @@ Whatever the cadence, ask before any action on the `change-management.md` confir
 - [ ] **Step 5: Commit (cutover path).** Stage the explicit paths only. With A2 unmerged, the export also carries other kernel edits, and those wait for their own PR.
 
 ```bash
-git add account/claude/rules/fix-quality.md account/claude/rules/bounded-review.md account/claude/rules/change-management.md account/claude/rules/coordinator-output.md account/claude/rules/harness-core.md account/claude/agents/senior-developer.md account/claude/agents/project-lead.md
+git add account/claude/rules/fix-quality.md account/claude/rules/bounded-review.md account/claude/rules/change-management.md account/claude/rules/coordinator-output.md account/claude/rules/harness-core.md account/claude/rules/writing-style.md account/claude/agents/senior-developer.md account/claude/agents/project-lead.md
 git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "refactor(account): the account layer keeps the kernel, code-repo rules live in core (#310)"
 ```
 
@@ -789,14 +805,14 @@ This commit's sha is the `BASE-SHA` for Task 13.
 Cutover path only. On the fallback path this task does not run. `fix-quality.md` is still shipped from the account layer then, so retiring it would make Install-Account refuse. Pointing the reviewer at `bounded-review.md` would silently drop its standard, and the pointer test would flag a pointer that is still valid.
 
 **Files:**
-- Modify: `install/account-retired.json`, `tools/pr-review/types.ts` (comment near line 6 and `TRUSTED_CONTEXT_PATHS`), `tools/pr-review/reviewer-prompt.md:79`, `tools/pr-review/README.md:7`, `install/Install-Harness.Tests.ps1:45` (comment), `test/layer-rules.test.ts`, `README.md` (Account layer section)
+- Modify: `install/account-retired.json`, `tools/pr-review/types.ts` (comment near line 6 and `TRUSTED_CONTEXT_PATHS`), `tools/pr-review/reviewer-prompt.md:79`, `tools/pr-review/README.md:7`, `install/Install-Harness.Tests.ps1` (the comment naming "Work has to be able to end", one line lower after Task 1), `test/layer-rules.test.ts`, `README.md` (Account layer section)
 
 **Interfaces:**
 - Consumes: Task 12's commit, Task 10's list shape, Task 7's test.
 - Produces: `DANGLING_RULE_POINTER: RegExp`, exported from `test/layer-rules.test.ts`.
 
-- [ ] **Step 1: Write the failing test** in `test/layer-rules.test.ts`: "no account or core file points at a moved rule by its account path". Use `DANGLING_RULE_POINTER = /(?:~\/\.claude|\{\{CLAUDE_HOME\}\})\/rules\/fix-quality\.md/` and scan every text file under `account/claude` and `core/claude`. Expect zero hits. A canary asserts the regex matches the literal string `` `~/.claude/rules/fix-quality.md` `` built at runtime, so a broken matcher cannot pass.
-- [ ] **Step 2: Run.** `bun test test/layer-rules.test.ts`. Expected: PASS, since Task 12 Step 3 repointed `senior-developer.md`. To ablate, restore the old pointer in a scratch copy of the file and confirm the test fails.
+- [ ] **Step 1: Write the pointer test** in `test/layer-rules.test.ts`: "no account or core file points at a moved rule by its account path". Use `DANGLING_RULE_POINTER = /(?:~\/\.claude|\{\{CLAUDE_HOME\}\})\/rules\/fix-quality\.md/` and scan every text file under `account/claude` and `core/claude`. Expect zero hits. A canary asserts the regex matches the literal string `` `~/.claude/rules/fix-quality.md` `` built at runtime, so a broken matcher cannot pass.
+- [ ] **Step 2: Run.** `bun test test/layer-rules.test.ts`. Expected: PASS, since Task 12 Step 3 repointed `senior-developer.md`. To ablate, restore the old pointer in `account/claude/agents/senior-developer.md` in the worktree, confirm the test fails, then revert the file.
 - [ ] **Step 3: Retire list.** Add `{ "path": "rules/fix-quality.md", "reason": "Split: the code-repo rules moved to core/claude/rules and the review-termination rule to rules/bounded-review.md." }`.
 - [ ] **Step 4: Reviewer standards.**
   - In `TRUSTED_CONTEXT_PATHS`, replace `"account/claude/rules/fix-quality.md"` with `"account/claude/rules/bounded-review.md"`. `core/claude/rules/fix-quality.md` stays from Task 7.
@@ -816,9 +832,9 @@ PR A4 body: `Docs: README updated: Account layer section says the account layer 
 
 ---
 
-### Task 14: Session close skips the push without a remote and cleans up worktrees
+### Task 14: Session close skips the push without a remote, and the kernel cleans up worktrees
 
-This runs after A4 merges, on either path. The split test's job ends when A4 merges with it green, and this edit changes a code section the test pins. On the fallback path, the full account `change-management.md` still carries its own Session Close Protocol. The coordinator applies the same two edits there in `~/.claude/rules/change-management.md`, exports, stages only `account/claude/rules/change-management.md`, and commits it in the A5 PR, so the two copies do not disagree.
+This runs after A4 merges, on either path. The split test's job ends when A4 merges with it green, and this edit changes a code section the test pins. Worktree cleanup is kernel housekeeping (spec: #308 E3), so it goes into the kernel half of `change-management.md` through a coordinator step (Step 5) on both paths. The code-layer edit keeps only the no-remote skip. On the fallback path, the full account `change-management.md` still carries its own Session Close Protocol, so Step 5 also applies the step 2 edit there, keeping the two copies in agreement.
 
 **Files:**
 - Modify: `core/claude/rules/change-management-code.md` ("Session Close Protocol")
@@ -829,26 +845,37 @@ This runs after A4 merges, on either path. The split test's job ends when A4 mer
 - Produces: nothing.
 
 - [ ] **Step 1: Retire the split test.** Delete the fixtures and the split case, and keep the registry and pointer cases.
-- [ ] **Step 2: Edit.** Replace step 2 of the Session Close Protocol and add a step 4.
+- [ ] **Step 2: Edit.** Replace step 2 of the Session Close Protocol.
 
 ```markdown
 2. **Push to remote** — ensure the commit is on GitHub, not just local. Run `git remote` first. When it prints nothing, the project has no remote: skip this step and say "No remote configured, push skipped" in the close. When the folder is not a git repository at all, skip steps 1 and 2 the same way and say so.
-4. **Remove finished agent worktrees** — for each worktree under `.claude/worktrees/`, remove it only when `git -C <worktree> status --porcelain` prints nothing and `git log <worktree-branch> --not --exclude=<worktree-branch> --branches --remotes --tags --oneline` prints nothing, which means no commit on it is unreachable from another ref. Report how many were removed and how many were kept, and why.
 ```
 
-The em dash after each bold label matches steps 1 and 3.
+The em dash after the bold label matches steps 1 and 3.
 
 - [ ] **Step 3: Verify.**
   - Run `bun test`. Expected: PASS.
-  - Run `pwsh -NoProfile -File install/Install-Harness.ps1 -Target <tmp project>`. `.claude/rules/harness/change-management-code.md` contains `No remote configured, push skipped` and `Remove finished agent worktrees`.
-  - In a temp repo with two worktrees, one clean and merged and one holding an unpushed commit, run the step 4 `git log` command for each. It prints nothing for the first and the commit for the second.
+  - Run `pwsh -NoProfile -File install/Install-Harness.ps1 -Target <tmp project>`. `.claude/rules/harness/change-management-code.md` contains `No remote configured, push skipped`.
 
 - [ ] **Step 4: Commit.**
 
 ```bash
 git add -A core/claude/rules/change-management-code.md test/layer-rules.test.ts test/fixtures/rules-premove
-git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "docs(rules): session close skips the push without a remote and removes finished worktrees (#310)"
+git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "docs(rules): session close skips the push when there is no remote (#310)"
 ```
+
+- [ ] **Step 5 (coordinator, operator's machine, both paths).**
+  - Append this section to the end of `~/.claude/rules/change-management.md`:
+
+```markdown
+## Session Close Housekeeping
+
+At session close, for each agent worktree under `.claude/worktrees/`, remove it only when `git -C <worktree> status --porcelain` prints nothing and `git log <worktree-branch> --not --exclude=<worktree-branch> --branches --remotes --tags --oneline` prints nothing, which means no commit on it is unreachable from another ref. Report how many were removed and how many were kept, and why. A folder that is not a git repository has no worktrees, so this step does nothing there.
+```
+
+  - On the fallback path, apply Step 2's replacement to that file's own Session Close Protocol as well.
+  - Verify the rule's commands in a temp repo with two worktrees, one clean and merged and one holding an unpushed commit. The `git log` command prints nothing for the first and the commit for the second.
+  - Export, stage only `account/claude/rules/change-management.md`, and commit in the A5 PR with `-m "docs(account): kernel session close removes finished worktrees (#310)"`.
 
 PR A5 body: `Docs: README still accurate: no README section describes the session close`. After the merge, the coordinator reinstalls every project from Task 11 Step 2 once more.
 
@@ -860,7 +887,7 @@ Group A3, after Task 8, which it shares `Install-Harness.ps1` with. It is number
 - Create: `core/claude/deps.json`, `install/Deps.ps1` (dot-sourced by both installers)
 - Modify: `install/Install-Harness.ps1` (replaces the bun-only probe and its warning), `install/Install-Account.ps1` (replaces the `$wanted` list at line 232, and drops `pwsh` and `uvx`)
 - Test: `install/Install-Harness.Tests.ps1` (new `Context 'dependencies'` plus the existing-case changes in Step 1), `install/Install-Account.Tests.ps1` (new cases plus the existing-case changes in Step 1). The cases sit in suites CI already runs, so `.github/workflows/test.yml` does not change.
-- Modify: `README.md` (Install and Account layer sections)
+- Modify: `README.md` (Install and Account layer sections), `.github/CODEOWNERS` (adds `/core/claude/deps.json                     @Cringely`, since the file decides what the installers download and which plugins are trusted), `.github/workflows/test.yml` (the two setup-bun comments that cite the `bun is not on PATH` negative control). Both are owned paths, so this rides the same administrator-bypass merge.
 
 **Interfaces:**
 - Consumes: `ConvertTo-LayerList` and `Resolve-ProjectLayers` (Task 8).
@@ -873,7 +900,7 @@ Group A3, after Task 8, which it shares `Install-Harness.ps1` with. It is number
     - `Get-DepsManifest -Path <string>` returns the validated manifest.
     - `Get-RequiredDeps -Manifest -Layers <string[]> -IsWindows <bool>` returns one record per tool for this platform. Its severity is the strictest across `kernel` and the chosen layers, so `hard` wins.
     - `Resolve-GitBashPath -Runner -IsWindows -GitExe <string|null>` returns an absolute path or `$null`. `-GitExe` is the injected git location. The preflight passes `(Get-Command git -CommandType Application -ErrorAction SilentlyContinue).Source`, and tests pass `$null` or a temp path.
-    - `Test-Dep -Dep -Runner <scriptblock> -GitExe <string|null>` returns `[pscustomobject]@{ Name; Present; Version; MeetsMin; Reason }`.
+    - `Test-Dep -Dep -Runner <scriptblock> -GitExe <string|null> -IsWindows <bool>` returns `[pscustomobject]@{ Name; Present; Version; MeetsMin; Reason }`.
     - `Get-DepInstallCommand -Dep -IsWindows <bool>` returns `string[]` or `$null`.
     - `Invoke-DepsPreflight -Manifest -Layers -IsWindows -InstallDeps <bool> -Runner <scriptblock> -ShouldInstall <scriptblock>`. The last parameter receives `(target, action)` and returns a bool. The callers pass `$PSCmdlet.ShouldProcess`.
     - `Invoke-DefaultDepsRunner -Argv <string[]> -TimeoutSeconds <int> -WorkingDirectory <string|null>`
@@ -892,9 +919,9 @@ Group A3, after Task 8, which it shares `Install-Harness.ps1` with. It is number
   - "a probe that exits non-zero is absent even when its output carries a version": the mock returns `ExitCode` 1 with output `harness-fake-hard 1.2.3`, and the install refuses.
   - "a probe that times out is absent": the mock returns `TimedOut = $true`, and the install refuses.
   - "one entry per tool, strictest severity wins": a fixture tool mapped `{ "kernel": "optional", "code": "hard" }` is probed once. With `-Layers code` a missing one refuses, and with `-Layers none` it warns. Under `-InstallDeps` exactly one install call is recorded.
-  - "-InstallDeps -WhatIf runs nothing": the probe misses, no install argv is recorded, the output carries `What if`, and the target has no `.claude`.
+  - "-InstallDeps -WhatIf runs nothing": the probe misses, no install argv is recorded, and the target has no `.claude`. Those absences are the binding check. The output also carries the preflight's own `WhatIf: would run <argv>` line.
   - "-Audit -InstallDeps is refused with a message", per Task 8's install-run-only guard.
-  - "Git Bash resolves from Git for Windows, never from PATH". These are unit tests: dot-source `install/Deps.ps1` and call `Test-Dep` with the shipped git-bash entry, so they run on both platforms.
+  - "Git Bash resolves from Git for Windows, never from PATH". These are unit tests: dot-source `install/Deps.ps1` and call `Test-Dep` with the shipped git-bash entry and `-IsWindows $true`, so they run on both platforms.
     - **Positive.** `-GitExe` is `<tmp>/cmd/git.exe`, and `<tmp>/usr/bin/bash.exe` exists. The mock answers `git --exec-path` with exit 1 and answers that absolute bash path with exit 0 and `GNU bash, version 5.2.21(1)-release`. The recorded probe argv starts with that absolute path, and the result is present.
     - **Negative.** `-GitExe` is `$null`, and the mock answers `git --exec-path` with exit 1.
       - The mock answers any argv whose first element's leaf is `bash` or `bash.exe` (bare `bash`, or `<tmp>/System32/bash.exe`) with exit 0 and the same GNU bash banner.
@@ -932,9 +959,9 @@ Group A3, after Task 8, which it shares `Install-Harness.ps1` with. It is number
     - It drops the emptied-PATH setup and makes bun absent through the mock runner (127).
     - The refusal names `bun` and contains `every TypeScript gate fails open`.
     - The target has no `.claude` afterwards.
-  - **`Install-Account.Tests.ps1`, "names <_> as an absent prerequisite".** The `-ForEach` list loses `uvx` and `pwsh`. It runs through a mock runner returning 127, not an emptied PATH. `vale` and `npm` are named as warnings. `bun` (and `git-bash` on Windows) are named in the refusal.
+  - **`Install-Account.Tests.ps1`, "names <_> as an absent prerequisite".** The list at HEAD is `vale, bun, node, bash, uvx, jq`. It becomes the kernel optional names `deps.json` defines for a Linux target: `vale`, `npm`, `python3`, `op`, `ccstatusline`, plus `jq` while npm is absent. Each is named as a warning. `bun` moves to the refusal case. The case runs through a mock runner returning 127, not an emptied PATH. `Install-Account.ps1` passes `-IsWindows $TargetIsWindows`, not the host's `$IsWindows`, because the suite runs Linux-target cases on the Windows CI leg.
   - **`Install-Account.Tests.ps1`, "still completes the install: preflight warns, it does not gate".** Split in two. With only optional entries missing, the install completes. With a hard entry missing, it refuses.
-  - **`Install-Account.Tests.ps1`, "does not offer jq when npm is present".** Unchanged, and still passing. jq keeps its npm-absent condition through `onlyWhenAbsent: "npm"`, and its existing npm-absent counterpart keeps passing too.
+  - **`Install-Account.Tests.ps1`, "does not offer jq when npm is present", and its npm-absent pair.** Rewritten, because npm presence moves from `-NpmGlobal` to the `npm` probe. With the mock's npm probe present, jq is not named. With the npm probe returning 127, jq is named. The pair must discriminate, and neither runs under the all-present stub.
 
 - [ ] **Step 2: Run to verify they fail.** `pwsh -NoProfile -File install/Install-Harness.Tests.ps1` and `pwsh -NoProfile -File install/Install-Account.Tests.ps1`. Expected: the new cases FAIL.
 
@@ -987,27 +1014,28 @@ Group A3, after Task 8, which it shares `Install-Harness.ps1` with. It is number
   - **Version parsing.** Use the entry's `versionPattern`, defaulting to the first `\d+(\.\d+)+` in the probe output, and compare as `[version]`. A probe with a non-zero exit, a timeout, or no match is absent.
   - **`Invoke-DepsPreflight`** collects every problem before deciding:
     - **Without `-InstallDeps`.** A missing or old hard dependency throws one message beginning `missing hard dependency`, listing each with its command or the no-pinned-install text. A missing optional one gets `Write-Warning` with its command.
-    - **With `-InstallDeps`.** For each available command it calls `-ShouldInstall` first. Under `-WhatIf` that returns false, prints `What if`, and runs nothing. Otherwise it runs the command through the runner with the install limit and re-probes. A hard dependency that still fails throws, and an optional one warns.
+    - **With `-InstallDeps`.** For each available command it calls `-ShouldInstall` first. Under `-WhatIf` that returns false, and the preflight prints its own `WhatIf: would run <argv>` line through `Write-Host` and runs nothing. Otherwise it runs the command through the runner with the install limit and re-probes. A hard dependency that still fails throws, and an optional one warns.
     - Nothing is installed without `-InstallDeps`.
   - **Plugin probes** from part 2 follow the same rules.
     - The plugin list, the marketplace list and the `git rev-parse` pin check go through the runner with the 10-second limit and closed stdin, and anything other than exit 0 within the limit is absent.
     - Marketplace adds, plugin installs and rollbacks go through `-ShouldInstall` with the 900-second limit.
     - Every plugin command carries the working directory the runner contract names.
   - **`Install-Harness.ps1`.**
-    - Calls the preflight with `@('kernel') + <resolved layers>` after the layer and manifest load and before the sidecar plan, which is the first write.
+    - Order: the layer and manifest load, then `Get-SidecarPlan` (which can refuse and writes nothing), then the preflight with `@('kernel') + <resolved layers>`, then the first write. Every refusal, the sidecar's included, therefore comes before any external install under `-InstallDeps`.
     - Never calls it on `-Audit`, `-Accept`, `-Unaccept` or `-Prune`.
     - Adds `-InstallDeps` to Task 8's install-run-only guard, so `-Audit -InstallDeps` throws "applies to an install run only".
-    - Under `-WhatIf` it runs the preflight and then returns before the sidecar plan with `WhatIf: stopped before writing`. That keeps native writes such as the `core.hooksPath` config from running in a dry run.
+    - Under `-WhatIf` it runs the preflight and then returns before the first write with `WhatIf: stopped before writing`. That keeps native writes such as the `core.hooksPath` config from running in a dry run.
     - The bun warning block goes.
   - **`Install-Account.ps1`.** Calls it with the kernel only, in place of `Test-Prerequisite`'s fixed list, passing `$PSCmdlet.ShouldProcess` as `-ShouldInstall`. jq's npm-absent condition is now carried by `onlyWhenAbsent`. `-SkipPreflight` keeps working.
   - **README.** The Install and Account sections list the hard dependencies, the refusal, `-InstallDeps`, `-WhatIf`, and the pinned sources (winget, apt, npm). The sentence saying the installers only warn goes.
+  - **Citations.** Re-pin whatever `install/Install-Harness.ps1:1616-1618` and `install/Install-Account.ps1:662-673` citations this task's edits move, then run `bun test test/citation-drift.test.ts`.
 
 - [ ] **Step 4: Run to verify they pass.** Both Pester suites and `bun test`. Expected: all PASS. Then check by hand on this machine that `pwsh -NoProfile -File install/Install-Harness.ps1 -Target <tmp>` passes the real preflight with no warning about bun or Git Bash.
 
 - [ ] **Step 5: Commit.**
 
 ```bash
-git add core/claude/deps.json install/Deps.ps1 install/Install-Harness.ps1 install/Install-Account.ps1 install/Install-Harness.Tests.ps1 install/Install-Account.Tests.ps1 README.md
+git add core/claude/deps.json install/Deps.ps1 install/Install-Harness.ps1 install/Install-Account.ps1 install/Install-Harness.Tests.ps1 install/Install-Account.Tests.ps1 README.md .github/CODEOWNERS .github/workflows/test.yml
 git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "feat(install): declared layer dependencies, a refusing preflight, opt-in installs (#310)"
 ```
 
@@ -1018,13 +1046,13 @@ Same task and same PR, as a second test-and-commit cycle on top of Step 5.
 **Trust rule** (operator ruling on #310, 2026-11-11):
 - **First-party marketplaces are trusted without a commit pin.** These are `claude-plugins-official` (source `anthropics/claude-plugins-official`) and `anthropic-agent-skills` (source `anthropics/skills`). At install the installer records a content hash of the installed plugin directory. Later probes and the drift check warn when it changes.
 - **Third-party marketplaces need one of two things:** a real pin verified before the plugin is enabled, or a per-project opt-in carrying a risk sentence.
-- **A first-party plugin whose marketplace entry carries its own sha has that sha tracked too.** superpowers is the case. A sha move in the marketplace is how such a plugin updates (7.0.0 to 7.0.2, say), so a mismatch warns, naming the old and new sha so the operator can read the diff, then re-records both the sha and the content hash. It never uninstalls or refuses.
+- **A first-party plugin whose marketplace entry carries its own sha has that sha tracked too.** superpowers is the case. A sha move in the marketplace is how such a plugin updates (7.0.0 to 7.0.2, say), so a mismatch warns, naming the old and new sha so the operator can read the diff. A plain run changes nothing, and `-Audit` keeps reporting `plugin-changed`. Installing the marketplace's version and re-recording both the sha and the content hash happen only under `-InstallDeps`, the same rule as content drift. It never uninstalls or refuses.
 
 **Plugin inventory.** Taken from `enabledPlugins` and `extraKnownMarketplaces` in `account/claude/settings.account.json` at `898ef59` and in the live `~/.claude/settings.json`. The live file adds `document-skills`, `core-presentations`, `core-workflow` and their two marketplaces, which the export leaves out.
 
 | Plugin | Goes to | Scope | Severity | Pin | Reason |
 |---|---|---|---|---|---|
-| `superpowers@claude-plugins-official` | kernel | user | optional | first-party, marketplace `sha` and hash recorded, a sha move warns and re-records | Brainstorming owns the start of new efforts on every project type, and plans run through it |
+| `superpowers@claude-plugins-official` | kernel | user | optional | first-party, marketplace `sha` and hash recorded, a sha move warns and re-records under `-InstallDeps` | Brainstorming owns the start of new efforts on every project type, and plans run through it |
 | `code-review@claude-plugins-official` | code | project | optional | first-party, hash recorded | The pull request review flow |
 | `feature-dev@claude-plugins-official` | code | project | optional | first-party, hash recorded | The code-architect and code-explorer agents |
 | `security-guidance@claude-plugins-official` | code | project | optional | first-party, hash recorded | Edit-time security reminders on code |
@@ -1076,20 +1104,20 @@ Moving plugin skills between layers is Plan C.
     - Every plugin call records cwd equal to the resolved `-Target`.
     - The mock's second list reports an `installPath` under a temp dir.
     - The sidecar's `pluginHashes` entry equals `Get-PluginContentHash` of that dir.
-  - "a kernel plugin installs at user scope with cwd at the home directory".
+  - "Install-Harness skips user-scope plugins": with a fixture kernel plugin, no plugin command is recorded for it, and the output notes that Install-Account owns user scope. The user-scope install case lives in the Install-Account suite.
   - "a known marketplace is not added again".
   - "a first-party plugin whose content changed warns, and -InstallDeps re-records it": change a file in the temp install dir after recording. A plain run warns `changed since recorded`, `-Audit` reports `plugin-changed`, and an `-InstallDeps` run re-records the new hash.
   - "Get-PluginContentHash is order- and line-ending-stable": the same files created in a different order, or with CRLF in place of LF, give the same hash. Changing one byte of content, or renaming a file, changes it.
-  - "a first-party plugin's sha move warns and re-records":
+  - "a first-party plugin's sha move warns, and -InstallDeps re-records":
     - A superpowers-like fixture (`firstParty` with `sha`) has its sha and hash recorded.
     - The mock's marketplace file now lists another sha, and its install dir has different content.
-    - The run warns, naming both shas.
-    - The record then holds the new sha and the new hash.
-    - No uninstall argv is recorded, and the run does not refuse.
+    - A plain run warns, naming both shas, records no install argv, and leaves the record unchanged.
+    - An `-InstallDeps` run installs the marketplace's version, and the record then holds the new sha and the new hash.
+    - Neither run records an uninstall argv or refuses.
   - "a third-party sha-pinned plugin is checked before install". The mock's registered marketplace file lists the plugin with another sha. Expected: refusal for a hard entry or a warning for an optional one, and no install argv recorded.
   - "a third-party pinned plugin is rolled back when the installed copy does not verify":
     - The install succeeds, and the installed dir's hash differs from the entry's `contentHash` (or the directory marketplace's `git rev-parse` returns another commit).
-    - The next recorded call is the uninstall at the same scope and cwd, and the run refuses.
+    - The next recorded call is the uninstall at the same scope and cwd. A hard entry then refuses, and an optional one warns.
   - "a plugin present but not enabled at the declared scope counts as missing".
   - "an unpinned third-party plugin is refused without the project opt-in": no install is recorded. With an opt-in entry carrying a `risk`, the preflight proceeds and the warning quotes the risk.
   - "plugin list output is never echoed":
@@ -1118,16 +1146,17 @@ Moving plugin skills between layers is Plan C.
     - Captured output never reaches a message, a warning, a log or a file. Messages name the plugin id and the field that failed, nothing more.
   - **Pins.**
     - Third-party `sha` and `commit` entries carry a `contentHash`, computed while implementing from a verified install of the pinned version.
-    - A first-party entry with a `sha` compares the marketplace entry's current `source.sha` against the recorded sha, or against `pin.sha` before the first record. On a mismatch it warns with both values, installs or keeps the marketplace's version, and re-records sha and hash. The rollback below never applies to first-party entries.
+    - A first-party entry with a `sha` compares the marketplace entry's current `source.sha` against the recorded sha, or against `pin.sha` before the first record. On a mismatch it warns with both values. Only under `-InstallDeps` does it install the marketplace's version and re-record sha and hash. The rollback below never applies to first-party entries.
     - Before any install of a third-party `sha` entry, read the plugin's entry in the registered marketplace's `marketplace.json`, located through the marketplace list, and require its `source.sha` to equal `pin.sha`. A mismatch installs nothing.
     - A `commit` entry compares `git -C <registered path> rev-parse HEAD`, run through the runner, before installing.
   - **Verify, then enable.**
     - If Step 6 found an install-without-enable form, install disabled, verify the hash, then enable.
-    - Otherwise install and verify at once, and on a mismatch run the uninstall at that scope and cwd before refusing.
+    - Otherwise install and verify at once, and on a mismatch run the uninstall at that scope and cwd. A hard entry then refuses, and an optional one warns.
     - First-party entries record their hash after a successful install.
   - **`-InstallDeps` on a first-party plugin** that is present but changed re-records the new hash after printing the warning. A plain run only warns.
   - **Unpinned third-party plugins** are processed only when the project manifest's `allowUnpinnedPlugins` names them, and the warning quotes the recorded `risk` on every install run.
-  - **Audit.** `-Audit` hashes each recorded `installPath`, project and user, without calling the CLI, and reports `plugin-changed` on a difference.
+  - **Audit.** `-Audit` hashes each project-scope recorded `installPath` without calling the CLI, and reports `plugin-changed` on a difference.
+  - **Scope ownership.** Install-Harness handles project-scope plugins only and skips user-scope entries with a note. Install-Account owns user scope through its existing `-ClaudeHome`, so Install-Harness reads no user-home path and needs no home seam.
   - **`Install-Account`** handles user-scope entries only, with cwd at the home directory. It skips project-scope entries with the note above.
   - **Scope rules.** `Get-DepsManifest` throws when:
     - a kernel plugin is not user scope
