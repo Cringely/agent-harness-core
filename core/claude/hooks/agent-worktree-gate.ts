@@ -94,9 +94,12 @@
 // a repo writer: agent-write-scope.ts reads the same file with the same parser and confines its
 // Write and Edit calls to a scratch directory, and with no shell nothing else reaches the checkout.
 // The gate trusts that only when the parser module loads, the installed write-scope gate is at the
-// required version (it carries the scratch-parent containment fix) and settings.json registers it
-// under a PreToolUse matcher covering Write and Edit. Anything less leaves the type requiring
-// isolation, because a scoped writer behind two gates that do not both hold is an unconfined one.
+// required version (it carries the scratch-parent containment fix) and the project's settings.json
+// registers that project's own `.claude/hooks/agent-write-scope.ts` under a PreToolUse matcher
+// covering Write and Edit. The definition must also sit in `<project>/.claude/agents`, where the
+// write-scope gate reads it, and the dispatched type name must already be trimmed and lowercase,
+// since that gate looks it up verbatim. Anything less leaves the type requiring isolation, because
+// a scoped writer behind two gates that do not both hold is an unconfined one.
 // The modules load through a guarded dynamic import: a static import that fails to link exits the
 // process before the entrypoint's try, which Claude Code reads as no opinion.
 //
@@ -105,7 +108,7 @@
 // contract itself IS spawn-tested (#78): see the
 // "spawned process" describe block at the end of that file.
 
-import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isValidAgentName } from "./agent-name";
@@ -192,8 +195,8 @@ export type GitProbe = "repo" | "not-repo" | "unknown";
 /**
  * Is `dir` inside a git work tree? Filesystem only, no git binary. `repo` when GIT_DIR or
  * GIT_WORK_TREE is set, or when `dir` or an ancestor holds a `.git` entry (a directory, or the file
- * a linked worktree uses). `unknown` when `dir` is not an existing directory or a read fails for any
- * reason but absence. `not-repo` only when the walk reaches the filesystem root (`/` or a drive
+ * a linked worktree uses), searched from the directory's real path so links resolve. `unknown` when
+ * `dir` is not an existing directory or a read fails for any reason but absence. `not-repo` only when the walk reaches the filesystem root (`/` or a drive
  * root) having found nothing. Unknown fails closed in the caller: the gate behaves as it did.
  */
 export function probeGitWorkTree(
@@ -203,7 +206,9 @@ export function probeGitWorkTree(
   if (env.GIT_DIR || env.GIT_WORK_TREE) return "repo";
   try {
     if (!statSync(dir).isDirectory()) return "unknown";
-    let p = resolve(dir);
+    // Walk from the real location. A junction or symlink into a repository is that repository, and
+    // a lexical walk would climb the link's own parents and call it not-repo.
+    let p = realpathSync.native(dir);
     for (;;) {
       try {
         lstatSync(join(p, ".git"));
@@ -253,12 +258,41 @@ function matcherCovers(matcher: unknown, tool: string): boolean {
   }
 }
 
+/** A path in comparison form: forward slashes, collapsed separators, lowercased where the filesystem folds case. */
+function canonPath(p: string): string {
+  const c = p.replace(/\\/g, "/").replace(/\/+/g, "/");
+  return process.platform === "win32" ? c.toLowerCase() : c;
+}
+
+/** The directory the write-scope gate reads definitions from, and the only one trusted here. */
+function projectAgentsDir(projectRoot: string): string {
+  return join(resolve(projectRoot), ".claude", "agents");
+}
+
 /**
- * True when settings.json registers a command containing `agent-write-scope.ts` under ONE
- * PreToolUse group whose matcher covers both Write and Edit. Two groups that each cover one tool
- * leave the other unguarded, so they do not count.
+ * Does `command` run THIS project's write-scope gate, `<projectRoot>/.claude/hooks/agent-write-scope.ts`?
+ * `$CLAUDE_PROJECT_DIR` and `${CLAUDE_PROJECT_DIR}` expand to the root, then the full path has to
+ * appear as its own word, bounded by whitespace, a quote or an end of the string. A bare file name,
+ * a relative path, another project's copy and a path that reaches this one only through `..` fail.
  */
-function registersWriteScopeGate(settingsPath: string): boolean {
+function commandNamesScopeGate(command: string, projectRoot: string): boolean {
+  const root = resolve(projectRoot);
+  const expected = canonPath(join(root, ".claude", "hooks", "agent-write-scope.ts"));
+  const expanded = canonPath(command.replace(/\$\{CLAUDE_PROJECT_DIR\}|\$CLAUDE_PROJECT_DIR\b/g, () => root));
+  for (let at = expanded.indexOf(expected); at >= 0; at = expanded.indexOf(expected, at + 1)) {
+    const before = at === 0 ? " " : expanded[at - 1];
+    const after = expanded[at + expected.length] ?? " ";
+    if (/[\s"']/.test(before) && /[\s"']/.test(after)) return true;
+  }
+  return false;
+}
+
+/**
+ * True when settings.json registers THIS project's write-scope gate (see commandNamesScopeGate)
+ * under ONE PreToolUse group whose matcher covers both Write and Edit. Two groups that each cover
+ * one tool leave the other unguarded, so they do not count.
+ */
+function registersWriteScopeGate(settingsPath: string, projectRoot: string): boolean {
   const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as unknown;
   const groups = (settings as { hooks?: { PreToolUse?: unknown } } | null)?.hooks?.PreToolUse;
   if (!Array.isArray(groups)) return false;
@@ -269,7 +303,7 @@ function registersWriteScopeGate(settingsPath: string): boolean {
     if (!Array.isArray(group.hooks)) return false;
     return group.hooks.some((h: unknown) => {
       const command = (h as { command?: unknown } | null)?.command;
-      return typeof command === "string" && command.includes("agent-write-scope.ts");
+      return typeof command === "string" && commandNamesScopeGate(command, projectRoot);
     });
   });
 }
@@ -282,7 +316,8 @@ function specifier(p: string): string {
 /**
  * Loads the write-scope parser, or null when trusting `writeScope` would be unsafe. Null on any
  * load error, and also unless the write-scope gate beside it exports WRITE_SCOPE_GATE_VERSION at or
- * above REQUIRED_WRITE_SCOPE_GATE_VERSION and settings.json registers that gate for Write and Edit.
+ * above REQUIRED_WRITE_SCOPE_GATE_VERSION and the project's settings.json registers
+ * `<projectRoot>/.claude/hooks/agent-write-scope.ts` for Write and Edit.
  * A project that modified or pinned agent-write-scope.ts keeps its old copy across a reinstall,
  * and that copy still has the scratch-parent gap, so trusting `writeScope` beside it would let a
  * scoped writer through both gates.
@@ -294,7 +329,8 @@ function specifier(p: string): string {
 export async function loadWriteScopeParser(
   parserPath: string = "./write-scope-parse",
   gatePath: string = "./agent-write-scope",
-  settingsPath: string = join(projectRootOf(process.env), ".claude", "settings.json"),
+  settingsPath?: string,
+  projectRoot: string = projectRootOf(process.env),
 ): Promise<WriteScopeParser | null> {
   try {
     const parser = (await import(specifier(parserPath))) as { parseWriteScope?: unknown };
@@ -302,7 +338,9 @@ export async function loadWriteScopeParser(
     if (typeof parser.parseWriteScope !== "function") return null;
     const version = gate.WRITE_SCOPE_GATE_VERSION;
     if (typeof version !== "number" || !(version >= REQUIRED_WRITE_SCOPE_GATE_VERSION)) return null;
-    if (!registersWriteScopeGate(settingsPath)) return null;
+    if (!registersWriteScopeGate(settingsPath ?? join(projectRoot, ".claude", "settings.json"), projectRoot)) {
+      return null;
+    }
     return parser.parseWriteScope as WriteScopeParser;
   } catch {
     return null;
@@ -444,7 +482,19 @@ export function decide(
       ? t.subagent_type.trim().toLowerCase()
       : "general-purpose";
 
-  if (!requiresIsolation(subagentType, agentsDir, parseScope)) return ALLOW;
+  // The scoped-writer trust holds only where agent-write-scope.ts confines the writes. It reads the
+  // definition verbatim from `<projectRoot>/.claude/agents`, so the definition this gate read must
+  // sit there too, and the type name must reach that lookup unchanged (this gate trims and
+  // lowercases it, the write-scope gate does not). Otherwise a same-named definition elsewhere, or a
+  // differently cased dispatch, would be trusted here and unconfined there.
+  const scopeTrusted =
+    parseScope !== null &&
+    typeof projectRoot === "string" &&
+    projectRoot !== "" &&
+    t.subagent_type === subagentType &&
+    canonPath(resolve(agentsDir)) === canonPath(projectAgentsDir(projectRoot));
+
+  if (!requiresIsolation(subagentType, agentsDir, scopeTrusted ? parseScope : null)) return ALLOW;
 
   // Nothing to isolate into: the project root is provably not a repository, and the session cwd
   // (when the payload names one) agrees. Allow and say so. Any other probe answer, "unknown"
