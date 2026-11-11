@@ -32,6 +32,11 @@ describe("doc-steward tool grant", () => {
     for (const slice of [text.slice(i4, i5), text.slice(i7, iSize)]) {
       expect(slice).toMatch(/dispatcher/i);
       expect(slice).toMatch(/skipped/i);
+      // Output handed in at dispatch predates the agent's edits, so the item must say it is
+      // not evidence and must not tell the agent to carry it into the report.
+      expect(slice).toMatch(/predates? your edits|before your edits/i);
+      expect(slice).not.toMatch(/carry[^.]*verbatim/i);
+      expect(slice).not.toMatch(/run it after/i);
     }
   });
 });
