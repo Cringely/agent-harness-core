@@ -124,6 +124,12 @@ anything. The same refusal covers a file that is not well-formed UTF-8, includin
 Latin-1 or Windows-1252 saves, because an accented letter in those encodings would never match the
 UTF-8 form git stores.
 
+The same two hooks also run a personal-term channel, which is opt-in per clone. Set the local git
+config `harness.personalTermsFile` to a JSON list of the form `{"terms": [...]}` and a commit or push
+carrying any listed string is refused. Where that config is unset the channel is skipped silently,
+and where it is set, a list that is missing, empty or malformed is a hard refusal. The same list is
+read by `install/Export-Account.ps1`, described below.
+
 The `.harness-manifest.json` behind that is a record of two different things, not one. `files` maps
 each installed path to the SHA256 it had at install time, which is what makes a project edit
 detectable. `accepted` maps a path to the hash of the project's own fork, pinned deliberately, and
