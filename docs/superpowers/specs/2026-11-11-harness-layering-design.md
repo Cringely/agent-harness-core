@@ -75,7 +75,8 @@ These would make the work a failure even if every layer ships:
 
   Claude Code plugins from marketplaces are dependencies too.
   - Each one declares its marketplace, the pin it resolves to, its scope (user for kernel plugins, project for layer plugins) and whether it is hard or optional. Personal-preference plugins stay account-only.
-  - A plugin that cannot be pinned, such as `document-skills` from `anthropics/skills`, is excluded unless a project opts in by name and records the risk. (Operator, 2026-11-11.)
+  - The Anthropic first-party marketplaces (`claude-plugins-official`, `anthropics/skills`) are trusted without a commit pin. At install, the installer records a content hash of the installed plugin directory: in the project's local sidecar for project scope, or the account state for user scope. Later probes and the drift check warn when that hash changes. So `document-skills` is a documents-layer, project-scope plugin with no opt-in.
+  - A third-party plugin needs a real pin, verified before it is enabled, or an explicit per-project opt-in that records the risk. A plugin whose marketplace entry carries its own sha, such as `superpowers`, keeps that sha check. (Operator, 2026-11-11.)
 
 ## The coordinator's calls
 

@@ -872,12 +872,12 @@ Group A3, after Task 8, which it shares `Install-Harness.ps1` with. It is number
   - In `install/Deps.ps1`:
     - `Get-DepsManifest -Path <string>` returns the validated manifest.
     - `Get-RequiredDeps -Manifest -Layers <string[]> -IsWindows <bool>` returns one record per tool for this platform. Its severity is the strictest across `kernel` and the chosen layers, so `hard` wins.
-    - `Resolve-GitBashPath -Runner -IsWindows` returns an absolute path or `$null`.
-    - `Test-Dep -Dep -Runner <scriptblock>` returns `[pscustomobject]@{ Name; Present; Version; MeetsMin; Reason }`.
+    - `Resolve-GitBashPath -Runner -IsWindows -GitExe <string|null>` returns an absolute path or `$null`. `-GitExe` is the injected git location. The preflight passes `(Get-Command git -CommandType Application -ErrorAction SilentlyContinue).Source`, and tests pass `$null` or a temp path.
+    - `Test-Dep -Dep -Runner <scriptblock> -GitExe <string|null>` returns `[pscustomobject]@{ Name; Present; Version; MeetsMin; Reason }`.
     - `Get-DepInstallCommand -Dep -IsWindows <bool>` returns `string[]` or `$null`.
     - `Invoke-DepsPreflight -Manifest -Layers -IsWindows -InstallDeps <bool> -Runner <scriptblock> -ShouldInstall <scriptblock>`. The last parameter receives `(target, action)` and returns a bool. The callers pass `$PSCmdlet.ShouldProcess`.
-    - `Invoke-DefaultDepsRunner -Argv <string[]> -TimeoutSeconds <int>`
-  - The runner contract is `& $Runner $argv $timeoutSeconds`, returning `[pscustomobject]@{ ExitCode; Output; TimedOut }`.
+    - `Invoke-DefaultDepsRunner -Argv <string[]> -TimeoutSeconds <int> -WorkingDirectory <string|null>`
+  - The runner contract is `& $Runner $argv $timeoutSeconds $workingDirectory`, returning `[pscustomobject]@{ ExitCode; Output; TimedOut }`. A `$null` working directory inherits the installer's own. Project-scope plugin commands pass the resolved `-Target`. User-scope plugin commands pass the user's home directory.
     - Probes get 10 seconds. Installs, marketplace adds and plugin installs get 900.
     - A command that is not on PATH returns `ExitCode` 127 without throwing. A timeout returns `TimedOut = $true` and `ExitCode` 124, and the process tree is killed.
     - A dependency is present only when the probe exits 0, did not time out, and its output matches the version pattern at or above `minVersion`.
@@ -894,9 +894,12 @@ Group A3, after Task 8, which it shares `Install-Harness.ps1` with. It is number
   - "one entry per tool, strictest severity wins": a fixture tool mapped `{ "kernel": "optional", "code": "hard" }` is probed once. With `-Layers code` a missing one refuses, and with `-Layers none` it warns. Under `-InstallDeps` exactly one install call is recorded.
   - "-InstallDeps -WhatIf runs nothing": the probe misses, no install argv is recorded, the output carries `What if`, and the target has no `.claude`.
   - "-Audit -InstallDeps is refused with a message", per Task 8's install-run-only guard.
-  - "Git Bash resolves from Git for Windows, never from PATH" (Windows only, `-Skip` elsewhere):
-    - With the mock's `git --exec-path` pointing into a temp Git root holding `usr/bin/bash.exe`, the probe argv uses that absolute path.
-    - With `git --exec-path` failing and a PATH `bash` stub at `<tmp>/System32/bash.exe` printing `GNU bash, version 5.2.21`, git-bash is absent and the install refuses.
+  - "Git Bash resolves from Git for Windows, never from PATH". These are unit tests: dot-source `install/Deps.ps1` and call `Test-Dep` with the shipped git-bash entry, so they run on both platforms.
+    - **Positive.** `-GitExe` is `<tmp>/cmd/git.exe`, and `<tmp>/usr/bin/bash.exe` exists. The mock answers `git --exec-path` with exit 1 and answers that absolute bash path with exit 0 and `GNU bash, version 5.2.21(1)-release`. The recorded probe argv starts with that absolute path, and the result is present.
+    - **Negative.** `-GitExe` is `$null`, and the mock answers `git --exec-path` with exit 1.
+      - The mock answers any argv whose first element's leaf is `bash` or `bash.exe` (bare `bash`, or `<tmp>/System32/bash.exe`) with exit 0 and the same GNU bash banner.
+      - Expected: absent, and no recorded argv starts with a bare `bash` or a `System32` path.
+      - A mutant that probes bare `bash` gets the banner and turns this case red.
   - The real default runner, called directly:
     - `Invoke-DefaultDepsRunner @('harness-absent-<guid>') 10` returns 127 without throwing.
     - `@('pwsh','-NoProfile','-Command','Start-Sleep 30')` with a 2-second limit returns `TimedOut` within 6 seconds.
@@ -925,6 +928,10 @@ Group A3, after Task 8, which it shares `Install-Harness.ps1` with. It is number
     - `BeforeAll` defines `$script:dep = @{ DepsRunner = <all-present stub> }`, and each existing `& "$PSScriptRoot/Install-*.ps1"` call gains `@script:dep`. This is a mechanical edit.
     - A spawned `pwsh -File` case (the Task 8 comma-list case) passes `-DepsManifestPath` to a fixture whose one optional entry probes `pwsh --version`.
   - **`Install-Harness.Tests.ps1:33`.** The negative control `Should -Not -Match 'bun is not on PATH'` becomes `Should -Not -Match 'missing hard dependenc'`. The refusal case above is its positive pair.
+  - **`Install-Harness.Tests.ps1:1687`, "warns that the gates stop enforcing when bun is not on PATH, and installs anyway".** Inverted and renamed "refuses when bun is missing, because every TypeScript gate would fail open".
+    - It drops the emptied-PATH setup and makes bun absent through the mock runner (127).
+    - The refusal names `bun` and contains `every TypeScript gate fails open`.
+    - The target has no `.claude` afterwards.
   - **`Install-Account.Tests.ps1`, "names <_> as an absent prerequisite".** The `-ForEach` list loses `uvx` and `pwsh`. It runs through a mock runner returning 127, not an emptied PATH. `vale` and `npm` are named as warnings. `bun` (and `git-bash` on Windows) are named in the refusal.
   - **`Install-Account.Tests.ps1`, "still completes the install: preflight warns, it does not gate".** Split in two. With only optional entries missing, the install completes. With a hard entry missing, it refuses.
   - **`Install-Account.Tests.ps1`, "does not offer jq when npm is present".** Unchanged, and still passing. jq keeps its npm-absent condition through `onlyWhenAbsent: "npm"`, and its existing npm-absent counterpart keeps passing too.
@@ -971,7 +978,7 @@ Group A3, after Task 8, which it shares `Install-Harness.ps1` with. It is number
     - It waits `TimeoutSeconds`. On expiry it kills the process tree (`Kill($true)`) and returns `TimedOut`.
     - Probes pass 10 and installs pass 900.
   - **Git Bash** (`resolve: git-bash`, Windows only). Implement `Resolve-GitBashPath`:
-    - Take the Git root from `git --exec-path` through the runner (three levels up from `mingw64/libexec/git-core`). If that fails, take it from `Get-Command git -CommandType Application` (two levels up from `cmd/git.exe`).
+    - Take the Git root from `git --exec-path` through the runner (three levels up from `mingw64/libexec/git-core`). If that fails, take it from `-GitExe` (two levels up from `cmd/git.exe`). `-GitExe` is the only git-location fallback, so a test can make it miss.
     - Use the first of `<root>/usr/bin/bash.exe` or `<root>/bin/bash.exe` that exists.
     - Reject any path under `System32` or `WindowsApps`.
     - Never probe a bare `bash`.
@@ -982,7 +989,10 @@ Group A3, after Task 8, which it shares `Install-Harness.ps1` with. It is number
     - **Without `-InstallDeps`.** A missing or old hard dependency throws one message beginning `missing hard dependency`, listing each with its command or the no-pinned-install text. A missing optional one gets `Write-Warning` with its command.
     - **With `-InstallDeps`.** For each available command it calls `-ShouldInstall` first. Under `-WhatIf` that returns false, prints `What if`, and runs nothing. Otherwise it runs the command through the runner with the install limit and re-probes. A hard dependency that still fails throws, and an optional one warns.
     - Nothing is installed without `-InstallDeps`.
-  - **Plugin probes** from part 2 follow the same rules: the plugin list and the `git rev-parse` pin check go through the runner with the 10-second limit and closed stdin, and anything other than exit 0 within the limit is absent. Marketplace adds and plugin installs go through `-ShouldInstall` with the 900-second limit.
+  - **Plugin probes** from part 2 follow the same rules.
+    - The plugin list, the marketplace list and the `git rev-parse` pin check go through the runner with the 10-second limit and closed stdin, and anything other than exit 0 within the limit is absent.
+    - Marketplace adds, plugin installs and rollbacks go through `-ShouldInstall` with the 900-second limit.
+    - Every plugin command carries the working directory the runner contract names.
   - **`Install-Harness.ps1`.**
     - Calls the preflight with `@('kernel') + <resolved layers>` after the layer and manifest load and before the sidecar plan, which is the first write.
     - Never calls it on `-Audit`, `-Accept`, `-Unaccept` or `-Prune`.
@@ -1003,86 +1013,125 @@ git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit
 
 #### Task 15, part 2: Claude Code plugins as dependencies
 
-Same task, same PR, a second test-and-commit cycle on top of Step 5.
+Same task and same PR, as a second test-and-commit cycle on top of Step 5.
+
+**Trust rule** (operator ruling on #310, 2026-11-11):
+- **First-party marketplaces are trusted without a commit pin.** These are `claude-plugins-official` (source `anthropics/claude-plugins-official`) and `anthropic-agent-skills` (source `anthropics/skills`). At install the installer records a content hash of the installed plugin directory. Later probes and the drift check warn when it changes.
+- **Third-party marketplaces need one of two things:** a real pin verified before the plugin is enabled, or a per-project opt-in carrying a risk sentence.
+- **A plugin whose marketplace entry carries its own sha keeps the sha check**, even in a first-party marketplace. superpowers is the case.
 
 **Plugin inventory.** Taken from `enabledPlugins` and `extraKnownMarketplaces` in `account/claude/settings.account.json` at `898ef59` and in the live `~/.claude/settings.json`. The live file adds `document-skills`, `core-presentations`, `core-workflow` and their two marketplaces, which the export leaves out.
 
-| Plugin | Goes to | Scope | Severity | Reason |
-|---|---|---|---|---|
-| `superpowers@claude-plugins-official` | kernel | user | optional | Brainstorming owns the start of new efforts on every project type (operator ruling), and plans run through it |
-| `code-review@claude-plugins-official` | code | project | optional | The pull request review flow |
-| `feature-dev@claude-plugins-official` | code | project | optional | The code-architect and code-explorer agents |
-| `security-guidance@claude-plugins-official` | code | project | optional | Edit-time security reminders on code |
-| `github@claude-plugins-official` | code | project | optional | GitHub MCP for pull request and issue work |
-| `core-presentations@agent-skills-core` | documents | project | optional | Deck and briefing skills. A directory marketplace, so its expected commit is probed |
-| `document-skills@anthropic-agent-skills` | documents | project | optional, unpinned | Office file skills. Excluded by default (rulings of 2026-11-08 and 2026-11-11), and installed only through the project opt-in below |
-| `core-workflow@agent-skills-core` | none in Plan A | none | none | Duplicates account skills (council, handoff, subagent-prompting). Which copy owns them is the spec's open related observation |
-| `caveman@caveman`, `ponytail@ponytail`, `ralph-loop@claude-plugins-official`, `ask-questions-if-underspecified@trailofbits`, `microsoft-docs@claude-plugins-official` | account only | none | none | Personal preference or domain tooling, not something a layer relies on |
-| Every entry set to `false` (code-simplifier, greptile, commit-commands, claude-md-management, audit-context-building, differential-review, the four `*-master` plugins, claude-code-setup, context7, frontend-design) | none | none | none | Not enabled |
+| Plugin | Goes to | Scope | Severity | Pin | Reason |
+|---|---|---|---|---|---|
+| `superpowers@claude-plugins-official` | kernel | user | optional | `sha` from its marketplace entry, plus the recorded hash | Brainstorming owns the start of new efforts on every project type, and plans run through it |
+| `code-review@claude-plugins-official` | code | project | optional | first-party, hash recorded | The pull request review flow |
+| `feature-dev@claude-plugins-official` | code | project | optional | first-party, hash recorded | The code-architect and code-explorer agents |
+| `security-guidance@claude-plugins-official` | code | project | optional | first-party, hash recorded | Edit-time security reminders on code |
+| `github@claude-plugins-official` | code | project | optional | first-party, hash recorded | GitHub MCP for pull request and issue work |
+| `document-skills@anthropic-agent-skills` | documents | project | optional | first-party, hash recorded, no opt-in | Office file skills |
+| `core-presentations@agent-skills-core` | documents | project | optional | `commit` of the directory marketplace, plus the recorded hash | Deck and briefing skills, from a third-party local-folder marketplace |
+| `core-workflow@agent-skills-core` | none in Plan A | none | none | none | Duplicates account skills (council, handoff, subagent-prompting). Which copy owns them is the spec's open related observation |
+| `caveman@caveman`, `ponytail@ponytail`, `ralph-loop@claude-plugins-official`, `ask-questions-if-underspecified@trailofbits`, `microsoft-docs@claude-plugins-official` | account only | none | none | none | Personal preference or domain tooling, not something a layer relies on |
+| Every entry set to `false` (code-simplifier, greptile, commit-commands, claude-md-management, audit-context-building, differential-review, the four `*-master` plugins, claude-code-setup, context7, frontend-design) | none | none | none | none | Not enabled |
 
 Moving plugin skills between layers is Plan C.
 
 **Interfaces:**
-- Consumes: Task 15 part 1 (`Get-DepsManifest`, `Invoke-DepsPreflight`, the runner).
+- Consumes: Task 15 part 1 (`Get-DepsManifest`, `Invoke-DepsPreflight`, the runner with its working directory).
 - Produces:
   - A plugin entry kind in `deps.json`. An entry without `kind` is a tool.
 
     ```
     { "kind": "plugin", "name", "plugin": "<id>@<marketplace>",
       "marketplace": { "name", "source": { "github": "owner/repo" } | { "git": "<url>" } | { "directory": true } },
-      "pin": { "sha": "<40 hex>" } | { "commit": "<40 hex>" } | { "unpinned": true },
-      "scope": "user" | "project", "layers", "severity", "failMode" }
+      "pin": { "firstParty": true } | { "sha": "<40 hex>", "contentHash": "sha256:<hex>" } | { "commit": "<40 hex>", "contentHash": "sha256:<hex>" } | { "unpinned": true },
+      "scope": "user" | "project", "severity", "failMode" }
     ```
 
-    A directory source carries no path, because a path is machine-specific. The probe finds the path where Claude Code registered that marketplace.
-  - The project manifest field `allowUnpinnedPlugins: [ { "plugin": "<id>@<marketplace>", "risk": "<sentence naming the risk>" } ]`. `ConvertTo-ManifestV3` carries it and validates it: an array of objects, each with a known plugin and a non-empty `risk`.
-  - Functions in `install/Deps.ps1`: `Test-PluginDep -Dep -Runner -ProjectDir -ClaudeHome` returns the same shape as `Test-Dep`, and `Get-PluginInstallCommands -Dep -MarketplaceKnown <bool>` returns `string[][]`.
+    - `firstParty` is valid only for the two first-party marketplace names.
+    - A `directory` source carries no path, because a path is machine-specific. The probe takes the path where Claude Code registered that marketplace.
+  - `Get-PluginContentHash -Path <dir>` returns `sha256:<64 hex>`.
+  - `Test-PluginDep -Dep -Runner -Target <string|null> -RecordedHash <string|null>` returns the `Test-Dep` shape plus `InstallPath`, `Hash` and `Changed`.
+  - `Get-PluginInstallCommands -Dep -MarketplaceKnown <bool>` returns `string[][]`.
+  - Recorded hashes:
+    - Project scope: the sidecar `.claude/.harness-manifest.local.json` key `pluginHashes`.
+    - User scope: `<CLAUDE_HOME>/state/harness-plugin-hashes.json`. That folder is outside the exporter's allowlist.
+    - Both map `<id>@<marketplace>` to `{ "hash", "installPath", "version", "recordedAt" }`, with `recordedAt` in UTC.
+    - Project-scope records go through the existing `Get-SidecarPlan` and `Invoke-SidecarPlan` gate. When that gate refuses the sidecar, no hash is recorded, and a warning says plugin drift cannot be checked until the ignore rule is fixed.
+  - The project manifest field `allowUnpinnedPlugins: [ { "plugin": "<id>@<marketplace>", "risk": "<sentence>" } ]`, for third-party `unpinned` entries only. `ConvertTo-ManifestV3 -Loaded` (Task 8) checks only its shape: an array of objects with non-empty string `plugin` and `risk`. Whether each name matches an unpinned third-party entry is checked in the preflight, which is the only place that loads `deps.json`.
+  - A new audit status, `plugin-changed` (counted), with the response: "re-run the installer with -InstallDeps to re-record after reviewing the change".
 
-- [ ] **Step 6: Verify the CLI.** Read `claude plugin --help`, `claude plugin marketplace --help` and `claude plugin install --help` from the installed CLI, or code.claude.com/docs/en/plugins. Record in a comment in `Deps.ps1` the exact syntax for four things: the marketplace list, the marketplace add, the plugin install with `--scope`, and a machine-readable plugin list. If no machine-readable plugin list exists, stop and report BLOCKED with the help text. A guessed parser is not acceptable.
+- [ ] **Step 6: Verify the CLI.** Read `claude plugin --help`, `claude plugin marketplace --help`, `claude plugin install --help` and `claude plugin uninstall --help` from the installed CLI, or code.claude.com/docs/en/plugins. Record the exact syntax in a comment in `Deps.ps1`:
+  - the machine-readable plugin list
+  - the marketplace list and the marketplace add
+  - the plugin install with `--scope`, and whether it can install without enabling
+  - the uninstall or disable at a scope
 
-- [ ] **Step 7: Write the failing tests** in `Context 'dependencies'`, with fixture plugin entries `fake-plugin@fake-market` (marketplace source `{ "github": "example/fake-market" }`, `pin.sha` 40 hex) and the recording mock runner:
-  - "a missing layer plugin with -InstallDeps adds its marketplace, then installs at project scope". The recorded calls, in order:
-    - the plugin list
-    - the marketplace list
-    - the marketplace add naming `example/fake-market`
-    - the plugin install naming `fake-plugin@fake-market` with project scope
-    - the re-probe list
+  Report BLOCKED with the help text if the plugin list has no machine-readable form, or lacks the plugin id, scope, enabled state, project path or install path. The installer never reads an installed commit from the CLI. It hashes the install path itself.
 
-    The scope's settings file then shows the plugin enabled, and the install completes.
-  - "a kernel plugin installs at user scope": the install argv carries user scope.
-  - "a known marketplace is not added again": no marketplace-add call is recorded.
-  - "a plugin at a different sha counts as missing": the list reports another sha. A hard entry refuses and an optional one warns.
+- [ ] **Step 7: Write the failing tests** in `Context 'dependencies'`, with fixture entries and the recording mock runner. The mock records `(argv, cwd)`.
+  - "a missing project-scope plugin with -InstallDeps adds its marketplace, installs at project scope in the target, and records the hash":
+    - Calls in order: list, marketplace list, marketplace add, install with project scope, list.
+    - Every plugin call records cwd equal to the resolved `-Target`.
+    - The mock's second list reports an `installPath` under a temp dir.
+    - The sidecar's `pluginHashes` entry equals `Get-PluginContentHash` of that dir.
+  - "a kernel plugin installs at user scope with cwd at the home directory".
+  - "a known marketplace is not added again".
+  - "a first-party plugin whose content changed warns, and -InstallDeps re-records it": change a file in the temp install dir after recording. A plain run warns `changed since recorded`, `-Audit` reports `plugin-changed`, and an `-InstallDeps` run re-records the new hash.
+  - "Get-PluginContentHash is order- and line-ending-stable": the same files created in a different order, or with CRLF in place of LF, give the same hash. Changing one byte of content, or renaming a file, changes it.
+  - "a sha-pinned plugin is checked before install". The mock's registered marketplace file lists the plugin with another sha. Expected: refusal for a hard entry or a warning for an optional one, and no install argv recorded.
+  - "a pinned plugin is rolled back when the installed copy does not verify":
+    - The install succeeds, and the installed dir's hash differs from the entry's `contentHash` (or the directory marketplace's `git rev-parse` returns another commit).
+    - The next recorded call is the uninstall at the same scope and cwd, and the run refuses.
   - "a plugin present but not enabled at the declared scope counts as missing".
-  - "a directory marketplace at an unexpected commit counts as missing, and -InstallDeps refuses with add-it-by-hand guidance and records no install".
-  - "an unpinned plugin is refused without the project opt-in": the message names the plugin and `allowUnpinnedPlugins`, and no install is recorded. With an opt-in entry carrying a `risk`, the preflight proceeds and the warning repeats that risk. An opt-in with an empty `risk` throws at manifest load.
+  - "an unpinned third-party plugin is refused without the project opt-in": no install is recorded. With an opt-in entry carrying a `risk`, the preflight proceeds and the warning quotes the risk.
+  - "plugin list output is never echoed":
+    - The mock's list output carries an MCP server entry with `"Authorization": "Bearer harness-secret-<guid>"`.
+    - Across a failing run and a passing run, the secret appears in no captured stream (`*>&1`), no thrown message, no warning and no written file.
+  - "Install-Account handles only user-scope plugins": it probes `superpowers` with cwd at the home directory, and skips a fixture project-scope entry with the note `project-scope plugin <id> is installed per project by Install-Harness`.
   - "the shipped deps.json plugin entries validate":
     - Kernel plugins are user scope and layer plugins are project scope.
+    - `firstParty` appears only on the two first-party marketplaces.
+    - `superpowers` carries `sha` and `contentHash`, and `core-presentations` carries `commit` and `contentHash`.
+    - `document-skills` is first-party with no opt-in.
     - `caveman` and `ponytail` are absent.
-    - `document-skills` is `unpinned`.
-    - Every other plugin carries `sha` or `commit`.
 
-- [ ] **Step 8: Run to verify they fail.** `pwsh -NoProfile -File install/Install-Harness.Tests.ps1`. Expected: the new cases FAIL.
+- [ ] **Step 8: Run to verify they fail.** `pwsh -NoProfile -File install/Install-Harness.Tests.ps1` and `pwsh -NoProfile -File install/Install-Account.Tests.ps1`. Expected: the new cases FAIL.
 
 - [ ] **Step 9: Implement.**
+  - **Content hash.** `Get-PluginContentHash` does the following:
+    - List every regular file under the directory recursively, skipping any `.git` directory. Symlinks are not followed, and each one contributes `link:<target>` in place of content.
+    - Order by the relative path with `/` separators, compared ordinally on its UTF-8 bytes.
+    - For each file, hash the content with SHA-256 after converting CRLF to LF. A file holding a NUL byte is hashed raw.
+    - Feed `<relative path>\n<file hex>\n` for every file, in order, into one SHA-256, and format the result as `sha256:<hex>`.
   - **Probe.**
-    - Run the machine-readable plugin list through the runner.
-    - Present means the plugin is listed at the pinned `sha`. A `commit` pin compares instead against `git -C <registered marketplace path> rev-parse HEAD`, also through the runner.
-    - Enabled is read from the declared scope's settings file (`<project>/.claude/settings.json` or `~/.claude/settings.json`). Enabled at the wrong scope counts as missing.
+    - Run the plugin list through the runner with the working directory the scope needs. Parse it in memory only.
+    - Present means the id is listed at the declared scope and enabled there. For project scope the project path must equal `-Target`.
+    - Then hash `installPath` and compare with the recorded hash (first-party) or the entry's `contentHash` (pinned).
+    - Captured output never reaches a message, a warning, a log or a file. Messages name the plugin id and the field that failed, nothing more.
   - **Pins.**
-    - The `claude-plugins-official` marketplace pins each plugin by sha in its marketplace file. Fill `pin.sha` from that file while implementing.
-    - The directory marketplace pins to whatever is checked out. Fill `pin.commit` with the commit expected at implementation time.
-    - `anthropics/skills` has no tags and cannot be pinned from settings, so it stays `unpinned`.
-  - **Scope rules.** `Get-DepsManifest` throws when a kernel plugin is not user scope or a layer plugin is not project scope.
-  - **`-InstallDeps`.**
-    - When the marketplace is not in the list, add it from its `github` or `git` source. A `directory` source is never added automatically. Refuse with "add this marketplace from your local checkout".
-    - Then install at the declared scope and re-probe.
-    - If the marketplace now pins a different sha than `deps.json`, the re-probe fails and the refusal says to update the pin.
-  - **Unpinned plugins.** One is processed only when the project manifest's `allowUnpinnedPlugins` names it. The warning then quotes the recorded `risk` on every install run.
+    - `sha` and `commit` entries carry a `contentHash`, computed while implementing from a verified install of the pinned version.
+    - Before any install, read the plugin's entry in the registered marketplace's `marketplace.json`, located through the marketplace list, and require its `source.sha` to equal `pin.sha`. A mismatch installs nothing.
+    - A `commit` entry compares `git -C <registered path> rev-parse HEAD`, run through the runner, before installing.
+  - **Verify, then enable.**
+    - If Step 6 found an install-without-enable form, install disabled, verify the hash, then enable.
+    - Otherwise install and verify at once, and on a mismatch run the uninstall at that scope and cwd before refusing.
+    - First-party entries record their hash after a successful install.
+  - **`-InstallDeps` on a first-party plugin** that is present but changed re-records the new hash after printing the warning. A plain run only warns.
+  - **Unpinned third-party plugins** are processed only when the project manifest's `allowUnpinnedPlugins` names them, and the warning quotes the recorded `risk` on every install run.
+  - **Audit.** `-Audit` hashes each recorded `installPath`, project and user, without calling the CLI, and reports `plugin-changed` on a difference.
+  - **`Install-Account`** handles user-scope entries only, with cwd at the home directory. It skips project-scope entries with the note above.
+  - **Scope rules.** `Get-DepsManifest` throws when:
+    - a kernel plugin is not user scope
+    - a layer plugin is not project scope
+    - `firstParty` names another marketplace
+    - a third-party entry has none of `sha`, `commit` or `unpinned`
 
 - [ ] **Step 10: Run to verify they pass, then commit.** Both Pester suites. Expected: all PASS.
 
 ```bash
-git add core/claude/deps.json install/Deps.ps1 install/Install-Harness.ps1 install/Install-Harness.Tests.ps1
+git add core/claude/deps.json install/Deps.ps1 install/Install-Harness.ps1 install/Install-Account.ps1 install/Install-Harness.Tests.ps1 install/Install-Account.Tests.ps1
 git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "feat(install): Claude Code plugins in the layer dependency manifest (#310)"
 ```
 
