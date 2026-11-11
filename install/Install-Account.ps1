@@ -207,7 +207,8 @@ if (-not $CoreRepo)    { $CoreRepo = $repoRoot }
 if (-not $PSBoundParameters.ContainsKey('NpmGlobal')) {
     $NpmGlobal = if (Get-Command npm -ErrorAction SilentlyContinue) {
         # Collect all output, then index. Select-Object -First 1 on a native command stops the
-        # pipeline early, so $LASTEXITCODE is never set and a present npm reads as absent.
+        # pipeline early, so $LASTEXITCODE keeps its prior value (null in a fresh process) and a
+        # present npm reads as absent.
         $v = @(& npm root -g 2>$null)[0]
         if ($LASTEXITCODE -eq 0) { $v } else { $null }
     } else { $null }
