@@ -130,6 +130,13 @@ describe("linkedIssueNumbers()", () => {
 });
 
 describe("selectHeadFiles()", () => {
+  test("keeps an installer-sized file of 90 KB whole", () => {
+    const content = "q".repeat(90_000);
+    const result = selectHeadFiles([{ path: "install.ps1", content }]);
+    expect(result.headFiles).toEqual([{ path: "install.ps1", content }]);
+    expect(result.omittedFiles).toEqual([]);
+  });
+
   test("drops a file over the per-file cap, a file with a NUL byte, and files past the total cap", () => {
     const chunk = "y".repeat(55_000);
     const result = selectHeadFiles([
