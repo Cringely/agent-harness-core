@@ -948,6 +948,91 @@ git add core/claude/deps.json install/Deps.ps1 install/Install-Harness.ps1 insta
 git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "feat(install): declared layer dependencies, a refusing preflight, opt-in installs (#310)"
 ```
 
+#### Task 15, part 2: Claude Code plugins as dependencies
+
+Same task, same PR, a second test-and-commit cycle on top of Step 5.
+
+**Plugin inventory.** Taken from `enabledPlugins` and `extraKnownMarketplaces` in `account/claude/settings.account.json` at `898ef59` and in the live `~/.claude/settings.json`. The live file adds `document-skills`, `core-presentations`, `core-workflow` and their two marketplaces, which the export leaves out.
+
+| Plugin | Goes to | Scope | Severity | Reason |
+|---|---|---|---|---|
+| `superpowers@claude-plugins-official` | kernel | user | optional | Brainstorming owns the start of new efforts on every project type (operator ruling), and plans run through it |
+| `code-review@claude-plugins-official` | code | project | optional | The pull request review flow |
+| `feature-dev@claude-plugins-official` | code | project | optional | The code-architect and code-explorer agents |
+| `security-guidance@claude-plugins-official` | code | project | optional | Edit-time security reminders on code |
+| `github@claude-plugins-official` | code | project | optional | GitHub MCP for pull request and issue work |
+| `core-presentations@agent-skills-core` | documents | project | optional | Deck and briefing skills. A directory marketplace, so its expected commit is probed |
+| `document-skills@anthropic-agent-skills` | documents | project | optional, unpinned | Office file skills. Excluded by default (rulings of 2026-11-08 and 2026-11-11), and installed only through the project opt-in below |
+| `core-workflow@agent-skills-core` | none in Plan A | none | none | Duplicates account skills (council, handoff, subagent-prompting). Which copy owns them is the spec's open related observation |
+| `caveman@caveman`, `ponytail@ponytail`, `ralph-loop@claude-plugins-official`, `ask-questions-if-underspecified@trailofbits`, `microsoft-docs@claude-plugins-official` | account only | none | none | Personal preference or domain tooling, not something a layer relies on |
+| Every entry set to `false` (code-simplifier, greptile, commit-commands, claude-md-management, audit-context-building, differential-review, the four `*-master` plugins, claude-code-setup, context7, frontend-design) | none | none | none | Not enabled |
+
+Moving plugin skills between layers is Plan C.
+
+**Interfaces:**
+- Consumes: Task 15 part 1 (`Get-DepsManifest`, `Invoke-DepsPreflight`, the runner).
+- Produces:
+  - A plugin entry kind in `deps.json`. An entry without `kind` is a tool.
+
+    ```
+    { "kind": "plugin", "name", "plugin": "<id>@<marketplace>",
+      "marketplace": { "name", "source": { "github": "owner/repo" } | { "git": "<url>" } | { "directory": true } },
+      "pin": { "sha": "<40 hex>" } | { "commit": "<40 hex>" } | { "unpinned": true },
+      "scope": "user" | "project", "layers", "severity", "failMode" }
+    ```
+
+    A directory source carries no path, because a path is machine-specific. The probe finds the path where Claude Code registered that marketplace.
+  - The project manifest field `allowUnpinnedPlugins: [ { "plugin": "<id>@<marketplace>", "risk": "<sentence naming the risk>" } ]`. `ConvertTo-ManifestV3` carries it and validates it: an array of objects, each with a known plugin and a non-empty `risk`.
+  - Functions in `install/Deps.ps1`: `Test-PluginDep -Dep -Runner -ProjectDir -ClaudeHome` returns the same shape as `Test-Dep`, and `Get-PluginInstallCommands -Dep -MarketplaceKnown <bool>` returns `string[][]`.
+
+- [ ] **Step 6: Verify the CLI.** Read `claude plugin --help`, `claude plugin marketplace --help` and `claude plugin install --help` from the installed CLI, or code.claude.com/docs/en/plugins. Record in a comment in `Deps.ps1` the exact syntax for four things: the marketplace list, the marketplace add, the plugin install with `--scope`, and a machine-readable plugin list. If no machine-readable plugin list exists, stop and report BLOCKED with the help text. A guessed parser is not acceptable.
+
+- [ ] **Step 7: Write the failing tests** in `Context 'dependencies'`, with fixture plugin entries `fake-plugin@fake-market` (marketplace source `{ "github": "example/fake-market" }`, `pin.sha` 40 hex) and the recording mock runner:
+  - "a missing layer plugin with -InstallDeps adds its marketplace, then installs at project scope". The recorded calls, in order:
+    - the plugin list
+    - the marketplace list
+    - the marketplace add naming `example/fake-market`
+    - the plugin install naming `fake-plugin@fake-market` with project scope
+    - the re-probe list
+
+    The scope's settings file then shows the plugin enabled, and the install completes.
+  - "a kernel plugin installs at user scope": the install argv carries user scope.
+  - "a known marketplace is not added again": no marketplace-add call is recorded.
+  - "a plugin at a different sha counts as missing": the list reports another sha. A hard entry refuses and an optional one warns.
+  - "a plugin present but not enabled at the declared scope counts as missing".
+  - "a directory marketplace at an unexpected commit counts as missing, and -InstallDeps refuses with add-it-by-hand guidance and records no install".
+  - "an unpinned plugin is refused without the project opt-in": the message names the plugin and `allowUnpinnedPlugins`, and no install is recorded. With an opt-in entry carrying a `risk`, the preflight proceeds and the warning repeats that risk. An opt-in with an empty `risk` throws at manifest load.
+  - "the shipped deps.json plugin entries validate":
+    - Kernel plugins are user scope and layer plugins are project scope.
+    - `caveman` and `ponytail` are absent.
+    - `document-skills` is `unpinned`.
+    - Every other plugin carries `sha` or `commit`.
+
+- [ ] **Step 8: Run to verify they fail.** `pwsh -NoProfile -File install/Install-Harness.Tests.ps1`. Expected: the new cases FAIL.
+
+- [ ] **Step 9: Implement.**
+  - **Probe.**
+    - Run the machine-readable plugin list through the runner.
+    - Present means the plugin is listed at the pinned `sha`. A `commit` pin compares instead against `git -C <registered marketplace path> rev-parse HEAD`, also through the runner.
+    - Enabled is read from the declared scope's settings file (`<project>/.claude/settings.json` or `~/.claude/settings.json`). Enabled at the wrong scope counts as missing.
+  - **Pins.**
+    - The `claude-plugins-official` marketplace pins each plugin by sha in its marketplace file. Fill `pin.sha` from that file while implementing.
+    - The directory marketplace pins to whatever is checked out. Fill `pin.commit` with the commit expected at implementation time.
+    - `anthropics/skills` has no tags and cannot be pinned from settings, so it stays `unpinned`.
+  - **Scope rules.** `Get-DepsManifest` throws when a kernel plugin is not user scope or a layer plugin is not project scope.
+  - **`-InstallDeps`.**
+    - When the marketplace is not in the list, add it from its `github` or `git` source. A `directory` source is never added automatically. Refuse with "add this marketplace from your local checkout".
+    - Then install at the declared scope and re-probe.
+    - If the marketplace now pins a different sha than `deps.json`, the re-probe fails and the refusal says to update the pin.
+  - **Unpinned plugins.** One is processed only when the project manifest's `allowUnpinnedPlugins` names it. The warning then quotes the recorded `risk` on every install run.
+
+- [ ] **Step 10: Run to verify they pass, then commit.** Both Pester suites. Expected: all PASS.
+
+```bash
+git add core/claude/deps.json install/Deps.ps1 install/Install-Harness.ps1 install/Install-Harness.Tests.ps1
+git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "feat(install): Claude Code plugins in the layer dependency manifest (#310)"
+```
+
 ## Out of scope, recorded
 
 - Plan B (the init interview, and a decision-log template if one is wanted) and Plan C (documents and physical rule content, and the office toolchain probe).

@@ -73,6 +73,10 @@ These would make the work a failure even if every layer ships:
 
   The audit behind this found that no installer installed anything, that python3, gh, the claude CLI, op, the ccstatusline package and git were neither declared nor probed, and that a missing bun or Git Bash fails every gate open. (Operator, 2026-11-11.)
 
+  Claude Code plugins from marketplaces are dependencies too.
+  - Each one declares its marketplace, the pin it resolves to, its scope (user for kernel plugins, project for layer plugins) and whether it is hard or optional. Personal-preference plugins stay account-only.
+  - A plugin that cannot be pinned, such as `document-skills` from `anthropics/skills`, is excluded unless a project opts in by name and records the risk. (Operator, 2026-11-11.)
+
 ## The coordinator's calls
 
 Each of these is a judgment the operator delegated. Each names what would flip it.
