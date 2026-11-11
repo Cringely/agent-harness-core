@@ -34,6 +34,8 @@ function runHook(stdinText: string, env: Record<string, string> = {}) {
 }
 
 const CWD = "/home/runner/project";
+const BS = String.fromCharCode(92);
+const NL = String.fromCharCode(10);
 
 describe("inScratch() — path classification", () => {
   test.each([
@@ -111,6 +113,19 @@ describe("inScratch(): a scratch-named ancestor of the project is not scratch", 
   test("a project path that merely shares a name prefix with the scratch dir does not count as contained", () => {
     // /home/x/scratch-old is not inside /home/x/scratch: segment comparison, not string prefix.
     expect(inScratch("/home/x/scratch/f.md", "/home/x/scratch-old", "/home/x/scratch-old")).toBe(true);
+  });
+
+  // Aliased spellings of a project file do not match the project's own segments, so without a
+  // blanket refusal the scratch ancestor would count again and the write would be allowed.
+  const tail = ["home", "x", "scratch", "myrepo", "src", "a.ts"];
+  test.each([
+    ["long-path prefix", BS + BS + "?" + BS + "C:" + BS + tail.join(BS)],
+    ["UNC share", BS + BS + "localhost" + BS + "C$" + BS + tail.join(BS)],
+    ["forward-slash UNC", "//localhost/C$/" + tail.join("/")],
+    ["long-path to a scratch folder", BS + BS + "?" + BS + "C:" + BS + "tmp" + BS + "scratchpad" + BS + "r.md"],
+  ])("%s is never scratch", (_label, p) => {
+    expect(inScratch(p, PROJ, PROJ)).toBe(false);
+    expect(decide("scratch", p, PROJ, PROJ).action).toBe("deny");
   });
 
   test("decide() denies a scoped write inside such a project", () => {
@@ -198,6 +213,10 @@ writeScopeDef(join(scopeAgentsDir, ".md"));
 writeScopeDef(join(scopeAgentsDir, "sub", "nested.md"));
 // Outside the agents directory entirely — only a traversal reaches this one.
 writeScopeDef(join(scopeRoot, "outside", "escaped.md"));
+writeFileSync(
+  join(scopeAgentsDir, "bom-agent.md"),
+  String.fromCharCode(0xfeff) + ["---", "name: bom-agent", "writeScope: scratch", "---", "", "Body."].join(NL),
+);
 // Two keys: the first wins, as the shared parser defines it.
 writeFileSync(
   join(scopeAgentsDir, "dup-key.md"),
@@ -241,6 +260,11 @@ describe("readSessionCwd() — a non-string cwd falls back instead of throwing",
 });
 
 describe("parseWriteScope() — frontmatter only, first key wins", () => {
+  test("a leading byte order mark does not hide the declaration", () => {
+    const bom = String.fromCharCode(0xfeff);
+    expect(parseWriteScope(bom + "---" + NL + "writeScope: scratch" + NL + "---" + NL)).toBe("scratch");
+  });
+
   test("reads the value from frontmatter", () => {
     expect(parseWriteScope("---\nwriteScope: scratch\n---\n")).toBe("scratch");
   });
@@ -278,6 +302,10 @@ describe("readWriteScope() — item 38: only a filename-safe agent name resolves
 
   test("a mixed-case agent name resolves its definition, since this hook does not lowercase", () => {
     expect(readWriteScope("Mixed-Case-Agent", scopeProjectDir)).toBe("scratch");
+  });
+
+  test("a definition saved with a byte order mark still resolves its scope", () => {
+    expect(readWriteScope("bom-agent", scopeProjectDir)).toBe("scratch");
   });
 
   test("a definition with duplicate keys resolves to the first", () => {

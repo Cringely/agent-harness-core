@@ -16,7 +16,11 @@ export type WriteScopeParser = (text: string) => string | null;
  * wins, so a definition that repeats the key reads the same everywhere this parser is used.
  */
 export function parseWriteScope(text: string): string | null {
-  const lines = text.split(/\r?\n/);
+  // One leading byte order mark is dropped first. An editor that saves a definition with a BOM
+  // would otherwise fail the opening-fence match and read as undeclared, which silently lifts the
+  // confinement the definition asked for.
+  const body = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  const lines = body.split(/\r?\n/);
   if (!/^---\s*$/.test(lines[0] ?? "")) return null;
   let value: string | null = null;
   for (let i = 1; i < lines.length; i++) {

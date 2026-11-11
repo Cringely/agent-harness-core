@@ -44,10 +44,14 @@
 //   - A scratch-named directory that contains the project root is not scratch.
 //   - A project whose root sits inside a scratch directory therefore gets denies for
 //     scoped writes outside a deeper scratch folder. That is the fail-closed
-//     direction: the scoped agent can still write under `<project>/.claude/scratch`,
-//     which the harness ships, and nowhere else.
+//     direction: the scoped agent can still write under `<project>/.claude/scratch`
+//     and in any scratch folder that does not contain the project root.
 //   - A tracked subfolder of the project named `scratch`, `scratchpad` or `.scratch`
 //     is still in scope, because it does not contain the project root.
+//   - A long-path (backslash backslash question mark) or UNC (two leading separators)
+//     file path is never scratch. Those spellings alias a project file under a form
+//     that does not match the project's own segments, which would let a scratch
+//     ancestor count again, so a scoped agent is denied them outright.
 //
 // The project root is CLAUDE_PROJECT_DIR when set and the session cwd otherwise. A
 // relative filePath resolves against the session cwd, which arrives on stdin as
@@ -87,6 +91,9 @@ export const WRITE_SCOPE_GATE_VERSION = 2;
  */
 const SCRATCH_SEGMENTS = new Set(["scratchpad", ".scratch", "scratch"]);
 
+/** Two leading separators of either kind: a long-path prefix, a device path, or a UNC share. */
+const ALIASED_PREFIX = /^[\\/]{2}/;
+
 export type Decision = { action: "allow" } | { action: "deny"; reason: string };
 
 /**
@@ -99,6 +106,9 @@ export type Decision = { action: "allow" } | { action: "deny"; reason: string };
  */
 export function inScratch(filePath: string, cwd: string, projectDir: string): boolean {
   const abs = isAbsolute(filePath) ? resolve(filePath) : resolve(cwd, filePath);
+  // Long-path and UNC spellings alias a path the segment comparison below cannot match. Checked on
+  // the raw input and on the resolved form, since a relative path can inherit a UNC cwd.
+  if (ALIASED_PREFIX.test(filePath) || ALIASED_PREFIX.test(abs)) return false;
   const segments = abs.split(/[\\/]+/).map((s) => s.toLowerCase());
   const project = resolve(projectDir)
     .split(/[\\/]+/)
