@@ -18,6 +18,7 @@ Describe "Install-Harness" {
         $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500
         Test-Path "$script:target/.claude/agents/task-reviewer.md" | Should -BeTrue
         Test-Path "$script:target/.claude/hooks/agent-worktree-gate.ts" | Should -BeTrue
+        Test-Path "$script:target/.claude/hooks/write-scope-parse.ts" | Should -BeTrue
         Test-Path "$script:target/.claude/guardrails.md" | Should -BeTrue
         # Scratch drop box: the directory must exist and carry the self-ignoring rule, or agent
         # working files land in the project's commits.

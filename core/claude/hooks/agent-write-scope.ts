@@ -35,23 +35,25 @@
 // that excludes Bash, or with OS-level sandbox filesystem rules, if the agent
 // is untrusted rather than merely narrow.
 //
-// Second coverage boundary, worse than the first because it is silent and
-// total: SCRATCH_SEGMENTS matches ANY path segment, so a project checked out
-// under a directory named `scratch`, `scratchpad` or `.scratch` — say
-// `/home/x/scratch/myrepo` — puts every file in that repo in scope. decide()
-// then returns allow for every write by every agent, and nothing logs, warns,
-// or reports that the gate has stopped having opinions. It looks exactly like
-// a gate that is passing. Pre-existing and unchanged here, and not yet in the
-// backlog — this comment is the only record of it. If you
-// are relying on this gate, check that no ancestor of the project root is
-// named for scratch.
+// Scratch-named ancestors. SCRATCH_SEGMENTS matches a path segment, and a segment
+// counts only when the directory it names does not contain the project root. Without
+// that condition a project checked out under `/home/x/scratch/myrepo` put every file
+// in scope, so decide() allowed every write by every agent and nothing logged it.
+// Now:
 //
-// And it is reachable from the payload, not only from where the checkout sits:
-// a relative filePath is resolved against the session cwd, which arrives on
-// stdin as `payload.cwd`. readSessionCwd() below type-checks that field but
-// cannot narrow it further — a cwd IS a directory path — so the honest
-// statement is that this is payload-driven with no narrower shape available,
-// and unchanged from master. Not that it is out of the payload's reach.
+//   - A scratch-named directory that contains the project root is not scratch.
+//   - A project whose root sits inside a scratch directory therefore gets denies for
+//     scoped writes outside a deeper scratch folder. That is the fail-closed
+//     direction: the scoped agent can still write under `<project>/.claude/scratch`,
+//     which the harness ships, and nowhere else.
+//   - A tracked subfolder of the project named `scratch`, `scratchpad` or `.scratch`
+//     is still in scope, because it does not contain the project root.
+//
+// The project root is CLAUDE_PROJECT_DIR when set and the session cwd otherwise. A
+// relative filePath resolves against the session cwd, which arrives on stdin as
+// `payload.cwd`. readSessionCwd() below type-checks that field but cannot narrow it
+// further, since a cwd IS a directory path, so the project root and the base for
+// relative paths are both payload- or environment-driven with no narrower shape.
 //
 // Fail-open contract, matching agent-worktree-gate.ts: malformed stdin,
 // missing fields, an unreadable definition, or our own bugs all log to stderr
@@ -65,9 +67,18 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { isValidAgentName } from "./agent-name";
+import { parseWriteScope } from "./write-scope-parse";
 
 /**
- * Directory names that count as scratch. A path is in scope if any segment matches.
+ * Marks the scratch-parent fix and the shared writeScope parser. The worktree gate trusts a
+ * definition's `writeScope` only when the installed scope gate is at this version or later. Bump it
+ * whenever a change to this gate alters what `writeScope: scratch` confines.
+ */
+export const WRITE_SCOPE_GATE_VERSION = 2;
+
+/**
+ * Directory names that count as scratch. A path is in scope if a segment matches and that
+ * directory does not contain the project root (see the header).
  * `scratch` is here because it is the drop box `install/Install-Harness.ps1` creates
  * under a project's `.claude`; without it this gate denied the one scratch directory
  * the harness itself ships. Rejected matching the `.claude/scratch` suffix instead:
@@ -81,12 +92,22 @@ export type Decision = { action: "allow" } | { action: "deny"; reason: string };
 /**
  * Is `filePath` inside a scratch directory? Resolved against `cwd` when
  * relative, so a bare `../../etc/hosts` cannot slip through as "not absolute".
+ *
+ * A scratch-named segment counts only when the project's own segments do not start with the file's
+ * segments up to and including it, i.e. when that directory does not contain the project root.
+ * Compared lowercased on every platform: case-insensitive containment can only add denies.
  */
-export function inScratch(filePath: string, cwd: string): boolean {
+export function inScratch(filePath: string, cwd: string, projectDir: string): boolean {
   const abs = isAbsolute(filePath) ? resolve(filePath) : resolve(cwd, filePath);
-  return abs
+  const segments = abs.split(/[\\/]+/).map((s) => s.toLowerCase());
+  const project = resolve(projectDir)
     .split(/[\\/]+/)
-    .some((segment) => SCRATCH_SEGMENTS.has(segment.toLowerCase()));
+    .map((s) => s.toLowerCase());
+  return segments.some(
+    (segment, i) =>
+      SCRATCH_SEGMENTS.has(segment) &&
+      !(project.length > i && segments.slice(0, i + 1).every((s, j) => s === project[j])),
+  );
 }
 
 /**
@@ -107,8 +128,7 @@ export function readWriteScope(agentType: string, projectDir: string): string | 
   const defPath = join(projectDir, ".claude", "agents", `${agentType}.md`);
   if (!existsSync(defPath)) return null;
   try {
-    const head = readFileSync(defPath, "utf8").slice(0, 4096);
-    return head.match(/^writeScope:\s*(\S+)\s*$/m)?.[1] ?? null;
+    return parseWriteScope(readFileSync(defPath, "utf8"));
   } catch {
     return null;
   }
@@ -144,10 +164,11 @@ export function decide(
   scope: string | null,
   filePath: string | undefined,
   cwd: string,
+  projectDir: string,
 ): Decision {
   if (scope !== "scratch") return { action: "allow" };
   if (!filePath) return { action: "allow" };
-  if (inScratch(filePath, cwd)) return { action: "allow" };
+  if (inScratch(filePath, cwd, projectDir)) return { action: "allow" };
   return {
     action: "deny",
     reason:
@@ -166,11 +187,14 @@ if (import.meta.main) {
     if (process.env.COPILOT_CLI && !process.env.CLAUDECODE) process.exit(0);
     const payload = JSON.parse(raw);
     const cwd = readSessionCwd(payload);
-    const scope = readWriteScope(
-      payload.agent_type ?? "",
-      process.env.CLAUDE_PROJECT_DIR ?? cwd,
+    const projectDir = process.env.CLAUDE_PROJECT_DIR ?? cwd;
+    const scope = readWriteScope(payload.agent_type ?? "", projectDir);
+    const verdict = decide(
+      scope,
+      payload.tool_input?.file_path ?? payload.tool_input?.notebook_path,
+      cwd,
+      projectDir,
     );
-    const verdict = decide(scope, payload.tool_input?.file_path, cwd);
     if (verdict.action === "deny") {
       console.log(
         JSON.stringify({
