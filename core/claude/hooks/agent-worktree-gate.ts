@@ -65,14 +65,25 @@
 // treats as "no opinion" — the normal permission flow proceeds. Only a
 // well-formed deny emits JSON. If `bun` itself is missing from PATH the hook
 // command fails non-zero-but-not-2, which Claude Code also treats as
-// non-blocking. No network, no mutation, stdin→stdout only.
+// non-blocking. No network, no git, no mutation. Input is the stdin payload alone.
 // (An unreadable agent-definition file is NOT a hook error — it resolves to
 // "requires isolation" for that type, see above.)
 //
-// Decision logic lives in the exported pure `decide()`, exercised offline by
+// Base-sha check (#36). An isolated (worktree or remote) write dispatch must carry a base the agent
+// can verify. The worktree branches from origin's default branch or from the dispatcher's local HEAD,
+// depending on `worktree.baseRef`, and a brief written for one base fails silently on the other.
+// Every isolated write dispatch whose prompt carries no base-sha line is denied. The line format is
+// `BASE-SHA: <hex>`, 7 to 40 hex digits, at the start of a prompt line (leading spaces allowed). The
+// agent compares it with its worktree HEAD before touching a file and aborts on a mismatch. The gate
+// checks only that the line is present, since the worktree does not exist yet.
+// The gate reads no git state and compares nothing. An earlier version denied only when the
+// dispatcher HEAD differed from origin's default branch and let an equal pair through, but the local
+// origin ref can be stale, so equal-HEAD was not a safe allow (operator ruling on #36, 2026-11-11).
+//
+// Decision logic lives in the exported `decide()`, exercised offline by
 // test/agent-worktree-gate.test.ts without spawning a process. The stdin/stdout
-// contract itself IS spawn-tested (#78): see the "spawned process" describe
-// block at the end of that file.
+// contract itself IS spawn-tested (#78): see the
+// "spawned process" describe block at the end of that file.
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -129,6 +140,13 @@ const ISOLATED = new Set(["worktree", "remote"]);
  */
 export const OVERRIDE_TOKEN = "ISOLATION-OVERRIDE:";
 const OVERRIDE_RE = /ISOLATION-OVERRIDE:[ \t]*\S/;
+
+/**
+ * Base-sha declaration: `BASE-SHA: <7-40 hex digits>` at the start of a prompt line. Anchored to
+ * line start so prose that merely mentions the token mid-sentence does not count.
+ */
+export const BASE_SHA_TOKEN = "BASE-SHA:";
+const BASE_SHA_RE = /^[ \t]*BASE-SHA:[ \t]*[0-9a-f]{7,40}\b/im;
 
 export type GateDecision =
   | { action: "allow" }
@@ -221,7 +239,9 @@ export function requiresIsolation(
   return result;
 }
 
-/** Pure decision over the PreToolUse stdin payload. Unrecognizable input allows. */
+/**
+ * Decision over the PreToolUse stdin payload. Unrecognizable input allows.
+ */
 export function decide(
   payload: unknown,
   agentsDir: string = DEFAULT_AGENTS_DIR,
@@ -249,7 +269,19 @@ export function decide(
 
   if (!requiresIsolation(subagentType, agentsDir)) return ALLOW;
 
-  if (typeof t.isolation === "string" && ISOLATED.has(t.isolation)) return ALLOW;
+  if (typeof t.isolation === "string" && ISOLATED.has(t.isolation)) {
+    if (typeof t.prompt === "string" && BASE_SHA_RE.test(t.prompt)) return ALLOW;
+    return {
+      action: "deny",
+      reason:
+        `Worktree base gate: this isolated write dispatch names no base sha. The worktree may come ` +
+        `up on origin's default branch or on the dispatcher's HEAD depending on worktree.baseRef, ` +
+        `and a brief written for one fails silently on the other. Add a line ` +
+        `"${BASE_SHA_TOKEN} <sha>" (7 to 40 hex digits, at the start of a prompt line) with the sha ` +
+        `the work must start from, and tell the agent to compare it with its worktree HEAD before ` +
+        `reading or writing and to abort on a mismatch.`,
+    };
+  }
 
   if (typeof t.prompt === "string" && OVERRIDE_RE.test(t.prompt)) return ALLOW;
 

@@ -13,6 +13,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  BASE_SHA_TOKEN,
   decide,
   OVERRIDE_TOKEN,
   PROJECT_EXCEPTIONS,
@@ -224,6 +225,55 @@ describe("decide() — read-only type: always allowed", () => {
   });
 });
 
+const SHA = "b".repeat(40);
+
+describe("decide() — every isolated write dispatch needs a base sha (#36)", () => {
+  const dispatch = (prompt: string | undefined, isolation = "worktree") => ({
+    tool_name: "Agent",
+    tool_input: { subagent_type: "writer", isolation, prompt },
+  });
+
+  test("worktree dispatch, no base sha: denied and names the token", () => {
+    const v = decide(dispatch("do a thing"), agentsDir);
+    expect(v.action).toBe("deny");
+    if (v.action === "deny") expect(v.reason).toContain(BASE_SHA_TOKEN);
+  });
+
+  test("worktree dispatch, base sha line present: allowed", () => {
+    expect(decide(dispatch(`intro\nBASE-SHA: ${SHA}\nbody`), agentsDir)).toEqual({ action: "allow" });
+  });
+
+  test("a missing prompt is the same as no base sha line", () => {
+    expect(decide(dispatch(undefined), agentsDir).action).toBe("deny");
+  });
+
+  test("a mid-sentence mention of the token does not count", () => {
+    expect(decide(dispatch("put a BASE-SHA: abcdef1 somewhere"), agentsDir).action).toBe("deny");
+  });
+
+  test("a non-hex value does not count", () => {
+    expect(decide(dispatch("BASE-SHA: not-a-sha"), agentsDir).action).toBe("deny");
+  });
+
+  test("a leading-space line and a 7-digit sha count", () => {
+    expect(decide(dispatch("  BASE-SHA: abcdef1"), agentsDir).action).toBe("allow");
+  });
+
+  test("remote isolation needs the line too", () => {
+    expect(decide(dispatch("x", "remote"), agentsDir).action).toBe("deny");
+    expect(decide(dispatch(`BASE-SHA: ${SHA}`, "remote"), agentsDir).action).toBe("allow");
+  });
+
+  test("a read-only type is never asked for a base sha", () => {
+    expect(
+      decide(
+        { tool_name: "Agent", tool_input: { subagent_type: "reader", isolation: "worktree", prompt: "x" } },
+        agentsDir,
+      ).action,
+    ).toBe("allow");
+  });
+});
+
 describe("decide() — write-capable type: isolation or override required", () => {
   test("no isolation, no override: denied", () => {
     const verdict = decide({ tool_name: "Agent", tool_input: { subagent_type: "writer" } }, agentsDir);
@@ -236,7 +286,10 @@ describe("decide() — write-capable type: isolation or override required", () =
 
   test.each(["worktree", "remote"])("isolation: %s allows", (isolation) => {
     expect(
-      decide({ tool_name: "Agent", tool_input: { subagent_type: "writer", isolation } }, agentsDir),
+      decide(
+        { tool_name: "Agent", tool_input: { subagent_type: "writer", isolation, prompt: `BASE-SHA: ${SHA}` } },
+        agentsDir,
+      ),
     ).toEqual({ action: "allow" });
   });
 
@@ -281,7 +334,10 @@ describe("decide() — memory: field end to end", () => {
   test("isolation: worktree still clears a memory: def", () => {
     expect(
       decide(
-        { tool_name: "Agent", tool_input: { subagent_type: "memory-project", isolation: "worktree" } },
+        {
+          tool_name: "Agent",
+          tool_input: { subagent_type: "memory-project", isolation: "worktree", prompt: `BASE-SHA: ${SHA}` },
+        },
         agentsDir,
       ),
     ).toEqual({ action: "allow" });
@@ -383,7 +439,23 @@ describe("spawned process — the deny path is observable", () => {
     expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain(OVERRIDE_TOKEN);
   });
 
-  test("the same dispatch with isolation: worktree: exit 0, silent (no opinion)", () => {
+  test("an isolated dispatch with a base sha line: exit 0, silent (no opinion)", () => {
+    const result = runHook(
+      JSON.stringify({
+        tool_name: "Agent",
+        tool_input: {
+          subagent_type: "general-purpose",
+          prompt: `BASE-SHA: ${"a".repeat(40)}\ndo a thing`,
+          isolation: "worktree",
+        },
+      }),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("");
+  });
+
+  test("an isolated dispatch with no base sha line: exit 0, deny JSON naming the token", () => {
     const result = runHook(
       JSON.stringify({
         tool_name: "Agent",
@@ -391,8 +463,9 @@ describe("spawned process — the deny path is observable", () => {
       }),
     );
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toBe("");
-    expect(result.stderr).toBe("");
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain(BASE_SHA_TOKEN);
   });
 
   test("a built-in read-only type (explore): exit 0, silent, no isolation required", () => {

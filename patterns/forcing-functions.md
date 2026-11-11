@@ -100,6 +100,15 @@ above say where that leaves it: the gate can require the dispatch to carry the s
 running before the tool call cannot inspect a worktree that does not exist yet, and only the agent
 inside the worktree can confirm the sha it came up on.
 
+`core/claude/hooks/agent-worktree-gate.ts` now does that. Every isolated (worktree or remote) write
+dispatch whose prompt has no line of the form `BASE-SHA: <7-40 hex digits>` is denied. The line must
+start a prompt line. The gate checks presence only, and the agent does the comparison against its
+worktree HEAD. The gate reads no git state and compares nothing. A first version denied only when the
+dispatcher HEAD differed from origin's default branch, and let an equal pair through, but the local
+origin ref can be stale, so an equal pair proved nothing about the base the worktree would come up
+on. The operator ruled this on 2026-11-11 on the strength of two incidents in two projects, and
+amended the ruling the same day to require the line on every isolated write dispatch.
+
 The third edge is that correlation, and it stays one. Dispatches that gave the agent a name and
 omitted isolation went idle and returned nothing, four times out of four, across three agent types
 including a read-only planner that had nothing to collide with. The identical briefs, re-dispatched
