@@ -130,6 +130,15 @@ describe("computeVerification()", () => {
     expect(SCAN).toBeGreaterThan(-1);
   });
 
+  // #152: the Linux Pester job gates the verdict too.
+  const LINUX = REQUIRED_CHECKS.findIndex((c) => c.name === "Pester (fixture-built installer suites, Linux)");
+
+  test("the Linux Pester job is a required check, and a missing run of it is incomplete", () => {
+    expect(LINUX).toBeGreaterThan(-1);
+    const runs = green().filter((_, i) => i !== LINUX);
+    expect(verify(runs).state).toBe("incomplete");
+  });
+
   test("a failing secret scan: failed", () => {
     const result = verify(withRun(SCAN, { conclusion: "failure" }));
     expect(result.state).toBe("failed");
