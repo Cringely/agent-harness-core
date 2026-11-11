@@ -46,8 +46,17 @@
 //     scoped writes outside a deeper scratch folder. That is the fail-closed
 //     direction: the scoped agent can still write under `<project>/.claude/scratch`
 //     and in any scratch folder that does not contain the project root.
-//   - A tracked subfolder of the project named `scratch`, `scratchpad` or `.scratch`
-//     is still in scope, because it does not contain the project root.
+//   - Inside the project root only `<project>/.claude/scratch` is scratch. A folder
+//     named `scratch`, `scratchpad` or `.scratch` anywhere else in the project is
+//     tracked content the main session can load (`.claude/skills/scratch/SKILL.md`,
+//     `scratch/CLAUDE.md`), so a scoped agent is denied it. The worktree gate runs a
+//     shell-less scoped writer in the live checkout on the strength of this rule.
+//   - The target and the project root are resolved with realpathSync.native first (the
+//     deepest existing ancestor, plus the tail that does not exist yet). A path that
+//     cannot be resolved, a dangling link, and a spelling that differs from the real
+//     one at or before the scratch segment (a junction, symlink, 8.3 short name,
+//     /tmp versus /private/tmp) are all "not scratch". Textual comparison alone let
+//     any such spelling make a scratch ancestor count again.
 //   - A long-path (backslash backslash question mark) or UNC (two leading separators)
 //     file path is never scratch. Those spellings alias a project file under a form
 //     that does not match the project's own segments, which would let a scratch
@@ -68,8 +77,8 @@
 // Decision logic is the exported pure decide(); `bun test
 // test/agent-write-scope.test.ts` exercises it with no spawn and no filesystem.
 
-import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { isValidAgentName } from "./agent-name";
 import { parseWriteScope } from "./write-scope-parse";
 
@@ -97,11 +106,54 @@ const ALIASED_PREFIX = /^[\\/]{2}/;
 export type Decision = { action: "allow" } | { action: "deny"; reason: string };
 
 /**
- * Is `filePath` inside a scratch directory? Resolved against `cwd` when
- * relative, so a bare `../../etc/hosts` cannot slip through as "not absolute".
+ * The real location of `p`: `realpathSync.native` of its deepest existing ancestor, with the
+ * not-yet-existing tail appended. A write target usually does not exist yet, so the file itself
+ * cannot be resolved. Throws on anything but plain absence, and also on a dangling link, because a
+ * write through one lands somewhere this cannot know.
+ */
+function canonicalize(p: string): string {
+  let head = p;
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      const real = realpathSync.native(head);
+      return tail.length === 0 ? real : join(real, ...tail.reverse());
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw err;
+      let linkExists = true;
+      try {
+        lstatSync(head);
+      } catch {
+        linkExists = false;
+      }
+      if (linkExists) throw err; // present but unresolvable: a dangling link
+      const parent = dirname(head);
+      if (parent === head) throw err;
+      tail.push(basename(head));
+      head = parent;
+    }
+  }
+}
+
+const segmentsOf = (p: string): string[] => p.split(/[\\/]+/).map((s) => s.toLowerCase());
+const startsWith = (a: string[], b: string[]): boolean => a.length >= b.length && b.every((s, i) => a[i] === s);
+
+/**
+ * Is `filePath` a place a scratch-scoped agent may write? Resolved against `cwd` when relative, so
+ * a bare `../../etc/hosts` cannot slip through as "not absolute".
  *
- * A scratch-named segment counts only when the project's own segments do not start with the file's
- * segments up to and including it, i.e. when that directory does not contain the project root.
+ * Both the target and the project root are canonicalised first (see canonicalize). Failing to
+ * canonicalise is "not scratch". The raw spelling must also match the canonical one up to and
+ * including the scratch segment, so a junction, symlink, 8.3 short name or `/tmp` versus
+ * `/private/tmp` style alias never counts: every such spelling is a deny, not an unrelated folder.
+ *
+ * Then, on the canonical paths:
+ *   - Inside the project root, only `<project>/.claude/scratch` is scratch. Any other scratch-named
+ *     folder there is tracked content the main session can load (`.claude/skills/scratch/SKILL.md`,
+ *     `scratch/CLAUDE.md`), so a write to it is refused.
+ *   - Outside the project root, a scratch-named segment counts only when that directory does not
+ *     contain the project root.
  * Compared lowercased on every platform: case-insensitive containment can only add denies.
  */
 export function inScratch(filePath: string, cwd: string, projectDir: string): boolean {
@@ -109,15 +161,26 @@ export function inScratch(filePath: string, cwd: string, projectDir: string): bo
   // Long-path and UNC spellings alias a path the segment comparison below cannot match. Checked on
   // the raw input and on the resolved form, since a relative path can inherit a UNC cwd.
   if (ALIASED_PREFIX.test(filePath) || ALIASED_PREFIX.test(abs)) return false;
-  const segments = abs.split(/[\\/]+/).map((s) => s.toLowerCase());
-  const project = resolve(projectDir)
-    .split(/[\\/]+/)
-    .map((s) => s.toLowerCase());
-  return segments.some(
-    (segment, i) =>
-      SCRATCH_SEGMENTS.has(segment) &&
-      !(project.length > i && segments.slice(0, i + 1).every((s, j) => s === project[j])),
-  );
+  let canonicalAbs: string;
+  let canonicalProject: string;
+  try {
+    canonicalAbs = canonicalize(abs);
+    canonicalProject = canonicalize(resolve(projectDir));
+  } catch {
+    return false;
+  }
+  const raw = segmentsOf(abs);
+  const real = segmentsOf(canonicalAbs);
+  const project = segmentsOf(canonicalProject);
+  if (startsWith(real, project)) {
+    const dropBox = [...project, ".claude", "scratch"];
+    return real.length > dropBox.length && startsWith(real, dropBox) && startsWith(raw, dropBox);
+  }
+  return real.some((segment, i) => {
+    if (!SCRATCH_SEGMENTS.has(segment)) return false;
+    const through = real.slice(0, i + 1);
+    return startsWith(raw, through) && !startsWith(project, through);
+  });
 }
 
 /**

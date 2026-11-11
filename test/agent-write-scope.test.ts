@@ -4,7 +4,7 @@
 // filesystem, and no agent definitions on disk.
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -41,8 +41,6 @@ describe("inScratch() — path classification", () => {
   test.each([
     "/tmp/claude/proj/sess/scratchpad/report.md",
     "C:\\Users\\me\\AppData\\Local\\Temp\\claude\\proj\\sess\\scratchpad\\findings.md",
-    "/home/runner/project/.scratch/notes.md",
-    "scratchpad/relative.md",
     "/tmp/SCRATCHPAD/case-insensitive.md",
   ])("in scope: %s", (p) => {
     expect(inScratch(p, CWD, CWD)).toBe(true);
@@ -57,6 +55,16 @@ describe("inScratch() — path classification", () => {
     "/tmp/scratchpad/../../etc/passwd",
     // A file merely NAMED scratchpad is not a scratch directory.
     "/home/runner/project/scratchpad.md",
+    // Inside the project only `.claude/scratch` is scratch. Every other scratch-named folder is a
+    // tracked folder the main session may load from, `.claude/skills/scratch/SKILL.md` among them.
+    "/home/runner/project/.scratch/notes.md",
+    "/home/runner/project/scratchpad/relative.md",
+    "scratchpad/relative.md",
+    "/home/runner/project/.claude/skills/scratch/SKILL.md",
+    "/home/runner/project/.claude/commands/scratch/x.md",
+    "/home/runner/project/.claude/rules/scratch/x.md",
+    "/home/runner/project/scratch/CLAUDE.md",
+    "/home/runner/project/src/scratch/a.ts",
   ])("out of scope: %s", (p) => {
     expect(inScratch(p, CWD, CWD)).toBe(false);
   });
@@ -76,7 +84,9 @@ describe("inScratch() — path classification", () => {
   });
 
   test("relative paths resolve against cwd, not the filesystem root", () => {
-    expect(inScratch("../.scratch/x.md", "/home/runner/project/sub", CWD)).toBe(true);
+    expect(inScratch("../../scratchpad/x.md", "/home/runner/project/sub", CWD)).toBe(true);
+    expect(inScratch("../.claude/scratch/x.md", "/home/runner/project/sub", CWD)).toBe(true);
+    expect(inScratch("../.scratch/x.md", "/home/runner/project/sub", CWD)).toBe(false);
     expect(inScratch("../src/x.ts", "/home/runner/project/sub", CWD)).toBe(false);
   });
 });
@@ -95,9 +105,10 @@ describe("inScratch(): a scratch-named ancestor of the project is not scratch", 
     expect(inScratch("/home/x/scratch/other/f.md", PROJ, PROJ)).toBe(false);
   });
 
-  test("a scratch folder inside the project still counts", () => {
+  test("inside the project only .claude/scratch counts", () => {
     expect(inScratch(`${PROJ}/.claude/scratch/r.md`, PROJ, PROJ)).toBe(true);
-    expect(inScratch(`${PROJ}/scratchpad/r.md`, PROJ, PROJ)).toBe(true);
+    expect(inScratch(`${PROJ}/scratchpad/r.md`, PROJ, PROJ)).toBe(false);
+    expect(inScratch(`${PROJ}/.scratch/r.md`, PROJ, PROJ)).toBe(false);
   });
 
   test("a scratch directory unrelated to the project still counts", () => {
@@ -134,6 +145,145 @@ describe("inScratch(): a scratch-named ancestor of the project is not scratch", 
 
   test("the gate version marks this fix", () => {
     expect(WRITE_SCOPE_GATE_VERSION).toBe(2);
+  });
+});
+
+describe("decide() — scratch-named folders inside the project instruction paths are refused", () => {
+  test.each([
+    ".claude/skills/scratch/SKILL.md",
+    ".claude/commands/scratch/x.md",
+    ".claude/rules/scratch/x.md",
+    "scratch/CLAUDE.md",
+  ])("a relative write to %s is denied", (rel) => {
+    const verdict = decide("scratch", rel, CWD, CWD);
+    expect(verdict.action).toBe("deny");
+  });
+
+  test("the drop box under .claude/scratch is still allowed", () => {
+    expect(decide("scratch", ".claude/scratch/r.md", CWD, CWD)).toEqual({ action: "allow" });
+  });
+});
+
+// Real directories: the gate canonicalises the project root and the target, so a link or short-name
+// alias into the project is seen for what it is. Each case would be allowed by a textual comparison.
+const realTmp = realpathSync.native(tmpdir());
+const linkRoot = mkdtempSync(join(realTmp, "write-scope-link-"));
+afterAll(() => {
+  rmSync(linkRoot, { recursive: true, force: true });
+});
+
+describe("inScratch(): an aliased spelling of a project path is never scratch", () => {
+  // The project sits under a scratch-named ancestor, so its real spelling is denied by containment.
+  // A link standing in for an ancestor BEFORE that segment (the Documents and Settings junction to
+  // Users is the Windows case, /tmp to /private/tmp the macOS one) keeps the scratch segment in the
+  // path but changes the text before it. A textual comparison sees an unrelated scratch folder.
+  const real = join(linkRoot, "real");
+  const proj = join(real, "scratch", "repo");
+  mkdirSync(join(proj, "src"), { recursive: true });
+  mkdirSync(join(proj, ".claude", "scratch"), { recursive: true });
+
+  const viaLink = join(linkRoot, "via-link");
+  let linked = true;
+  try {
+    symlinkSync(real, viaLink, "junction");
+  } catch {
+    linked = false;
+  }
+
+  test("the real spelling of a source file is denied", () => {
+    expect(inScratch(join(proj, "src", "a.ts"), proj, proj)).toBe(false);
+  });
+
+  test.skipIf(!linked)("the same file through a link standing in for an ancestor is denied", () => {
+    expect(inScratch(join(viaLink, "scratch", "repo", "src", "a.ts"), proj, proj)).toBe(false);
+  });
+
+  test.skipIf(!linked)("a project root given through the link is canonicalised, so its real files are still denied", () => {
+    const linkedProj = join(viaLink, "scratch", "repo");
+    expect(inScratch(join(proj, "src", "a.ts"), linkedProj, linkedProj)).toBe(false);
+  });
+
+  test.skipIf(!linked)("a link carrying a scratch-named segment into the project is not scratch", () => {
+    const scratchLink = join(linkRoot, "scratchpad");
+    symlinkSync(join(proj, "src"), scratchLink, "junction");
+    expect(inScratch(join(scratchLink, "new.ts"), proj, proj)).toBe(false);
+  });
+
+  test.skipIf(!linked)("a scratch folder outside the project reached through a link is denied, its real spelling is allowed", () => {
+    const other = join(linkRoot, "other-real");
+    mkdirSync(join(other, "scratchpad"), { recursive: true });
+    const otherLink = join(linkRoot, "other-link");
+    symlinkSync(other, otherLink, "junction");
+    expect(inScratch(join(other, "scratchpad", "f.md"), proj, proj)).toBe(true);
+    expect(inScratch(join(otherLink, "scratchpad", "f.md"), proj, proj)).toBe(false);
+  });
+
+  test.skipIf(!linked)("the project's .claude/scratch is allowed by its real spelling and denied through a link spelling", () => {
+    expect(inScratch(join(proj, ".claude", "scratch", "r.md"), proj, proj)).toBe(true);
+    expect(inScratch(join(viaLink, "scratch", "repo", ".claude", "scratch", "r.md"), proj, proj)).toBe(false);
+  });
+
+  test("a file that exists is canonicalised the same way as one that does not yet", () => {
+    writeFileSync(join(proj, ".claude", "scratch", "exists.md"), "x");
+    expect(inScratch(join(proj, ".claude", "scratch", "exists.md"), proj, proj)).toBe(true);
+    expect(inScratch(join(proj, ".claude", "scratch", "sub", "new.md"), proj, proj)).toBe(true);
+  });
+
+  // An 8.3 short name aliases a long one. Only a Windows volume with short names enabled has one,
+  // and the lookup is the same call the OS makes.
+  function shortPathOf(dir: string): string | null {
+    if (process.platform !== "win32") return null;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { dlopen, ptr } = require("bun:ffi");
+      const k = dlopen("kernel32.dll", { GetShortPathNameW: { args: ["ptr", "ptr", "u32"], returns: "u32" } });
+      const input = Buffer.from(dir + String.fromCharCode(0), "utf16le");
+      const out = Buffer.alloc(2048);
+      const n = k.symbols.GetShortPathNameW(ptr(input), ptr(out), 1024) as number;
+      const short = n > 0 ? out.toString("utf16le", 0, n * 2) : null;
+      return short !== null && short.toLowerCase() !== dir.toLowerCase() ? short : null;
+    } catch {
+      return null;
+    }
+  }
+  const longProject = join(linkRoot, "scratch", "a-long-project-name-for-short-alias");
+  mkdirSync(join(longProject, "src"), { recursive: true });
+  const shortProject = shortPathOf(longProject);
+
+  test.skipIf(shortProject === null)("an 8.3 short-name spelling of a project file is not scratch", () => {
+    expect(inScratch(join(longProject, "src", "a.ts"), longProject, longProject)).toBe(false);
+    expect(inScratch(join(shortProject!, "src", "a.ts"), longProject, longProject)).toBe(false);
+  });
+
+  test.skipIf(shortProject === null)("an 8.3 spelling of the scratch ancestor itself is not scratch", () => {
+    const shortRoot = shortPathOf(join(linkRoot, "scratch"));
+    expect(shortRoot).not.toBeNull();
+    expect(inScratch(join(shortRoot!, "a-long-project-name-for-short-alias", "src", "a.ts"), longProject, longProject)).toBe(false);
+  });
+
+  test("a path the filesystem cannot canonicalise is not scratch", () => {
+    // An embedded NUL makes realpath throw something other than ENOENT.
+    expect(inScratch(join(linkRoot, "scratchpad", "bad" + String.fromCharCode(0) + ".md"), linkRoot, linkRoot)).toBe(false);
+    expect(inScratch(join(linkRoot, "elsewhere", "scratchpad", "ok.md"), linkRoot + String.fromCharCode(0), linkRoot)).toBe(false);
+  });
+
+  test("a dangling link in the path is not scratch, since where a write lands is unknown", () => {
+    const outside = mkdtempSync(join(realTmp, "write-scope-dangle-"));
+    try {
+      mkdirSync(join(outside, "scratchpad"));
+      let dangling = true;
+      try {
+        symlinkSync(join(outside, "nowhere"), join(outside, "scratchpad", "gap"), "junction");
+      } catch {
+        dangling = false;
+      }
+      if (dangling) {
+        expect(inScratch(join(outside, "scratchpad", "gap", "f.md"), linkRoot, linkRoot)).toBe(false);
+      }
+      expect(inScratch(join(outside, "scratchpad", "plain.md"), linkRoot, linkRoot)).toBe(true);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 });
 
@@ -375,7 +525,7 @@ describe("spawned process — the deny path is observable", () => {
       JSON.stringify({
         agent_type: "scratch-spawn-agent",
         cwd: spawnScopeRoot,
-        tool_input: { file_path: join(spawnScopeRoot, "scratchpad", "report.md") },
+        tool_input: { file_path: join(spawnScopeRoot, ".claude", "scratch", "report.md") },
       }),
     );
     expect(result.exitCode).toBe(0);
@@ -428,7 +578,7 @@ describe("spawned process — scratch-named ancestor and NotebookEdit", () => {
       JSON.stringify({
         agent_type: "scratch-spawn-agent",
         cwd: spawnScopeRoot,
-        tool_input: { notebook_path: join(spawnScopeRoot, "scratchpad", "n.ipynb") },
+        tool_input: { notebook_path: join(spawnScopeRoot, ".claude", "scratch", "n.ipynb") },
       }),
       { CLAUDE_PROJECT_DIR: spawnScopeRoot },
     );
