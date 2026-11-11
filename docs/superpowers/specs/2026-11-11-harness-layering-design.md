@@ -1,6 +1,6 @@
 # Harness layering by project type: design
 
-Date: 2026-11-11. Status: design, awaiting operator approval. Source conversation: the 2026-11-11 decision pass and brainstorm. Evidence: issues #294 (physical workbench build, no git repo) and #308 (product and program analysis brief, no remote).
+Date: 2026-11-11. Status: approved by the operator 2026-11-11 (#310). Source conversation: the 2026-11-11 decision pass and brainstorm. Evidence: issues #294 (physical workbench build, no git repo) and #308 (product and program analysis brief, no remote).
 
 ## Intent
 

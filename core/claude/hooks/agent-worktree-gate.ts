@@ -10,11 +10,18 @@
 //
 // Floor: once the hook can read a subagent_type out of a well-formed payload,
 // a write-capable dispatch never proceeds against this shared, non-isolated
-// checkout unless the hook proved the type read-only or it is a built-in the
-// hook trusts as read-only (Explore, Plan). The only other way through is a
-// reasoned override the dispatcher wrote itself: an ISOLATION-OVERRIDE line
-// in the prompt, or a PROJECT_EXCEPTIONS entry. The CLOSED path below
-// derives from that floor:
+// checkout unless one of these holds:
+//   - the hook proved the type read-only, or it is a built-in the hook trusts as
+//     read-only (Explore, Plan);
+//   - the type is a trusted scoped writer: a definition in the project's own
+//     agents folder that declares `writeScope: scratch` and grants no shell (see the
+//     scoped-writer paragraph below);
+//   - neither the project root nor the session folder is a git repository, so no
+//     worktree can exist (see the git-probe paragraph below). The dispatch is allowed
+//     with a note rather than denied for something that cannot be done;
+//   - the dispatcher wrote a reasoned override itself: an ISOLATION-OVERRIDE line in
+//     the prompt, or a PROJECT_EXCEPTIONS entry.
+// The CLOSED path below derives from that floor:
 // where classification runs but can't prove the type safe, the gate denies,
 // because an unproven type is not a read-only type. The OPEN path is a
 // deliberate reliability trade against the floor, not a consequence of it,
@@ -30,15 +37,19 @@
 // out of sync the first time a new role is added with a tools grant nobody
 // updated the list for — which is the exact failure class this hook exists
 // to close. The rule as shipped:
-//   - Type has a definition file → parse its `tools:` frontmatter. Exempt only if
-//     every listed tool is on the provably-read-only allowlist; an absent/empty
-//     `tools:` field, `*`, "All tools", or any unlisted tool ⇒ requires isolation.
+//   - Type has a definition file → parse its `tools:` frontmatter. Exempt if every
+//     listed tool is on the provably-read-only allowlist, or if it is a trusted scoped
+//     writer (`writeScope: scratch`, no `memory:` line, every tool read-only or one of
+//     Write, Edit and SendMessage, and the trust conditions in the scoped-writer
+//     paragraph below hold). An absent/empty `tools:` field, `*`, "All tools", or any
+//     other unlisted tool ⇒ requires isolation.
 //   - Definition file exists but is unreadable ⇒ that TYPE requires isolation
 //     (fail-closed tier: classification ran and found nothing provably safe.
 //     The fail-open tier below is reserved for malformed stdin and our own
 //     bugs, where classification never ran at all).
 //   - No definition file → only the known built-ins are hardcoded: Explore and
-//     Plan are read-only (their published grant excludes Edit/Write/NotebookEdit);
+//     Plan are read-only (their published grant denies Write and Edit, see
+//     BUILTIN_READ_ONLY);
 //     general-purpose, fork, and an OMITTED subagent_type (the tool defaults it to
 //     general-purpose) have all tools. Any other unknown type requires isolation —
 //     an unknown role is not evidence it is read-only.
@@ -143,12 +154,15 @@ const READ_ONLY_TOOLS = new Set([
 
 /**
  * Built-in subagent types with no `.claude/agents/<type>.md` definition file.
- * Explore and Plan are read-only per their published grant ("All tools except
- * Agent, Artifact, ExitPlanMode, Edit, Write, NotebookEdit"). general-purpose
+ * Explore and Plan are read-only per the built-in subagents section of the Claude Code subagent
+ * docs (code.claude.com/docs/en/sub-agents), which gives both "read-only tools; Write and Edit are
+ * denied", and per the Agent tool's own roster ("All tools except Agent, Artifact, ExitPlanMode,
+ * Edit, Write, NotebookEdit"). No source documents a grant for any other built-in, a `web-fetch`
+ * type included, so none is listed: an uncited grant is not proof of read-only. general-purpose
  * and fork carry all tools and deliberately have no entry here — they fall
  * through to the requires-isolation default, exactly like unknown types.
  */
-const BUILTIN_READ_ONLY = new Set(["explore", "plan", "web-fetch"]);
+const BUILTIN_READ_ONLY = new Set(["explore", "plan"]);
 
 /**
  * Write tools a `writeScope: scratch` definition may hold and still be trusted without isolation.
@@ -353,8 +367,12 @@ const ALLOW: GateDecision = { action: "allow" };
 const classificationCache = new Map<string, boolean>();
 
 /**
- * True unless the frontmatter proves the role read-only: a `tools:` field whose
- * every entry is on the read-only allowlist. Absent/empty field means all tools.
+ * True unless the frontmatter proves the role needs no isolation. Two things prove it:
+ *   - a `tools:` field whose every entry is on the read-only allowlist, or
+ *   - a trusted scoped writer: `parseScope` is non-null and reads `writeScope: scratch`, there is no
+ *     `memory:` line, and every tool is read-only or one of Write, Edit and SendMessage.
+ * An absent or empty `tools:` field means all tools. The caller decides whether a parser may be
+ * passed at all (decide() checks the project agents folder, the type spelling and the registration).
  */
 function frontmatterRequiresIsolation(text: string, parseScope: WriteScopeParser | null): boolean {
   const fm = text.match(/^---\r?\n([\s\S]*?)\r?\n---/)?.[1];

@@ -11,7 +11,7 @@
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import {
   BASE_SHA_TOKEN,
   decide,
@@ -788,8 +788,9 @@ describe("requiresIsolation() — a shell-less scratch writer is trusted only wi
     expect(requiresIsolation("scoped-in-body", scopedDir, parseWriteScope)).toBe(true);
   });
 
-  test("web-fetch with no def file is a read-only built-in", () => {
-    expect(requiresIsolation("web-fetch", join(scopedDir, "no-such-dir"))).toBe(false);
+  // No source documents a grant for a built-in named web-fetch, so it is an unknown type.
+  test("web-fetch with no def file is an unknown type and requires isolation", () => {
+    expect(requiresIsolation("web-fetch", join(scopedDir, "no-such-dir"))).toBe(true);
   });
 
   test("a web-fetch.md def granting Write with no writeScope requires isolation", () => {
@@ -832,10 +833,17 @@ describe("decide() — scoped-writer trust needs the project agents dir and the 
     expect(decide(dispatch("scoped"), scopedDir, projectRoot, inRepo, parseWriteScope).action).toBe("deny");
   });
 
-  test("an agents dir spelled with a trailing separator or dot segments still matches the project's", () => {
-    expect(
-      decide(dispatch("scoped"), join(projectAgents, ".", "..", "agents"), projectRoot, inRepo, parseWriteScope),
-    ).toEqual({ action: "allow" });
+  // Built by concatenation: join() and resolve() would normalise these away before the gate saw
+  // them, and the point is that the gate's own comparison does.
+  test.each([
+    ["a trailing separator", projectAgents + sep],
+    ["a trailing dot segment", projectAgents + sep + "."],
+    ["an embedded dot segment", projectAgents + sep + "." + sep + sep],
+    ["a doubled separator before the last segment", dirname(projectAgents) + sep + sep + "agents"],
+    ["a parent segment that returns to it", projectAgents + sep + "x" + sep + ".."],
+  ])("an agents dir spelled with %s still matches the project's", (_label, spelled) => {
+    expect(spelled).not.toBe(projectAgents);
+    expect(decide(dispatch("scoped"), spelled, projectRoot, inRepo, parseWriteScope)).toEqual({ action: "allow" });
   });
 
   test.each(["Scoped", "SCOPED", " scoped ", "scoped\t"])(
