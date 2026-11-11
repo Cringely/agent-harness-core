@@ -81,19 +81,24 @@ Agents and hooks installed by `Install-Harness.ps1` stay ungated by layer in Pla
 | A4 cutover | `feat/310-cutover` | 11, 12, 13 | coordinator on the operator's machine, then an agent |
 | A5 session close | `feat/310-session-close` | 14 | agent |
 
-A1, A2 and A3 are independent. A4 starts after A1 and A3 merge, and only if Task 11's check passes. A5 starts after A4 merges.
+A1, A2 and A3 are independent. A4 starts after A1 and A3 merge. Task 11's live check then picks one of two A4 paths:
+- **Cutover** (check passes): Task 12 Steps 1-5, then Task 13.
+- **Fallback** (check fails): Task 12 Step 1 and its commit (Step 5F) only. Task 13 does not run. The code halves stay in the account layer beside the project copies, so nothing names `bounded-review.md` or retires `fix-quality.md`.
+
+A5 starts after A4 merges on either path.
 
 ---
 
 ### Task 1: Close the scratch-parent gap and share one writeScope parser
 
 **Files:**
+- Create: `core/claude/hooks/write-scope-parse.ts`
 - Modify: `core/claude/hooks/agent-write-scope.ts` (header paragraph "Second coverage boundary", `inScratch`, `readWriteScope`, `decide`, the `import.meta.main` block)
-- Test: `test/agent-write-scope.test.ts`
+- Test: `test/agent-write-scope.test.ts`, `install/Install-Harness.Tests.ps1` (one assertion)
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `export function parseWriteScope(text: string): string | null`, `inScratch(filePath: string, cwd: string, projectDir: string): boolean`, `decide(scope: string | null, filePath: string | undefined, cwd: string, projectDir: string): Decision`. Task 2 imports `parseWriteScope` and relies on the rule that a scratch-named directory counts only when it does not contain the project root.
+- Produces: `export type WriteScopeParser = (text: string) => string | null` and `export function parseWriteScope(text: string): string | null` in `core/claude/hooks/write-scope-parse.ts`, a new file beside the hooks. It sits flat in the hooks directory, like `agent-name.ts`, because the installer copies that directory file by file and not recursively. A new file is installed fresh, never skipped as project-modified. Also produces `inScratch(filePath: string, cwd: string, projectDir: string): boolean` and `decide(scope: string | null, filePath: string | undefined, cwd: string, projectDir: string): Decision`. Task 2 loads the parser module and relies on the rule that a scratch-named directory counts only when it does not contain the project root.
 
 - [ ] **Step 1: Write the failing tests.** Add a describe block "inScratch(): a scratch-named ancestor of the project is not scratch", and update every existing `inScratch`/`decide` call to pass `CWD` as `projectDir`.
 
@@ -111,12 +116,14 @@ expect(decide("scratch", `${PROJ}/src/index.ts`, PROJ, PROJ).action).toBe("deny"
 
 A NotebookEdit call: the entrypoint reads `tool_input.file_path ?? tool_input.notebook_path`. A spawned case with a scoped agent and `notebook_path` outside scratch is denied.
 
+In `install/Install-Harness.Tests.ps1`'s first case, add `Test-Path "$script:target/.claude/hooks/write-scope-parse.ts" | Should -BeTrue`, so the module provably ships.
+
 Spawned case for the ancestor: build `<tmp>/scratch/proj/.claude/agents/scoped.md` with `writeScope: scratch`, run the hook with `CLAUDE_PROJECT_DIR=<tmp>/scratch/proj`, `agent_type: "scoped"`, `file_path: <tmp>/scratch/proj/src/x.ts`. Expected: exit 0 and a deny JSON on stdout.
 
 - [ ] **Step 2: Run to verify they fail.** `bun test test/agent-write-scope.test.ts`. Expected: the new cases FAIL.
 
 - [ ] **Step 3: Implement.**
-  - `parseWriteScope` reads only the frontmatter between a leading `---` line and the next `---` line, split on `/\r?\n/`, and returns the value of the first `writeScope:` key. `readWriteScope` reads the whole file and calls it.
+  - `parseWriteScope` in `write-scope-parse.ts` reads only the frontmatter between a leading `---` line and the next `---` line, split on `/\r?\n/`, and returns the value of the first `writeScope:` key. `agent-write-scope.ts` imports it, and `readWriteScope` reads the whole file and calls it.
   - `inScratch` splits the resolved file path and the resolved `projectDir` into segments on `/[\\/]+/`. A segment at index `i` whose lowercased name is in `SCRATCH_SEGMENTS` counts only when the project's segments do not start with the file's segments `0..i`. Compare lowercased on every platform, since case-insensitive containment can only add denies.
   - The entrypoint passes `process.env.CLAUDE_PROJECT_DIR ?? cwd` as `projectDir`.
   - Header: replace "Second coverage boundary" with three facts. A scratch-named directory counts only when it does not contain the project root. A project whose root sits inside a scratch directory gets denies for scoped writes outside a deeper scratch folder, the fail-closed direction. A tracked subfolder of the project named `scratch`, `scratchpad` or `.scratch` is still in scope.
@@ -126,7 +133,7 @@ Spawned case for the ancestor: build `<tmp>/scratch/proj/.claude/agents/scoped.m
 - [ ] **Step 5: Commit.**
 
 ```bash
-git add core/claude/hooks/agent-write-scope.ts test/agent-write-scope.test.ts
+git add core/claude/hooks/write-scope-parse.ts core/claude/hooks/agent-write-scope.ts test/agent-write-scope.test.ts install/Install-Harness.Tests.ps1
 git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "fix(write-scope): a scratch-named ancestor no longer puts the project in scope (#310)"
 ```
 
@@ -139,8 +146,8 @@ git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit
 - Test: `test/agent-worktree-gate.test.ts`
 
 **Interfaces:**
-- Consumes: `parseWriteScope` from `./agent-write-scope` (Task 1), and Task 1's containment rule. Task 2 lands after Task 1 in the same PR.
-- Produces: `export type GitProbe = "repo" | "not-repo" | "unknown"`, `export function probeGitWorkTree(dir: string, env?: Record<string, string | undefined>): GitProbe`, `export function nonGitNote(projectRoot: string): string`, `export function projectRootOf(env: Record<string, string | undefined>): string` (the `CLAUDE_PROJECT_DIR` value, else `join(import.meta.dir, "..", "..")`), `GateDecision = { action: "allow"; note?: string } | { action: "deny"; reason: string }`, `decide(payload: unknown, agentsDir?: string, projectRoot?: string | null, probe?: (dir: string) => GitProbe): GateDecision`.
+- Consumes: `WriteScopeParser` and the module `./write-scope-parse` (Task 1), and Task 1's containment rule. Task 2 lands after Task 1 in the same PR.
+- Produces: `export async function loadWriteScopeParser(modulePath?: string): Promise<WriteScopeParser | null>` (default `./write-scope-parse`, `null` on any load error), `requiresIsolation(subagentType: string, agentsDir?: string, parseScope?: WriteScopeParser | null): boolean`, `export type GitProbe = "repo" | "not-repo" | "unknown"`, `export function probeGitWorkTree(dir: string, env?: Record<string, string | undefined>): GitProbe`, `export function nonGitNote(projectRoot: string): string`, `export function projectRootOf(env: Record<string, string | undefined>): string` (the `CLAUDE_PROJECT_DIR` value, else `join(import.meta.dir, "..", "..")`), `GateDecision = { action: "allow"; note?: string } | { action: "deny"; reason: string }`, `decide(payload: unknown, agentsDir?: string, projectRoot?: string | null, probe?: (dir: string) => GitProbe, parseScope?: WriteScopeParser | null): GateDecision`. A `null` or omitted `parseScope` means no scoped-writer trust.
 
 - [ ] **Step 1: Write the failing tests.**
 
@@ -157,14 +164,15 @@ Decide (stub probe, write-capable type `writer`, no isolation, no override):
 - Root probed `"unknown"`: deny. `projectRoot` `null`: deny, and the stub records zero calls.
 - Read-only type `reader` with root `"not-repo"`: `{ action: "allow" }` with no `note`, stub not called.
 
-Write-scope trust (`requiresIsolation`, real def files):
-- `tools: Read, Grep, Glob, WebFetch, WebSearch, Write, SendMessage` plus `writeScope: scratch`: `false`.
+Write-scope trust (`requiresIsolation` with `parseWriteScope` passed, real def files):
+- `tools: Read, Grep, Glob, WebFetch, WebSearch, Write, SendMessage` plus `writeScope: scratch`: `false`. The same def with `parseScope` `null`: `true`.
+- `loadWriteScopeParser("./no-such-module")` resolves to `null` and does not throw.
 - The same with `NotebookEdit`, `Bash`, `PowerShell`, `Agent`, `Skill`, `mcp__x__y` or `*` added: `true`.
 - The same tools with no `writeScope`, with `writeScope: repo`, or with `memory: user` added: `true`.
 - Duplicate keys `writeScope: repo` then `writeScope: scratch`: `true`.
 - `web-fetch` with no def file: `false`. A `web-fetch.md` def granting `Write` with no `writeScope`: `true`.
 
-Spawned process: `CLAUDE_PROJECT_DIR` set to a git temp dir and payload `cwd` set to a non-git temp dir, `subagent_type: "general-purpose"`, no isolation: deny JSON. `CLAUDE_PROJECT_DIR` set to a non-git temp dir (same skip guard): exit 0, stdout JSON with `systemMessage` and `hookSpecificOutput.additionalContext` both equal to the note, and no `permissionDecision` key.
+Spawned process: `CLAUDE_PROJECT_DIR` set to a git temp dir and payload `cwd` set to a non-git temp dir, `subagent_type: "general-purpose"`, no isolation: deny JSON. `CLAUDE_PROJECT_DIR` set to a non-git temp dir (same skip guard): exit 0, stdout JSON with `systemMessage` and `hookSpecificOutput.additionalContext` both equal to the note, and no `permissionDecision` key. Missing parser module: copy `agent-worktree-gate.ts` and `agent-name.ts`, but not `write-scope-parse.ts`, into `<tmp>/.claude/hooks/`, and put a scratch-scoped `scoped.md` def (Write, no shell) in `<tmp>/.claude/agents/`. Spawn the copied gate with `CLAUDE_PROJECT_DIR` set to a git temp dir and an unisolated `subagent_type: "scoped"` dispatch. Expected: exit 0 and a deny JSON.
 
 - [ ] **Step 2: Run to verify they fail.** `bun test test/agent-worktree-gate.test.ts`. Expected: FAIL on the new exports and cases.
 
@@ -173,7 +181,8 @@ Spawned process: `CLAUDE_PROJECT_DIR` set to a git temp dir and payload `cwd` se
   - `nonGitNote(root)` returns exactly: `` Worktree gate: ${root} is not a git repository, so worktree isolation is not available and this dispatch runs in the shared folder. A git repository in a subfolder of it is not isolated either. If this work should be versioned, run `git init` here and the gate will isolate concurrent writers. ``
   - In `decide`, after `requiresIsolation` returns true and before the isolation branch: allow with the note only when `projectRoot` is a non-empty string, `probe(projectRoot)` is `"not-repo"`, and either the payload has no string `cwd` or `probe(cwd)` is also `"not-repo"`. Any other answer falls through to today's logic.
   - `BUILTIN_READ_ONLY` gains `"web-fetch"`, whose published grant is WebFetch only.
-  - `frontmatterRequiresIsolation` returns `false` when `parseWriteScope(text) === "scratch"`, there is no `memory:` line, and every tools token is in `READ_ONLY_TOOLS` or in `SCOPED_WRITE_TOOLS = new Set(["write", "edit", "sendmessage"])`. A comment says why. `agent-write-scope.ts` reads this same file with the same parser and confines those writes, and with no shell the confinement holds. NotebookEdit stays out.
+  - The gate never imports the parser statically. A static import that fails to link exits the process before the entrypoint's `try`, which Claude Code reads as no opinion. `loadWriteScopeParser` does `await import(modulePath)` inside its own `try` and returns `null` on any error. The entrypoint calls it inside the existing `try` and passes the result down. The classification cache key includes whether a parser was present.
+  - `frontmatterRequiresIsolation` returns `false` only when `parseScope` is non-null, `parseScope(text) === "scratch"`, there is no `memory:` line, and every tools token is in `READ_ONLY_TOOLS` or in `SCOPED_WRITE_TOOLS = new Set(["write", "edit", "sendmessage"])`. A comment says why. `agent-write-scope.ts` reads this same file with the same parser and confines those writes, and with no shell the confinement holds. NotebookEdit stays out.
   - The entrypoint passes `projectRootOf(process.env)`. On an allow with a note it prints `{"systemMessage": note, "hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": note}}`. A plain allow prints nothing.
   - Header: replace "No network, no git" and "The gate reads no git state" with the probe's contract (filesystem only, no git spawned, the project root decides, unknown keeps today's behaviour). Add one paragraph on the scoped-writer rule, naming Task 1's fix as its precondition.
 
@@ -388,7 +397,7 @@ export const SPLITS = {
 Cases:
 - "every rule listed in layers.json exists in core/claude/rules", and "every .md file in core/claude/rules is listed in layers.json".
 - "layer names are only code, documents and physical, and every list is non-empty".
-- "the split loses and adds nothing". For each entry in `SPLITS`, the fixture is the original. Before cutover, `account/claude/rules/<original>` equals the fixture. Then the core code file must be `newPreamble` (or the original preamble, per `preambleStaysIn`) followed by exactly the `codeSections`, in original order and byte-identical. After cutover, the account copy differs and `account/claude/rules/<kernelFile>` holds the kernel half. Then the kernel file's sections plus the code file's sections must equal the fixture's sections: each fixture section appears exactly once across the two files, byte-identical, each file keeps the original order, and the preambles follow `preambleStaysIn` and `newPreamble`. An account copy that matches neither shape fails with a message saying the source changed since the move and must be ported into core.
+- "the split loses and adds nothing". For each entry in `SPLITS`, the fixture is the original. Before cutover, `account/claude/rules/<original>` equals the fixture. Then the core code file must be `newPreamble` (or the original preamble, per `preambleStaysIn`) followed by exactly the `codeSections`, in original order and byte-identical. After cutover, the account copy differs and `account/claude/rules/<kernelFile>` holds the kernel half. Then the kernel file's sections plus the code file's sections must equal the fixture's sections: each fixture section appears exactly once across the two files, byte-identical, each file keeps the original order, and the preambles follow `preambleStaysIn` and `newPreamble`. Export mirrors the rules directory, so after cutover a removed file is absent rather than different. An absent account copy counts as after-cutover only when `kernelFile` differs from the original name (fix-quality.md, whose kernel half is `bounded-review.md`). For change-management.md, whose kernel file keeps the name, an absent account copy fails. Read with an existence check first, so absence never throws. An account copy that matches neither shape fails with a message saying the source changed since the move and must be ported into core.
 
 - [ ] **Step 2: Run to verify it fails.** `bun test test/layer-rules.test.ts`. Expected: FAIL, files missing.
 
@@ -705,22 +714,24 @@ This runs after A1 and A3 merge. Until it passes, nothing leaves `~/.claude/rule
 
   Committing there waits on the answer.
 
-- [ ] **Step 4: Run the live check.** Do this in this repo, which gitignores `/.claude/`, and in one reinstalled project that tracks `.claude/` and has had its rule files committed and pushed.
-  - The marker is the line `Layers: kernel (always on), code.`. It exists only in `.claude/rules/harness/project-settings.md` and in no account file, so it discriminates.
-  - Positive control: in the main session, quote that line from context without reading a file. It must appear. This also confirms Claude Code loads `.claude/rules/` subfolders.
-  - Test: dispatch a fresh `general-purpose` agent (`model: haiku`, `isolation: "worktree"`, with the `BASE-SHA` line). The brief says: "Without reading any file, quote the line that starts with `Layers:` from the project rules in your context, or reply NOT IN CONTEXT."
-  - Predictions: visible means it quotes the marker. Not visible means `NOT IN CONTEXT`.
+- [ ] **Step 4: Run the live check, in this repo only.** This repo gitignores `/.claude/`, so its isolated worktrees cannot carry the rule files, which makes it the hardest case. Everything runs in one Git Bash command from the repo root, after Step 2. The coordinator's own session takes no part, because its rules were loaded before the reinstall.
+  - **Marker.** Generate a random token at run time, for example `harness-check-` plus 16 hex digits from `/dev/urandom`. Hold it in a shell variable and append it as a `Check token: <token>` line to `.claude/rules/harness/project-settings.md` only. It is never printed, never written anywhere else, and never appears in this plan or in the coordinator's context.
+  - **Brief.** Both runs use the same neutral question: "Without reading any file or running any tool, quote the line that starts with `Check token:` from the project rules in your context, or reply NOT IN CONTEXT."
+  - **Control.** Run `claude -p --model haiku "<brief>"` as a fresh headless session from the repo root. The shell compares the output with the token and prints only `CONTROL MATCH` or `CONTROL NO MATCH`. A match also confirms that Claude Code loads `.claude/rules/` subfolders.
+  - **Check.** Run a second fresh session, `claude -p --model haiku --output-format stream-json --verbose`. Its prompt asks it to dispatch one `general-purpose` agent with `isolation: "worktree"` and `model: haiku`, whose prompt is a `BASE-SHA: <git rev-parse HEAD>` line followed by the brief. The stream goes to a temp file under the session scratchpad. A `bun -e` one-liner finds the Agent `tool_use` with `isolation` set to `worktree` and its `tool_result`. It prints `CHECK MATCH` when that result contains the token, `CHECK NO MATCH` when it does not, and `CHECK NO DISPATCH` when no such call exists. The outer session's own text is never read, because it can see the token itself.
+  - **Cleanup.** Unset the variable, delete the temp file, and re-run `Install-Harness.ps1` on this repo, which rewrites `project-settings.md` without the token. Headless output can carry the account email, which is why only verdicts are printed.
+  - **Predictions.** If isolated agents load project rules from the main checkout, `CHECK MATCH`. If they load them from the worktree's own tree, `CHECK NO MATCH`. `CHECK NO DISPATCH` gets one retry, and a second one counts as `CHECK NO MATCH`.
 
 - [ ] **Step 5: Gate.**
-  - If the isolated agent quotes the marker in both repos, Task 12 runs.
-  - If it does not in a repo that tracks `.claude/`, that repo's rule files are committed and pushed and the check repeats.
-  - If it does not in this repo (`/.claude/` ignored), or still does not after committing elsewhere, Task 12 does not remove the code halves from the account layer. The fallback is that both copies stay: the kernel changes in Task 12 Steps 1 and 3 still run, and the account `fix-quality.md` and the code sections of `change-management.md` stay in `~/.claude/rules` beside the project copies. The coordinator then raises a Needs-you item. Option A: change this repo's `.gitignore` from `/.claude/` to `/.claude/*` plus `!/.claude/rules/`, so installed rules travel with worktrees. Option B: keep the duplication.
+  - `CONTROL NO MATCH`: stop. Claude Code does not load `.claude/rules/harness/`, so Plan A's install path is wrong. Neither A4 path runs. The coordinator raises a Needs-you item to move the installed rules to `.claude/rules/` directly, with a file-name prefix.
+  - `CONTROL MATCH` and `CHECK MATCH`: the cutover path, Task 12 Steps 1-5, then Task 13.
+  - `CONTROL MATCH` and `CHECK NO MATCH`: the fallback path, Task 12 Step 1 and Step 5F only, and Task 13 does not run. Both copies of the code halves stay: the account `fix-quality.md` and the full account `change-management.md` remain in `~/.claude/rules` beside the project copies. The coordinator raises a Needs-you item. Option A: change this repo's `.gitignore` from `/.claude/` to `/.claude/*` plus `!/.claude/rules/`, commit and push the installed rules in every project, and re-run Task 11. Option B: keep the duplication.
 
 ---
 
 ### Task 12: Cutover (coordinator, operator's machine)
 
-In the main clone, on `feat/310-cutover` from `origin/master`, after Task 11 passes. Step 2 is skipped under Task 11's fallback.
+In the main clone, on `feat/310-cutover` from `origin/master`, after Task 11's gate. On the cutover path, run Steps 1-5. On the fallback path, run Step 1, then Step 5F, and stop. Steps 2-5 name `bounded-review.md` and the removal of `fix-quality.md`, which the fallback never produces.
 
 - [ ] **Step 1: Coordinator output in the kernel.** Edit `~/.claude/rules/coordinator-output.md`:
   - The title becomes `# Coordinator Output: One Self-Contained Close`.
@@ -757,18 +768,22 @@ Whatever the cadence, ask before any action on the `change-management.md` confir
 
   Then run `bun test test/layer-rules.test.ts`. Expected: PASS in after-cutover mode, which proves the kernel and code halves reassemble the original sections exactly.
 
-- [ ] **Step 5: Commit.**
+- [ ] **Step 5: Commit (cutover path).** Stage the explicit paths only. With A2 unmerged, the export also carries other kernel edits, and those wait for their own PR.
 
 ```bash
-git add account/claude/rules account/claude/agents/senior-developer.md account/claude/agents/project-lead.md
+git add account/claude/rules/fix-quality.md account/claude/rules/bounded-review.md account/claude/rules/change-management.md account/claude/rules/coordinator-output.md account/claude/rules/harness-core.md account/claude/agents/senior-developer.md account/claude/agents/project-lead.md
 git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "refactor(account): the account layer keeps the kernel, code-repo rules live in core (#310)"
 ```
 
 This commit's sha is the `BASE-SHA` for Task 13.
 
+- [ ] **Step 5F: Commit (fallback path).** Run `pwsh -NoProfile -File install/Export-Account.ps1`. Expected: `git diff --stat account/claude/rules/coordinator-output.md` shows the Step 1 change. Stage that one path and commit with `-m "docs(account): status cadence becomes a project setting (#310)"`. The A4 PR then carries this commit alone, with body `Docs: README still accurate: no README section describes coordinator output`.
+
 ---
 
 ### Task 13: Repoint references, fill the retire list, pin the pointers
+
+Cutover path only. On the fallback path this task does not run. `fix-quality.md` is still shipped from the account layer then, so retiring it would make Install-Account refuse. Pointing the reviewer at `bounded-review.md` would silently drop its standard, and the pointer test would flag a pointer that is still valid.
 
 **Files:**
 - Modify: `install/account-retired.json`, `tools/pr-review/types.ts` (comment near line 6 and `TRUSTED_CONTEXT_PATHS`), `tools/pr-review/reviewer-prompt.md:79`, `tools/pr-review/README.md:7`, `install/Install-Harness.Tests.ps1:45` (comment), `test/layer-rules.test.ts`, `README.md` (Account layer section)
@@ -800,7 +815,7 @@ PR A4 body: `Docs: README updated: Account layer section says the account layer 
 
 ### Task 14: Session close skips the push without a remote and cleans up worktrees
 
-This runs after A4 merges. The split test's job ends when A4 merges with it green, and this edit changes a code section the test pins.
+This runs after A4 merges, on either path. The split test's job ends when A4 merges with it green, and this edit changes a code section the test pins. On the fallback path, the full account `change-management.md` still carries its own Session Close Protocol. The coordinator applies the same two edits there in `~/.claude/rules/change-management.md`, exports, stages only `account/claude/rules/change-management.md`, and commits it in the A5 PR, so the two copies do not disagree.
 
 **Files:**
 - Modify: `core/claude/rules/change-management-code.md` ("Session Close Protocol")
