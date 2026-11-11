@@ -13,8 +13,11 @@
 //
 // Output: a first line naming the source, then one row per finding:
 //   <status>\t<file>:<line>\t<value>\t<latest or ->
+// then a last line "scanned N files, skipped M". A file or directory that cannot be read is an
+// unknown row naming it and the error class. Files skipped by rule (.jsonl, .bak, over 2 MB, NUL
+// bytes) are counted in M and not reported otherwise.
 // Exit 1 when any row is behind or stale-alias. Otherwise 2 when any row is unknown, the source is
-// the alias source, or there is no source. Otherwise 0.
+// the alias source, there is no source, or no file was scanned. Otherwise 0.
 //
 // A line holding the text "model-currency: ignore" is never reported. The alias resolution step
 // reads only the model names under modelUsage in the claude CLI's JSON, and nothing else from it
@@ -215,30 +218,66 @@ interface FoundFile {
   shown: string;
 }
 
+// What the walk and scan covered. An unreadable file or directory is never dropped silently: it
+// becomes an unknown row naming the path and the error class (never contents), so the exit code
+// reflects it.
+interface Coverage {
+  scanned: number;
+  skipped: number;
+  unreadable: Row[];
+}
+
 function skipFile(name: string): boolean {
   return name.endsWith(".jsonl") || name.includes(".bak");
 }
 
-function walk(abs: string, shown: string, excludes: Set<string>, out: FoundFile[]): void {
-  for (const e of readdirSync(abs, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+// The error's code (EACCES, EPERM, ...) when it is a plain upper-case token, else a generic word.
+// Message text is never used, because it can carry a path or contents.
+function errorClass(e: unknown): string {
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === "string" && /^[A-Z0-9_]{2,32}$/.test(code) ? code : "error";
+}
+
+function unreadableRow(shown: string, e: unknown): Row {
+  return { status: "unknown", file: shown, line: 0, value: `unreadable: ${errorClass(e)}`, latest: null };
+}
+
+function walk(abs: string, shown: string, excludes: Set<string>, out: FoundFile[], cov: Coverage): void {
+  let entries;
+  try {
+    entries = readdirSync(abs, { withFileTypes: true });
+  } catch (e) {
+    cov.unreadable.push(unreadableRow(shown, e));
+    return;
+  }
+  for (const e of entries.sort((x, y) => (x.name < y.name ? -1 : x.name > y.name ? 1 : 0))) {
     const childAbs = join(abs, e.name);
     const childShown = `${shown.replace(/[\\/]$/, "")}/${e.name}`;
     if (e.isSymbolicLink()) continue;
     if (e.isDirectory()) {
-      if (!excludes.has(e.name)) walk(childAbs, childShown, excludes, out);
-    } else if (e.isFile() && !skipFile(e.name)) {
-      out.push({ abs: childAbs, shown: childShown });
+      if (!excludes.has(e.name)) walk(childAbs, childShown, excludes, out, cov);
+    } else if (e.isFile()) {
+      if (skipFile(e.name)) cov.skipped++;
+      else out.push({ abs: childAbs, shown: childShown });
     }
   }
 }
 
-function scanFile(f: FoundFile): Finding[] {
+function scanFile(f: FoundFile, readFile: (path: string) => Buffer, cov: Coverage): Finding[] {
   try {
-    if (statSync(f.abs).size > MAX_BYTES) return [];
-    const buf = readFileSync(f.abs);
-    if (buf.includes(0)) return [];
+    if (statSync(f.abs).size > MAX_BYTES) {
+      cov.skipped++;
+      return [];
+    }
+    const buf = readFile(f.abs);
+    if (buf.includes(0)) {
+      cov.skipped++;
+      return [];
+    }
+    cov.scanned++;
     return scanText(f.shown, buf.toString("utf8"));
-  } catch {
+  } catch (e) {
+    cov.unreadable.push(unreadableRow(f.shown, e));
     return [];
   }
 }
@@ -247,6 +286,8 @@ export interface RunDeps {
   env: Record<string, string | undefined>;
   fetchImpl: typeof fetch;
   runClaude: ClaudeRunner;
+  // Test seam for file reads. Defaults to readFileSync.
+  readFile?: (path: string) => Buffer;
 }
 
 const USAGE = "usage: bun tools/model-currency/check.ts [--root <dir-or-file>]... [--exclude <name>]... [--latest <file.json>] [--no-resolve]";
@@ -286,15 +327,16 @@ export async function run(argv: string[], deps: RunDeps): Promise<{ exitCode: 0 
 
   const excludes = new Set([...DEFAULT_EXCLUDES, ...(values.exclude ?? [])]);
   const files: FoundFile[] = [];
+  const cov: Coverage = { scanned: 0, skipped: 0, unreadable: [] };
   for (const root of values.root ?? ["."]) {
     try {
-      if (statSync(root).isDirectory()) walk(root, root, excludes, files);
+      if (statSync(root).isDirectory()) walk(root, root, excludes, files, cov);
       else files.push({ abs: root, shown: root });
     } catch {
       return fail(`cannot read root: ${root}`);
     }
   }
-  const findings = files.flatMap(scanFile);
+  const findings = files.flatMap((f) => scanFile(f, deps.readFile ?? readFileSync, cov));
 
   const noResolve = values["no-resolve"] === true;
   const resolved: Partial<Record<Family, string | null>> = {};
@@ -318,19 +360,24 @@ export async function run(argv: string[], deps: RunDeps): Promise<{ exitCode: 0 
     }
   }
 
-  const rows = classify(findings, latest, resolved);
+  const rows = [...classify(findings, latest, resolved), ...cov.unreadable];
   const head =
     latest === null
       ? "latest source: none (latest unknown)"
       : latest.source === "alias"
         ? "latest source: alias (unverified: an alias can itself resolve to an older model)"
         : `latest source: ${latest.source}`;
-  const lines = [head, ...rows.map((r) => `${r.status}\t${r.file}:${r.line}\t${r.value}\t${r.latest ?? "-"}`)];
+  const lines = [
+    head,
+    ...rows.map((r) => `${r.status}\t${r.file}:${r.line}\t${r.value}\t${r.latest ?? "-"}`),
+    `scanned ${cov.scanned} files, skipped ${cov.skipped}`,
+  ];
 
+  // Nothing scanned means a mistyped or fully excluded root, which must not read as a clean pass.
   const exitCode =
     rows.some((r) => r.status === "behind" || r.status === "stale-alias")
       ? 1
-      : rows.some((r) => r.status === "unknown") || latest === null || latest.source === "alias"
+      : rows.some((r) => r.status === "unknown") || latest === null || latest.source === "alias" || cov.scanned === 0
         ? 2
         : 0;
   return { exitCode, output: lines.join("\n") };

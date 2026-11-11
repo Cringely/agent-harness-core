@@ -3,7 +3,7 @@
 // real claude CLI or the network: the runner and fetch are injected stubs.
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -233,6 +233,70 @@ describe("walker", () => {
     expect(rowsOf(r.output, "unknown").length).toBe(1);
     const single = await run(["--root", join(root, "ok.txt"), "--no-resolve"], deps({}));
     expect(rowsOf(single.output, "unknown").length).toBe(1);
+  });
+});
+
+describe("coverage", () => {
+  const lastLine = (output: string): string => output.split("\n").at(-1)!;
+  async function withLatestFile(): Promise<string> {
+    const latest = join(tempRoot(), "latest.json");
+    writeFileSync(latest, '{"sonnet":"claude-sonnet-5-5"}'); // model-currency: ignore
+    return latest;
+  }
+
+  test("the last line counts scanned files and rule skips; the first line stays the source", async () => {
+    const root = tempRoot();
+    put(root, "a.sh", "claude --model claude-sonnet-5-5 -p x\n"); // model-currency: ignore
+    put(root, "b.txt", "nothing here\n");
+    put(root, "log.jsonl", "x\n");
+    put(root, "old.bak.1", "x\n");
+    put(root, "bin.dat", "x\0y\n");
+    put(root, "big.txt", "x".repeat(2 * 1024 * 1024 + 1));
+    const r = await run(["--root", root, "--latest", await withLatestFile()], deps({}));
+    expect(r.output.split("\n")[0]).toBe("latest source: file");
+    expect(lastLine(r.output)).toBe("scanned 2 files, skipped 4");
+    expect(r.exitCode).toBe(0);
+  });
+  test("a root whose files are all excluded scans nothing and is exit 2", async () => {
+    const root = tempRoot();
+    put(root, "worktrees/x/a.md", "claude-sonnet-5-5\n"); // model-currency: ignore
+    const r = await run(["--root", root, "--latest", await withLatestFile()], deps({}));
+    expect(lastLine(r.output)).toBe("scanned 0 files, skipped 0");
+    expect(r.exitCode).toBe(2);
+  });
+  test("an empty root is exit 2 even under a real latest source", async () => {
+    const r = await run(["--root", tempRoot(), "--latest", await withLatestFile()], deps({}));
+    expect(lastLine(r.output)).toBe("scanned 0 files, skipped 0");
+    expect(r.exitCode).toBe(2);
+  });
+  test("an unreadable file is an unknown row naming it and the error class, never its contents", async () => {
+    const root = tempRoot();
+    put(root, "ok.sh", "claude --model claude-sonnet-5-5 -p x\n"); // model-currency: ignore
+    put(root, "locked.sh", "claude --model claude-sonnet-5 -p SECRET-CONTENT\n"); // model-currency: ignore
+    const d: RunDeps = {
+      ...deps({}),
+      readFile: (path) => {
+        if (path.endsWith("locked.sh")) throw Object.assign(new Error(`EACCES: denied ${path} SECRET-CONTENT`), { code: "EACCES" });
+        return readFileSync(path);
+      },
+    };
+    const r = await run(["--root", root, "--latest", await withLatestFile()], d);
+    const rows = rowsOf(r.output, "unknown");
+    expect(rows.length).toBe(1);
+    expect(rows[0]).toContain("locked.sh:0\tunreadable: EACCES");
+    expect(r.output).not.toContain("SECRET-CONTENT");
+    expect(rowsOf(r.output, "current").length).toBe(1);
+    expect(lastLine(r.output)).toBe("scanned 1 files, skipped 0");
+    expect(r.exitCode).toBe(2);
+  });
+  test("an error without a plain code is reported as error", async () => {
+    const root = tempRoot();
+    put(root, "x.sh", "hi\n");
+    const d: RunDeps = { ...deps({}), readFile: () => { throw new Error("odd /path/with spaces"); } };
+    const r = await run(["--root", root, "--latest", await withLatestFile()], d);
+    expect(rowsOf(r.output, "unknown")[0]).toContain("x.sh:0\tunreadable: error");
+    expect(r.output).not.toContain("odd");
+    expect(r.exitCode).toBe(2);
   });
 });
 
