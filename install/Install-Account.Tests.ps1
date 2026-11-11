@@ -2107,7 +2107,9 @@ Describe "Install-Account" {
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
             $args = @{
                 PayloadRoot = $p; ClaudeHome = $h; ClaudeJson = $cj
-                CoreRepo = 'C:/projects/agent-harness-core'; NpmGlobal = 'C:/npm'
+                # TargetIsWindows is pinned: the fixture is a Windows-shaped entry, which the #290
+                # filter drops on a Linux target, so a host-defaulted run has nothing to hand-fix.
+                CoreRepo = 'C:/projects/agent-harness-core'; NpmGlobal = 'C:/npm'; TargetIsWindows = $true
             }
             & $script:install @args -SkipPreflight | Out-Null
 
