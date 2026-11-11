@@ -1018,13 +1018,13 @@ Same task and same PR, as a second test-and-commit cycle on top of Step 5.
 **Trust rule** (operator ruling on #310, 2026-11-11):
 - **First-party marketplaces are trusted without a commit pin.** These are `claude-plugins-official` (source `anthropics/claude-plugins-official`) and `anthropic-agent-skills` (source `anthropics/skills`). At install the installer records a content hash of the installed plugin directory. Later probes and the drift check warn when it changes.
 - **Third-party marketplaces need one of two things:** a real pin verified before the plugin is enabled, or a per-project opt-in carrying a risk sentence.
-- **A plugin whose marketplace entry carries its own sha keeps the sha check**, even in a first-party marketplace. superpowers is the case.
+- **A first-party plugin whose marketplace entry carries its own sha has that sha tracked too.** superpowers is the case. A sha move in the marketplace is how such a plugin updates (7.0.0 to 7.0.2, say), so a mismatch warns, naming the old and new sha so the operator can read the diff, then re-records both the sha and the content hash. It never uninstalls or refuses.
 
 **Plugin inventory.** Taken from `enabledPlugins` and `extraKnownMarketplaces` in `account/claude/settings.account.json` at `898ef59` and in the live `~/.claude/settings.json`. The live file adds `document-skills`, `core-presentations`, `core-workflow` and their two marketplaces, which the export leaves out.
 
 | Plugin | Goes to | Scope | Severity | Pin | Reason |
 |---|---|---|---|---|---|
-| `superpowers@claude-plugins-official` | kernel | user | optional | `sha` from its marketplace entry, plus the recorded hash | Brainstorming owns the start of new efforts on every project type, and plans run through it |
+| `superpowers@claude-plugins-official` | kernel | user | optional | first-party, marketplace `sha` and hash recorded, a sha move warns and re-records | Brainstorming owns the start of new efforts on every project type, and plans run through it |
 | `code-review@claude-plugins-official` | code | project | optional | first-party, hash recorded | The pull request review flow |
 | `feature-dev@claude-plugins-official` | code | project | optional | first-party, hash recorded | The code-architect and code-explorer agents |
 | `security-guidance@claude-plugins-official` | code | project | optional | first-party, hash recorded | Edit-time security reminders on code |
@@ -1045,11 +1045,11 @@ Moving plugin skills between layers is Plan C.
     ```
     { "kind": "plugin", "name", "plugin": "<id>@<marketplace>",
       "marketplace": { "name", "source": { "github": "owner/repo" } | { "git": "<url>" } | { "directory": true } },
-      "pin": { "firstParty": true } | { "sha": "<40 hex>", "contentHash": "sha256:<hex>" } | { "commit": "<40 hex>", "contentHash": "sha256:<hex>" } | { "unpinned": true },
+      "pin": { "firstParty": true, "sha"?: "<40 hex>" } | { "sha": "<40 hex>", "contentHash": "sha256:<hex>" } | { "commit": "<40 hex>", "contentHash": "sha256:<hex>" } | { "unpinned": true },
       "scope": "user" | "project", "severity", "failMode" }
     ```
 
-    - `firstParty` is valid only for the two first-party marketplace names.
+    - `firstParty` is valid only for the two first-party marketplace names. Its optional `sha` is the value expected at first install, and later runs compare against the recorded one.
     - A `directory` source carries no path, because a path is machine-specific. The probe takes the path where Claude Code registered that marketplace.
   - `Get-PluginContentHash -Path <dir>` returns `sha256:<64 hex>`.
   - `Test-PluginDep -Dep -Runner -Target <string|null> -RecordedHash <string|null>` returns the `Test-Dep` shape plus `InstallPath`, `Hash` and `Changed`.
@@ -1057,7 +1057,7 @@ Moving plugin skills between layers is Plan C.
   - Recorded hashes:
     - Project scope: the sidecar `.claude/.harness-manifest.local.json` key `pluginHashes`.
     - User scope: `<CLAUDE_HOME>/state/harness-plugin-hashes.json`. That folder is outside the exporter's allowlist.
-    - Both map `<id>@<marketplace>` to `{ "hash", "installPath", "version", "recordedAt" }`, with `recordedAt` in UTC.
+    - Both map `<id>@<marketplace>` to `{ "hash", "sha", "installPath", "version", "recordedAt" }` (`sha` only for first-party entries that carry one), with `recordedAt` in UTC.
     - Project-scope records go through the existing `Get-SidecarPlan` and `Invoke-SidecarPlan` gate. When that gate refuses the sidecar, no hash is recorded, and a warning says plugin drift cannot be checked until the ignore rule is fixed.
   - The project manifest field `allowUnpinnedPlugins: [ { "plugin": "<id>@<marketplace>", "risk": "<sentence>" } ]`, for third-party `unpinned` entries only. `ConvertTo-ManifestV3 -Loaded` (Task 8) checks only its shape: an array of objects with non-empty string `plugin` and `risk`. Whether each name matches an unpinned third-party entry is checked in the preflight, which is the only place that loads `deps.json`.
   - A new audit status, `plugin-changed` (counted), with the response: "re-run the installer with -InstallDeps to re-record after reviewing the change".
@@ -1080,8 +1080,14 @@ Moving plugin skills between layers is Plan C.
   - "a known marketplace is not added again".
   - "a first-party plugin whose content changed warns, and -InstallDeps re-records it": change a file in the temp install dir after recording. A plain run warns `changed since recorded`, `-Audit` reports `plugin-changed`, and an `-InstallDeps` run re-records the new hash.
   - "Get-PluginContentHash is order- and line-ending-stable": the same files created in a different order, or with CRLF in place of LF, give the same hash. Changing one byte of content, or renaming a file, changes it.
-  - "a sha-pinned plugin is checked before install". The mock's registered marketplace file lists the plugin with another sha. Expected: refusal for a hard entry or a warning for an optional one, and no install argv recorded.
-  - "a pinned plugin is rolled back when the installed copy does not verify":
+  - "a first-party plugin's sha move warns and re-records":
+    - A superpowers-like fixture (`firstParty` with `sha`) has its sha and hash recorded.
+    - The mock's marketplace file now lists another sha, and its install dir has different content.
+    - The run warns, naming both shas.
+    - The record then holds the new sha and the new hash.
+    - No uninstall argv is recorded, and the run does not refuse.
+  - "a third-party sha-pinned plugin is checked before install". The mock's registered marketplace file lists the plugin with another sha. Expected: refusal for a hard entry or a warning for an optional one, and no install argv recorded.
+  - "a third-party pinned plugin is rolled back when the installed copy does not verify":
     - The install succeeds, and the installed dir's hash differs from the entry's `contentHash` (or the directory marketplace's `git rev-parse` returns another commit).
     - The next recorded call is the uninstall at the same scope and cwd, and the run refuses.
   - "a plugin present but not enabled at the declared scope counts as missing".
@@ -1093,7 +1099,7 @@ Moving plugin skills between layers is Plan C.
   - "the shipped deps.json plugin entries validate":
     - Kernel plugins are user scope and layer plugins are project scope.
     - `firstParty` appears only on the two first-party marketplaces.
-    - `superpowers` carries `sha` and `contentHash`, and `core-presentations` carries `commit` and `contentHash`.
+    - `superpowers` is `firstParty` with a `sha` and no `contentHash`, and `core-presentations` carries `commit` and `contentHash`.
     - `document-skills` is first-party with no opt-in.
     - `caveman` and `ponytail` are absent.
 
@@ -1111,8 +1117,9 @@ Moving plugin skills between layers is Plan C.
     - Then hash `installPath` and compare with the recorded hash (first-party) or the entry's `contentHash` (pinned).
     - Captured output never reaches a message, a warning, a log or a file. Messages name the plugin id and the field that failed, nothing more.
   - **Pins.**
-    - `sha` and `commit` entries carry a `contentHash`, computed while implementing from a verified install of the pinned version.
-    - Before any install, read the plugin's entry in the registered marketplace's `marketplace.json`, located through the marketplace list, and require its `source.sha` to equal `pin.sha`. A mismatch installs nothing.
+    - Third-party `sha` and `commit` entries carry a `contentHash`, computed while implementing from a verified install of the pinned version.
+    - A first-party entry with a `sha` compares the marketplace entry's current `source.sha` against the recorded sha, or against `pin.sha` before the first record. On a mismatch it warns with both values, installs or keeps the marketplace's version, and re-records sha and hash. The rollback below never applies to first-party entries.
+    - Before any install of a third-party `sha` entry, read the plugin's entry in the registered marketplace's `marketplace.json`, located through the marketplace list, and require its `source.sha` to equal `pin.sha`. A mismatch installs nothing.
     - A `commit` entry compares `git -C <registered path> rev-parse HEAD`, run through the runner, before installing.
   - **Verify, then enable.**
     - If Step 6 found an install-without-enable form, install disabled, verify the hash, then enable.
