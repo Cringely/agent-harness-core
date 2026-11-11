@@ -47,6 +47,15 @@ describe("parseModelId", () => {
     expect(parseModelId("claude-3-5-sonnet-20241022")).toMatchObject({ family: "sonnet", major: 3, minor: 5 }); // model-currency: ignore
     expect(parseModelId("sonnet")).toBeNull();
   });
+  test("the dotted version form equals the hyphenated one", () => {
+    expect(parseModelId("claude-sonnet-5.5")).toMatchObject({ family: "sonnet", major: 5, minor: 5, date: null }); // model-currency: ignore
+    expect(parseModelId("claude-sonnet-4.5-20250929")).toMatchObject({ family: "sonnet", major: 4, minor: 5, date: "20250929" }); // model-currency: ignore
+    expect(parseModelId("claude-3.5-sonnet")).toMatchObject({ family: "sonnet", major: 3, minor: 5 }); // model-currency: ignore
+    const dotted = parseModelId("claude-sonnet-5.5")!; // model-currency: ignore
+    const hyphen = parseModelId("claude-sonnet-5-5")!; // model-currency: ignore
+    expect(compareModelIds(dotted, hyphen)).toBe(0);
+    expect(latestByFamily(["claude-sonnet-5.5", "claude-sonnet-5"])).toEqual({ sonnet: "claude-sonnet-5.5" }); // model-currency: ignore
+  });
 });
 
 describe("compareModelIds and latestByFamily", () => {
@@ -74,6 +83,11 @@ describe("scanText", () => {
   test("finds a dated pin and an older-shape pin whole", () => {
     const f = scanText("a.md", "x claude-sonnet-4-20250514 y\nz claude-3-5-sonnet-20241022\n"); // model-currency: ignore
     expect(f.map((x) => x.value)).toEqual(["claude-sonnet-4-20250514", "claude-3-5-sonnet-20241022"]); // model-currency: ignore
+  });
+  test("finds a dotted pin whole, not truncated at the dot", () => {
+    const text = ["pwsh -File x.ps1 --model claude-sonnet-5.5", "see claude-opus-5.", ""].join("\n"); // model-currency: ignore
+    const f = scanText("a.ps1", text);
+    expect(f.map((x) => x.value)).toEqual(["claude-sonnet-5.5", "claude-opus-5"]); // model-currency: ignore
   });
   test("finds aliases in frontmatter, JSON and --model", () => {
     const text = ["---", "model: sonnet", "---", '{ "model": "opus" }', "claude --model haiku", ""].join("\n"); // model-currency: ignore
@@ -120,6 +134,11 @@ describe("classify", () => {
       { sonnet: "claude-sonnet-5-5" }, // model-currency: ignore
     );
     expect(rows.map((r) => r.status)).toEqual(["unknown", "behind", "unknown"]);
+  });
+  test("a dotted pin equals the hyphenated latest, and a lower dotted pin is behind", () => {
+    const rows = classify([f("claude-sonnet-5.5", "pin"), f("claude-sonnet-4.5", "pin")], API_LATEST, {}); // model-currency: ignore
+    expect(rows.map((r) => r.status)).toEqual(["current", "behind"]);
+    expect(rows[0]!.value).toBe("claude-sonnet-5.5"); // model-currency: ignore
   });
   test("with no latest table everything is unknown", () => {
     const rows = classify([f("claude-sonnet-5", "pin"), f("sonnet", "alias")], null, {}); // model-currency: ignore
@@ -211,6 +230,7 @@ describe("walker", () => {
     put(root, ".claude/worktrees/x/a.md", pin);
     put(root, "projects/t.jsonl", pin);
     put(root, "docs/superpowers/p.md", pin);
+    put(root, ".superpowers/sdd/brief.md", pin);
     put(root, "extra/e.md", pin);
     put(root, "kept.md", pin);
     for (const name of DEFAULT_EXCLUDES) put(root, `deep/${name}/f.md`, pin);

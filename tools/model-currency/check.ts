@@ -39,8 +39,8 @@ export interface ModelId {
   raw: string;
 }
 
-const NEW_SHAPE = /^claude-(fable|opus|sonnet|haiku)-(\d{1,2})(?:-(\d{1,2}))?(?:-(\d{8}))?$/;
-const OLD_SHAPE = /^claude-(\d)(?:-(\d))?-(opus|sonnet|haiku)(?:-(\d{8}))?$/;
+const NEW_SHAPE = /^claude-(fable|opus|sonnet|haiku)-(\d{1,2})(?:[-.](\d{1,2}))?(?:-(\d{8}))?$/;
+const OLD_SHAPE = /^claude-(\d)(?:[-.](\d))?-(opus|sonnet|haiku)(?:-(\d{8}))?$/;
 
 export function parseModelId(id: string): ModelId | null {
   const n = NEW_SHAPE.exec(id);
@@ -78,8 +78,8 @@ export interface Finding {
 const IGNORE_MARKER = "model-currency: ignore";
 const ALIAS = "fable|opus|sonnet|haiku";
 const PIN_PATTERNS = [
-  /claude-(?:fable|opus|sonnet|haiku)-\d{1,2}(?:-\d{1,2})?(?:-\d{8})?\b/g,
-  /claude-\d(?:-\d)?-(?:opus|sonnet|haiku)(?:-\d{8})?\b/g,
+  /claude-(?:fable|opus|sonnet|haiku)-\d{1,2}(?:[-.]\d{1,2})?(?:-\d{8})?\b/g,
+  /claude-\d(?:[-.]\d)?-(?:opus|sonnet|haiku)(?:-\d{8})?\b/g,
 ];
 const ALIAS_PATTERNS = [
   new RegExp(`^\\s*model:\\s*(${ALIAS})\\s*$`, "g"),
@@ -209,7 +209,7 @@ export const defaultClaudeRunner: ClaudeRunner = (args) => {
 };
 
 export const DEFAULT_EXCLUDES = [
-  ".git", "node_modules", "runs", "worktrees", "projects", "file-history", "plugins", "debug", "backups", "superpowers",
+  ".git", "node_modules", "runs", "worktrees", "projects", "file-history", "plugins", "debug", "backups", "superpowers", ".superpowers",
 ];
 const MAX_BYTES = 2 * 1024 * 1024;
 
