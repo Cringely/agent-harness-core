@@ -78,8 +78,7 @@ or an event log of what actually happened, that record outranks a hand-written o
 hand-written one is a second source that can drift from it. This repo has already made that call
 once in the other direction: `core/claude/hooks/dispatch-audit.ts` (deleted, #97) deliberately
 declined to port a self-attested per-turn ledger from its source project, on the grounds that the
-real transcript was available to read instead, the same `readTranscript()` that now lives in
-`core/claude/hooks/transcript-utils.ts` and backs `review-gate.ts`. Write the ledger here only
+real transcript was available to read instead. Write the ledger here only
 where no such record exists, or where one exists and is not readable at the moment the answer is
 needed.
 
@@ -102,10 +101,9 @@ The second failure is silence read as approval. A dispatch that returns nothing 
 same as a dispatch that found nothing, and after a compaction the default reading of silence is
 "still working." The ledger does not recover the lost output and does not repair whatever swallowed
 it. What it changes is that an open entry, with the session otherwise finished, is a recorded fact
-rather than an inference nobody drew. That is the same gap `core/claude/hooks/review-gate.ts` has
-on the commit side, described in [`forcing-functions.md`](forcing-functions.md): a gate that clears
-on a review having been requested cannot tell a reviewer that filed findings from one that went
-idle.
+rather than an inference nobody drew. The same gap exists on the commit side, described in
+[`forcing-functions.md`](forcing-functions.md): a gate that clears on a review having been
+requested cannot tell a reviewer that filed findings from one that went idle.
 
 ## Reconcile on resume, do not trust
 
@@ -118,8 +116,7 @@ expected artifact path, the branch, the worktree.
 
 A missing or empty ledger is indeterminate, not empty. That rule is borrowed from `bradygaster/squad`
 (MIT), by way of the comment block that used to sit at the top of `core/claude/hooks/dispatch-audit.ts`
-(deleted, #97; the provenance pointer now lives in `core/claude/hooks/transcript-utils.ts`'s
-header), which recorded that squad's own ledger treats a missing or empty file as indeterminate
+(deleted, #97), which recorded that squad's own ledger treats a missing or empty file as indeterminate
 rather than as a free pass.
 It holds for the reason [`ablation-verification.md`](ablation-verification.md) gives: read as
 "nothing was outstanding," an absent file is indistinguishable from a file that was never written,
@@ -151,7 +148,7 @@ Everything above is a design. No code of this shape, dispatch entries paired to 
 has been built or exercised. The nearest prior art that does run is `bradygaster/squad`'s
 `.squad/hooks/dispatch-audit.sh` (MIT), described in the comment block that used to sit at the top
 of `core/claude/hooks/dispatch-audit.ts` before that file was deleted (#97, shipped untested and
-unused; the provenance pointer now lives in `core/claude/hooks/transcript-utils.ts`'s header): a
+unused): a
 self-attested JSONL ledger the coordinator appends to every turn. What it attests is per turn
 rather than per dispatch, so it answers whether the coordinator has been dispatching at all, and
 not which dispatches are still outstanding, which is the question this pattern is built around. Two recorded episodes from one project motivated the design, both of them

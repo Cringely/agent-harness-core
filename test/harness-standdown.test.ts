@@ -178,35 +178,6 @@ const rows: Row[] = [
     },
   },
   {
-    hook: "review-gate.ts",
-    run(mode) {
-      const dir = gitRepo("standdown-rg-");
-      writeFileSync(join(dir, "changed.txt"), "v2\n");
-      git(["add", "changed.txt"], dir);
-      const transcript = join(tempDir("standdown-rg-transcript-"), "t.jsonl");
-      const edit = {
-        type: "assistant",
-        message: {
-          role: "assistant",
-          content: [{ type: "tool_use", name: "Write", input: { file_path: join(dir, "changed.txt") } }],
-        },
-      };
-      writeFileSync(transcript, JSON.stringify(edit) + "\n");
-      const payload = JSON.stringify({
-        tool_name: "Bash",
-        tool_input: { command: "git commit -m test" },
-        cwd: dir,
-        transcript_path: transcript,
-      });
-      const r = spawn(bunHook(this.hook), dir, childEnv(mode, { CLAUDE_PROJECT_DIR: dir }), payload);
-      return { ...r, effect: false };
-    },
-    acted(r) {
-      expect(r.exitCode).toBe(0);
-      expect(JSON.parse(r.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
-    },
-  },
-  {
     hook: "memory-transition-log.ts",
     run(mode) {
       const dir = tempDir("standdown-mem-");
