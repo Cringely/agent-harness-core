@@ -65,7 +65,7 @@ These would make the work a failure even if every layer ships:
     - whether it is hard or optional
     - what fails without it
     - a probe command
-    - install ids pinned to an exact version per platform (winget on Windows, apt or brew on Linux)
+    - install ids pinned to an exact version per platform (winget on Windows, apt or npm on Linux)
   - The installer preflight checks the dependencies of the chosen layers. A missing hard dependency refuses the install and prints the exact install command. A missing optional one warns.
   - An opt-in `-InstallDeps` flag installs what is missing from the pinned ids, then re-runs the probe to verify. Nothing is ever installed without it.
   - bun and Git Bash are hard for every gate, because without them every TypeScript and shell gate fails open. git is probed. uvx leaves the preflight until something shipped uses it.

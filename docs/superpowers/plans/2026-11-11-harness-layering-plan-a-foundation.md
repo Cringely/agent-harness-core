@@ -859,28 +859,48 @@ Group A3, after Task 8, which it shares `Install-Harness.ps1` with. It is number
 **Files:**
 - Create: `core/claude/deps.json`, `install/Deps.ps1` (dot-sourced by both installers)
 - Modify: `install/Install-Harness.ps1` (replaces the bun-only probe and its warning), `install/Install-Account.ps1` (replaces the `$wanted` list at line 232, and drops `pwsh` and `uvx`)
-- Test: `install/Install-Harness.Tests.ps1` (new `Context 'dependencies'`), `install/Install-Account.Tests.ps1` (two cases). The cases sit in suites CI already runs, so `.github/workflows/test.yml` does not change.
+- Test: `install/Install-Harness.Tests.ps1` (new `Context 'dependencies'` plus the existing-case changes in Step 1), `install/Install-Account.Tests.ps1` (new cases plus the existing-case changes in Step 1). The cases sit in suites CI already runs, so `.github/workflows/test.yml` does not change.
 - Modify: `README.md` (Install and Account layer sections)
 
 **Interfaces:**
 - Consumes: `ConvertTo-LayerList` and `Resolve-ProjectLayers` (Task 8).
 - Produces:
-  - `core/claude/deps.json`, shaped `{ "schemaVersion": 1, "deps": [ { "name", "layers": ["kernel" | "code" | "documents" | "physical"], "platforms"?: ["windows" | "linux"], "minVersion", "severity": "hard" | "optional", "failMode", "probe": [argv...], "install": { "windows"?: { "winget", "version" }, "linux"?: { "apt" | "brew" | "npm", "version" } } } ] }`. An absent `platforms` means both.
+  - `core/claude/deps.json`, shaped `{ "schemaVersion": 1, "deps": [ { "name", "severity": { "<kernel|code|documents|physical>": "hard" | "optional", ... }, "platforms"?: ["windows" | "linux"], "onlyWhenAbsent"?: "<dep name>", "resolve"?: "git-bash", "needs"?: ["<dep name>"], "minVersion", "failMode", "probe": [argv...], "versionPattern"?: "<regex>", "install": { "windows"?: { "winget", "version" }, "linux"?: { "apt", "version" } | { "npm", "version" } } } ] }`.
+    - Names are unique, so one entry per tool. The layers an entry belongs to are the keys of `severity`.
+    - An absent `platforms` means both.
+    - `onlyWhenAbsent` makes the entry apply only while the named dependency is missing.
   - In `install/Deps.ps1`:
     - `Get-DepsManifest -Path <string>` returns the validated manifest.
-    - `Get-RequiredDeps -Manifest -Layers <string[]> -IsWindows <bool>` returns the kernel entries plus the chosen layers' entries for this platform.
-    - `Test-Dep -Dep -Runner <scriptblock>` returns `[pscustomobject]@{ Name; Present; Version; MeetsMin }`.
+    - `Get-RequiredDeps -Manifest -Layers <string[]> -IsWindows <bool>` returns one record per tool for this platform. Its severity is the strictest across `kernel` and the chosen layers, so `hard` wins.
+    - `Resolve-GitBashPath -Runner -IsWindows` returns an absolute path or `$null`.
+    - `Test-Dep -Dep -Runner <scriptblock>` returns `[pscustomobject]@{ Name; Present; Version; MeetsMin; Reason }`.
     - `Get-DepInstallCommand -Dep -IsWindows <bool>` returns `string[]` or `$null`.
-    - `Invoke-DepsPreflight -Manifest -Layers -IsWindows -InstallDeps <bool> -Runner <scriptblock>`
-  - The runner contract is `& $Runner $argv` returning `[pscustomobject]@{ ExitCode; Output }`. The default runner runs the argv and joins its output. A command that is not on PATH returns `ExitCode` 127 instead of throwing.
-  - New params on both installers: `[switch]$InstallDeps`, plus the test seams `[string]$DepsManifestPath` and `[scriptblock]$DepsRunner`.
+    - `Invoke-DepsPreflight -Manifest -Layers -IsWindows -InstallDeps <bool> -Runner <scriptblock> -ShouldInstall <scriptblock>`. The last parameter receives `(target, action)` and returns a bool. The callers pass `$PSCmdlet.ShouldProcess`.
+    - `Invoke-DefaultDepsRunner -Argv <string[]> -TimeoutSeconds <int>`
+  - The runner contract is `& $Runner $argv $timeoutSeconds`, returning `[pscustomobject]@{ ExitCode; Output; TimedOut }`.
+    - Probes get 10 seconds. Installs, marketplace adds and plugin installs get 900.
+    - A command that is not on PATH returns `ExitCode` 127 without throwing. A timeout returns `TimedOut = $true` and `ExitCode` 124, and the process tree is killed.
+    - A dependency is present only when the probe exits 0, did not time out, and its output matches the version pattern at or above `minVersion`.
+  - New params on both installers: `[switch]$InstallDeps`, plus the test seams `[string]$DepsManifestPath` and `[scriptblock]$DepsRunner`. `Install-Harness.ps1` gains `SupportsShouldProcess` for `-WhatIf` (Step 3 says what that covers).
 
 - [ ] **Step 1: Write the failing tests.** Each uses a fixture manifest through `-DepsManifestPath` and a recording mock `-DepsRunner`, so no real tool is probed or installed. The fixture's hard dep `harness-fake-hard` (probe `harness-fake-hard --version`, `minVersion` `1.2.0`) has install entries `{ "winget": "Example.FakeHard", "version": "1.2.3" }` and `{ "apt": "fake-hard", "version": "1.2.3" }`.
   - "a missing hard dependency refuses before any write and prints the pinned command":
     - The mock returns 127 for the probe.
     - The install throws a message containing the platform's command: `winget install --id Example.FakeHard --version 1.2.3 --exact --source winget` on Windows, `sudo apt-get install -y fake-hard=1.2.3` on Linux.
     - The target has no `.claude`, and the mock recorded no install argv.
-  - "a missing optional dependency warns and the install completes": the output matches the optional dep's name and command, and `.claude/.harness-manifest.json` exists.
+  - "a missing optional dependency warns, installs nothing, and the install completes": the output matches the optional dep's name and command, `.claude/.harness-manifest.json` exists, and the mock recorded no install argv.
+  - "a probe that exits non-zero is absent even when its output carries a version": the mock returns `ExitCode` 1 with output `harness-fake-hard 1.2.3`, and the install refuses.
+  - "a probe that times out is absent": the mock returns `TimedOut = $true`, and the install refuses.
+  - "one entry per tool, strictest severity wins": a fixture tool mapped `{ "kernel": "optional", "code": "hard" }` is probed once. With `-Layers code` a missing one refuses, and with `-Layers none` it warns. Under `-InstallDeps` exactly one install call is recorded.
+  - "-InstallDeps -WhatIf runs nothing": the probe misses, no install argv is recorded, the output carries `What if`, and the target has no `.claude`.
+  - "-Audit -InstallDeps is refused with a message", per Task 8's install-run-only guard.
+  - "Git Bash resolves from Git for Windows, never from PATH" (Windows only, `-Skip` elsewhere):
+    - With the mock's `git --exec-path` pointing into a temp Git root holding `usr/bin/bash.exe`, the probe argv uses that absolute path.
+    - With `git --exec-path` failing and a PATH `bash` stub at `<tmp>/System32/bash.exe` printing `GNU bash, version 5.2.21`, git-bash is absent and the install refuses.
+  - The real default runner, called directly:
+    - `Invoke-DefaultDepsRunner @('harness-absent-<guid>') 10` returns 127 without throwing.
+    - `@('pwsh','-NoProfile','-Command','Start-Sleep 30')` with a 2-second limit returns `TimedOut` within 6 seconds.
+    - `@('pwsh','-NoProfile','-Command','[Console]::In.ReadToEnd() | Out-Null; exit 0')` returns `ExitCode` 0 within the limit, which proves stdin is closed.
   - "-InstallDeps runs the pinned command, re-probes, and proceeds": the first probe returns 127, the install returns 0, and the second probe prints `harness-fake-hard 1.2.3`. The recorded calls are exactly probe, install argv, probe, and the install completes.
   - "-InstallDeps refuses when the re-probe still fails": the message names the dependency and says the install did not verify.
   - "a version below minVersion counts as missing": a probe printing `harness-fake-hard 1.1.9` refuses.
@@ -888,56 +908,89 @@ Group A3, after Task 8, which it shares `Install-Harness.ps1` with. It is number
   - "the dependency preflight is skipped by -Audit": `-Audit` with the failing fixture does not throw.
   - "the shipped deps.json validates":
     - `Get-DepsManifest` on the real file passes.
-    - `bun` and `git-bash` are `hard` kernel entries, with `git-bash` Windows-only.
-    - `git` is `hard` for `code` and `optional` in the kernel.
-    - No entry is named `uvx`.
+    - `bun` and `git-bash` are `hard` in the kernel, `git-bash` is Windows-only with `resolve: git-bash`, and `bun` on Linux installs through `npm` with `needs: ["npm"]`.
+    - There is one `git` entry, mapped `{ "kernel": "optional", "code": "hard" }`.
+    - No entry is named `uvx` or `pwsh`, and no install uses `brew`.
     - Every install entry carries an exact version.
-  - "Get-DepsManifest rejects a range or tag": `latest`, `1.x`, `>=1.2` and an empty version each throw.
-  - In `install/Install-Account.Tests.ps1`, "a missing hard kernel dependency refuses the account install" (same fixture and mock), and "uvx is no longer probed" (no recorded probe argv starts with `uvx`).
+  - "Get-DepsManifest rejects a range or tag":
+    - `latest`, `1.x`, `>=1.2`, `^1.2.3` and an empty version each throw for winget and npm.
+    - For apt, `*` and `>=` throw. The Debian strings `1:2.43.0-1ubuntu7.1` and `1.7.1-1build1` pass.
+  - In `install/Install-Account.Tests.ps1`:
+    - "a missing hard kernel dependency refuses the account install".
+    - "uvx and pwsh are no longer probed".
+    - "-InstallDeps -WhatIf runs nothing".
+
+  Existing cases that change. Every changed case is listed here, and no other existing case changes behaviour:
+  - **Both suites.** Every existing installer invocation runs with a stub runner that reports every probe present, so no suite probes a real tool.
+    - `BeforeAll` defines `$script:dep = @{ DepsRunner = <all-present stub> }`, and each existing `& "$PSScriptRoot/Install-*.ps1"` call gains `@script:dep`. This is a mechanical edit.
+    - A spawned `pwsh -File` case (the Task 8 comma-list case) passes `-DepsManifestPath` to a fixture whose one optional entry probes `pwsh --version`.
+  - **`Install-Harness.Tests.ps1:33`.** The negative control `Should -Not -Match 'bun is not on PATH'` becomes `Should -Not -Match 'missing hard dependenc'`. The refusal case above is its positive pair.
+  - **`Install-Account.Tests.ps1`, "names <_> as an absent prerequisite".** The `-ForEach` list loses `uvx` and `pwsh`. It runs through a mock runner returning 127, not an emptied PATH. `vale` and `npm` are named as warnings. `bun` (and `git-bash` on Windows) are named in the refusal.
+  - **`Install-Account.Tests.ps1`, "still completes the install: preflight warns, it does not gate".** Split in two. With only optional entries missing, the install completes. With a hard entry missing, it refuses.
+  - **`Install-Account.Tests.ps1`, "does not offer jq when npm is present".** Unchanged, and still passing. jq keeps its npm-absent condition through `onlyWhenAbsent: "npm"`, and its existing npm-absent counterpart keeps passing too.
 
 - [ ] **Step 2: Run to verify they fail.** `pwsh -NoProfile -File install/Install-Harness.Tests.ps1` and `pwsh -NoProfile -File install/Install-Account.Tests.ps1`. Expected: the new cases FAIL.
 
 - [ ] **Step 3: Implement.**
-  - **`deps.json`.** It declares the following. Each `minVersion` comes from the version the repo is tested on (Bun 1.3.14 per the bun-autoload note).
+  - **`deps.json`.** It declares the following, one entry per tool. Each `minVersion` comes from the version the repo is tested on (Bun 1.3.14 per the bun-autoload note).
 
-    | Dependency | Layer | Severity | Applies to |
-    |---|---|---|---|
-    | bun | kernel | hard | both platforms |
-    | git-bash | kernel | hard | Windows only. Probe `bash --version`, resolved from Git's `usr/bin` |
-    | git | kernel | optional | both |
-    | git | code | hard | both |
-    | vale | kernel | optional | both |
-    | python3 | kernel | optional | both. The not-ai gate, stdlib only |
-    | node and npm | kernel | optional | both. For ccstatusline |
-    | ccstatusline | kernel | optional | both. npm package |
-    | op | kernel | optional | both |
-    | jq | kernel | optional | Linux only. The statusline fallback |
-    | gh, claude | code | optional | both. The pr-review and model-currency tools |
+    | Dependency | Severity by layer | Applies to |
+    |---|---|---|
+    | bun | kernel hard | Both platforms. On Linux it installs through `npm` (`bun@<exact>`), with `needs: ["npm"]` |
+    | git-bash | kernel hard | Windows only, with `resolve: git-bash` |
+    | git | kernel optional, code hard | Both |
+    | vale | kernel optional | Both. No Linux install entry |
+    | python3 | kernel optional | Both. The not-ai gate, stdlib only |
+    | npm | kernel optional | Both. Probe `npm --version`. It installs the node package that carries npm, for ccstatusline and the Linux bun install |
+    | ccstatusline | kernel optional | Both. An npm package |
+    | op | kernel optional | Both |
+    | jq | kernel optional | Linux only, with `onlyWhenAbsent: "npm"`, keeping today's npm-absent condition |
+    | gh, claude | code optional | Both. The pr-review and model-currency tools |
 
     Each `failMode` is one sentence. For bun and git-bash it reads "every TypeScript (or shell) gate fails open".
   - **Install ids.** Fill winget ids and versions from `winget show --id <id> --versions` output taken while implementing, never from memory. Fill apt versions from `apt-cache policy <pkg>` and npm versions from `npm view <pkg> versions`. Per `security.md`, each pinned version's release is at least 30 days old.
-  - **Tools with no pinned package source on a platform.** bun and vale on Linux get no `install.linux` entry. Their refusal says to install by hand per the README.
+  - **Missing install entry or prerequisite.** A tool with no install entry for this platform (vale on Linux) gets `no pinned install for <platform>: install <name> <minVersion> or later from a pinned release, then re-run`. A tool whose `needs` entry is missing (bun on Linux without npm) names that prerequisite and its pinned command first. Under `-InstallDeps` the prerequisite installs first, then the tool.
   - **Install commands.** Built as argv arrays, never strings:
     - `winget install --id <id> --version <v> --exact --source winget --silent --accept-package-agreements --accept-source-agreements`
     - `sudo apt-get install -y <pkg>=<v>`
-    - `brew install <versioned-formula>`, accepted only when the formula name carries the version
-    - `npm install -g <pkg>@<v>`
+    - `npm install -g <pkg>@<v>`, which npm verifies against the registry integrity hash
 
-    No download-and-execute form is accepted.
+    brew is not a source, since macOS is not a target receiver. No download-and-execute form is accepted.
   - **`Get-DepsManifest`** throws on:
-    - an unknown severity or layer
+    - duplicate names
+    - an unknown severity, layer, `resolve` value, or `needs`/`onlyWhenAbsent` name
     - an empty probe
-    - a version that is not an exact dotted number
+    - a version that fails its source's grammar:
+      - winget: `^\d+(\.\d+){1,3}$`
+      - npm: `^\d+\.\d+\.\d+$`
+      - apt: a Debian version string, `^(\d+:)?[0-9][A-Za-z0-9.+~-]*$`, with no `*`, comparison operator or space
 
     Every refusal comes before any write.
-  - **Version parsing.** Take the first `\d+(\.\d+)+` in the probe output and compare as `[version]`. Unparsable output from a present tool counts as below the minimum.
+  - **Default runner.** `Invoke-DefaultDepsRunner` resolves `Argv[0]` with `Get-Command -CommandType Application` and returns 127 when that fails.
+    - It starts the process with `System.Diagnostics.Process`, with `RedirectStandardInput` set and stdin closed at once. Stdout and stderr are read asynchronously.
+    - It waits `TimeoutSeconds`. On expiry it kills the process tree (`Kill($true)`) and returns `TimedOut`.
+    - Probes pass 10 and installs pass 900.
+  - **Git Bash** (`resolve: git-bash`, Windows only). Implement `Resolve-GitBashPath`:
+    - Take the Git root from `git --exec-path` through the runner (three levels up from `mingw64/libexec/git-core`). If that fails, take it from `Get-Command git -CommandType Application` (two levels up from `cmd/git.exe`).
+    - Use the first of `<root>/usr/bin/bash.exe` or `<root>/bin/bash.exe` that exists.
+    - Reject any path under `System32` or `WindowsApps`.
+    - Never probe a bare `bash`.
+
+    The probe argv is `<resolved path> --version`, present only on exit 0 with output matching `GNU bash, version \d+\.\d+`. An unresolved path is absent.
+  - **Version parsing.** Use the entry's `versionPattern`, defaulting to the first `\d+(\.\d+)+` in the probe output, and compare as `[version]`. A probe with a non-zero exit, a timeout, or no match is absent.
   - **`Invoke-DepsPreflight`** collects every problem before deciding:
-    - Without `-InstallDeps`, a missing or old hard dependency throws one message listing each with its command, or with "no pinned install for <platform>, install by hand (README, Install)". A missing optional one gets `Write-Warning` with its command.
-    - With `-InstallDeps`, it runs each available command through the runner and re-probes. A hard dependency that still fails throws, and an optional one warns.
+    - **Without `-InstallDeps`.** A missing or old hard dependency throws one message beginning `missing hard dependency`, listing each with its command or the no-pinned-install text. A missing optional one gets `Write-Warning` with its command.
+    - **With `-InstallDeps`.** For each available command it calls `-ShouldInstall` first. Under `-WhatIf` that returns false, prints `What if`, and runs nothing. Otherwise it runs the command through the runner with the install limit and re-probes. A hard dependency that still fails throws, and an optional one warns.
     - Nothing is installed without `-InstallDeps`.
-  - **`Install-Harness.ps1`** calls the preflight with `@('kernel') + <resolved layers>` after the layer and manifest load and before the sidecar plan, which is the first write. It never calls it on `-Audit`, `-Accept`, `-Unaccept` or `-Prune`. The bun warning block goes.
-  - **`Install-Account.ps1`** calls it with the kernel only, in place of `Test-Prerequisite`'s fixed list. The `-NeedJq` condition becomes the `jq` entry's Linux platform scope. `-SkipPreflight` keeps working.
-  - **README.** The Install and Account sections list the hard dependencies, the refusal, `-InstallDeps` and its pinned sources. The sentence saying the installers only warn goes.
+  - **Plugin probes** from part 2 follow the same rules: the plugin list and the `git rev-parse` pin check go through the runner with the 10-second limit and closed stdin, and anything other than exit 0 within the limit is absent. Marketplace adds and plugin installs go through `-ShouldInstall` with the 900-second limit.
+  - **`Install-Harness.ps1`.**
+    - Calls the preflight with `@('kernel') + <resolved layers>` after the layer and manifest load and before the sidecar plan, which is the first write.
+    - Never calls it on `-Audit`, `-Accept`, `-Unaccept` or `-Prune`.
+    - Adds `-InstallDeps` to Task 8's install-run-only guard, so `-Audit -InstallDeps` throws "applies to an install run only".
+    - Under `-WhatIf` it runs the preflight and then returns before the sidecar plan with `WhatIf: stopped before writing`. That keeps native writes such as the `core.hooksPath` config from running in a dry run.
+    - The bun warning block goes.
+  - **`Install-Account.ps1`.** Calls it with the kernel only, in place of `Test-Prerequisite`'s fixed list, passing `$PSCmdlet.ShouldProcess` as `-ShouldInstall`. jq's npm-absent condition is now carried by `onlyWhenAbsent`. `-SkipPreflight` keeps working.
+  - **README.** The Install and Account sections list the hard dependencies, the refusal, `-InstallDeps`, `-WhatIf`, and the pinned sources (winget, apt, npm). The sentence saying the installers only warn goes.
 
 - [ ] **Step 4: Run to verify they pass.** Both Pester suites and `bun test`. Expected: all PASS. Then check by hand on this machine that `pwsh -NoProfile -File install/Install-Harness.ps1 -Target <tmp>` passes the real preflight with no warning about bun or Git Bash.
 
