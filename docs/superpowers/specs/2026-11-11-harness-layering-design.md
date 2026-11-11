@@ -1,0 +1,163 @@
+# Harness layering by project type: design
+
+Date: 2026-11-11. Status: design, awaiting operator approval. Source conversation: the 2026-11-11 decision pass and brainstorm. Evidence: issues #294 (physical workbench build, no git repo) and #308 (product and program analysis brief, no remote).
+
+## Intent
+
+The harness was built for one kind of project: a git repository of software, with a remote, worked by an engineer, sometimes with several agents writing at once. Two field reports show what happens elsewhere. On a woodworking build with no git repo, the worktree gate denied every write dispatch and every page fetch, so more than ten dispatches in one session carried an override line (#294). On an analysis project that produced an executive brief, the same gate denied seven dispatches, the operator asked for status three times because the coordinator stays silent mid-run, internal labels leaked into a document for non-engineers, and review rounds grew the brief to 8,745 words against a request for something short (#308).
+
+The safeguards that held in both reports are the same ones: untrusted content kept away from credentials, decision logs, pilot runs before scale, self-checks with negative controls, number reconciliation, and one bounded review round. The friction came from rules whose preconditions were never stated, so they fired where their risk did not exist.
+
+The goal is a harness that keeps its protections everywhere they apply and stops charging tokens and operator patience where they do not.
+
+## Who it is for
+
+The operator is the primary user. Others install the harness on their own projects too (#308 was written by one of them). That has one consequence the design must answer: today the operator's account rules travel with the account layer, so on another person's project they acted as project settings. #308's author got the operator's engineer register and silent mid-run style on a document meant for non-engineering leaders. Whatever is chosen per project has to live in the project, and the install has to explain its choices to someone who does not share the operator's context.
+
+## Goals
+
+1. A small kernel that runs on every project for every person and protects against leaks, credential exposure and false claims.
+2. Gates that check their own preconditions, so a gate that cannot apply steps aside with a one-line note instead of denying.
+3. Project layers (code, documents and analysis, physical and hardware) chosen at install and recorded in the project, not in anyone's account.
+4. An install interview that picks the layers in numbered rounds, each question with a recommended answer, written so a non-engineer can follow it.
+5. The rules that fit only one layer move into that layer, so other projects stop paying for them.
+
+## Non-goals
+
+- Rewriting the code-project gates themselves. They work on code projects and stay as they are there.
+- A new harness per project type. Every layer ships from this core through the one installer.
+- Automatic project-type detection as the only signal. Detection can propose a default in the interview, but the person installing confirms it.
+- Measuring per-gate time cost before acting. Both reports say the hours lost per gate were not measured. The design proceeds on the denial counts and operator corrections they did record.
+
+## Anti-goals
+
+These would make the work a failure even if every layer ships:
+
+- Any weakening of a security or leak protection on a code project: identity and secret scans, the untrusted-content boundary, the worktree gate, CODEOWNERS, the App review gate.
+- A kernel protection that can be switched off by the project interview. The interview chooses layers, never the kernel.
+- Forks of the harness, or per-type copies of rules that then drift apart.
+- A profile that becomes a second source of truth for something a gate can detect for itself, such as whether git or a remote exists.
+
+## Constraints
+
+- The repository is public. Nothing identifying the operator may reach it (`security.md`, "Identifying Information Never Reaches a Remote Repo"). Field reports are cited by issue number only, and examples use placeholder domains.
+- The graduation bar holds. `CONTRIBUTING.md` says "One occurrence is a note. Two occurrences across different projects make it a candidate for core", and the accepted decision note on the graduation bar keeps that for hooks and agent defs. Several items below have two independent reports (#294 and #308) and qualify. Items seen once are recorded as candidates, not built.
+- A new executable artifact carries its registration in the same commit (`CONTRIBUTING.md`, the registration rule). Every new or changed hook ships with its `settings.hooks.json` entry and its test.
+- Receivers run Windows and Linux. Anything that probes tools (git, an office toolchain) must work on both and fail closed on an unknown answer.
+- The account layer under `account/claude/` is generated by `install/Export-Account.ps1` from the operator's `~/.claude`. Changes to account rules are made at the source and exported, never by hand in the repo.
+- Project state already has a home. The installer keeps `.claude/.harness-manifest.json` (v2, committed: installed-file hashes under `files`, plus the `accepted` overlay map) and a gitignored per-machine sidecar `.claude/.harness-manifest.local.json` (`coreRepo`, `stackDetected`). Project choices belong in the committed manifest. Machine facts belong in the sidecar.
+- The installer already has one opt-in component switch, `-IncludeCeremonies`. The layer mechanism should generalize that pattern rather than add a parallel one.
+
+## Decided by the operator
+
+- The harness becomes a kernel that is always on, plus layers chosen per project. (Operator, 2026-11-11.)
+- The primary audience is the operator, and others will install it on their own projects. (Operator, 2026-11-11.)
+- What runs all the time is left to the coordinator's judgment, based on #294, #308 and the session's evidence. (Operator, 2026-11-11.)
+- superpowers:brainstorming owns the start of new efforts and features. The operator found this session's brainstorming closest to the experience wanted. grill-me stays available on request. (Operator, 2026-11-11.)
+- A grill-style interview runs at harness init for a new project. (Operator, 2026-11-11.)
+
+## The coordinator's calls
+
+Each of these is a judgment the operator delegated. Each names what would flip it.
+
+### Kernel: always on, every project, every person
+
+1. **Leak protection.** The identity and secret scans on commit and push. They need git, so with no git they have nothing to guard and stay quiet.
+2. **Credential separation.** An agent that reads untrusted content holds no credential (`security.md`, "Untrusted Content and Credentials"). Held in both reports.
+3. **No-overclaim, extended twice.** A failed fetch or thin search supports only "could not find, tried X, Y, Z", never "does not exist" (#294, two disproved absence claims). And before stating that a human step did not happen, ask the operator, because offline human work leaves no transcript (#308, a false "spot check skipped" in a deliverable). Both reports show the same failure, a claim of absence made from missing evidence.
+4. **Durable deliverables.** Nothing the operator keeps ends its life in the scratchpad. Held in both reports.
+5. **Decision log.** Who drafted and who decided each choice. #308 called it the most useful artifact. It costs one file.
+6. **Bounded review.** Where review runs, one round with a severity floor (`fix-quality.md`, "Work has to be able to end"). Both reports kept it.
+7. **Challenge mandate, with a scope trigger.** After repeated additions or rework rounds on one part, the coordinator volunteers a keep-or-drop challenge with the cost so far (#294, the vise). Seen once. It ships as a sentence in the existing `challenge-mandate.md`, which is a rule edit, not a new artifact, so the graduation bar does not block it.
+
+Flips if: the operator wants a smaller kernel. The natural cut is items 5 and 7, which are process rather than protection.
+
+### Gates that check their own preconditions
+
+- **Worktree gate.** Today `core/claude/hooks/agent-worktree-gate.ts` reads no git state and does not look at an agent's `writeScope`. It denies a write-capable dispatch without isolation everywhere. Proposed: when the working directory is not a git repository, isolation is impossible, so the gate allows with a one-line note and offers `git init` (#294). When an agent type holds no shell and a declared write scope (for example `research-scout`, `writeScope: scratch`, already enforced by `agent-write-scope.ts`), the gate treats it as a scoped writer, not a repo writer (#308 E1). The BASE-SHA rule merged for #36 still applies whenever isolation does.
+- **Session close.** The push step is skipped, and says so, when `git remote` is empty (#308 E10, #294 had no repo at all). Today `change-management.md` "Session Close Protocol" step 2 is unconditional.
+- **Worktree cleanup.** At session close, remove agent worktrees with no changes and report the count (#308 E3, nine orphans). This session also ended with dozens.
+
+Flips if: the operator prefers a denial with an explicit remedy over an allow with a note on non-git directories. That trade is noise against an occasional missed setup step.
+
+### Project layers: chosen at init, recorded in the project manifest
+
+**Code.** Everything the harness does today for software: worktree isolation for concurrent writers, the App reviewer, TDD, plans as contracts, model-tier routing, the prose lint on committed docs.
+
+**Documents and analysis** (from #308, which has one report, so built as layer settings, not new hooks, until a second project confirms):
+
+- an audience setting, `peer-engineer` or `plain-all-roles`. The second glosses or drops internal IDs and house vocabulary in operator-facing text (#308 E5). Today `writing-style.md` opens with "Write like a senior engineer talking to peers", which is the wrong default here.
+- a status heartbeat while long work runs, one line per phase change, and never an empty turn (#308 E4). #294 asked for the same thing, so this one has two reports.
+- a length budget per deliverable. A checker may flag an omission only if it names what to cut (#308 E7).
+- protection for a generated file the operator has edited by hand (#308 E8).
+- number reconciliation against the final file, not its markdown source (#308 E9).
+- an office toolchain probe recorded in the sidecar (#308 4.2).
+
+**Physical and hardware** (from #294, one report):
+
+- restate each requirement in physical terms before dispatch: which part, which axis, the unit, floor or target.
+- a stated capacity is a floor with margin, and "smallest change" may mean a different part rather than shaved clearances.
+- an evidence ladder for goods: field measurement, spec sheet, listing image, retailer page, search snippet.
+- parametric models carry self-checks with negative controls.
+- offer a local `git init` at the first real work.
+
+Flips if: the operator sees documents and physical work as one layer ("non-code"). They share the heartbeat and the git offer, but their other rules do not overlap.
+
+### Interview
+
+- **At init.** A short interview in numbered rounds, each question with a recommended answer, picks the layers and settings and writes them into `.harness-manifest.json`. Written for someone who does not know the harness. Detection (git present, remote present, file types) proposes the defaults.
+- **At feature start.** superpowers:brainstorming, as decided. The interview does not run again for features.
+
+### Where settings live
+
+Project choices (layers, audience, budgets, heartbeat) go in the committed manifest, so they travel with the project and not with whoever installed it. The account layer keeps only the operator's personal preferences, and a project setting wins over an account preference when they differ. This fixes the bleed #308 shows.
+
+Flips if: the operator wants personal preferences to win on their own projects. The answer then is a precedence rule that names whose project it is, which is harder to get right.
+
+## Mapping of the field-report proposals
+
+| Item | Proposal | Where it lands | Note |
+|---|---|---|---|
+| #308 E1 | Write-scoped agents pass the worktree gate | Self-check | Reads the agent's existing `writeScope`. Two reports hit the gate. |
+| #308 E2 | No isolation for single writers on analysis projects | Rejected as written | Covered by E1 plus the non-git check. A profile switch would weaken the gate on a code project mislabelled as analysis. |
+| #308 E3 | Remove unchanged worktrees at session close | Self-check | Kernel housekeeping. |
+| #308 E4 | Heartbeat status | Layer (documents and physical) | Two reports. Code projects keep silent mid-run. |
+| #308 E5 | Audience parameter for register | Layer (documents) | Default per layer, override per project. |
+| #308 E6 | Ask before claiming a human step was skipped | Kernel | Joined with #294's absence-claim rule. |
+| #308 E7 | Length budget gate | Layer (documents) | One report. Starts as a brief convention and a checker rule, and becomes a hook only after a second report. |
+| #308 E8 | Guard operator-edited binary files | Layer (documents) | One report. Same staging as E7. |
+| #308 E9 | Reconcile numbers against the final binary | Layer (documents) | Folds into the reconciliation step. |
+| #308 E10 | Skip push when there is no remote | Self-check | The gate reads `git remote` itself, so no setting is needed. |
+| #308 E11 | Suppress the injected co-author reminder | Rejected here | The reminder comes from Claude Code, not the harness. The harness already refuses the trailer through `commit-msg`. Tracked upstream if anywhere. |
+| #308 E12 | Default to Workflow for batches of five or more | Rejected as a layer rule | Already governed by `agent-usage.md` and the session's Workflow setting on every project type. |
+| #308 4.2 | Office toolchain preflight and a Windows office skill | Layer (documents) | The skill is a skill, not core machinery, and lives in the account layer or a skill pack. |
+| #308 4.3 | Numbers ledger, decision log, human-check register templates | Decision log in kernel, the rest in the documents layer | |
+| #308 4.4 | Councils for method decisions, one reviewer for prose | Layer (documents) | |
+| #294 | Worktree gate on a non-git directory | Self-check | |
+| #294 | `web-fetch` treated as a writer | Self-check | Built-in type with only WebFetch. Same fix family as E1. Also hit in this session. |
+| #294 | Model-tier hook demands xhigh effort | Bug, outside this design | The rule withdrew the mandate on 2026-09-05. A drift between hook and rule, filed separately. |
+| #294 | Offer `git init` | Layer (physical), and the self-check's note | |
+| #294 | Restate requirements in physical terms | Layer (physical) | |
+| #294 | Capacity is a floor with margin | Layer (physical) | |
+| #294 | Absence claims are not facts | Kernel | |
+| #294 | Scope-accumulation challenge | Kernel | Sentence in `challenge-mandate.md`. |
+| #294 | Evidence ladder for goods | Layer (physical) | |
+| #294 | Status when the operator is conversing | Layer (documents and physical) | Same as E4. |
+| #294 | Licence-restricted inputs stay local | Kernel candidate | Seen once, so it waits for a second report before anything is built. |
+
+## Related observation, out of scope
+
+This session loads `subagent-prompting`, `council` and `handoff` twice: once from the account layer and once from the `core-workflow` plugin served by the local `agent-skills-core` marketplace. Duplicate skills answering one trigger are the collision risk the #280 survey named. Settling which copy owns each is separate work, but the layer design should not add a third.
+
+## Left to the builder
+
+- The manifest schema for layers and settings, including how an existing v2 manifest gains them without a version break.
+- How the installer generalizes `-IncludeCeremonies` into layer selection, and whether the interview runs inside the installer or as a skill that writes the manifest.
+- How rules read the project's layer at run time (session-start injection, a guardrails section, or a hook that reads the manifest).
+- The exact non-git and no-remote probes, including Windows and Linux behaviour and fail-closed handling of an unknown answer.
+- Test shape for each changed gate, following `CONTRIBUTING.md`'s rule that a gate's test pins its refusal and its allow.
+- Order of work. A sensible first slice is the two self-checks with two reports behind them (worktree gate on non-git and write-scoped agents, push skipped without a remote) plus the kernel's absence-claim rule.
+
+## Open questions for the operator
+
+None blocking. The "flips if" lines above are the places where the operator's knowledge could change a call.
