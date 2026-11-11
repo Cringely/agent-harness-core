@@ -258,6 +258,33 @@ describe("identity gate — pre-commit (cheap stage: content, path, pending auth
     expect(result.stderr.toString()).toContain("declares no names and no emails");
   });
 
+  // Issue #91, operator ruling 2026-11-11: a file with no names key refuses, and
+  // an explicit empty names list is the deliberate opt-out and passes.
+  test("gate refuses an identity file with no names key, even when emails are declared", () => {
+    const dir = initPreCommitRepo();
+    const home = makeIdentityHome(JSON.stringify({ emails: ["fixture@example.test"] }));
+    stageClean(dir);
+    const result = runPreCommit(dir, envWith({ USERPROFILE: home, HOME: home }));
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain('no "names" key');
+  });
+
+  test("gate accepts an explicit empty names list when emails are declared", () => {
+    const dir = initPreCommitRepo();
+    const home = makeIdentityHome(JSON.stringify({ names: [], emails: ["fixture@example.test"] }));
+    stageClean(dir);
+    const result = runPreCommit(dir, envWith({ USERPROFILE: home, HOME: home }));
+    expect(result.exitCode).toBe(0);
+  });
+
+  test("gate accepts a populated names list with no emails key", () => {
+    const dir = initPreCommitRepo();
+    const home = makeIdentityHome(JSON.stringify({ names: ["Fictional Persona"] }));
+    stageClean(dir);
+    const result = runPreCommit(dir, envWith({ USERPROFILE: home, HOME: home }));
+    expect(result.exitCode).toBe(0);
+  });
+
   test("gate exits non-zero when the identity file is not JSON-shaped", () => {
     const dir = initPreCommitRepo();
     const badHome = makeIdentityHome("not even json");

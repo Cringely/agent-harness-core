@@ -316,7 +316,7 @@ keeps its shape and stops naming a person. The other two cannot be derived, so t
 `$HOME/.claude-account-identity.json`, or the file `-IdentityFile` names, as
 `{"names": [...], "emails": [...]}`. That file sits outside both this repo and `~/.claude` on
 purpose: a declaration list inside either one would publish the strings it exists to catch. Without
-it the run warns and checks the username alone, which is a narrower gate rather than no gate.
+it the run warns and checks the username alone, which is a narrower gate rather than no gate. The git identity hooks and the PR review tool refuse a file with no `names` key. An explicit `"names": []` is the deliberate opt-out.
 
 A second declaration file is required rather than optional. `$HOME/.claude-personal-terms.json`, or
 the file `-PersonalTermsFile` names, lists strings that are not identity strings but still have no
