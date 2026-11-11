@@ -101,9 +101,9 @@ The second failure is silence read as approval. A dispatch that returns nothing 
 same as a dispatch that found nothing, and after a compaction the default reading of silence is
 "still working." The ledger does not recover the lost output and does not repair whatever swallowed
 it. What it changes is that an open entry, with the session otherwise finished, is a recorded fact
-rather than an inference nobody drew. The same gap exists on the commit side, described in
-[`forcing-functions.md`](forcing-functions.md): a gate that clears on a review having been
-requested cannot tell a reviewer that filed findings from one that went idle.
+rather than an inference nobody drew. The same gap existed on the commit side, described in
+[`forcing-functions.md`](forcing-functions.md): a gate that cleared on a review having been
+requested could not tell a reviewer that filed findings from one that went idle.
 
 ## Reconcile on resume, do not trust
 
@@ -165,4 +165,4 @@ ledger promoted to durable storage inherits a retention policy and a schema, and
 most of what makes this cheap enough to bother with.
 
 [`forcing-functions.md`](forcing-functions.md): why a rule to remember the roster is the weakest
-available tier, and where the silence-as-approval reading already sits in this repo's own gates.
+available tier, and where the silence-as-approval reading sat, in the now-retired `review-gate.ts`.

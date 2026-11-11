@@ -485,10 +485,11 @@ describe("citation drift — live scan of core/ and install/", () => {
   // A floor of 20 against a measured 30 let ten citations vanish from the extractor's output
   // with nothing here noticing -- ten generated `test()` cases simply stop existing, which reads
   // as a smaller, faster suite rather than a regression. Repair round on #98 replaced the floor
-  // with the exact count: 30 in this tree today (29 the checker's first commit measured, +1 from
+  // with the exact count: 30 in this tree today (30 the checker's first commit measured, +1 from
   // fixing isCommentLine's PowerShell `<# ... #>` blind spot, which surfaced a citation that was
   // previously invisible to extractCitations rather than merely unverified --
-  // install/Install-Account.ps1:62, citing Restore-ClaudeProject.ps1:88-95). A real edit to the
+  // install/Install-Account.ps1:62, citing Restore-ClaudeProject.ps1:88-95, and -1 when #37 retired
+  // review-gate.ts and agent-write-scope.ts lost its review-gate.ts:807 citation). A real edit to the
   // population -- a citation added, removed, or a comment restructured so a match splits or
   // merges -- updates this number in the same commit; that is the point, not a maintenance cost.
   test("the extractor finds exactly the live population of citations to check", () => {
