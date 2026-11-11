@@ -25,6 +25,7 @@ import {
 export const REQUIRED_CHECKS: ReadonlyArray<{ name: string; appSlug: string }> = [
   { name: "bun test (TypeScript hook suite)", appSlug: "github-actions" },
   { name: "Pester (fixture-built installer suites)", appSlug: "github-actions" },
+  { name: "Pester (fixture-built installer suites, Linux)", appSlug: "github-actions" },
   { name: "secret scan (Gitleaks)", appSlug: "github-actions" },
 ];
 

@@ -388,8 +388,7 @@ CI is one workflow, `.github/workflows/test.yml`. A Linux job runs `bun test`. S
 every Pester suite under `install/` end to end, one on Windows and one again on Linux, one step per
 suite so a `run:` line names each individually. `tools/pr-review/verdict.ts`'s `REQUIRED_CHECKS` is
 the source of truth for which of those jobs gate the pull request reviewer's own verification
-state. The Linux Pester job is deliberately left out of that list (see the comment beside it in
-`test.yml`). The reviewer counts a suite as covered only when `test.yml` at the pull request's base
+state, the Linux Pester job included. The reviewer counts a suite as covered only when `test.yml` at the pull request's base
 names it on a `run:` line, and takes its verification state from what `REQUIRED_CHECKS` reported
 for the head commit.
 
@@ -420,7 +419,7 @@ is configured to record as a rule-suite bypass (pending live verification under 
 bypass skips only the default ruleset: its review rule (the approval, the code-owner review and the
 last-push approval), its code quality rule and its Copilot review. It cannot skip the second
 ruleset, "CI required", which has no bypass list. That ruleset requires the `bun test` job and the
-Pester jobs on Windows and on Linux to pass (unlike `REQUIRED_CHECKS`, it includes the Linux one),
+Pester jobs on Windows and on Linux to pass (the same set `REQUIRED_CHECKS` reads),
 blocks a merge on a CodeQL error-level alert or a security alert at high severity or higher, and
 forbids force-pushing to or deleting `master`. It holds for every merge, the operator's included,
 so a CI outage blocks every merge until the operator edits the ruleset. The bypass is policy, not
