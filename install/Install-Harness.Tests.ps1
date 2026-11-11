@@ -229,6 +229,9 @@ Describe "Install-Harness" {
         Test-Path "$script:target/.claude/agents/soc-monitor.md" | Should -BeTrue
         Test-Path "$script:target/.claude/hooks/wave-close-handoff.sh" | Should -BeTrue
         Test-Path "$script:target/.claude/ceremony-ledger.json" | Should -BeTrue
+        $ledger = Get-Content "$script:target/.claude/ceremony-ledger.json" -Raw | ConvertFrom-Json
+        $ledger.PSObject.Properties.Name | Should -Not -Contain "council"
+        $ledger.PSObject.Properties.Name | Should -Contain "standup"
         $sCeremony = Get-Content "$script:target/.claude/settings.json" -Raw | ConvertFrom-Json
         $ceremonyCommands = @()
         foreach ($event in $sCeremony.hooks.PSObject.Properties.Name) {
