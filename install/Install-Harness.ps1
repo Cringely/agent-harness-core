@@ -30,9 +30,10 @@
     Each layer's rule files, listed in core/claude/rules/layers.json, install under
     .claude/rules/harness/ for the layers the project records. Beside them the installer
     writes .claude/rules/harness/project-settings.md from the manifest's layers and settings.
-    That file is regenerated on every install and is not tracked in `files`, so a hand edit
-    there is lost on the next install, and -Audit's settings-stale row is the only signal
-    that one happened.
+    That file is not tracked in `files`. Its first line is a marker holding the hash of the
+    body, and an install regenerates the file only when it is absent or still matches its
+    marker. A hand edit, or a file the installer never wrote, is kept with a warning unless
+    -Force is given, and -Audit reports it as settings-modified.
 
     `coreRepo` (an absolute filesystem path) and `stackDetected` (the per-machine plugin,
     output-style, and MCP-server inventory, plus the timestamp of the scan that found
@@ -161,8 +162,12 @@
                          its record.
       settings-missing   .claude/rules/harness/project-settings.md is absent. Counted.
                          Re-run the installer, which rewrites it from the manifest.
-      settings-stale     project-settings.md differs, line endings aside, from what the
-                         manifest renders. Counted. Re-run the installer, which rewrites it.
+      settings-stale     project-settings.md is as the installer wrote it but differs, line
+                         endings aside, from what the manifest now renders. Counted. Re-run the
+                         installer, which rewrites it.
+      settings-modified  project-settings.md was edited by hand, or the installer never wrote
+                         it, so installs keep it. Counted. Move the change into the manifest
+                         with the setting's flag, then delete the file and re-run.
       manifest-invalid   the manifest's layers or settings value is outside what layers.json
                          defines. Counted. Fix the value the error names. -Audit prints this
                          one row and stops, and every other command refuses.
@@ -834,6 +839,42 @@ function Get-ProjectSettingsText {
     $text = $text.Replace('{{STATUS_CADENCE}}', $Settings['statusCadence'])
     $text = $text.Replace('{{AUDIENCE}}', $Settings['audience'])
     return $text.Replace('{{LAYERS}}', $layerText)
+}
+
+# project-settings.md opens with a marker line holding the SHA256 of the body below it. The marker
+# is what lets the installer tell a file it wrote, untouched since, from a hand edit or a file it
+# never wrote, without tracking the path in `files`. Hashed over LF text, so a CRLF checkout of an
+# untouched file still matches.
+$settingsMarkerPattern = '^<!-- harness-generated sha256:([0-9a-f]{64}) -->$'
+
+function Get-TextSha256 {
+    param([string]$Text)
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
+    return ([System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($bytes))).ToLowerInvariant()
+}
+
+function Format-ProjectSettingsFile {
+    param([string]$Body)
+    return "<!-- harness-generated sha256:$(Get-TextSha256 -Text $Body) -->`n$Body"
+}
+
+# State is 'absent', 'generated' (a valid marker whose hash matches the body) or 'modified'
+# (anything else, including a file with no marker). Body is the LF text below a valid marker.
+function Get-ProjectSettingsFileState {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return [pscustomobject]@{ State = 'absent'; Body = $null } }
+    $raw = Get-Content -LiteralPath $Path -Raw
+    if ($null -eq $raw) { $raw = '' }
+    $text = $raw.Replace("`r`n", "`n")
+    $firstBreak = $text.IndexOf("`n")
+    if ($firstBreak -ge 0) {
+        $marker = [regex]::Match($text.Substring(0, $firstBreak), $script:settingsMarkerPattern)
+        $body = $text.Substring($firstBreak + 1)
+        if ($marker.Success -and $marker.Groups[1].Value -ceq (Get-TextSha256 -Text $body)) {
+            return [pscustomobject]@{ State = 'generated'; Body = $body }
+        }
+    }
+    return [pscustomobject]@{ State = 'modified'; Body = $null }
 }
 
 # The one answer to "does this project get this component". $null means selected. Otherwise the
@@ -1640,17 +1681,18 @@ if ($Audit) {
         $results.Add([pscustomobject]@{ File = $key; Status = $status })
     }
 
-    # The generated settings file is not hash-tracked: every install rewrites it from the manifest,
-    # so the audit renders the same text and compares. Line endings are normalised on both sides,
-    # since a checkout with core.autocrlf turns the LF the installer writes into CRLF.
+    # The generated settings file is not tracked in `files`. Its marker says whether the body is
+    # still what the installer wrote, and a body that is gets compared with what the manifest
+    # renders now. Line endings are normalised first, since a checkout with core.autocrlf turns
+    # the LF the installer writes into CRLF.
     $settingsKey = 'rules/harness/project-settings.md'
     $settingsDst = Join-Path $claudeDir $settingsKey
+    $settingsFile = Get-ProjectSettingsFileState -Path $settingsDst
     $settingsStatus = 'settings-missing'
-    if (Test-Path -LiteralPath $settingsDst -PathType Leaf) {
+    if ($settingsFile.State -eq 'modified') { $settingsStatus = 'settings-modified' }
+    elseif ($settingsFile.State -eq 'generated') {
         $expectedSettings = Get-ProjectSettingsText -Layers $auditLayers -Settings $auditSettings -Registry $layerRegistry
-        $onDiskSettings = Get-Content -LiteralPath $settingsDst -Raw
-        if ($null -eq $onDiskSettings) { $onDiskSettings = '' }
-        $settingsStatus = if ($onDiskSettings.Replace("`r`n", "`n") -ceq $expectedSettings) { 'in-sync' } else { 'settings-stale' }
+        $settingsStatus = if ($settingsFile.Body -ceq $expectedSettings) { 'in-sync' } else { 'settings-stale' }
     }
     $results.Add([pscustomobject]@{ File = $settingsKey; Status = $settingsStatus })
 
@@ -1715,7 +1757,7 @@ if ($Audit) {
         # recovery for one and the pin-drop for the other rather than sending both to the
         # installer. (CONTRIBUTING.md's drift-detection gate: every class the audit reports needs
         # a standing response, and the classes that must never be auto-repaired are named as such.)
-        Write-Host "$($attention.Count) file(s) need attention. project-modified/untracked-differs = candidates to promote into core; core-updated/not-installed = re-run installer to pull down; overlay-changed = re-review the fork, then re-pin with -Accept; missing = re-run the installer if the row is a tracked file, but a missing pinned overlay exists only in the project's own history, so restore it from there or drop the pin with -Unaccept; orphaned (already removed/unmodified/modified) = -Prune the key to drop the stale manifest record -- the file, if any is still there, is left on disk for you to delete by hand or -Accept to pin as an overlay. installed (layer not selected) = delete the file by hand, and the next install drops its record. settings-missing/settings-stale = re-run the installer, which rewrites .claude/rules/harness/project-settings.md from the manifest. manifest-invalid = fix the layers or settings value the error names."
+        Write-Host "$($attention.Count) file(s) need attention. project-modified/untracked-differs = candidates to promote into core; core-updated/not-installed = re-run installer to pull down; overlay-changed = re-review the fork, then re-pin with -Accept; missing = re-run the installer if the row is a tracked file, but a missing pinned overlay exists only in the project's own history, so restore it from there or drop the pin with -Unaccept; orphaned (already removed/unmodified/modified) = -Prune the key to drop the stale manifest record -- the file, if any is still there, is left on disk for you to delete by hand or -Accept to pin as an overlay. installed (layer not selected) = delete the file by hand, and the next install drops its record. settings-missing/settings-stale = re-run the installer, which rewrites .claude/rules/harness/project-settings.md from the manifest. settings-modified = the installer keeps that file because it was edited by hand or never written by the installer, so move the change into the manifest with the setting's flag, then delete the file and re-run. manifest-invalid = fix the layers or settings value the error names."
     }
 
     # Stack drift: report-only, same as the file audit above — never writes the manifest or
@@ -2201,12 +2243,23 @@ $sidecarOutcome = Invoke-SidecarPlan -Plan $sidecarPlan -Sidecar $sidecar
 $sidecarAction = if ($sidecarOutcome -eq 'removed') { 'removed' } elseif ($sidecarOutcome -eq 'written') { 'written' } else { 'skipped-unprotected' }
 $results.Add([pscustomobject]@{ File = '.harness-manifest.local.json'; Action = $sidecarAction })
 
-# Regenerated on every install from the manifest values above, with LF endings, and never tracked
-# in `files`: the manifest is its source, so a hand edit here is overwritten by design and -Audit's
-# settings-stale row is the only signal one happened.
+# Rendered from the manifest values above, with LF endings, and never tracked in `files`, since the
+# manifest is its source. Held to the same rule as every managed file: a file the installer wrote
+# and nobody has touched since (its marker hash matches) is regenerated, and anything else, a hand
+# edit or a file the installer never wrote, is kept with a warning unless -Force is given.
 $projectSettingsText = Get-ProjectSettingsText -Layers $projectLayers -Settings $projectSettings -Registry $layerRegistry
-Set-Content -LiteralPath (Join-Path $rulesHarnessDst 'project-settings.md') -Value $projectSettingsText -NoNewline
-$results.Add([pscustomobject]@{ File = 'rules/harness/project-settings.md'; Action = 'generated' })
+$projectSettingsDst = Join-Path $rulesHarnessDst 'project-settings.md'
+$projectSettingsState = (Get-ProjectSettingsFileState -Path $projectSettingsDst).State
+if ($projectSettingsState -eq 'modified' -and -not $Force) {
+    Write-Warning "Keeping 'rules/harness/project-settings.md': it was edited by hand, or the installer never wrote it, so this run did not regenerate it. Settings live in the manifest. Change one by re-running with its flag, then delete this file so the next install writes it again, or re-run with -Force, which also overwrites every other modified managed file."
+    $results.Add([pscustomobject]@{ File = 'rules/harness/project-settings.md'; Action = 'kept (modified)' })
+}
+else {
+    Set-Content -LiteralPath $projectSettingsDst -Value (Format-ProjectSettingsFile -Body $projectSettingsText) -NoNewline
+    $settingsFileAction = 'generated'
+    if ($projectSettingsState -eq 'modified') { $settingsFileAction = 'forced-overwrite' }
+    $results.Add([pscustomobject]@{ File = 'rules/harness/project-settings.md'; Action = $settingsFileAction })
+}
 
 $settings | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $settingsPath
 $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath

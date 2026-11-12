@@ -2370,30 +2370,88 @@ Describe "Install-Harness" {
             $out | Should -Match "Skipping 'rules/harness/fix-quality\.md'"
         }
 
-        It "audit reports settings-stale after a hand edit but not after CRLF conversion, and writes nothing" {
+        It "audit reports settings-modified after a hand edit and settings-stale after a manifest change, ignores CRLF, and writes nothing" {
             & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-Null
             $settingsMd = "$script:target/.claude/rules/harness/project-settings.md"
             $manifestFile = "$script:target/.claude/.harness-manifest.json"
-            $before = (Get-FileHash $manifestFile).Hash
 
             $lf = [System.IO.File]::ReadAllText($settingsMd)
             [System.IO.File]::WriteAllText($settingsMd, $lf.Replace("`r`n", "`n").Replace("`n", "`r`n"))
             [System.IO.File]::ReadAllText($settingsMd).Contains("`r`n") | Should -BeTrue
             $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String -Width 500
-            $audit | Should -Not -Match 'settings-stale'
+            $audit | Should -Not -Match 'settings-(stale|modified)'
             $audit | Should -Match 'All managed files in sync with core\.'
+
+            # A valid marker over a body the manifest no longer renders: stale, and a re-run fixes it.
+            $m = Read-TestManifest $script:target
+            $m['settings']['statusCadence'] = 'heartbeat'
+            Write-TestManifest $script:target $m
+            $before = (Get-FileHash $manifestFile).Hash
+            $quiet = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit -Quiet *>&1 | Out-String -Width 500
+            $quiet | Should -Match "settings-stale`trules/harness/project-settings\.md"
+            $quiet | Should -Not -Match 'settings-modified'
 
             'hand edit' | Add-Content -LiteralPath $settingsMd
             $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String -Width 500
-            $audit | Should -Match 'rules/harness/project-settings\.md\s+settings-stale'
+            $audit | Should -Match 'rules/harness/project-settings\.md\s+settings-modified'
             $quiet = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit -Quiet *>&1 | Out-String -Width 500
-            $quiet | Should -Match "settings-stale`trules/harness/project-settings\.md"
+            $quiet | Should -Match "settings-modified`trules/harness/project-settings\.md"
 
             Remove-Item -LiteralPath $settingsMd
             $quiet = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit -Quiet *>&1 | Out-String -Width 500
             $quiet | Should -Match "settings-missing`trules/harness/project-settings\.md"
             Test-Path -LiteralPath $settingsMd | Should -BeFalse
             (Get-FileHash $manifestFile).Hash | Should -Be $before
+        }
+
+        It "writes an absent settings file and regenerates an unmodified one, behind a hash marker" {
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-Null
+            $settingsMd = "$script:target/.claude/rules/harness/project-settings.md"
+            $first = [System.IO.File]::ReadAllText($settingsMd)
+            $first | Should -Match '\A<!-- harness-generated sha256:[0-9a-f]{64} -->\n# Project settings\n'
+
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -StatusCadence heartbeat *>&1 | Out-Null
+            $second = [System.IO.File]::ReadAllText($settingsMd)
+            $second | Should -Match 'Status cadence, `heartbeat`'
+            $second | Should -Not -Be $first
+
+            Remove-Item -LiteralPath $settingsMd
+            $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500
+            [System.IO.File]::ReadAllText($settingsMd) | Should -Be $second
+            $out | Should -Not -Match 'kept \(modified\)'
+        }
+
+        It "keeps a hand-edited settings file with a warning, and -Force replaces it" {
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-Null
+            $settingsMd = "$script:target/.claude/rules/harness/project-settings.md"
+            'PROJECT EDIT' | Add-Content -LiteralPath $settingsMd
+            $before = (Get-FileHash -LiteralPath $settingsMd).Hash
+
+            $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -StatusCadence heartbeat *>&1 | Out-String -Width 500
+            (Get-FileHash -LiteralPath $settingsMd).Hash | Should -Be $before
+            $out | Should -Match 'kept \(modified\)'
+            $out | Should -Match "Keeping 'rules/harness/project-settings\.md'"
+            # The manifest still records the flag, so the edit and the record now disagree, which
+            # is what the audit row is for.
+            (Read-TestManifest $script:target)['settings']['statusCadence'] | Should -Be 'heartbeat'
+
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Force *>&1 | Out-Null
+            $text = [System.IO.File]::ReadAllText($settingsMd)
+            $text | Should -Not -Match 'PROJECT EDIT'
+            $text | Should -Match 'Status cadence, `heartbeat`'
+        }
+
+        It "keeps a pre-existing settings file the installer never wrote" {
+            New-Item -ItemType Directory -Path "$script:target/.claude/rules/harness" -Force | Out-Null
+            $settingsMd = "$script:target/.claude/rules/harness/project-settings.md"
+            'project-owned settings' | Set-Content -LiteralPath $settingsMd
+            $before = (Get-FileHash -LiteralPath $settingsMd).Hash
+
+            $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500
+            (Get-FileHash -LiteralPath $settingsMd).Hash | Should -Be $before
+            $out | Should -Match 'kept \(modified\)'
+            $quiet = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit -Quiet *>&1 | Out-String -Width 500
+            $quiet | Should -Match "settings-modified`trules/harness/project-settings\.md"
         }
 
         It "audit leaves rules of unselected layers uncounted" {
