@@ -33,8 +33,8 @@ const greenFor = (checks: readonly RequiredCheck[]): CheckRun[] =>
   checks.map((c) => ({ name: c.name, appSlug: c.appSlug, status: "completed", conclusion: "success" }));
 const green = (): CheckRun[] => greenFor(REQUIRED_CHECKS);
 
-// #318: verification reads a required check only when the base-commit workflow declares it as a
-// job name, so every synthetic workflow below carries the core names.
+// #318: verification reads a required check only when its name appears as a `name:` line in the
+// base-commit workflow, so every synthetic workflow below carries the core names.
 const jobNameLines = (checks: readonly RequiredCheck[]) => checks.map((c, i) => [`  job-${i}:`, `    name: ${c.name}`]).flat();
 
 const withRun = (index: number, patch: Partial<CheckRun>): CheckRun[] =>
@@ -82,7 +82,7 @@ describe("CORE_POLICY's required checks are tied to the workflow they measure", 
   // Pinned on the real file rather than restated: renaming a job in test.yml without updating
   // CORE_POLICY turns every future review into COMMENT, and this test names the cause. The second
   // assertion is the same matcher verification itself applies at the base commit (#318).
-  test.each(REQUIRED_CHECKS.map((c) => c.name))("the workflow declares a job named %p", (name) => {
+  test.each(REQUIRED_CHECKS.map((c) => c.name))("the workflow has a name: line for %p", (name) => {
     const lines = REAL_WORKFLOW.split(/\r?\n/).map((line) => line.trim());
     expect(lines).toContain(`name: ${name}`);
     expect(workflowDeclaresName(REAL_WORKFLOW, name)).toBe(true);
@@ -544,19 +544,19 @@ describe("computeVerification() under a repository's own policy (#318)", () => {
 
   // Critique item 11: a green run with the right name from some other workflow, while the
   // configured workflow never declares that job, does not vouch for anything.
-  test("a green required check that the base-commit workflow does not declare as a job name: incomplete", () => {
+  test("a green required check whose name is not a name: line in the base-commit workflow: incomplete", () => {
     const other = ["jobs:", "  ci:", "    name: something else"].join("\n");
     const result = verify(greenFor(FOREIGN.requiredChecks), ["src/a.ts"], other, true, FOREIGN);
     expect(result.state).toBe("incomplete");
-    expect(result.reasons.join("\n")).toContain('required check "ci" is not declared');
+    expect(result.reasons.join("\n")).toContain('required check "ci" does not appear as a name: line in the CI workflow at the base commit');
   });
 
-  test("a step named like the check does not count as the job name", () => {
+  test("a step's `- name:` line naming the check does not count as a name: line", () => {
     const stepOnly = ["jobs:", "  build:", "    steps:", "      - name: ci"].join("\n");
     expect(verify(greenFor(FOREIGN.requiredChecks), ["src/a.ts"], stepOnly, true, FOREIGN).state).toBe("incomplete");
   });
 
-  test("under CORE_POLICY, a workflow missing one core job name: incomplete, naming it", () => {
+  test("under CORE_POLICY, a workflow missing one core check's name: line: incomplete, naming it", () => {
     const missing = WORKFLOW.split("\r\n").filter((line) => line.trim() !== `name: ${REQUIRED_CHECKS[3]!.name}`).join("\r\n");
     const result = verify(green(), ["README.md"], missing);
     expect(result.state).toBe("incomplete");

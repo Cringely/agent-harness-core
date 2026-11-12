@@ -44,8 +44,6 @@ const MAX_CHECK_NAME_CHARS = 100;
 // system's config, so a check from another app could be satisfied by the pull request it vouches for.
 const ALLOWED_APP_SLUG = "github-actions";
 const APP_SLUG_RE = /^[a-z0-9-]+$/;
-// Printed in a refusal only when it looks like a key name, so a stray value cannot ride out in it.
-const PRINTABLE_KEY_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 
 // C0, DEL, C1, and the invisible and directional marks types.ts's UNSAFE_CHARS lists. Built from
 // code points, not escape sequences, so no tool round trip can turn one into a raw byte.
@@ -118,13 +116,11 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 // Exactly these keys, no more and no fewer. An unknown key includes #146's deferred ones
 // (livingDocs, powershellSuiteCoverage and the rest): this version cannot honour them, and
-// silently dropping one would review a repository against less than its operator configured.
-function requireExactKeys(value: Record<string, unknown>, keys: readonly string[], at: string): void {
+// silently dropping one would review a repository against less than its operator configured. The
+// refusal names where the key sits, never the key: an operator-authored key can be a private name.
+function requireExactKeys(value: Record<string, unknown>, keys: readonly string[], at: string, where: string): void {
   for (const key of Object.keys(value)) {
-    if (!keys.includes(key)) {
-      const shown = PRINTABLE_KEY_RE.test(key) ? `key "${key}"` : "a key";
-      throw new PolicyInvalid(`${at}: ${shown} is not supported by this reviewer version`);
-    }
+    if (!keys.includes(key)) throw new PolicyInvalid(`${where}: an unsupported key (not supported by this reviewer version)`);
   }
   for (const key of keys) {
     if (!Object.prototype.hasOwnProperty.call(value, key)) throw new PolicyInvalid(`${at}.${key}: is required`);
@@ -160,9 +156,9 @@ function sameAsCore(entry: RepoPolicy): boolean {
   );
 }
 
-function parseEntry(value: unknown, at: string): RepoPolicy {
+function parseEntry(value: unknown, at: string, index: number): RepoPolicy {
   if (!isPlainObject(value)) throw new PolicyInvalid(`${at}: must be an object`);
-  requireExactKeys(value, ["repo", "ciWorkflowPath", "requiredChecks"], at);
+  requireExactKeys(value, ["repo", "ciWorkflowPath", "requiredChecks"], at, `entry ${index}`);
   if (typeof value.repo !== "string" || parseRepo(value.repo) === null) throw new PolicyInvalid(`${at}.repo: must be owner/name`);
   const pathProblem = workflowPathProblem(value.ciWorkflowPath);
   if (pathProblem !== null) throw new PolicyInvalid(`${at}.ciWorkflowPath: ${pathProblem}`);
@@ -174,7 +170,7 @@ function parseEntry(value: unknown, at: string): RepoPolicy {
   value.requiredChecks.forEach((item: unknown, i: number) => {
     const checkAt = `${at}.requiredChecks[${i}]`;
     if (!isPlainObject(item)) throw new PolicyInvalid(`${checkAt}: must be an object`);
-    requireExactKeys(item, ["name", "appSlug"], checkAt);
+    requireExactKeys(item, ["name", "appSlug"], checkAt, `entry ${index}, check ${i}`);
     const nameProblem = checkNameProblem(item.name);
     if (nameProblem !== null) throw new PolicyInvalid(`${checkAt}.name: ${nameProblem}`);
     const slugProblem = appSlugProblem(item.appSlug);
@@ -189,7 +185,9 @@ function parseEntry(value: unknown, at: string): RepoPolicy {
   return deepFreezePolicy({ repo: value.repo, ciWorkflowPath: value.ciWorkflowPath as string, requiredChecks: checks, pesterCoverage: false });
 }
 
-// Pure validation of the file's text.
+// Pure validation of the file's text. Every error maps to an invalid file, not only PolicyInvalid:
+// deep nesting can overflow the stack in JSON.parse or in the key count with a RangeError, and the
+// CLI must still print its structured refusal rather than crash.
 export function parsePolicyFile(raw: string): PolicyLoad {
   try {
     let parsed: unknown;
@@ -200,7 +198,7 @@ export function parsePolicyFile(raw: string): PolicyLoad {
     }
     if (rawKeyCount(raw) !== parsedKeyCount(parsed)) throw new PolicyInvalid("the file repeats a key inside one object");
     if (!isPlainObject(parsed)) throw new PolicyInvalid("the top level must be an object");
-    requireExactKeys(parsed, ["version", "repos"], "(top level)");
+    requireExactKeys(parsed, ["version", "repos"], "(top level)", "the top level");
     if (parsed.version !== 1) throw new PolicyInvalid("version: must be 1");
     if (!Array.isArray(parsed.repos) || parsed.repos.length === 0) throw new PolicyInvalid("repos: must be a non-empty array");
 
@@ -208,7 +206,7 @@ export function parsePolicyFile(raw: string): PolicyLoad {
     const seen = new Set<string>();
     parsed.repos.forEach((item: unknown, i: number) => {
       const at = `repos[${i}]`;
-      const entry = parseEntry(item, at);
+      const entry = parseEntry(item, at, i);
       const folded = entry.repo.toLowerCase();
       if (seen.has(folded)) throw new PolicyInvalid(`${at}.repo: duplicates an earlier entry, case-insensitively`);
       seen.add(folded);
@@ -222,7 +220,7 @@ export function parsePolicyFile(raw: string): PolicyLoad {
     return { ok: true, entries: Object.freeze(entries) };
   } catch (error) {
     if (error instanceof PolicyInvalid) return { ok: false, reason: error.message };
-    throw error;
+    return { ok: false, reason: "the file could not be checked, for example because it nests too deeply" };
   }
 }
 

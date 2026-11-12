@@ -78,9 +78,11 @@ export function uncoveredPowerShellFiles(changedFiles: readonly string[], workfl
   });
 }
 
-// #318 (critique item 11): a required check counts only when the base-commit workflow declares it
-// as a job name, using the same whole-line match test/pr-review-verdict.test.ts pins CORE_POLICY's
-// names with. Without it, a green run with the right name from some other workflow satisfies a
+// #318 (critique item 11): a required check counts only when its name appears as a `name:` line in
+// the configured workflow at the base commit, using the same whole-line match
+// test/pr-review-verdict.test.ts pins CORE_POLICY's names with. This checks for a `name:` line, not
+// for a job: any line that reads exactly `name: <check>` once trimmed matches, so the workflow's
+// own top-level name, or a step whose `name:` sits on a line after its dash, matches too. Without it, a green run with the right name from some other workflow satisfies a
 // check whose own workflow never ran, for example one a path filter skipped. A name the workflow
 // builds from an expression, or quotes, does not match, and that reads incomplete.
 export function workflowDeclaresName(workflowText: string, name: string): boolean {
@@ -107,7 +109,7 @@ export function computeVerification(input: {
   // and picking one arbitrarily lets a failing run hide behind a passing one, or the reverse.
   for (const required of requiredChecks) {
     if (input.workflowText !== null && !workflowDeclaresName(input.workflowText, required.name)) {
-      incomplete.push(`required check "${required.name}" is not declared as a job name in the CI workflow at the base commit`);
+      incomplete.push(`required check "${required.name}" does not appear as a name: line in the CI workflow at the base commit`);
     }
     const runs = input.checkRuns.filter((r) => r.name === required.name && r.appSlug === required.appSlug);
     if (runs.length === 0) {

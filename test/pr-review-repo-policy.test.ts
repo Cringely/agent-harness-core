@@ -165,8 +165,41 @@ describe("parsePolicyFile()", () => {
     expect(reasonOf(load).length).toBeGreaterThan(0);
   });
 
-  test("names a deferred key as unsupported by this reviewer version", () => {
-    expect(reasonOf(parsePolicyFile(file([entry({ livingDocs: [] })])))).toContain('key "livingDocs" is not supported by this reviewer version');
+  // Review round 1: an operator-authored key can itself be a private name, so a refusal names
+  // only where the unsupported key sits, never the key.
+  test("a deferred key refuses as unsupported without echoing its name", () => {
+    const reason = reasonOf(parsePolicyFile(file([entry({ livingDocs: [] })])));
+    expect(reason).toContain("entry 0: an unsupported key");
+    expect(reason).not.toContain("livingDocs");
+  });
+
+  test.each([
+    ["the top level", (key: string) => file([entry()], { [key]: 1 }), "the top level: an unsupported key"],
+    ["an entry", (key: string) => file([entry(), entry({ repo: "owner/second", [key]: 1 })]), "entry 1: an unsupported key"],
+    [
+      "a check",
+      (key: string) => file([entry({ requiredChecks: [{ name: "build", appSlug: "github-actions", [key]: 1 }] })]),
+      "entry 0, check 0: an unsupported key",
+    ],
+  ] as const)("an arbitrary unknown key at %s never appears in the reason", (_label, build, location) => {
+    for (const key of ["privateRepoName", "acme-internal-tool", "x"]) {
+      const reason = reasonOf(parsePolicyFile(build(key)));
+      expect(reason).toContain(location);
+      expect(reason).not.toContain(key);
+    }
+  });
+
+  // Review round 1: deep nesting can overflow the stack in JSON.parse or in the key count. Any
+  // error must still come back as an invalid-file reason, so --json prints the structured refusal.
+  test("deeply nested arrays under an extra key refuse as invalid rather than throwing", () => {
+    const depth = 200_000;
+    const raw = `{"version": 1, "repos": [], "extra": ${"[".repeat(depth)}${"]".repeat(depth)}}`;
+    let load: PolicyLoad | undefined;
+    expect(() => {
+      load = parsePolicyFile(raw);
+    }).not.toThrow();
+    expect(load!.ok).toBe(false);
+    expect(reasonOf(load!).length).toBeGreaterThan(0);
   });
 
   test("a refusal names the key path, never a check list or another repository", () => {

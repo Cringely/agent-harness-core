@@ -37,8 +37,8 @@ export const ROUND_ONE_HEAD = "043ef878dd75f1ac8dc846cf9e7182ead0074b6d";
 export const CONTROL_BASE = "ddc67a1450d9776ec5a08f05d3f0d236340da3fd";
 export const CONTROL_HEAD = "a9da9f904532aeb349f49766d01c308a6b71b38f";
 
-// #318: verification counts a required check only when the base commit's workflow declares it as
-// a job name. Both bases above predate the Linux Pester and Gitleaks jobs, so under CORE_POLICY
+// #318: verification counts a required check only when its name appears as a `name:` line in the
+// base commit's workflow. Both bases above predate the Linux Pester and Gitleaks jobs, so under CORE_POLICY
 // every case here would read incomplete for that reason alone and the control could never pass.
 // The check runs are synthetic (LocalGitSource), so narrowing to the two jobs those bases declare
 // changes what is simulated, not what is trusted, and gives the same verification these cases had

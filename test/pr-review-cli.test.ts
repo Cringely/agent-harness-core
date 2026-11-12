@@ -910,6 +910,19 @@ describe("main(): the repository policy (#318)", () => {
     expect(summary.verification.reasons.join(" ")).not.toContain(CORE_POLICY.requiredChecks[0]!.name);
   });
 
+  // Review round 1: main() must hand runReview the resolved policy. With CORE_POLICY passed
+  // instead, the pipeline's repo guard refuses this owner/example snapshot, and even without the
+  // guard the verification would name CORE_POLICY's checks rather than "build".
+  test("a review run passes the resolved policy, not CORE_POLICY, to runReview", async () => {
+    const { io } = spyIo();
+    const result = await capture(["review", ...base, "--json", "--repo", "owner/example", "--policy", listed], io);
+    expect(result.code).toBe(0);
+    const outcome = JSON.parse(result.out);
+    expect(outcome.status).toBe("dry-run");
+    expect(outcome.verification.reasons.join(" ")).toContain('"build"');
+    for (const check of CORE_POLICY.requiredChecks) expect(outcome.verification.reasons.join(" ")).not.toContain(check.name);
+  });
+
   test("the built-in repository with no --policy still proceeds with CORE_POLICY's workflow path", async () => {
     const { io, calls } = spyIo();
     const result = await capture(["snapshot", ...base], io);
