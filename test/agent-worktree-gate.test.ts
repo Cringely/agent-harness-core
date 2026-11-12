@@ -9,24 +9,20 @@
 // this file is what makes that claim true now.
 
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   BASE_SHA_TOKEN,
   decide,
-  frontmatterLines,
   type GitProbe,
-  loadWriteScopeParser,
   nonGitNote,
   OVERRIDE_TOKEN,
   probeGitWorkTree,
   PROJECT_EXCEPTIONS,
   projectRootOf,
-  REQUIRED_WRITE_SCOPE_GATE_VERSION,
   requiresIsolation,
 } from "../core/claude/hooks/agent-worktree-gate";
-import { parseWriteScope } from "../core/claude/hooks/write-scope-parse";
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const HOOKS_SRC = join(REPO_ROOT, "core", "claude", "hooks");
@@ -721,32 +717,17 @@ describe("decide() — a project root that is not a git repository (#310)", () =
   });
 });
 
-// --- scoped writers: shell-less scratch agents are not repo writers ------------------------------
+// --- scoped writers are classified like any other write-capable type (#312 tracks trust) ------------
 
 const scopedDir = mkdtempSync(join(tmpdir(), "worktree-gate-scoped-"));
 scratchDirs.push(scopedDir);
-function writeScopedDef(type: string, lines: string[], body: string[] = []) {
-  writeFileSync(join(scopedDir, `${type}.md`), ["---", `name: ${type}`, ...lines, "---", "", ...body].join("\n"));
+function writeScopedDef(type: string, lines: string[]) {
+  writeFileSync(join(scopedDir, `${type}.md`), ["---", `name: ${type}`, ...lines, "---", "", "Body."].join("\n"));
 }
 const SCOPED_TOOLS = "tools: Read, Grep, Glob, WebFetch, WebSearch, Write, SendMessage";
 writeScopedDef("scoped", [SCOPED_TOOLS, "writeScope: scratch"]);
 writeScopedDef("scoped-edit", ["tools: Read, Edit, Write", "writeScope: scratch"]);
 writeScopedDef("scoped-readonly", ["tools: Read, Grep", "writeScope: scratch"]);
-writeScopedDef("unscoped", [SCOPED_TOOLS]);
-writeScopedDef("scoped-repo", [SCOPED_TOOLS, "writeScope: repo"]);
-writeScopedDef("scoped-memory", [SCOPED_TOOLS, "writeScope: scratch", "memory: user"]);
-writeScopedDef("dup-repo-first", [SCOPED_TOOLS, "writeScope: repo", "writeScope: scratch"]);
-writeScopedDef("scoped-in-body", [SCOPED_TOOLS], ["writeScope: scratch"]);
-const EXTRA_TOOLS: Array<[string, string]> = [
-  ["scoped-plus-notebookedit", "NotebookEdit"],
-  ["scoped-plus-bash", "Bash"],
-  ["scoped-plus-powershell", "PowerShell"],
-  ["scoped-plus-agent", "Agent"],
-  ["scoped-plus-skill", "Skill"],
-  ["scoped-plus-mcp", "mcp__x__y"],
-  ["scoped-plus-star", "*"],
-];
-for (const [name, tool] of EXTRA_TOOLS) writeScopedDef(name, [`${SCOPED_TOOLS}, ${tool}`, "writeScope: scratch"]);
 writeScopedDef("web-fetch", ["tools: Write"]);
 // Claude Code reads the frontmatter key `tools` case-sensitively. A differently cased key is not a
 // grant, so the definition inherits every tool, a shell included.
@@ -754,105 +735,22 @@ writeScopedDef("scoped-key-title", ["Tools: Read, Write", "writeScope: scratch"]
 writeScopedDef("scoped-key-upper", ["TOOLS: Read, Write", "writeScope: scratch"]);
 writeScopedDef("readonly-key-title", ["Tools: Read, Grep"]);
 writeScopedDef("readonly-key-upper", ["TOOLS: Read, Grep"]);
-// A lowercase grant after a cased one is the grant Claude Code sees only if it reads the first line
-// it matches, so the cased line must not hide the real one: here the real one is a read-only list.
-writeScopedDef("scoped-key-both", ["Tools: Read, Write, Bash", "tools: Read, Write", "writeScope: scratch"]);
+// The real grant is the lowercase line, and it is read-only. A cased line before it is not a grant.
+writeScopedDef("key-both", ["Tools: Read, Write, Bash", "tools: Read, Grep"]);
 
-describe("requiresIsolation() — the tools key is read as Claude Code reads it, case-sensitively", () => {
-  test.each([
-    ["scoped-key-title", "Tools:"],
-    ["scoped-key-upper", "TOOLS:"],
-  ])("a scratch writer whose grant key is %s (%s) inherits every tool, so it requires isolation", (type) => {
-    expect(requiresIsolation(type, scopedDir, parseWriteScope)).toBe(true);
-    expect(requiresIsolation(type, scopedDir, null)).toBe(true);
+describe("requiresIsolation() — a writeScope: scratch agent is write-capable and needs isolation", () => {
+  test.each(["scoped", "scoped-edit"])("%s: Write or Edit in the grant requires isolation", (type) => {
+    expect(requiresIsolation(type, scopedDir)).toBe(true);
   });
 
-  test.each([["readonly-key-title"], ["readonly-key-upper"]])(
-    "%s: a read-only list under a differently cased key is not a grant, so it requires isolation",
-    (type) => {
-      expect(requiresIsolation(type, scopedDir, parseWriteScope)).toBe(true);
-    },
-  );
-
-  test("the lowercase key keeps working for both a scoped writer and a read-only role", () => {
-    expect(requiresIsolation("scoped", scopedDir, parseWriteScope)).toBe(false);
-    expect(requiresIsolation("scoped-readonly", scopedDir, null)).toBe(false);
+  test("a scoped writer dispatched without isolation is denied, in a git project", () => {
+    const d = { tool_name: "Agent", tool_input: { subagent_type: "scoped", prompt: "go" } };
+    expect(decide(d, scopedDir, "/p", () => "repo").action).toBe("deny");
+    expect(decide(d, scopedDir).action).toBe("deny");
   });
 
-  test("a cased line does not stand in for the lowercase one", () => {
-    expect(requiresIsolation("scoped-key-both", scopedDir, parseWriteScope)).toBe(false);
-  });
-});
-
-// The trust side must read the same frontmatter the confinement side does. These texts probe the
-// boundaries: a closing fence with trailing spaces, a line that merely starts with three dashes, a
-// missing close, and CRLF. For each, the gate's reading and the shared parser's agree on whether a
-// `writeScope` line is inside the frontmatter.
-describe("frontmatterLines() — the same boundaries as the shared writeScope parser", () => {
-  const N = String.fromCharCode(10);
-  const R = String.fromCharCode(13) + N;
-  const cases: Array<[string, string]> = [
-    ["plain", ["---", "tools: Read", "writeScope: scratch", "---", "body"].join(N)],
-    ["CRLF", ["---", "tools: Read", "writeScope: scratch", "---", "body"].join(R)],
-    ["trailing spaces on both fences", ["--- ", "tools: Read", "writeScope: scratch", "---  ", "body"].join(N)],
-    ["a dash-prefixed line is not a close", ["---", "tools: Read", "---x", "writeScope: scratch", "---", "body"].join(N)],
-    ["four dashes are not a close", ["---", "tools: Read", "----", "writeScope: scratch", "---", "body"].join(N)],
-    ["no close", ["---", "tools: Read", "writeScope: scratch", "body"].join(N)],
-    ["key in the body", ["---", "tools: Read", "---", "writeScope: scratch"].join(N)],
-    ["no opening fence", ["tools: Read", "writeScope: scratch", "---"].join(N)],
-    ["blank first line", ["", "---", "writeScope: scratch", "---"].join(N)],
-  ];
-
-  test.each(cases)("%s", (_label, text) => {
-    const lines = frontmatterLines(text);
-    const gateSees = lines?.some((l) => /^writeScope:\s*(\S+)\s*$/.test(l)) ?? false;
-    expect(gateSees).toBe(parseWriteScope(text) !== null);
-  });
-
-  test("a leading byte order mark is not frontmatter here, so the type requires isolation", () => {
-    const bom = String.fromCharCode(0xfeff) + ["---", "tools: Read, Write", "writeScope: scratch", "---"].join(N);
-    expect(frontmatterLines(bom)).toBeNull();
-  });
-});
-
-describe("requiresIsolation() — a shell-less scratch writer is trusted only with the parser (#310)", () => {
-  test("scratch scope, Write + Edit + SendMessage, no shell: not an isolation case", () => {
-    expect(requiresIsolation("scoped", scopedDir, parseWriteScope)).toBe(false);
-    expect(requiresIsolation("scoped-edit", scopedDir, parseWriteScope)).toBe(false);
-  });
-
-  test("the same def with parseScope null or omitted still requires isolation", () => {
-    expect(requiresIsolation("scoped", scopedDir, null)).toBe(true);
-    expect(requiresIsolation("scoped", scopedDir)).toBe(true);
-  });
-
-  test("a read-only grant stays exempt with or without the parser", () => {
-    expect(requiresIsolation("scoped-readonly", scopedDir, null)).toBe(false);
-    expect(requiresIsolation("scoped-readonly", scopedDir, parseWriteScope)).toBe(false);
-  });
-
-  test.each(EXTRA_TOOLS)("%s: adding %s to the grant requires isolation again", (type) => {
-    expect(requiresIsolation(type, scopedDir, parseWriteScope)).toBe(true);
-  });
-
-  test("no writeScope declared: requires isolation", () => {
-    expect(requiresIsolation("unscoped", scopedDir, parseWriteScope)).toBe(true);
-  });
-
-  test("writeScope: repo: requires isolation", () => {
-    expect(requiresIsolation("scoped-repo", scopedDir, parseWriteScope)).toBe(true);
-  });
-
-  test("a memory: line puts the scratch writer back under isolation", () => {
-    expect(requiresIsolation("scoped-memory", scopedDir, parseWriteScope)).toBe(true);
-  });
-
-  test("duplicate keys: the first one wins, so repo-then-scratch requires isolation", () => {
-    expect(requiresIsolation("dup-repo-first", scopedDir, parseWriteScope)).toBe(true);
-  });
-
-  test("a writeScope line in the body is prose, not a declaration", () => {
-    expect(requiresIsolation("scoped-in-body", scopedDir, parseWriteScope)).toBe(true);
+  test("a scoped writer with a read-only grant stays exempt, as any read-only role is", () => {
+    expect(requiresIsolation("scoped-readonly", scopedDir)).toBe(false);
   });
 
   // No source documents a grant for a built-in named web-fetch, so it is an unknown type.
@@ -860,314 +758,32 @@ describe("requiresIsolation() — a shell-less scratch writer is trusted only wi
     expect(requiresIsolation("web-fetch", join(scopedDir, "no-such-dir"))).toBe(true);
   });
 
-  test("a web-fetch.md def granting Write with no writeScope requires isolation", () => {
-    expect(requiresIsolation("web-fetch", scopedDir, parseWriteScope)).toBe(true);
+  test("a web-fetch.md def granting Write requires isolation", () => {
+    expect(requiresIsolation("web-fetch", scopedDir)).toBe(true);
   });
-
-  test("the classification cache keeps the with-parser and without-parser answers apart", () => {
-    // Same agentsDir + type, asked both ways, in both orders: neither answer may leak to the other.
-    expect(requiresIsolation("scoped-edit", scopedDir, null)).toBe(true);
-    expect(requiresIsolation("scoped-edit", scopedDir, parseWriteScope)).toBe(false);
-    expect(requiresIsolation("scoped-edit", scopedDir, null)).toBe(true);
-  });
-
 });
 
-// A scoped writer is trusted only through decide(), and only for a definition the write-scope gate
-// would read too: the gate looks the type up verbatim under `<projectRoot>/.claude/agents`.
-describe("decide() — scoped-writer trust needs the project agents dir and the verbatim type name", () => {
-  const projectRoot = tmpRoot("wg-scoped-project-");
-  const projectAgents = join(projectRoot, ".claude", "agents");
-  mkdirSync(projectAgents, { recursive: true });
-  for (const f of ["scoped.md"]) copyFileSync(join(scopedDir, f), join(projectAgents, f));
-  const inRepo = () => "repo" as GitProbe;
-  const dispatch = (type: string) => ({ tool_name: "Agent", tool_input: { subagent_type: type, prompt: "go" } });
-
-  test("a def in the project agents dir with the parser: allowed, silently", () => {
-    expect(decide(dispatch("scoped"), projectAgents, projectRoot, inRepo, parseWriteScope)).toEqual({
-      action: "allow",
-    });
-  });
-
-  test("the same dispatch without the parser, or with no project root: denied", () => {
-    expect(decide(dispatch("scoped"), projectAgents, projectRoot, inRepo, null).action).toBe("deny");
-    expect(decide(dispatch("scoped"), projectAgents, null, inRepo, parseWriteScope).action).toBe("deny");
-    expect(decide(dispatch("scoped"), projectAgents, undefined, inRepo, parseWriteScope).action).toBe("deny");
-  });
-
-  test("a def outside the project agents dir is not trusted, though the type name matches", () => {
-    // scopedDir holds the same `scoped.md`, but the write-scope gate reads the project's own folder.
-    expect(decide(dispatch("scoped"), scopedDir, projectRoot, inRepo, parseWriteScope).action).toBe("deny");
-  });
-
-  // Built by concatenation: join() and resolve() would normalise these away before the gate saw
-  // them, and the point is that the gate's own comparison does.
+describe("requiresIsolation() — the tools key is read as Claude Code reads it, case-sensitively", () => {
   test.each([
-    ["a trailing separator", projectAgents + sep],
-    ["a trailing dot segment", projectAgents + sep + "."],
-    ["an embedded dot segment", projectAgents + sep + "." + sep + sep],
-    ["a doubled separator before the last segment", dirname(projectAgents) + sep + sep + "agents"],
-    ["a parent segment that returns to it", projectAgents + sep + "x" + sep + ".."],
-  ])("an agents dir spelled with %s still matches the project's", (_label, spelled) => {
-    expect(spelled).not.toBe(projectAgents);
-    expect(decide(dispatch("scoped"), spelled, projectRoot, inRepo, parseWriteScope)).toEqual({ action: "allow" });
+    ["scoped-key-title", "Tools:"],
+    ["scoped-key-upper", "TOOLS:"],
+  ])("a def whose grant key is %s (%s) inherits every tool, so it requires isolation", (type) => {
+    expect(requiresIsolation(type, scopedDir)).toBe(true);
   });
 
-  test.each(["Scoped", "SCOPED", " scoped ", "scoped\t"])(
-    "raw subagent_type %p differs from its normalized form: no trust, denied",
+  test.each([["readonly-key-title"], ["readonly-key-upper"]])(
+    "%s: a read-only list under a differently cased key is not a grant, so it requires isolation",
     (type) => {
-      expect(decide(dispatch(type), projectAgents, projectRoot, inRepo, parseWriteScope).action).toBe("deny");
-    },
-  );
-});
-
-// --- loadWriteScopeParser(): the guarded dynamic import ----------------------------------------
-
-function settingsJson(groups: Array<{ matcher?: string; command: string }>): string {
-  return JSON.stringify({
-    hooks: {
-      PreToolUse: groups.map((g) => ({
-        ...(g.matcher === undefined ? {} : { matcher: g.matcher }),
-        hooks: [{ type: "command", command: g.command }],
-      })),
-    },
-  });
-}
-const SCOPE_CMD = 'bun "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-write-scope.ts"';
-
-/**
- * Builds an installed-layout project: `<root>/.claude/{hooks,agents}`, a settings file and a git
- * marker. `gate` is "real" (a copy of the shipped agent-write-scope.ts), a stub source string, or
- * null for none.
- */
-function makeInstall(opts: { parser?: boolean; gate?: "real" | string | null; settings?: string | null }) {
-  const root = gitTmpRoot("wg-install-");
-  const hooks = join(root, ".claude", "hooks");
-  mkdirSync(hooks, { recursive: true });
-  mkdirSync(join(root, ".claude", "agents"), { recursive: true });
-  copyFileSync(join(HOOKS_SRC, "agent-name.ts"), join(hooks, "agent-name.ts"));
-  copyFileSync(HOOK, join(hooks, "agent-worktree-gate.ts"));
-  if (opts.parser !== false) copyFileSync(join(HOOKS_SRC, "write-scope-parse.ts"), join(hooks, "write-scope-parse.ts"));
-  if (opts.gate === "real") copyFileSync(join(HOOKS_SRC, "agent-write-scope.ts"), join(hooks, "agent-write-scope.ts"));
-  else if (typeof opts.gate === "string") writeFileSync(join(hooks, "agent-write-scope.ts"), opts.gate);
-  if (opts.settings !== null) {
-    writeFileSync(
-      join(root, ".claude", "settings.json"),
-      opts.settings ?? settingsJson([{ matcher: "Write|Edit|NotebookEdit", command: SCOPE_CMD }]),
-    );
-  }
-  writeFileSync(
-    join(root, ".claude", "agents", "scoped.md"),
-    ["---", "name: scoped", SCOPED_TOOLS, "writeScope: scratch", "---", "", "Body."].join("\n"),
-  );
-  return {
-    root,
-    parserPath: join(hooks, "write-scope-parse.ts"),
-    gatePath: join(hooks, "agent-write-scope.ts"),
-    settingsPath: join(root, ".claude", "settings.json"),
-    gate: join(hooks, "agent-worktree-gate.ts"),
-  };
-}
-
-const VERSION_STUB = (v: string | null) =>
-  v === null ? "export const SOMETHING_ELSE = 1;\n" : `export const WRITE_SCOPE_GATE_VERSION = ${v};\n`;
-
-describe("loadWriteScopeParser() — trusts a parser only beside a current, registered scope gate", () => {
-  test("the required version is 2", () => {
-    expect(REQUIRED_WRITE_SCOPE_GATE_VERSION).toBe(2);
-  });
-
-  test("a module that does not exist resolves to null and does not throw", async () => {
-    await expect(loadWriteScopeParser("./no-such-module")).resolves.toBeNull();
-  });
-
-  test("the shipped modules, registered under Write|Edit|NotebookEdit, load", async () => {
-    const inst = makeInstall({ gate: "real" });
-    const parser = await loadWriteScopeParser(undefined, undefined, inst.settingsPath, inst.root);
-    expect(typeof parser).toBe("function");
-    expect(parser!("---\nwriteScope: scratch\n---\n")).toBe("scratch");
-  });
-
-  test("installed copies of all three modules load from an absolute path", async () => {
-    const inst = makeInstall({ gate: "real" });
-    const parser = await loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath, inst.root);
-    expect(typeof parser).toBe("function");
-  });
-
-  test("a scope gate with no version export gives null", async () => {
-    const inst = makeInstall({ gate: VERSION_STUB(null) });
-    await expect(loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath, inst.root)).resolves.toBeNull();
-  });
-
-  test("a scope gate at version 1 gives null", async () => {
-    const inst = makeInstall({ gate: VERSION_STUB("1") });
-    await expect(loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath, inst.root)).resolves.toBeNull();
-  });
-
-  test('a version that is not a number ("2") gives null', async () => {
-    const inst = makeInstall({ gate: VERSION_STUB('"2"') });
-    await expect(loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath, inst.root)).resolves.toBeNull();
-  });
-
-  test("a scope gate at version 2 gives a parser", async () => {
-    const inst = makeInstall({ gate: VERSION_STUB("2") });
-    expect(typeof (await loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath, inst.root))).toBe("function");
-  });
-
-  test("a later version also gives a parser", async () => {
-    const inst = makeInstall({ gate: VERSION_STUB("3") });
-    expect(typeof (await loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath, inst.root))).toBe("function");
-  });
-
-  test("a missing scope gate module gives null", async () => {
-    const inst = makeInstall({ gate: null });
-    await expect(loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath, inst.root)).resolves.toBeNull();
-  });
-
-  test("a missing parser module gives null", async () => {
-    const inst = makeInstall({ parser: false, gate: VERSION_STUB("2") });
-    await expect(loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath, inst.root)).resolves.toBeNull();
-  });
-
-  test("a parser module that exports no parseWriteScope function gives null", async () => {
-    const inst = makeInstall({ gate: VERSION_STUB("2") });
-    writeFileSync(inst.parserPath, "export const parseWriteScope = 5;\n");
-    await expect(loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath, inst.root)).resolves.toBeNull();
-  });
-
-  test("a scope gate that throws on import gives null", async () => {
-    const inst = makeInstall({ gate: 'throw new Error("boom");\nexport const WRITE_SCOPE_GATE_VERSION = 2;\n' });
-    await expect(loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath, inst.root)).resolves.toBeNull();
-  });
-
-  test("a settings file that does not register the scope gate gives null", async () => {
-    const inst = makeInstall({
-      gate: VERSION_STUB("2"),
-      settings: settingsJson([{ matcher: "Agent|Task", command: 'bun "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-worktree-gate.ts"' }]),
-    });
-    await expect(loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath, inst.root)).resolves.toBeNull();
-  });
-
-  test.each(["Write", "Edit", "NotebookEdit"])("registered only under %s gives null", async (matcher) => {
-    const inst = makeInstall({ gate: VERSION_STUB("2"), settings: settingsJson([{ matcher, command: SCOPE_CMD }]) });
-    await expect(loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath, inst.root)).resolves.toBeNull();
-  });
-
-  test("a matcher naming other tools that merely contain Write and Edit does not count", async () => {
-    const inst = makeInstall({
-      gate: VERSION_STUB("2"),
-      settings: settingsJson([{ matcher: "WriteFile|EditFile", command: SCOPE_CMD }]),
-    });
-    await expect(loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath, inst.root)).resolves.toBeNull();
-  });
-
-  test.each(["Write|Edit", "Edit|Write", "Write|Edit|NotebookEdit", "*", ""])(
-    "registered under a matcher that covers both (%p) gives a parser",
-    async (matcher) => {
-      const inst = makeInstall({ gate: VERSION_STUB("2"), settings: settingsJson([{ matcher, command: SCOPE_CMD }]) });
-      expect(typeof (await loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath, inst.root))).toBe("function");
+      expect(requiresIsolation(type, scopedDir)).toBe(true);
     },
   );
 
-  test("a group with no matcher at all covers every tool", async () => {
-    const inst = makeInstall({ gate: VERSION_STUB("2"), settings: settingsJson([{ command: SCOPE_CMD }]) });
-    expect(typeof (await loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath, inst.root))).toBe("function");
+  test("the lowercase key keeps working for a read-only role", () => {
+    expect(requiresIsolation("scoped-readonly", scopedDir)).toBe(false);
   });
 
-  test("the registration must be under PreToolUse, not PostToolUse", async () => {
-    const inst = makeInstall({
-      gate: VERSION_STUB("2"),
-      settings: JSON.stringify({
-        hooks: { PostToolUse: [{ matcher: "Write|Edit", hooks: [{ type: "command", command: SCOPE_CMD }] }] },
-      }),
-    });
-    await expect(loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath, inst.root)).resolves.toBeNull();
-  });
-
-  test.each([
-    ["a missing settings file", null],
-    ["malformed JSON", "{not json"],
-    ["a non-object", "5"],
-    ["hooks that is not an object", '{"hooks": 5}'],
-    ["PreToolUse that is not an array", '{"hooks": {"PreToolUse": {}}}'],
-    ["a group that is null", '{"hooks": {"PreToolUse": [null]}}'],
-    ["a hooks entry that is not an array", '{"hooks": {"PreToolUse": [{"matcher": "Write|Edit", "hooks": 3}]}}'],
-    ["an invalid matcher regex", settingsJson([{ matcher: "Write|(Edit", command: SCOPE_CMD }])],
-  ])("%s gives null and does not throw", async (_label, settings) => {
-    const inst = makeInstall({ gate: VERSION_STUB("2"), settings });
-    await expect(loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath, inst.root)).resolves.toBeNull();
-  });
-
-  test("a registration split across two groups, one per tool, does not count", async () => {
-    // Each group alone leaves one tool unguarded, so a scoped writer's Edit would go unconfined.
-    const inst = makeInstall({
-      gate: VERSION_STUB("2"),
-      settings: settingsJson([
-        { matcher: "Write", command: SCOPE_CMD },
-        { matcher: "Edit", command: SCOPE_CMD },
-      ]),
-    });
-    await expect(loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath, inst.root)).resolves.toBeNull();
-  });
-});
-
-describe("loadWriteScopeParser() — the registered command must name THIS project's scope gate", () => {
-  const load = (inst: ReturnType<typeof makeInstall>) =>
-    loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath, inst.root);
-  const withCommand = (command: string) => makeInstall({ gate: VERSION_STUB("2"), settings: settingsJson([{ matcher: "Write|Edit", command }]) });
-
-  test.each([
-    ["$CLAUDE_PROJECT_DIR", 'bun "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-write-scope.ts"'],
-    ["${CLAUDE_PROJECT_DIR}", 'bun "${CLAUDE_PROJECT_DIR}/.claude/hooks/agent-write-scope.ts"'],
-    ["unquoted", "bun $CLAUDE_PROJECT_DIR/.claude/hooks/agent-write-scope.ts"],
-  ])("the project-dir variable form %s is accepted", async (_label, command) => {
-    expect(typeof (await load(withCommand(command)))).toBe("function");
-  });
-
-  test("an absolute path to this project's copy is accepted, in either slash style", async () => {
-    const inst = withCommand("placeholder");
-    const abs = join(inst.root, ".claude", "hooks", "agent-write-scope.ts");
-    for (const spelled of [abs, abs.replace(/\\/g, "/")]) {
-      writeFileSync(inst.settingsPath, settingsJson([{ matcher: "Write|Edit", command: `bun "${spelled}"` }]));
-      expect(typeof (await load(inst))).toBe("function");
-    }
-  });
-
-  test("an absolute path to some other project's copy gives null", async () => {
-    const other = gitTmpRoot("wg-other-project-");
-    const cmd = `bun "${join(other, ".claude", "hooks", "agent-write-scope.ts").replace(/\\/g, "/")}"`;
-    await expect(load(withCommand(cmd))).resolves.toBeNull();
-  });
-
-  test.each([
-    ["a different folder under the project", 'bun "$CLAUDE_PROJECT_DIR/vendor/agent-write-scope.ts"'],
-    ["a home-relative copy", 'bun "$HOME/.claude/hooks/agent-write-scope.ts"'],
-    ["a bare relative path", "bun .claude/hooks/agent-write-scope.ts"],
-    ["the file name only as a substring", 'bun "$CLAUDE_PROJECT_DIR/.claude/hooks/not-agent-write-scope.ts"'],
-    ["the file name in an unrelated command", "echo agent-write-scope.ts"],
-    ["a parent traversal out of the project", 'bun "$CLAUDE_PROJECT_DIR/../x/.claude/hooks/agent-write-scope.ts"'],
-  ])("%s gives null", async (_label, command) => {
-    await expect(load(withCommand(command))).resolves.toBeNull();
-  });
-});
-
-describe("requiresIsolation() — an old scope gate beside the new parser keeps the scoped writer isolated", () => {
-  test.each([
-    ["no version export", VERSION_STUB(null), true],
-    ["version 1", VERSION_STUB("1"), true],
-    ["version 2", VERSION_STUB("2"), false],
-  ])("%s", async (_label, gateSrc, isolated) => {
-    const inst = makeInstall({ gate: gateSrc });
-    const parser = await loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath, inst.root);
-    expect(parser === null).toBe(isolated);
-    expect(requiresIsolation("scoped", scopedDir, parser)).toBe(isolated);
-  });
-
-  test("an unregistered scope gate keeps the scoped writer isolated", async () => {
-    const inst = makeInstall({ gate: VERSION_STUB("2"), settings: settingsJson([{ matcher: "Write", command: SCOPE_CMD }]) });
-    const parser = await loadWriteScopeParser(inst.parserPath, inst.gatePath, inst.settingsPath, inst.root);
-    expect(parser).toBeNull();
-    expect(requiresIsolation("scoped", scopedDir, parser)).toBe(true);
+  test("a cased line does not hide or replace the lowercase grant", () => {
+    expect(requiresIsolation("key-both", scopedDir)).toBe(false);
   });
 });
 
@@ -1206,47 +822,6 @@ describe("spawned process — project root and git probe (#310)", () => {
   test.skipIf(TMP_UNDER_GIT)("GIT_DIR in the environment makes the same non-git root a repo: deny", () => {
     const plain = tmpRoot("wg-spawn-gitdir-");
     const result = runHook(GP(), { CLAUDE_PROJECT_DIR: plain, GIT_DIR: join(plain, "x") });
-    expect(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
-  });
-});
-
-describe("spawned process — installed layout and the guarded dynamic import (#310)", () => {
-  const scopedDispatch = (root: string) =>
-    JSON.stringify({ tool_name: "Agent", tool_input: { subagent_type: "scoped", prompt: "go" }, cwd: root });
-
-  test("write-scope-parse.ts missing: exit 0 and a deny JSON, not silence", () => {
-    const inst = makeInstall({ parser: false, gate: VERSION_STUB("2") });
-    const result = runHook(scopedDispatch(inst.root), { CLAUDE_PROJECT_DIR: inst.root }, inst.gate);
-    expect(result.exitCode).toBe(0);
-    expect(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
-  });
-
-  test("agent-write-scope.ts missing entirely: exit 0 and a deny JSON", () => {
-    const inst = makeInstall({ gate: null });
-    const result = runHook(scopedDispatch(inst.root), { CLAUDE_PROJECT_DIR: inst.root }, inst.gate);
-    expect(result.exitCode).toBe(0);
-    expect(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
-  });
-
-  test("an old agent-write-scope.ts without the version export: exit 0 and a deny JSON", () => {
-    const inst = makeInstall({ gate: VERSION_STUB(null) });
-    const result = runHook(scopedDispatch(inst.root), { CLAUDE_PROJECT_DIR: inst.root }, inst.gate);
-    expect(result.exitCode).toBe(0);
-    expect(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
-  });
-
-  test("all three modules at version 2 and the gate registered: exit 0, no stdout", () => {
-    const inst = makeInstall({ gate: "real" });
-    const result = runHook(scopedDispatch(inst.root), { CLAUDE_PROJECT_DIR: inst.root }, inst.gate);
-    expect(result.exitCode).toBe(0);
-    expect(result.stdout).toBe("");
-    expect(result.stderr).toBe("");
-  });
-
-  test("the same layout with the gate registered only under Write: deny JSON", () => {
-    const inst = makeInstall({ gate: "real", settings: settingsJson([{ matcher: "Write", command: SCOPE_CMD }]) });
-    const result = runHook(scopedDispatch(inst.root), { CLAUDE_PROJECT_DIR: inst.root }, inst.gate);
-    expect(result.exitCode).toBe(0);
     expect(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
   });
 });

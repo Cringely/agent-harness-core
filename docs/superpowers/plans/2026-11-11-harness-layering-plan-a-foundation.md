@@ -101,7 +101,7 @@ A1, A2 and A3 run in parallel but are not file-independent. A1 (Task 1) and A3 (
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `export type WriteScopeParser = (text: string) => string | null` and `export function parseWriteScope(text: string): string | null` in `core/claude/hooks/write-scope-parse.ts`, a new file beside the hooks. It sits flat in the hooks directory, like `agent-name.ts`, because the installer copies that directory file by file and not recursively. A new file is installed fresh, never skipped as project-modified. Also produces `export const WRITE_SCOPE_GATE_VERSION = 2` in `agent-write-scope.ts`, `inScratch(filePath: string, cwd: string, projectDir: string): boolean` and `decide(scope: string | null, filePath: string | undefined, cwd: string, projectDir: string): Decision`. Task 2 loads the parser module and relies on two rules. Inside the project root only `<project>/.claude/scratch` counts as scratch. Outside it, a scratch-named directory counts only when it does not contain the project root.
+- Produces: `export type WriteScopeParser = (text: string) => string | null` and `export function parseWriteScope(text: string): string | null` in `core/claude/hooks/write-scope-parse.ts`, a new file beside the hooks. It sits flat in the hooks directory, like `agent-name.ts`, because the installer copies that directory file by file and not recursively. A new file is installed fresh, never skipped as project-modified. Also produces `export const WRITE_SCOPE_GATE_VERSION = 2` in `agent-write-scope.ts`, `inScratch(filePath: string, cwd: string, projectDir: string): boolean` and `decide(scope: string | null, filePath: string | undefined, cwd: string, projectDir: string): Decision`. Inside the project root only `<project>/.claude/scratch` counts as scratch. Outside it, a scratch-named directory counts only when it does not contain the project root.
 
 - [ ] **Step 1: Write the failing tests.** Add a describe block "inScratch(): a scratch-named ancestor of the project is not scratch", and update every existing `inScratch`/`decide` call to pass `CWD` as `projectDir`.
 
@@ -130,7 +130,7 @@ Spawned case for the ancestor: build `<tmp>/scratch/proj/.claude/agents/scoped.m
   - `parseWriteScope` in `write-scope-parse.ts` reads only the frontmatter between a leading `---` line and the next `---` line, split on `/\r?\n/`, and returns the value of the first `writeScope:` key. `agent-write-scope.ts` imports it, and `readWriteScope` reads the whole file and calls it.
   - `inScratch` first resolves the file path and `projectDir` with `realpathSync.native` (the deepest existing ancestor plus the tail that does not exist yet). A failure to resolve, a dangling link, and a raw spelling that differs from the real one at or before the scratch segment all give "not scratch". It then splits both into segments on the host's separators: `/[\\/]+/` on Windows and `/\/+/` elsewhere, since a backslash is an ordinary file-name character on POSIX. If the file is inside the project root, only `<project>/.claude/scratch` counts. Otherwise a segment at index `i` whose lowercased name is in `SCRATCH_SEGMENTS` counts only when the project's segments do not start with the file's segments `0..i`. Compare lowercased on every platform, since case-insensitive containment can only add denies. Tests that need links, an 8.3 short name or a dangling link build real temporary directories.
   - The entrypoint passes `process.env.CLAUDE_PROJECT_DIR ?? cwd` as `projectDir`, and reads the target path as `tool_input.file_path ?? tool_input.notebook_path`. Extend the test file's spawned `runHook` helper to take an env, for the `CLAUDE_PROJECT_DIR` cases.
-  - Export `WRITE_SCOPE_GATE_VERSION = 2` from `agent-write-scope.ts`, with a comment: it marks the scratch-parent fix and the shared parser. The worktree gate trusts `writeScope` only at this version or later. Bump it whenever a change to this gate alters what `writeScope: scratch` confines.
+  - Export `WRITE_SCOPE_GATE_VERSION = 2` from `agent-write-scope.ts`, with a comment: it marks the scratch-parent fix and the shared parser. Bump it whenever a change to this gate alters what `writeScope: scratch` confines.
   - Header: replace "Second coverage boundary" with three facts. A scratch-named directory counts only when it does not contain the project root. A project whose root sits inside a scratch directory gets denies for scoped writes outside a deeper scratch folder, the fail-closed direction. Inside the project root only `<project>/.claude/scratch` is scratch, so a tracked subfolder named `scratch`, `scratchpad` or `.scratch` is not. Rewrite the next paragraph, "And it is reachable from the payload ... unchanged from master", which goes stale with the same change.
 
 - [ ] **Step 4: Run to verify they pass.** `bun test`. Expected: all PASS.
@@ -144,22 +144,23 @@ git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit
 
 ---
 
-### Task 2: Worktree gate checks its own preconditions
+### Task 2: Worktree gate allows with a note outside git
 
 **Files:**
-- Modify: `core/claude/hooks/agent-worktree-gate.ts` (header including the "reads no git state" line near 79, `BUILTIN_READ_ONLY`, `frontmatterRequiresIsolation`, `GateDecision`, `decide`, entrypoint)
+- Modify: `core/claude/hooks/agent-worktree-gate.ts` (header including the "reads no git state" line near 79, `frontmatterRequiresIsolation`, `GateDecision`, `decide`, entrypoint)
 - Test: `test/agent-worktree-gate.test.ts`
 
 **Interfaces:**
-- Consumes: `WriteScopeParser` and the module `./write-scope-parse` (Task 1), and Task 1's containment rule. Task 2 lands after Task 1 in the same PR.
-- Produces: `export const REQUIRED_WRITE_SCOPE_GATE_VERSION = 2` and `export async function loadWriteScopeParser(parserPath?: string, gatePath?: string): Promise<WriteScopeParser | null>`. The defaults are `./write-scope-parse` and `./agent-write-scope`. The function returns `null` on any load error, and also when the installed write-scope gate's `WRITE_SCOPE_GATE_VERSION` is missing, not a number, or below the required version. A third parameter, `settingsPath` (default `<projectRoot>/.claude/settings.json`), names the settings file. The function also returns `null` unless that file registers a command containing `agent-write-scope.ts` under a `PreToolUse` matcher that covers both `Write` and `Edit`. `requiresIsolation(subagentType: string, agentsDir?: string, parseScope?: WriteScopeParser | null): boolean`, `export type GitProbe = "repo" | "not-repo" | "unknown"`, `export function probeGitWorkTree(dir: string, env?: Record<string, string | undefined>): GitProbe`, `export function nonGitNote(projectRoot: string): string`, `export function projectRootOf(env: Record<string, string | undefined>): string` (the `CLAUDE_PROJECT_DIR` value, else `join(import.meta.dir, "..", "..")`), `GateDecision = { action: "allow"; note?: string } | { action: "deny"; reason: string }`, `decide(payload: unknown, agentsDir?: string, projectRoot?: string | null, probe?: (dir: string) => GitProbe, parseScope?: WriteScopeParser | null): GateDecision`. A `null` or omitted `parseScope` means no scoped-writer trust.
+- Consumes: nothing from Task 1. Task 2 lands after Task 1 in the same PR.
+- Produces: `export type GitProbe = "repo" | "not-repo" | "unknown"`, `export function probeGitWorkTree(dir: string, env?: Record<string, string | undefined>): GitProbe`, `export function nonGitNote(projectRoot: string): string`, `export function projectRootOf(env: Record<string, string | undefined>): string` (the `CLAUDE_PROJECT_DIR` value, else `join(import.meta.dir, "..", "..")`), `GateDecision = { action: "allow"; note?: string } | { action: "deny"; reason: string }`, and `decide(payload: unknown, agentsDir?: string, projectRoot?: string | null, probe?: (dir: string) => GitProbe): GateDecision`. An omitted or `null` `projectRoot` means no root is known: the probe is never called. `requiresIsolation` keeps its signature. A `writeScope: scratch` agent is classified like any other write-capable type, and trusting it is tracked in #312.
 
 - [ ] **Step 1: Write the failing tests.**
 
 Probe (real temp dirs):
 - `probeGitWorkTree` on a dir holding a `.git` directory is `"repo"`, and so is a subfolder of it.
 - A dir holding a `.git` file (the linked-worktree shape) is `"repo"`.
-- A path that does not exist is `"unknown"`.
+- A junction or symlink into a repo is `"repo"`, and a dangling link is `"unknown"`.
+- A path that does not exist, or is a file, is `"unknown"`.
 - Any dir with `env = { GIT_DIR: "/x" }` is `"repo"`.
 - A fresh `mkdtempSync(tmpdir())` is `"not-repo"`, skipped with `test.skipIf` when a `.git` exists in any ancestor of `tmpdir()`.
 
@@ -168,36 +169,24 @@ Decide (stub probe, write-capable type `writer`, no isolation, no override):
 - Root `"not-repo"`, payload `cwd` probed `"repo"`: deny. Review Focus 2's inverse: root `"repo"`, payload `cwd` probed `"not-repo"`: deny.
 - Root probed `"unknown"`: deny. `projectRoot` `null`: deny, and the stub records zero calls.
 - Read-only type `reader` with root `"not-repo"`: `{ action: "allow" }` with no `note`, stub not called.
+- Root `"repo"` and an isolated write dispatch with no base sha: still denied.
 
-Write-scope trust (`requiresIsolation` with `parseWriteScope` passed, real def files):
-- `tools: Read, Grep, Glob, WebFetch, WebSearch, Write, SendMessage` plus `writeScope: scratch`: `false`. The same def with `parseScope` `null`: `true`.
-- `loadWriteScopeParser("./no-such-module")` resolves to `null` and does not throw.
-- Old write-scope copy. The temp hooks dir holds the real `agent-name.ts` and `write-scope-parse.ts` plus a stub `agent-write-scope.ts`, and a settings file registering it. Three variants run:
-  - no `WRITE_SCOPE_GATE_VERSION` export, which gives `null`
-  - `WRITE_SCOPE_GATE_VERSION = 1`, which gives `null`
-  - `WRITE_SCOPE_GATE_VERSION = 2`, which gives a non-null parser
+Classification:
+- A `writeScope: scratch` def granting `Write` requires isolation, and so does the same def dispatched in a git project.
+- A def whose grant key is `Tools:` or `TOOLS:` (not `tools:`) requires isolation, as does a read-only list under such a key. The lowercase key keeps working, and a cased line before it does not hide it.
+- `web-fetch` with no def file requires isolation, since no source documents a grant for it.
 
-  For the scratch-scoped def, `requiresIsolation` with a `null` result is `true`.
-- Unregistered write-scope gate: the version-2 layout with a settings file that does not register `agent-write-scope.ts` (or registers it only under `Write`) gives `null`, and the scoped def requires isolation.
-- The same with `NotebookEdit`, `Bash`, `PowerShell`, `Agent`, `Skill`, `mcp__x__y` or `*` added: `true`.
-- The same tools with no `writeScope`, with `writeScope: repo`, or with `memory: user` added: `true`.
-- Duplicate keys `writeScope: repo` then `writeScope: scratch`: `true`.
-- `web-fetch` with no def file: `true`, since no source documents a grant for it. A `web-fetch.md` def granting `Write` with no `writeScope`: `true`.
-- A scoped def whose grant key is `Tools:` or `TOOLS:` (not `tools:`) requires isolation, as does a read-only list under such a key. The lowercase key keeps working.
-
-Spawned process: `CLAUDE_PROJECT_DIR` set to a git temp dir and payload `cwd` set to a non-git temp dir, `subagent_type: "general-purpose"`, no isolation: deny JSON. `CLAUDE_PROJECT_DIR` set to a non-git temp dir (same skip guard): exit 0, stdout JSON with `systemMessage` and `hookSpecificOutput.additionalContext` both equal to the note, and no `permissionDecision` key. Missing parser module: copy `agent-worktree-gate.ts` and `agent-name.ts`, but not `write-scope-parse.ts`, into `<tmp>/.claude/hooks/`, and put a scratch-scoped `scoped.md` def (Write, no shell) in `<tmp>/.claude/agents/`. Spawn the copied gate with `CLAUDE_PROJECT_DIR` set to a git temp dir and an unisolated `subagent_type: "scoped"` dispatch. Expected: exit 0 and a deny JSON. Old write-scope gate: the same layout with `write-scope-parse.ts` present and an `agent-write-scope.ts` lacking the version export. Expected: exit 0 and a deny JSON. Spawned allow: the same layout with all three modules at version 2, a settings file registering `agent-write-scope.ts`, and a git temp root. Expected: exit 0 and no stdout, which proves the dynamic load succeeds in an installed layout.
+Spawned process: `CLAUDE_PROJECT_DIR` set to a git temp dir and payload `cwd` set to a non-git temp dir, `subagent_type: "general-purpose"`, no isolation: deny JSON. `CLAUDE_PROJECT_DIR` set to a non-git temp dir (same skip guard): exit 0, stdout JSON with `systemMessage` and `hookSpecificOutput.additionalContext` both equal to the note, and no `permissionDecision` key. With `GIT_DIR` in the environment the same root is a repo and the dispatch is denied.
 
 - [ ] **Step 2: Run to verify they fail.** `bun test test/agent-worktree-gate.test.ts`. Expected: FAIL on the new exports and cases.
 
 - [ ] **Step 3: Implement.**
-  - `probeGitWorkTree` returns `"repo"` when `env.GIT_DIR` or `env.GIT_WORK_TREE` is non-empty. Otherwise it returns `"unknown"` if `dir` is not an existing directory, then walks from `resolve(dir)` upward and returns `"repo"` at the first `.git` entry (file or directory). It returns `"not-repo"` when `dirname(p) === p`, which is how the walk ends at `/` and at a Windows drive root. A thrown error returns `"unknown"`. No git binary is spawned.
+  - `probeGitWorkTree` returns `"repo"` when `env.GIT_DIR` or `env.GIT_WORK_TREE` is non-empty. Otherwise it returns `"unknown"` if `dir` is not an existing directory, then walks upward from `realpathSync.native(dir)` so a link resolves to its target, and returns `"repo"` at the first `.git` entry (file or directory). It returns `"not-repo"` when `dirname(p) === p`, which is how the walk ends at `/` and at a Windows drive root. Any error other than absence returns `"unknown"`. No git binary is spawned.
   - `nonGitNote(root)` returns exactly: `` Worktree gate: ${root} is not a git repository, so worktree isolation is not available and this dispatch runs in the shared folder. A git repository in a subfolder of it is not isolated either. If this work should be versioned, run `git init` here and the gate will isolate concurrent writers. ``
   - In `decide`, after `requiresIsolation` returns true and before the isolation branch: allow with the note only when `projectRoot` is a non-empty string, `probe(projectRoot)` is `"not-repo"`, and either the payload has no string `cwd` or `probe(cwd)` is also `"not-repo"`. Any other answer falls through to today's logic.
-  - `BUILTIN_READ_ONLY` stays `explore` and `plan`. No source documents a grant for a `web-fetch` built-in, so it is an unknown type. The comment cites the Claude Code subagent docs for Explore and Plan.
-  - The gate never imports the parser statically, and it takes the `WriteScopeParser` type with `import type`, which erases at build. A static import that fails to link exits the process before the entrypoint's `try`, which Claude Code reads as no opinion. `loadWriteScopeParser` does both `await import(...)` calls inside its own `try` and returns `null` on any error. Importing `agent-write-scope.ts` is safe because its entrypoint sits behind `import.meta.main`. The function also returns `null` unless `WRITE_SCOPE_GATE_VERSION >= REQUIRED_WRITE_SCOPE_GATE_VERSION`. A project that modified or pinned `agent-write-scope.ts` keeps its old copy across a reinstall, and that copy still has the scratch-parent gap, so trusting `writeScope` beside it would let a scoped writer through both gates. The entrypoint calls it inside the existing `try` and passes the result down. The classification cache key includes whether a parser was present.
-  - `frontmatterRequiresIsolation` reads the frontmatter between the same fences as the shared parser (`frontmatterLines`) and matches the `tools` key case-sensitively, as Claude Code does. It returns `false` only when `parseScope` is non-null, `parseScope(text) === "scratch"`, there is no `memory:` line, and every tools token is in `READ_ONLY_TOOLS` or in `SCOPED_WRITE_TOOLS = new Set(["write", "edit", "sendmessage"])`. A comment says why. `agent-write-scope.ts` reads this same file with the same parser and confines those writes, and with no shell the confinement holds. NotebookEdit stays out.
+  - `frontmatterRequiresIsolation` matches the `tools` key case-sensitively, as Claude Code does. `BUILTIN_READ_ONLY` stays `explore` and `plan`, and its comment cites the Claude Code subagent docs.
   - The entrypoint passes `projectRootOf(process.env)`. On an allow with a note it prints `{"systemMessage": note, "hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": note}}`. A plain allow prints nothing.
-  - Header: replace "No network, no git" and "The gate reads no git state" with the probe's contract (filesystem only, no git spawned, the project root decides, unknown keeps today's behaviour). Add one paragraph on the scoped-writer rule, naming Task 1's fix as its precondition.
+  - Header: replace "No network, no git" and "The gate reads no git state" with the probe's contract (filesystem only, no git spawned, the project root decides, unknown keeps today's behaviour). Add a short paragraph saying a `writeScope: scratch` agent is still write-capable and needs isolation, and that #312 tracks trusting it.
 
 - [ ] **Step 4: Run to verify they pass.** `bun test`. Expected: all PASS.
 
@@ -205,7 +194,7 @@ Spawned process: `CLAUDE_PROJECT_DIR` set to a git temp dir and payload `cwd` se
 
 ```bash
 git add core/claude/hooks/agent-worktree-gate.ts test/agent-worktree-gate.test.ts
-git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "feat(worktree-gate): allow with a note outside git, trust shell-less scratch writers (#310)"
+git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "feat(worktree-gate): allow with a note outside git (#310)"
 ```
 
 PR A1 body: `Docs: README still accurate: the hooks row names the gates without describing their decisions`. PR checklist: one live run in a non-git folder confirms the note reaches the session (`systemMessage` shown, and the model can repeat the `git init` offer). If Claude Code rejects `additionalContext` on PreToolUse, drop that key and keep `systemMessage`.
@@ -303,7 +292,7 @@ In the main clone on `feat/310-kernel` after Task 3's commit.
 - Consumes: Task 3's CLI.
 - Produces: nothing later tasks call.
 
-- [ ] **Step 1: Dispatch the source read.** Use `research-scout` (it holds Write scoped to scratch) with `model: sonnet`. If group A1 has not merged, add an `ISOLATION-OVERRIDE:` line naming its scratch-only write scope. The brief: read Anthropic's current model documentation for Haiku 5.5, Sonnet 5.5, Opus 5.5 and Fable 5.2. For each, report effort support and levels, adaptive or extended thinking support, and any published guidance on delegation or self-verification, with the URL and a quoted line. The report goes to `<scratchpad>/model-docs-report.md`.
+- [ ] **Step 1: Dispatch the source read.** Use `research-scout` (it holds Write scoped to scratch) with `model: sonnet`. Add an `ISOLATION-OVERRIDE:` line naming its scratch-only write scope, since the worktree gate does not trust `writeScope` (#312). The brief: read Anthropic's current model documentation for Haiku 5.5, Sonnet 5.5, Opus 5.5 and Fable 5.2. For each, report effort support and levels, adaptive or extended thinking support, and any published guidance on delegation or self-verification, with the URL and a quoted line. The report goes to `<scratchpad>/model-docs-report.md`.
 - [ ] **Step 2: Apply the findings in `~/.claude`.**
   - In `skills/subagent-prompting/SKILL.md`, rewrite the Haiku 4.5 row (lines near 3, 77 and 79) for Haiku 5.5.
   - Relabel the Fable 5, Opus 5 and Sonnet 5 tables (near 74-76, 83-99 and 114-116) to the current point releases where the report confirms each claim. Label the rest "measured on 5.0, unverified on 5.x". The Opus 4.x history stays.

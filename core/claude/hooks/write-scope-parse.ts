@@ -1,7 +1,7 @@
 // The one parser for the `writeScope` key in an agent definition's frontmatter. The scratch-scope
-// gate (agent-write-scope.ts) and the worktree gate (agent-worktree-gate.ts) both ask the same
-// question of the same file, and two parsers would give two answers the first time a definition
-// carries a duplicate key or CRLF line endings. This file sits flat beside the hooks, like
+// gate (agent-write-scope.ts) reads it. It lives in its own file so a second consumer, such as the
+// worktree gate once #312 settles how it may rely on `writeScope`, shares this answer instead of
+// adding a parser that disagrees on a duplicate key or CRLF line endings. This file sits flat beside the hooks, like
 // agent-name.ts, because the installer copies that directory file by file and not recursively.
 
 export type WriteScopeParser = (text: string) => string | null;

@@ -49,14 +49,16 @@
 //   - Inside the project root only `<project>/.claude/scratch` is scratch. A folder
 //     named `scratch`, `scratchpad` or `.scratch` anywhere else in the project is
 //     tracked content the main session can load (`.claude/skills/scratch/SKILL.md`,
-//     `scratch/CLAUDE.md`), so a scoped agent is denied it. The worktree gate runs a
-//     shell-less scoped writer in the live checkout on the strength of this rule.
+//     `scratch/CLAUDE.md`), so a scoped agent is denied it.
 //   - The target and the project root are resolved with realpathSync.native first (the
-//     deepest existing ancestor, plus the tail that does not exist yet). A path that
-//     cannot be resolved, a dangling link, and a spelling that differs from the real
-//     one at or before the scratch segment (a junction, symlink, 8.3 short name,
-//     /tmp versus /private/tmp) are all "not scratch". Textual comparison alone let
-//     any such spelling make a scratch ancestor count again.
+//     deepest existing ancestor, plus the tail that does not exist yet), and the
+//     decision is made on the resolved paths. A path that cannot be resolved and a
+//     dangling link are "not scratch". Inside the project, the spelling must also match
+//     the project's own: a junction, symlink or 8.3 short name that reaches a project
+//     file by another route is denied, since textual comparison alone let any such
+//     spelling make a scratch ancestor count again. Outside the project the resolved
+//     path decides, so a session scratchpad under a linked temp directory (macOS
+//     /var versus /private/var) still counts.
 //   - A long-path (backslash backslash question mark) or UNC (two leading separators)
 //     file path is never scratch. Those spellings alias a project file under a form
 //     that does not match the project's own segments, which would let a scratch
@@ -85,9 +87,10 @@ import { isValidAgentName } from "./agent-name";
 import { parseWriteScope } from "./write-scope-parse";
 
 /**
- * Marks the scratch-parent fix and the shared writeScope parser. The worktree gate trusts a
- * definition's `writeScope` only when the installed scope gate is at this version or later. Bump it
- * whenever a change to this gate alters what `writeScope: scratch` confines.
+ * Marks the scratch-parent fix, the project-only drop box and the shared writeScope parser. Nothing
+ * reads it yet: a consumer that wants to rely on what `writeScope: scratch` confines (the worktree
+ * gate, once #312 redesigns that trust) can compare an installed copy against it. Bump it whenever
+ * a change to this gate alters what `writeScope: scratch` confines.
  */
 export const WRITE_SCOPE_GATE_VERSION = 2;
 
@@ -152,17 +155,17 @@ const startsWith = (a: string[], b: string[]): boolean => a.length >= b.length &
  * Is `filePath` a place a scratch-scoped agent may write? Resolved against `cwd` when relative, so
  * a bare `../../etc/hosts` cannot slip through as "not absolute".
  *
- * Both the target and the project root are canonicalised first (see canonicalize). Failing to
- * canonicalise is "not scratch". The raw spelling must also match the canonical one up to and
- * including the scratch segment, so a junction, symlink, 8.3 short name or `/tmp` versus
- * `/private/tmp` style alias never counts: every such spelling is a deny, not an unrelated folder.
- *
- * Then, on the canonical paths:
+ * Both the target and the project root are canonicalised first (see canonicalize), and failing to
+ * canonicalise is "not scratch". The decision is then made on the canonical paths:
  *   - Inside the project root, only `<project>/.claude/scratch` is scratch. Any other scratch-named
  *     folder there is tracked content the main session can load (`.claude/skills/scratch/SKILL.md`,
- *     `scratch/CLAUDE.md`), so a write to it is refused.
- *   - Outside the project root, a scratch-named segment counts only when that directory does not
- *     contain the project root.
+ *     `scratch/CLAUDE.md`), so a write to it is refused. The spelling used must also lead to that
+ *     folder through the project's own path, resolved or as given. A junction, symlink or 8.3 short
+ *     name that reaches it by another route is a deny, not an unrelated folder.
+ *   - Outside the project root, a scratch-named segment of the canonical path counts only when that
+ *     directory does not contain the project root. The spelling does not matter here, so a
+ *     scratchpad under a linked temp directory (macOS `/var` to `/private/var`) is still scratch,
+ *     and a scratch-named link to a folder that is not scratch is not.
  * Compared lowercased on every platform: case-insensitive containment can only add denies.
  */
 export function inScratch(filePath: string, cwd: string, projectDir: string): boolean {
@@ -182,14 +185,17 @@ export function inScratch(filePath: string, cwd: string, projectDir: string): bo
   const real = segmentsOf(canonicalAbs);
   const project = segmentsOf(canonicalProject);
   if (startsWith(real, project)) {
+    // Inside the project the route taken must be the project's own, either resolved or as the
+    // project was given. A link standing in for an ancestor of the project matches neither.
     const dropBox = [...project, ".claude", "scratch"];
-    return real.length > dropBox.length && startsWith(real, dropBox) && startsWith(raw, dropBox);
+    const givenDropBox = [...segmentsOf(resolve(projectDir)), ".claude", "scratch"];
+    return (
+      real.length > dropBox.length &&
+      startsWith(real, dropBox) &&
+      (startsWith(raw, dropBox) || startsWith(raw, givenDropBox))
+    );
   }
-  return real.some((segment, i) => {
-    if (!SCRATCH_SEGMENTS.has(segment)) return false;
-    const through = real.slice(0, i + 1);
-    return startsWith(raw, through) && !startsWith(project, through);
-  });
+  return real.some((segment, i) => SCRATCH_SEGMENTS.has(segment) && !startsWith(project, real.slice(0, i + 1)));
 }
 
 /**

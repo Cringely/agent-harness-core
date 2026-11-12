@@ -13,9 +13,6 @@
 // checkout unless one of these holds:
 //   - the hook proved the type read-only, or it is a built-in the hook trusts as
 //     read-only (Explore, Plan);
-//   - the type is a trusted scoped writer: a definition in the project's own
-//     agents folder that declares `writeScope: scratch` and grants no shell (see the
-//     scoped-writer paragraph below);
 //   - neither the project root nor the session folder is a git repository, so no
 //     worktree can exist (see the git-probe paragraph below). The dispatch is allowed
 //     with a note rather than denied for something that cannot be done;
@@ -37,12 +34,13 @@
 // out of sync the first time a new role is added with a tools grant nobody
 // updated the list for — which is the exact failure class this hook exists
 // to close. The rule as shipped:
-//   - Type has a definition file → parse its `tools:` frontmatter. Exempt if every
-//     listed tool is on the provably-read-only allowlist, or if it is a trusted scoped
-//     writer (`writeScope: scratch`, no `memory:` line, every tool read-only or one of
-//     Write, Edit and SendMessage, and the trust conditions in the scoped-writer
-//     paragraph below hold). An absent/empty `tools:` field, `*`, "All tools", or any
-//     other unlisted tool ⇒ requires isolation.
+//   - Type has a definition file → parse its `tools:` frontmatter. Exempt only if
+//     every listed tool is on the provably-read-only allowlist; an absent/empty
+//     `tools:` field, `*`, "All tools", or any unlisted tool ⇒ requires isolation.
+//     The key is matched case-sensitively, as Claude Code reads it, so `Tools:` is no
+//     grant. A `writeScope: scratch` declaration changes nothing here: such an agent
+//     is write-capable and needs isolation like any other (a redesign of trust for
+//     scoped writers is tracked in #312).
 //   - Definition file exists but is unreadable ⇒ that TYPE requires isolation
 //     (fail-closed tier: classification ran and found nothing provably safe.
 //     The fail-open tier below is reserved for malformed stdin and our own
@@ -77,7 +75,7 @@
 // well-formed deny emits JSON. If `bun` itself is missing from PATH the hook
 // command fails non-zero-but-not-2, which Claude Code also treats as
 // non-blocking. No network, no git binary, no mutation. Input is the stdin payload, the environment,
-// and the few filesystem reads the git probe and the scoped-writer check make.
+// and the few filesystem reads the git probe and the agent-definition lookup make.
 // (An unreadable agent-definition file is NOT a hook error — it resolves to
 // "requires isolation" for that type, see above.)
 //
@@ -101,18 +99,11 @@
 // `cwd` must agree with it. Any answer short of "not-repo" for either, "unknown" included, keeps the
 // behaviour above, so a probe that cannot answer never widens what is allowed.
 //
-// Scoped writers (#310). A definition that declares `writeScope: scratch` and grants no shell is not
-// a repo writer: agent-write-scope.ts reads the same file with the same parser and confines its
-// Write and Edit calls to a scratch directory, and with no shell nothing else reaches the checkout.
-// The gate trusts that only when the parser module loads, the installed write-scope gate is at the
-// required version (it carries the scratch-parent containment fix) and the project's settings.json
-// registers that project's own `.claude/hooks/agent-write-scope.ts` under a PreToolUse matcher
-// covering Write and Edit. The definition must also sit in `<project>/.claude/agents`, where the
-// write-scope gate reads it, and the dispatched type name must already be trimmed and lowercase,
-// since that gate looks it up verbatim. Anything less leaves the type requiring isolation, because
-// a scoped writer behind two gates that do not both hold is an unconfined one.
-// The modules load through a guarded dynamic import: a static import that fails to link exits the
-// process before the entrypoint's try, which Claude Code reads as no opinion.
+// Scoped writers (#312). An agent that declares `writeScope: scratch` is classified like any other
+// write-capable type and needs isolation. agent-write-scope.ts confines its Write and Edit calls to
+// a scratch folder, but the worktree gate does not rely on that. Trusting it needs the two gates to
+// agree on the definition, the type name, the project root and the registration, and the redesign
+// is tracked in #312.
 //
 // Decision logic lives in the exported `decide()`, exercised offline by
 // test/agent-worktree-gate.test.ts without spawning a process. The stdin/stdout
@@ -120,13 +111,8 @@
 // "spawned process" describe block at the end of that file.
 
 import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { dirname, join, resolve } from "node:path";
 import { isValidAgentName } from "./agent-name";
-// Type only: erased at build, so nothing here can fail to link. The module itself loads through
-// loadWriteScopeParser() below.
-import type { WriteScopeParser } from "./write-scope-parse";
-
 /**
  * Project-specific escape hatch: subagent_type values this project has
  * decided are safe to dispatch without isolation regardless of what their
@@ -157,23 +143,12 @@ const READ_ONLY_TOOLS = new Set([
  * Explore and Plan are read-only per the built-in subagents section of the Claude Code subagent
  * docs (code.claude.com/docs/en/sub-agents), which gives both "read-only tools; Write and Edit are
  * denied", and per the Agent tool's own roster ("All tools except Agent, Artifact, ExitPlanMode,
- * Edit, Write, NotebookEdit"). No source documents a grant for any other built-in, a `web-fetch`
- * type included, so none is listed: an uncited grant is not proof of read-only. general-purpose
+ * Edit, Write, NotebookEdit"). No source documents a grant for any other built-in, so none is
+ * listed: an uncited grant is not proof of read-only. general-purpose
  * and fork carry all tools and deliberately have no entry here — they fall
  * through to the requires-isolation default, exactly like unknown types.
  */
 const BUILTIN_READ_ONLY = new Set(["explore", "plan"]);
-
-/**
- * Write tools a `writeScope: scratch` definition may hold and still be trusted without isolation.
- * agent-write-scope.ts reads the same definition with the same parser and confines Write and Edit
- * to a scratch directory, and SendMessage writes no file. With no shell in the grant, nothing else
- * reaches the checkout. NotebookEdit stays out, and so does everything not named here.
- */
-const SCOPED_WRITE_TOOLS = new Set(["write", "edit", "sendmessage"]);
-
-/** The write-scope gate version that carries the scratch-parent containment fix (Task 1). */
-export const REQUIRED_WRITE_SCOPE_GATE_VERSION = 2;
 
 /** Where the agent definitions live, relative to this script. */
 export const DEFAULT_AGENTS_DIR = join(import.meta.dir, "..", "agents");
@@ -257,149 +232,21 @@ export function projectRootOf(env: Record<string, string | undefined>): string {
   return env.CLAUDE_PROJECT_DIR || join(import.meta.dir, "..", "..");
 }
 
-/**
- * Does a settings.json matcher cover `tool`? Claude Code treats an empty or `*` matcher as every
- * tool and anything else as a regular expression over the tool name. Anchored, so `WriteFile` does
- * not cover `Write`. An invalid expression covers nothing.
- */
-function matcherCovers(matcher: unknown, tool: string): boolean {
-  if (matcher === undefined || matcher === "" || matcher === "*") return true;
-  if (typeof matcher !== "string") return false;
-  try {
-    return new RegExp(`^(?:${matcher})$`).test(tool);
-  } catch {
-    return false;
-  }
-}
-
-/** A path in comparison form: forward slashes, collapsed separators, lowercased where the filesystem folds case. */
-function canonPath(p: string): string {
-  const c = p.replace(/\\/g, "/").replace(/\/+/g, "/");
-  return process.platform === "win32" ? c.toLowerCase() : c;
-}
-
-/** The directory the write-scope gate reads definitions from, and the only one trusted here. */
-function projectAgentsDir(projectRoot: string): string {
-  return join(resolve(projectRoot), ".claude", "agents");
-}
-
-/**
- * Does `command` run THIS project's write-scope gate, `<projectRoot>/.claude/hooks/agent-write-scope.ts`?
- * `$CLAUDE_PROJECT_DIR` and `${CLAUDE_PROJECT_DIR}` expand to the root, then the full path has to
- * appear as its own word, bounded by whitespace, a quote or an end of the string. A bare file name,
- * a relative path, another project's copy and a path that reaches this one only through `..` fail.
- */
-function commandNamesScopeGate(command: string, projectRoot: string): boolean {
-  const root = resolve(projectRoot);
-  const expected = canonPath(join(root, ".claude", "hooks", "agent-write-scope.ts"));
-  const expanded = canonPath(command.replace(/\$\{CLAUDE_PROJECT_DIR\}|\$CLAUDE_PROJECT_DIR\b/g, () => root));
-  for (let at = expanded.indexOf(expected); at >= 0; at = expanded.indexOf(expected, at + 1)) {
-    const before = at === 0 ? " " : expanded[at - 1];
-    const after = expanded[at + expected.length] ?? " ";
-    if (/[\s"']/.test(before) && /[\s"']/.test(after)) return true;
-  }
-  return false;
-}
-
-/**
- * True when settings.json registers THIS project's write-scope gate (see commandNamesScopeGate)
- * under ONE PreToolUse group whose matcher covers both Write and Edit. Two groups that each cover
- * one tool leave the other unguarded, so they do not count.
- */
-function registersWriteScopeGate(settingsPath: string, projectRoot: string): boolean {
-  const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as unknown;
-  const groups = (settings as { hooks?: { PreToolUse?: unknown } } | null)?.hooks?.PreToolUse;
-  if (!Array.isArray(groups)) return false;
-  return groups.some((g: unknown) => {
-    if (typeof g !== "object" || g === null) return false;
-    const group = g as { matcher?: unknown; hooks?: unknown };
-    if (!matcherCovers(group.matcher, "Write") || !matcherCovers(group.matcher, "Edit")) return false;
-    if (!Array.isArray(group.hooks)) return false;
-    return group.hooks.some((h: unknown) => {
-      const command = (h as { command?: unknown } | null)?.command;
-      return typeof command === "string" && commandNamesScopeGate(command, projectRoot);
-    });
-  });
-}
-
-/** An import specifier for a path: absolute paths become file URLs, relative ones pass through. */
-function specifier(p: string): string {
-  return isAbsolute(p) ? pathToFileURL(p).href : p;
-}
-
-/**
- * Loads the write-scope parser, or null when trusting `writeScope` would be unsafe. Null on any
- * load error, and also unless the write-scope gate beside it exports WRITE_SCOPE_GATE_VERSION at or
- * above REQUIRED_WRITE_SCOPE_GATE_VERSION and the project's settings.json registers
- * `<projectRoot>/.claude/hooks/agent-write-scope.ts` for Write and Edit.
- * A project that modified or pinned agent-write-scope.ts keeps its old copy across a reinstall,
- * and that copy still has the scratch-parent gap, so trusting `writeScope` beside it would let a
- * scoped writer through both gates.
- *
- * Both imports are dynamic and inside the try. A static import that fails to link exits the process
- * before the entrypoint's try, which Claude Code reads as no opinion. Importing agent-write-scope.ts
- * is safe: its entrypoint sits behind `import.meta.main`.
- */
-export async function loadWriteScopeParser(
-  parserPath: string = "./write-scope-parse",
-  gatePath: string = "./agent-write-scope",
-  settingsPath?: string,
-  projectRoot: string = projectRootOf(process.env),
-): Promise<WriteScopeParser | null> {
-  try {
-    const parser = (await import(specifier(parserPath))) as { parseWriteScope?: unknown };
-    const gate = (await import(specifier(gatePath))) as { WRITE_SCOPE_GATE_VERSION?: unknown };
-    if (typeof parser.parseWriteScope !== "function") return null;
-    const version = gate.WRITE_SCOPE_GATE_VERSION;
-    if (typeof version !== "number" || !(version >= REQUIRED_WRITE_SCOPE_GATE_VERSION)) return null;
-    if (!registersWriteScopeGate(settingsPath ?? join(projectRoot, ".claude", "settings.json"), projectRoot)) {
-      return null;
-    }
-    return parser.parseWriteScope as WriteScopeParser;
-  } catch {
-    return null;
-  }
-}
-
 const ALLOW: GateDecision = { action: "allow" };
 
 /** Per-process memo of agentsDir+type → requires-isolation. Short-lived by construction. */
 const classificationCache = new Map<string, boolean>();
 
 /**
- * The lines between a leading `---` line and the next `---` line, or null when the text has no such
- * frontmatter. The boundaries are the shared writeScope parser's (write-scope-parse.ts): a fence is
- * a line of three dashes with optional trailing whitespace, CRLF-agnostic, and an unterminated
- * block is not frontmatter. The trust decision below must read the same block the confinement side
- * reads, or a line one of them sees and the other misses would be decided differently. One
- * deliberate difference: this side does not strip a leading byte order mark, so a definition that
- * has one reads as no frontmatter and requires isolation. The trust side under-detects on purpose.
+ * True unless the frontmatter proves the role read-only: a `tools:` field whose
+ * every entry is on the read-only allowlist. Absent/empty field means all tools.
+ * The key is matched case-sensitively, as Claude Code reads it, so `Tools:` or `TOOLS:` is no grant
+ * at all and the role inherits every tool.
  */
-export function frontmatterLines(text: string): string[] | null {
-  const lines = text.split(/\r?\n/);
-  if (!/^---\s*$/.test(lines[0] ?? "")) return null;
-  for (let i = 1; i < lines.length; i++) {
-    if (/^---\s*$/.test(lines[i])) return lines.slice(1, i);
-  }
-  return null;
-}
-
-/**
- * True unless the frontmatter proves the role needs no isolation. Two things prove it:
- *   - a `tools:` field whose every entry is on the read-only allowlist, or
- *   - a trusted scoped writer: `parseScope` is non-null and reads `writeScope: scratch`, there is no
- *     `memory:` line, and every tool is read-only or one of Write, Edit and SendMessage.
- * An absent or empty `tools:` field means all tools. The key is matched case-sensitively, as Claude
- * Code reads it, so `Tools:` or `TOOLS:` is no grant at all and the role inherits every tool.
- *
- * Whether a parser may be passed at all is the caller's decision, not made here. That means the
- * write-scope gate being at REQUIRED_WRITE_SCOPE_GATE_VERSION and registered for Write and Edit
- * (loadWriteScopeParser), and the project agents folder, type spelling and project root checks in
- * decide().
- */
-function frontmatterRequiresIsolation(text: string, parseScope: WriteScopeParser | null): boolean {
-  const lines = frontmatterLines(text);
-  if (lines === null) return true; // no parseable frontmatter → cannot prove read-only
+function frontmatterRequiresIsolation(text: string): boolean {
+  const fm = text.match(/^---\r?\n([\s\S]*?)\r?\n---/)?.[1];
+  if (fm === undefined) return true; // no parseable frontmatter → cannot prove read-only
+  const lines = fm.split(/\r?\n/);
   // A `memory:` field (any scope) auto-enables Read, Write, and Edit regardless
   // of what `tools:` grants, per the docs' persistent-memory section.
   // `memory: user` writes outside the checkout (~/.claude/agent-memory/), so
@@ -418,19 +265,7 @@ function frontmatterRequiresIsolation(text: string, parseScope: WriteScopeParser
     .map((s) => s.trim().toLowerCase())
     .filter((s) => s !== "");
   if (tokens.length === 0) return true; // empty value = all tools
-  if (tokens.every((tok) => READ_ONLY_TOOLS.has(tok))) return false;
-  // A shell-less scratch writer is not a repo writer. agent-write-scope.ts reads this same file with
-  // the same parser and confines Write and Edit to a scratch directory, and with no shell in the
-  // grant nothing else reaches the checkout. The memory: check above has already run, and only a
-  // non-null parser (see loadWriteScopeParser) lets this line fire.
-  if (
-    parseScope !== null &&
-    parseScope(text) === "scratch" &&
-    tokens.every((tok) => READ_ONLY_TOOLS.has(tok) || SCOPED_WRITE_TOOLS.has(tok))
-  ) {
-    return false;
-  }
-  return true;
+  return !tokens.every((tok) => READ_ONLY_TOOLS.has(tok));
 }
 
 /**
@@ -458,13 +293,11 @@ function frontmatterRequiresIsolation(text: string, parseScope: WriteScopeParser
 export function requiresIsolation(
   subagentType: string,
   agentsDir: string = DEFAULT_AGENTS_DIR,
-  parseScope: WriteScopeParser | null = null,
 ): boolean {
   if (PROJECT_EXCEPTIONS.includes(subagentType)) return false;
   if (!isValidAgentName(subagentType)) return true;
 
-  // The answer depends on whether a parser was supplied, so the key says so.
-  const key = `${agentsDir} ${subagentType} ${parseScope === null ? "plain" : "scoped"}`;
+  const key = `${agentsDir} ${subagentType}`;
   const cached = classificationCache.get(key);
   if (cached !== undefined) return cached;
 
@@ -472,7 +305,7 @@ export function requiresIsolation(
   const defFile = join(agentsDir, `${subagentType}.md`);
   if (existsSync(defFile)) {
     try {
-      result = frontmatterRequiresIsolation(readFileSync(defFile, "utf8"), parseScope);
+      result = frontmatterRequiresIsolation(readFileSync(defFile, "utf8"));
     } catch {
       // Definition exists but can't be read: cannot prove read-only, so this
       // TYPE requires isolation. Not a hook-level fail-open — that is reserved
@@ -494,14 +327,13 @@ export function requiresIsolation(
  * Decision over the PreToolUse stdin payload. Unrecognizable input allows.
  *
  * `projectRoot` null or omitted means no root is known: the probe is not called and the non-git
- * allow never fires. `parseScope` null or omitted means no scoped-writer trust.
+ * allow never fires.
  */
 export function decide(
   payload: unknown,
   agentsDir: string = DEFAULT_AGENTS_DIR,
   projectRoot: string | null = null,
   probe: (dir: string) => GitProbe = (dir) => probeGitWorkTree(dir),
-  parseScope: WriteScopeParser | null = null,
 ): GateDecision {
   if (typeof payload !== "object" || payload === null) return ALLOW;
   const p = payload as Record<string, unknown>;
@@ -524,19 +356,7 @@ export function decide(
       ? t.subagent_type.trim().toLowerCase()
       : "general-purpose";
 
-  // The scoped-writer trust holds only where agent-write-scope.ts confines the writes. It reads the
-  // definition verbatim from `<projectRoot>/.claude/agents`, so the definition this gate read must
-  // sit there too, and the type name must reach that lookup unchanged (this gate trims and
-  // lowercases it, the write-scope gate does not). Otherwise a same-named definition elsewhere, or a
-  // differently cased dispatch, would be trusted here and unconfined there.
-  const scopeTrusted =
-    parseScope !== null &&
-    typeof projectRoot === "string" &&
-    projectRoot !== "" &&
-    t.subagent_type === subagentType &&
-    canonPath(resolve(agentsDir)) === canonPath(projectAgentsDir(projectRoot));
-
-  if (!requiresIsolation(subagentType, agentsDir, scopeTrusted ? parseScope : null)) return ALLOW;
+  if (!requiresIsolation(subagentType, agentsDir)) return ALLOW;
 
   // Nothing to isolate into: the project root is provably not a repository, and the session cwd
   // (when the payload names one) agrees. Allow and say so. Any other probe answer, "unknown"
@@ -584,13 +404,7 @@ if (import.meta.main) {
     // down there, but never while CLAUDECODE is set, so a Claude Code session always runs the rest.
     if (process.env.COPILOT_CLI && !process.env.CLAUDECODE) process.exit(0);
     const payload = JSON.parse(raw);
-    const decision = decide(
-      payload,
-      DEFAULT_AGENTS_DIR,
-      projectRootOf(process.env),
-      undefined,
-      await loadWriteScopeParser(),
-    );
+    const decision = decide(payload, DEFAULT_AGENTS_DIR, projectRootOf(process.env));
     if (decision.action === "allow" && decision.note !== undefined) {
       console.log(
         JSON.stringify({

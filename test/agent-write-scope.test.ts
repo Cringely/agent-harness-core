@@ -6,7 +6,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   WRITE_SCOPE_GATE_VERSION,
   decide,
@@ -236,13 +236,32 @@ describe("inScratch(): an aliased spelling of a project path is never scratch", 
     expect(inScratch(join(scratchLink, "new.ts"), proj, proj)).toBe(false);
   });
 
-  test.skipIf(!linked)("a scratch folder outside the project reached through a link is denied, its real spelling is allowed", () => {
-    const other = join(linkRoot, "other-real");
-    mkdirSync(join(other, "scratchpad"), { recursive: true });
-    const otherLink = join(linkRoot, "other-link");
-    symlinkSync(other, otherLink, "junction");
-    expect(inScratch(join(other, "scratchpad", "f.md"), proj, proj)).toBe(true);
-    expect(inScratch(join(otherLink, "scratchpad", "f.md"), proj, proj)).toBe(false);
+  // Outside the project the resolved path decides, whatever the spelling. A session scratchpad under
+  // a linked temp directory (macOS /var to /private/var) must keep working.
+  test.skipIf(!linked)("a scratchpad under a linked temp directory is scratch by either spelling", () => {
+    const tmpReal = join(linkRoot, "tmp-real");
+    const pad = join("claude", "sess", "scratchpad");
+    mkdirSync(join(tmpReal, pad), { recursive: true });
+    const tmpLink = join(linkRoot, "tmp-link");
+    symlinkSync(tmpReal, tmpLink, "junction");
+    expect(inScratch(join(tmpReal, pad, "r.md"), proj, proj)).toBe(true);
+    expect(inScratch(join(tmpLink, pad, "r.md"), proj, proj)).toBe(true);
+    expect(inScratch(join(tmpLink, pad, "new-dir", "r.md"), proj, proj)).toBe(true);
+  });
+
+  test.skipIf(!linked)("a scratch-named link to a folder that is not scratch is not scratch", () => {
+    const plain = join(linkRoot, "plain-target");
+    mkdirSync(plain, { recursive: true });
+    const named = join(linkRoot, "tmp-named", "scratchpad");
+    mkdirSync(dirname(named), { recursive: true });
+    symlinkSync(plain, named, "junction");
+    expect(inScratch(join(named, "f.md"), proj, proj)).toBe(false);
+  });
+
+  test.skipIf(!linked)("a project given by its link spelling allows its own .claude/scratch under that spelling", () => {
+    const linkedProj = join(viaLink, "scratch", "repo");
+    expect(inScratch(join(linkedProj, ".claude", "scratch", "r.md"), linkedProj, linkedProj)).toBe(true);
+    expect(inScratch(join(linkedProj, "src", "a.ts"), linkedProj, linkedProj)).toBe(false);
   });
 
   test.skipIf(!linked)("the project's .claude/scratch is allowed by its real spelling and denied through a link spelling", () => {
@@ -288,10 +307,32 @@ describe("inScratch(): an aliased spelling of a project path is never scratch", 
     expect(inScratch(join(shortRoot!, "a-long-project-name-for-short-alias", "src", "a.ts"), longProject, longProject)).toBe(false);
   });
 
-  test("a path the filesystem cannot canonicalise is not scratch", () => {
-    // An embedded NUL makes realpath throw something other than ENOENT.
-    expect(inScratch(join(linkRoot, "scratchpad", "bad" + String.fromCharCode(0) + ".md"), linkRoot, linkRoot)).toBe(false);
-    expect(inScratch(join(linkRoot, "elsewhere", "scratchpad", "ok.md"), linkRoot + String.fromCharCode(0), linkRoot)).toBe(false);
+  // An embedded NUL makes realpath throw something other than "absent". Each target is one the
+  // outside-the-project rule would accept if canonicalisation were skipped or its failure ignored,
+  // and each has a control with a resolvable twin that is accepted, so a pass here can only come
+  // from the failure being treated as "not scratch".
+  const NUL = String.fromCharCode(0);
+  test("a target the filesystem cannot canonicalise is not scratch", () => {
+    const outside = mkdtempSync(join(realTmp, "write-scope-nul-"));
+    try {
+      mkdirSync(join(outside, "scratchpad"));
+      expect(inScratch(join(outside, "scratchpad", "ok.md"), linkRoot, linkRoot)).toBe(true);
+      expect(inScratch(join(outside, "scratchpad", "bad" + NUL + ".md"), linkRoot, linkRoot)).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("a project root the filesystem cannot canonicalise makes every target not scratch", () => {
+    const outside = mkdtempSync(join(realTmp, "write-scope-nul-"));
+    try {
+      mkdirSync(join(outside, "scratchpad"));
+      const target = join(outside, "scratchpad", "ok.md");
+      expect(inScratch(target, linkRoot, linkRoot)).toBe(true);
+      expect(inScratch(target, linkRoot, linkRoot + NUL)).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   test("a dangling link in the path is not scratch, since where a write lands is unknown", () => {
