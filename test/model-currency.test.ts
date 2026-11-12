@@ -285,15 +285,32 @@ describe("walker", () => {
     const r2 = await run(["--root", root, "--no-resolve", "--exclude", "extra"], deps({}));
     expect(rowsOf(r2.output, "unknown").length).toBe(1);
   });
-  test("skips a file with a NUL byte and a file over 2 MB, and a root may be a file", async () => {
+  test("a file with a NUL byte and a file over 2 MB are unknown rows, and a root may be a file", async () => {
     const root = tempRoot();
     put(root, "bin.dat", "claude-sonnet-5\0\n"); // model-currency: ignore
     put(root, "big.txt", "claude-sonnet-5\n" + "x".repeat(2 * 1024 * 1024)); // model-currency: ignore
     put(root, "ok.txt", PIN_FILE);
     const r = await run(["--root", root, "--no-resolve"], deps({}));
-    expect(rowsOf(r.output, "unknown").length).toBe(1);
+    const rows = rowsOf(r.output, "unknown");
+    expect(rows.some((l) => l.includes("bin.dat:0\tnot read: NUL byte"))).toBe(true);
+    expect(rows.some((l) => l.includes("big.txt:0\tnot read: over 2 MB"))).toBe(true);
+    expect(rows.length).toBe(3);
     const single = await run(["--root", join(root, "ok.txt"), "--no-resolve"], deps({}));
     expect(rowsOf(single.output, "unknown").length).toBe(1);
+  });
+  test("the .bak exclusion matches backup names only", async () => {
+    const root = tempRoot();
+    const pin = "claude-sonnet-5\n"; // model-currency: ignore
+    put(root, "deploy.bake.json", pin);
+    put(root, "x.bakery.ts", pin);
+    put(root, "config.yml.bak.20260930-033418", pin);
+    put(root, "old.bak", pin);
+    const r = await run(["--root", root, "--no-resolve"], deps({}));
+    const rows = rowsOf(r.output, "unknown");
+    expect(rows.length).toBe(2);
+    expect(rows.some((l) => l.includes("deploy.bake.json"))).toBe(true);
+    expect(rows.some((l) => l.includes("x.bakery.ts"))).toBe(true);
+    expect(r.output.split("\n").at(-1)).toBe("scanned 2 files, skipped 0, excluded 2");
   });
 });
 
@@ -305,29 +322,45 @@ describe("coverage", () => {
     return latest;
   }
 
-  test("the last line counts scanned files and rule skips; the first line stays the source", async () => {
+  test("the last line counts scanned, skipped and excluded; the first line stays the source", async () => {
     const root = tempRoot();
     put(root, "a.sh", "claude --model claude-sonnet-5-5 -p x\n"); // model-currency: ignore
     put(root, "b.txt", "nothing here\n");
     put(root, "log.jsonl", "x\n");
     put(root, "old.bak.1", "x\n");
-    put(root, "bin.dat", "x\0y\n");
-    put(root, "big.txt", "x".repeat(2 * 1024 * 1024 + 1));
+    put(root, "plugins/p.md", "x\n");
     const r = await run(["--root", root, "--latest", await withLatestFile()], deps({}));
     expect(r.output.split("\n")[0]).toBe("latest source: file");
-    expect(lastLine(r.output)).toBe("scanned 2 files, skipped 4");
+    expect(lastLine(r.output)).toBe("scanned 2 files, skipped 0, excluded 3");
     expect(r.exitCode).toBe(0);
+  });
+  test("an oversize file makes the run inconclusive (exit 2) even when every scanned pin is current", async () => {
+    const root = tempRoot();
+    put(root, "a.sh", "claude --model claude-sonnet-5-5 -p x\n"); // model-currency: ignore
+    put(root, "big.txt", "x".repeat(2 * 1024 * 1024 + 1));
+    const r = await run(["--root", root, "--latest", await withLatestFile()], deps({}));
+    expect(rowsOf(r.output, "unknown")[0]).toContain("big.txt:0\tnot read: over 2 MB");
+    expect(lastLine(r.output)).toBe("scanned 1 files, skipped 1, excluded 0");
+    expect(r.exitCode).toBe(2);
+  });
+  test("a stray NUL byte in a UTF-8 file makes the run inconclusive (exit 2)", async () => {
+    const root = tempRoot();
+    put(root, "a.sh", "claude --model claude-sonnet-5-5 -p x\n"); // model-currency: ignore
+    put(root, "stray.md", "claude --model claude-sonnet-5 -p x\0\n"); // model-currency: ignore
+    const r = await run(["--root", root, "--latest", await withLatestFile()], deps({}));
+    expect(rowsOf(r.output, "unknown")[0]).toContain("stray.md:0\tnot read: NUL byte");
+    expect(r.exitCode).toBe(2);
   });
   test("a root whose files are all excluded scans nothing and is exit 2", async () => {
     const root = tempRoot();
     put(root, "worktrees/x/a.md", "claude-sonnet-5-5\n"); // model-currency: ignore
     const r = await run(["--root", root, "--latest", await withLatestFile()], deps({}));
-    expect(lastLine(r.output)).toBe("scanned 0 files, skipped 0");
+    expect(lastLine(r.output)).toBe("scanned 0 files, skipped 0, excluded 1");
     expect(r.exitCode).toBe(2);
   });
   test("an empty root is exit 2 even under a real latest source", async () => {
     const r = await run(["--root", tempRoot(), "--latest", await withLatestFile()], deps({}));
-    expect(lastLine(r.output)).toBe("scanned 0 files, skipped 0");
+    expect(lastLine(r.output)).toBe("scanned 0 files, skipped 0, excluded 0");
     expect(r.exitCode).toBe(2);
   });
   test("an unreadable file is an unknown row naming it and the error class, never its contents", async () => {
@@ -347,7 +380,7 @@ describe("coverage", () => {
     expect(rows[0]).toContain("locked.sh:0\tunreadable: EACCES");
     expect(r.output).not.toContain("SECRET-CONTENT");
     expect(rowsOf(r.output, "current").length).toBe(1);
-    expect(lastLine(r.output)).toBe("scanned 1 files, skipped 0");
+    expect(lastLine(r.output)).toBe("scanned 1 files, skipped 0, excluded 0");
     expect(r.exitCode).toBe(2);
   });
   test("a symlinked or junctioned directory is counted as skipped and is an unknown row, so exit is not 0", async () => {
@@ -360,7 +393,7 @@ describe("coverage", () => {
     const rows = rowsOf(r.output, "unknown");
     expect(rows.length).toBe(1);
     expect(rows[0]).toContain("linked:0\tnot read: symlink");
-    expect(lastLine(r.output)).toBe("scanned 1 files, skipped 1");
+    expect(lastLine(r.output)).toBe("scanned 1 files, skipped 1, excluded 0");
     expect(r.exitCode).toBe(2);
   });
   test("a UTF-16 file with a byte order mark is decoded and scanned, not skipped as binary", async () => {
@@ -373,7 +406,7 @@ describe("coverage", () => {
     writeFileSync(join(root, "be.ps1"), be);
     const r = await run(["--root", root, "--latest", await withLatestFile()], deps({}));
     expect(rowsOf(r.output, "behind").length).toBe(2);
-    expect(lastLine(r.output)).toBe("scanned 2 files, skipped 0");
+    expect(lastLine(r.output)).toBe("scanned 2 files, skipped 0, excluded 0");
     expect(r.exitCode).toBe(1);
   });
   test("an error without a plain code is reported as error", async () => {

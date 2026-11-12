@@ -13,10 +13,18 @@
 //
 // Output: a first line naming the source, then one row per finding:
 //   <status>\t<file>:<line>\t<value>\t<latest or ->
-// then a last line "scanned N files, skipped M". A file or directory that cannot be read is an
-// unknown row naming it and the error class. So is a symlink or other non-regular entry, which is
-// not followed. Files skipped by rule (.jsonl, .bak, over 2 MB, a NUL byte in a file with no UTF-16
-// byte order mark) are counted in M and not reported otherwise. UTF-16 files with a mark are decoded.
+// then a last line "scanned N files, skipped M, excluded K".
+//
+// The invariant: exit 0 means every file in scope was read. Anything in scope that was not read is
+// an unknown row, so the run exits 2, and M counts those entries. They are a file or directory that
+// cannot be read (with the error class), a symlink or other non-regular entry (not followed), a file
+// over 2 MB, and a file with a NUL byte and no UTF-16 byte order mark. UTF-16 files with a mark are
+// decoded and scanned.
+//
+// Deliberately out of scope, and counted in K so they are never presented as covered: .jsonl files,
+// backup names (a name ending in .bak or carrying a .bak.<suffix> segment), and every directory named
+// in DEFAULT_EXCLUDES or by --exclude, at any depth. Each excluded directory counts once, whatever
+// it holds. A root that is a file is read whatever its name.
 //
 // What is detected. Pins: claude-<family>-<major>[-|.]<minor>[-<date>] and the older
 // claude-<major>[-|.]<minor>-<family>. Aliases (fable, opus, sonnet, haiku), only in these forms:
@@ -239,12 +247,15 @@ interface FoundFile {
 // reflects it.
 interface Coverage {
   scanned: number;
-  skipped: number;
+  skipped: number; // entries not read, each with an unknown row
+  excluded: number; // deliberate exclusions: .jsonl, backup names, default and --exclude directories
   unread: Row[];
 }
 
-function skipFile(name: string): boolean {
-  return name.endsWith(".jsonl") || name.includes(".bak");
+// Deliberately excluded files: JSON-lines logs, and backup names (ending in .bak, or carrying a
+// .bak.<suffix> segment). A name that merely contains the letters, such as deploy.bake.json, is not one.
+function excludedFile(name: string): boolean {
+  return name.endsWith(".jsonl") || /\.bak(?:\.|$)/.test(name);
 }
 
 // The error's code (EACCES, EPERM, ...) when it is a plain upper-case token, else a generic word.
@@ -280,9 +291,10 @@ function walk(abs: string, shown: string, excludes: Set<string>, out: FoundFile[
       continue;
     }
     if (e.isDirectory()) {
-      if (!excludes.has(e.name)) walk(childAbs, childShown, excludes, out, cov);
+      if (excludes.has(e.name)) cov.excluded++;
+      else walk(childAbs, childShown, excludes, out, cov);
     } else if (e.isFile()) {
-      if (skipFile(e.name)) cov.skipped++;
+      if (excludedFile(e.name)) cov.excluded++;
       else out.push({ abs: childAbs, shown: childShown });
     }
   }
@@ -304,12 +316,14 @@ function scanFile(f: FoundFile, readFile: (path: string) => Buffer, cov: Coverag
   try {
     if (statSync(f.abs).size > MAX_BYTES) {
       cov.skipped++;
+      cov.unread.push(notReadRow(f.shown, "over 2 MB"));
       return [];
     }
     const buf = readFile(f.abs);
     const text = decodeUtf16(buf);
     if (text === null && buf.includes(0)) {
       cov.skipped++;
+      cov.unread.push(notReadRow(f.shown, "NUL byte"));
       return [];
     }
     cov.scanned++;
@@ -365,7 +379,7 @@ export async function run(argv: string[], deps: RunDeps): Promise<{ exitCode: 0 
 
   const excludes = new Set([...DEFAULT_EXCLUDES, ...(values.exclude ?? [])]);
   const files: FoundFile[] = [];
-  const cov: Coverage = { scanned: 0, skipped: 0, unread: [] };
+  const cov: Coverage = { scanned: 0, skipped: 0, excluded: 0, unread: [] };
   for (const root of values.root ?? ["."]) {
     try {
       if (statSync(root).isDirectory()) walk(root, root, excludes, files, cov);
@@ -408,7 +422,7 @@ export async function run(argv: string[], deps: RunDeps): Promise<{ exitCode: 0 
   const lines = [
     head,
     ...rows.map((r) => `${r.status}\t${r.file}:${r.line}\t${r.value}\t${r.latest ?? "-"}`),
-    `scanned ${cov.scanned} files, skipped ${cov.skipped}`,
+    `scanned ${cov.scanned} files, skipped ${cov.skipped}, excluded ${cov.excluded}`,
   ];
 
   // Nothing scanned means a mistyped or fully excluded root, which must not read as a clean pass.
