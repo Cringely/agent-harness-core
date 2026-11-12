@@ -820,8 +820,20 @@ describe("requiresIsolation() — frontmatter fences must be whole lines", () =>
   def("fence-no-close-dash", ["---", "name: x", "tools: Read, Grep", "---x", "Body."].join(NL));
   def("fence-bom", String.fromCharCode(0xfeff) + okLines.join(NL));
   def("fence-open-dashes", ["----", "name: x", "tools: Read, Grep", "---", "Body."].join(NL));
+  // JS \s matches Unicode whitespace, but a fence is ASCII spaces and tabs only. A no-break space or
+  // a zero-width no-break space (U+FEFF) after the dashes is not a fence, so Claude Code would not
+  // open or close there.
+  const NBSP = String.fromCharCode(0xa0);
+  const ZWNBSP = String.fromCharCode(0xfeff);
+  def("fence-ok-tab", ["---\t", "name: ok", "tools: Read, Grep", "--- \t ", "Body."].join(NL));
+  def("fence-open-nbsp", ["---" + NBSP, "name: x", "tools: Read, Grep", "---", "Body."].join(NL));
+  def("fence-open-zwnbsp", ["---" + ZWNBSP, "name: x", "tools: Read, Grep", "---", "Body."].join(NL));
+  def("fence-close-nbsp", ["---", "name: x", "tools: Read, Grep", "---" + NBSP, "Body."].join(NL));
+  def("fence-close-zwnbsp", ["---", "name: x", "tools: Read, Grep", "---" + ZWNBSP, "Body."].join(NL));
+  // A real close after the odd line does not rescue the block.
+  def("fence-close-nbsp-then-real", ["---", "name: x", "tools: Read, Grep", "---" + NBSP, "---", "Body."].join(NL));
 
-  test.each(["fence-ok", "fence-ok-crlf", "fence-ok-spaces"])("%s: a read-only grant between real fences is exempt", (type) => {
+  test.each(["fence-ok", "fence-ok-crlf", "fence-ok-spaces", "fence-ok-tab"])("%s: a read-only grant between real fences is exempt", (type) => {
     expect(requiresIsolation(type, fenceDir)).toBe(false);
   });
 
@@ -834,6 +846,11 @@ describe("requiresIsolation() — frontmatter fences must be whole lines", () =>
     ["fence-no-close-dash", "no closing fence and a dash-led line"],
     ["fence-bom", "a leading byte order mark"],
     ["fence-open-dashes", "an opening line of four dashes"],
+    ["fence-open-nbsp", "a no-break space after the opening fence"],
+    ["fence-open-zwnbsp", "a U+FEFF after the opening fence"],
+    ["fence-close-nbsp", "a no-break space after the closing fence"],
+    ["fence-close-zwnbsp", "a U+FEFF after the closing fence"],
+    ["fence-close-nbsp-then-real", "a no-break-space fence line before the real close"],
   ])("%s (%s): requires isolation", (type) => {
     expect(requiresIsolation(type, fenceDir)).toBe(true);
   });

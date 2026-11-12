@@ -513,6 +513,31 @@ describe("parseWriteScope() — frontmatter only, first key wins", () => {
   });
 });
 
+describe("parseWriteScope() — a fence is dashes plus ASCII spaces and tabs only", () => {
+  const NBSP = String.fromCharCode(0xa0);
+  const ZWNBSP = String.fromCharCode(0xfeff);
+  const N = String.fromCharCode(10);
+  const body = (open: string, close: string) => [open, "writeScope: scratch", close, "Body."].join(N);
+
+  test("trailing spaces and tabs are still a fence", () => {
+    expect(parseWriteScope(body("--- ", "---\t "))).toBe("scratch");
+  });
+
+  test.each([
+    ["a no-break space", NBSP],
+    ["a U+FEFF", ZWNBSP],
+  ])("%s after the opening fence is not a fence, so there is no frontmatter", (_label, ch) => {
+    expect(parseWriteScope(body("---" + ch, "---"))).toBeNull();
+  });
+
+  test.each([
+    ["a no-break space", NBSP],
+    ["a U+FEFF", ZWNBSP],
+  ])("%s after the closing fence is not a fence, so the block never closes", (_label, ch) => {
+    expect(parseWriteScope(body("---", "---" + ch))).toBeNull();
+  });
+});
+
 describe("readWriteScope() — item 38: only a filename-safe agent name resolves a definition", () => {
   test("a normal agent name still resolves its definition", () => {
     expect(readWriteScope("valid-agent", scopeProjectDir)).toBe("scratch");

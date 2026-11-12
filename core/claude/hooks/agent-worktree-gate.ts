@@ -239,8 +239,9 @@ const classificationCache = new Map<string, boolean>();
 
 /**
  * The lines between the opening and closing frontmatter fences, or null when the block cannot be
- * read with confidence. A fence is a whole line: three dashes and optional trailing whitespace. The
- * first line must be one and the close is the next one, so a line that merely starts with `---`
+ * read with confidence. A fence is a whole line: three dashes and optional trailing ASCII spaces or
+ * tabs, so a no-break space or U+FEFF after them is not a fence. The first line must be one and the
+ * close is the next one, so a line that merely starts with `---`
  * (`----`, `---x`) is not a close. Claude Code does not close there, so closing there would let
  * lines after it decide the classification against a block Claude Code reads differently. Such a
  * line inside the block makes the result null, as do a missing close, a missing opening fence and a
@@ -250,9 +251,9 @@ const classificationCache = new Map<string, boolean>();
  */
 export function frontmatterLines(text: string): string[] | null {
   const lines = text.split(/\r?\n/);
-  if (!/^---\s*$/.test(lines[0] ?? "")) return null;
+  if (!/^---[ \t]*\r?$/.test(lines[0] ?? "")) return null;
   for (let i = 1; i < lines.length; i++) {
-    if (/^---\s*$/.test(lines[i])) return lines.slice(1, i);
+    if (/^---[ \t]*\r?$/.test(lines[i])) return lines.slice(1, i);
     if (lines[i].startsWith("---")) return null;
   }
   return null;
