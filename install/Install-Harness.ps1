@@ -202,8 +202,26 @@
     A default length budget in words for the project's deliverables, from 1 to 100000.
     0 clears it, which records null. Omitted, the recorded value stays, and a project with
     none recorded has no budget. Install runs only.
+
+.PARAMETER InstallDeps
+    Run the pinned install command for each missing dependency core/claude/deps.json declares
+    for the kernel and this project's layers, then re-probe it. Without it the preflight only
+    reports: a missing hard dependency refuses the install before its first write, and a missing
+    optional one warns. Each command goes through ShouldProcess, so -WhatIf prints it and runs
+    nothing. Install runs only.
+
+.PARAMETER DepsManifestPath
+    Test seam. The dependency manifest to read in place of core/claude/deps.json.
+
+.PARAMETER DepsRunner
+    Test seam. Replaces the process runner every probe and install goes through, so a test never
+    probes or installs a real tool.
+
+.PARAMETER WhatIf
+    Runs the dependency preflight, prints each pinned command -InstallDeps would run, and stops
+    before the first write with 'WhatIf: stopped before writing'.
 #>
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess)]
 param(
     [Parameter(Mandatory = $true)]
     [string]$Target,
@@ -233,10 +251,20 @@ param(
     [string]$Audience,
 
     [ValidateRange(0, 100000)]
-    [int]$LengthBudget
+    [int]$LengthBudget,
+
+    [switch]$InstallDeps,
+
+    [string]$DepsManifestPath,
+
+    [scriptblock]$DepsRunner
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Deps.ps1')
+# Captured here, because the ShouldInstall callback runs inside Deps.ps1's functions, where a
+# bare $PSCmdlet could resolve to another command's.
+$script:harnessCmdlet = $PSCmdlet
 
 # -Quiet reaches nothing outside the -Audit block, so on an install run it is a switch that
 # silently does nothing. Rejected the simpler alternative of ignoring it: an operator who typed
@@ -256,7 +284,7 @@ foreach ($flagName in @('Accept', 'Unaccept', 'Prune')) {
     if (-not $standaloneCommand -and $PSBoundParameters.ContainsKey($flagName)) { $standaloneCommand = $flagName }
 }
 if ($standaloneCommand) {
-    foreach ($flagName in @('Layers', 'StatusCadence', 'Audience', 'LengthBudget')) {
+    foreach ($flagName in @('Layers', 'StatusCadence', 'Audience', 'LengthBudget', 'InstallDeps')) {
         if ($PSBoundParameters.ContainsKey($flagName)) {
             throw "-$flagName applies to an install run only. -$standaloneCommand reads the layers and settings the manifest records and never changes them. Re-run the installer without -$standaloneCommand to change it."
         }
@@ -779,6 +807,23 @@ function ConvertTo-ManifestV3 {
             $checked['lengthBudgetDefault'] = if ($null -eq $budget -or $budget -eq 0) { $null } else { [int]$budget }
         }
         $m['settings'] = $checked
+    }
+
+    # Shape only. Whether each name is an unpinned third-party entry is the preflight's check,
+    # since it is the one place that loads core/claude/deps.json. Read from the input for the
+    # same reason as layers: the v1 branch above rebuilds the map without it.
+    if ($source.Contains('allowUnpinnedPlugins')) {
+        $rawAllow = $source['allowUnpinnedPlugins']
+        $allowShape = ".harness-manifest.json 'allowUnpinnedPlugins' must be a list of objects, each with a non-empty string plugin (<id>@<marketplace>) and a non-empty string risk sentence."
+        if ($rawAllow -isnot [System.Collections.IList]) { throw $allowShape }
+        foreach ($o in $rawAllow) {
+            if ($o -isnot [System.Collections.IDictionary] -or
+                $o['plugin'] -isnot [string] -or -not $o['plugin'].Trim() -or
+                $o['risk'] -isnot [string] -or -not $o['risk'].Trim()) {
+                throw $allowShape
+            }
+        }
+        $m['allowUnpinnedPlugins'] = @($rawAllow)
     }
 
     return $m
@@ -1403,18 +1448,26 @@ function Invoke-SidecarPlan {
 # the raw ConvertFrom-Json exception used to escape.
 # `-and $rawSettings` before .Trim(): Get-Content -Raw yields $null for a zero-byte file, and a
 # method call on $null inside this try would report an empty file as a parse error, which it is not.
-$settingsPath = Join-Path $claudeDir 'settings.json'
-$settings = [pscustomobject]@{}
-$settingsParseError = $null
-if (Test-Path -LiteralPath $settingsPath -PathType Leaf) {
-    try {
-        $rawSettings = Get-Content -LiteralPath $settingsPath -Raw
-        if ($rawSettings -and $rawSettings.Trim()) { $settings = $rawSettings | ConvertFrom-Json }
+# A function because the install reads the file twice: here, and again after the dependency
+# preflight, which can run `claude plugin install --scope project` and so write this same file.
+function Read-TargetSettings {
+    param([string]$Path)
+    $read = [pscustomobject]@{ Settings = [pscustomobject]@{}; ParseError = $null }
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        try {
+            $rawSettings = Get-Content -LiteralPath $Path -Raw
+            if ($rawSettings -and $rawSettings.Trim()) { $read.Settings = $rawSettings | ConvertFrom-Json }
+        }
+        catch {
+            $read.ParseError = $_.Exception.Message
+        }
     }
-    catch {
-        $settingsParseError = $_.Exception.Message
-    }
+    return $read
 }
+$settingsPath = Join-Path $claudeDir 'settings.json'
+$settingsRead = Read-TargetSettings -Path $settingsPath
+$settings = $settingsRead.Settings
+$settingsParseError = $settingsRead.ParseError
 
 # -Accept: a standalone action, deliberately not composed with an install. Pinning a fork and
 # copying core files over the project are opposite intentions, and running an install to get a
@@ -1719,6 +1772,41 @@ if ($Audit) {
         }
     }
 
+    # Plugin drift, from the sidecar's recorded hashes alone: -Audit never calls the CLI. A missing
+    # install directory counts as changed, since the recorded content is no longer there.
+    if ($sidecar['pluginHashes'] -is [System.Collections.IDictionary]) {
+        foreach ($pluginId in @($sidecar['pluginHashes'].Keys | Sort-Object)) {
+            $pluginRec = $sidecar['pluginHashes'][$pluginId]
+            if ($pluginRec -isnot [System.Collections.IDictionary]) { continue }
+            $nowHash = $null
+            $recPath = [string]$pluginRec['installPath']
+            if ($recPath -and (Test-Path -LiteralPath $recPath -PathType Container)) {
+                try { $nowHash = Get-PluginContentHash -Path $recPath } catch { $nowHash = $null }
+            }
+            if ($nowHash -ne $pluginRec['hash']) {
+                $results.Add([pscustomobject]@{ File = "plugin:$pluginId"; Status = 'plugin-changed' })
+                continue
+            }
+            # The recorded folder matching proves nothing about the active copy once Claude Code
+            # has installed a newer one beside it, as an update into a new version folder does.
+            # Without the CLI the only evidence is the parent folder: a sibling newer than the
+            # recorded one is reported, and a parent that cannot be listed is reported too, since
+            # silence would vouch for a plugin nobody looked at.
+            $unverified = $false
+            try {
+                $recItem = Get-Item -LiteralPath $recPath -ErrorAction Stop
+                $parentDir = Split-Path -Parent $recItem.FullName
+                $siblings = @(Get-ChildItem -LiteralPath $parentDir -Directory -Force -ErrorAction Stop |
+                        Where-Object { $_.FullName -ne $recItem.FullName })
+                if (@($siblings | Where-Object { $_.LastWriteTimeUtc -gt $recItem.LastWriteTimeUtc }).Count -gt 0) { $unverified = $true }
+            }
+            catch { $unverified = $true }
+            if ($unverified) {
+                $results.Add([pscustomobject]@{ File = "plugin:$pluginId"; Status = 'plugin-unverified' })
+            }
+        }
+    }
+
     if (-not $Quiet) { $results | Format-Table -AutoSize | Out-String | Write-Host }
 
     # 'overlay (accepted)' is silent by design: the pin exists precisely so a deliberate fork
@@ -1757,7 +1845,7 @@ if ($Audit) {
         # recovery for one and the pin-drop for the other rather than sending both to the
         # installer. (CONTRIBUTING.md's drift-detection gate: every class the audit reports needs
         # a standing response, and the classes that must never be auto-repaired are named as such.)
-        Write-Host "$($attention.Count) file(s) need attention. project-modified/untracked-differs = candidates to promote into core; core-updated/not-installed = re-run installer to pull down; overlay-changed = re-review the fork, then re-pin with -Accept; missing = re-run the installer if the row is a tracked file, but a missing pinned overlay exists only in the project's own history, so restore it from there or drop the pin with -Unaccept; orphaned (already removed/unmodified/modified) = -Prune the key to drop the stale manifest record -- the file, if any is still there, is left on disk for you to delete by hand or -Accept to pin as an overlay. installed (layer not selected) = delete the file by hand, and the next install drops its record. settings-missing/settings-stale = re-run the installer, which rewrites .claude/rules/harness/project-settings.md from the manifest. settings-modified = the installer keeps that file because it was edited by hand or never written by the installer, so move the change into the manifest with the setting's flag, then delete the file and re-run. manifest-invalid = fix the layers or settings value the error names."
+        Write-Host "$($attention.Count) file(s) need attention. project-modified/untracked-differs = candidates to promote into core; core-updated/not-installed = re-run installer to pull down; overlay-changed = re-review the fork, then re-pin with -Accept; missing = re-run the installer if the row is a tracked file, but a missing pinned overlay exists only in the project's own history, so restore it from there or drop the pin with -Unaccept; orphaned (already removed/unmodified/modified) = -Prune the key to drop the stale manifest record -- the file, if any is still there, is left on disk for you to delete by hand or -Accept to pin as an overlay. installed (layer not selected) = delete the file by hand, and the next install drops its record. settings-missing/settings-stale = re-run the installer, which rewrites .claude/rules/harness/project-settings.md from the manifest. settings-modified = the installer keeps that file because it was edited by hand or never written by the installer, so move the change into the manifest with the setting's flag, then delete the file and re-run. manifest-invalid = fix the layers or settings value the error names. plugin-changed = re-run the installer with -InstallDeps to re-record after reviewing the change. plugin-unverified = a newer copy exists than the recorded one, or its folder could not be listed, so the recorded hash may not be the active plugin's. Re-run the installer so it re-reads the plugin listing."
     }
 
     # Stack drift: report-only, same as the file audit above — never writes the manifest or
@@ -1904,22 +1992,6 @@ if ($settingsParseError) {
     throw "Target settings.json does not parse as JSON: $settingsPath. Merging the hook registrations into it would destroy whatever it holds, so nothing was copied and the manifest was not written. Fix or move that file, then re-run. Parser reported: $settingsParseError"
 }
 
-# Prerequisite probe. Every TypeScript hook this installs is registered below as a bare
-# `bun ...` command, so on a machine without bun the layer installs looking complete and the
-# gates never run. README.md's install section is the only place that has said so, and a
-# documented prerequisite nothing checks is a prerequisite that gets skipped.
-#   Warns rather than throws: installing the layer before installing bun is legitimate (a fresh
-# clone being equipped ahead of its toolchain), and nothing this run writes is wrong without it:
-# the registrations are correct either way, so bun arriving later needs no re-install.
-#   Only bun is probed, not the whole prerequisite list Install-Account.ps1 warns about. A vale
-# probe would be noise, since its consumer degrades to a documented advisory skip by design; an
-# sh probe would rest on an unverified claim about how Claude Code resolves `sh` for a hook
-# command, which is not resolved against this script's PATH. Widen this when either turns into
-# a measured failure rather than a guess.
-if (-not (Get-Command bun -ErrorAction SilentlyContinue)) {
-    Write-Warning "bun is not on PATH. The TypeScript hooks installed below are registered as bare 'bun' commands, so the gates stop enforcing and Claude Code surfaces an error notice on stderr per dispatch. Install bun to make them enforce; the registrations this run writes are already correct, so no re-install is needed."
-}
-
 # Sidecar decision, ahead of every write this install makes (round-4 C). Round 3 threw the R2-2
 # refusal from the sidecar write at the bottom of the script, after the copy loops below had
 # already updated agents, hooks and guardrails, so a refused run left a half-updated layer while
@@ -1941,6 +2013,48 @@ if ($PSBoundParameters.ContainsKey('LengthBudget')) {
 }
 $projectSettings = Resolve-ProjectSettings -Recorded $manifest['settings'] -Defaults (Get-DefaultProjectSettings -Layers $projectLayers) -Bound $boundSettings
 $includeCeremoniesFlag = [bool]$IncludeCeremonies
+
+# Dependency preflight, after every refusal above (the sidecar's included) and before the first
+# write, so a refusal here leaves the target untouched and -InstallDeps never installs anything
+# for a run that was going to refuse anyway. It replaces a bun-only probe that warned and
+# installed regardless: every TypeScript gate is registered as a bare bun command, so a layer
+# installed without bun looked complete while each gate failed open. -Audit, -Accept, -Unaccept
+# and -Prune returned above and never reach it.
+$depsPath = if ($DepsManifestPath) { $DepsManifestPath } else { Join-Path $coreDir 'deps.json' }
+$depsManifest = Get-DepsManifest -Path $depsPath
+$depsRunnerBlock = if ($DepsRunner) { $DepsRunner } else { ${function:Invoke-DefaultDepsRunner} }
+$depsShouldInstall = { param($What, $Action) $script:harnessCmdlet.ShouldProcess($What, $Action) }
+$onWindowsHost = ($PSVersionTable.PSVersion.Major -lt 6) -or $IsWindows
+# Plugins: this installer owns project scope only, and its plugin commands run in the target, so
+# Claude Code resolves the project from their working directory. Recorded content hashes live in
+# the sidecar, never the committed manifest: an installPath is a machine-local path.
+$pluginRecords = @{}
+if ($sidecar['pluginHashes'] -is [System.Collections.IDictionary]) {
+    foreach ($k in @($sidecar['pluginHashes'].Keys)) { $pluginRecords[$k] = $sidecar['pluginHashes'][$k] }
+}
+$depsOutcome = Invoke-DepsPreflight -Manifest $depsManifest -Layers ([string[]](@('kernel') + @($projectLayers))) -IsWindows $onWindowsHost `
+    -InstallDeps ([bool]$InstallDeps) -Runner $depsRunnerBlock -ShouldInstall $depsShouldInstall `
+    -PluginScope 'project' -PluginCwd (Resolve-Path -LiteralPath $Target).Path -PluginRecords $pluginRecords `
+    -AllowUnpinned @($manifest['allowUnpinnedPlugins'] | Where-Object { $_ })
+if ($depsOutcome.PluginRecordsChanged) { $sidecar['pluginHashes'] = $depsOutcome.PluginRecords }
+
+# Read settings.json again. A project-scope `claude plugin install` above writes enabledPlugins
+# into it, and merging the hooks into the copy parsed at the top would write that stale copy back
+# and drop the plugin's enablement. Still before the first write, so a file the CLI left
+# unparsable refuses here the same way the top-of-script guard does.
+$settingsRead = Read-TargetSettings -Path $settingsPath
+if ($settingsRead.ParseError) {
+    throw "Target settings.json does not parse as JSON after the dependency preflight: $settingsPath. Merging the hook registrations into it would destroy whatever it holds, so nothing was copied and the manifest was not written. Fix or move that file, then re-run. Parser reported: $($settingsRead.ParseError)"
+}
+$settings = $settingsRead.Settings
+
+# A dry run stops here. Every write below is either a built-in cmdlet that would honour -WhatIf on
+# its own or a native command (git config core.hooksPath, chmod) that would not, and stopping
+# before all of them is the only way the second kind stays dry.
+if ($WhatIfPreference) {
+    Write-Host 'WhatIf: stopped before writing'
+    return
+}
 
 # Created here, after the decision above, not at the top of the script: a refused run must not
 # leave new directories behind either. Only a plain install reaches this point. -Accept, -Unaccept,
@@ -2058,10 +2172,10 @@ if ($IncludeCeremonies) {
     }
 }
 
-# Settings merge. $settingsPath and $settings come from the parse at the top of the script, which
-# is also what the guard above the agents loop checked, so the shape merged here is the shape that
-# was approved before anything was copied. Nothing this run writes touches settings.json between
-# the two points.
+# Settings merge. $settings comes from the second parse, after the dependency preflight, so it
+# carries whatever a plugin install wrote. That parse and the one at the top are both checked
+# before anything is copied, and nothing this installer itself writes touches settings.json
+# between that second parse and this merge.
 if (-not $settings.PSObject.Properties['hooks']) {
     $settings | Add-Member -NotePropertyName hooks -NotePropertyValue ([pscustomobject]@{})
 }
@@ -2241,6 +2355,9 @@ $sidecarOutcome = Invoke-SidecarPlan -Plan $sidecarPlan -Sidecar $sidecar
 # having touched the file -- the two used to share one label ('skipped-unprotected'), which
 # made a run that just deleted something read as though nothing had happened to it.
 $sidecarAction = if ($sidecarOutcome -eq 'removed') { 'removed' } elseif ($sidecarOutcome -eq 'written') { 'written' } else { 'skipped-unprotected' }
+if ($depsOutcome.PluginRecordsChanged -and $sidecarOutcome -ne 'written') {
+    Write-Warning "Plugin content hashes were not recorded, because the sidecar was not written (see the warning above). Plugin drift cannot be checked until the ignore rule is fixed and the installer runs again."
+}
 $results.Add([pscustomobject]@{ File = '.harness-manifest.local.json'; Action = $sidecarAction })
 
 # Rendered from the manifest values above, with LF endings, and never tracked in `files`, since the

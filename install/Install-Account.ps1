@@ -5,8 +5,10 @@
 .DESCRIPTION
     Runs on any workstation from a clone, on Windows or Linux. Content directories are copied
     over the top of ~/.claude and model-tier-gate.ts is sourced from core rather than the
-    payload, so the repo holds one copy of it. A preflight warns about every prerequisite tool
-    absent from PATH without gating the install. On a Linux target every .sh hook under
+    payload, so the repo holds one copy of it. A preflight probes every kernel dependency
+    core/claude/deps.json declares: a missing hard one (bun, and Git Bash on Windows) refuses the
+    install before its first write, and a missing optional one warns. -InstallDeps runs each
+    pinned install command instead. On a Linux target every .sh hook under
     hooks/ is chmod +x'd; the operator gets the same warning either way if chmod is missing or
     if it runs and fails. Supports -WhatIf: every file write is a built-in cmdlet that honours
     $WhatIfPreference on its own, and the one write that is not, the chmod call, is wrapped in
@@ -62,7 +64,18 @@
     branches from a Windows host, the same "Test seam" Restore-ClaudeProject.ps1:88-95 names.
 
 .PARAMETER SkipPreflight
-    Skip the prerequisite probe. Test seam.
+    Skip the dependency preflight. Test seam.
+
+.PARAMETER InstallDeps
+    Run the pinned install command (winget, apt or npm, each at an exact version) for every
+    missing kernel dependency, then re-probe it. Each command goes through ShouldProcess, so
+    -WhatIf prints it and runs nothing. Without it nothing is installed.
+
+.PARAMETER DepsManifestPath
+    Test seam. The dependency manifest to read in place of core/claude/deps.json.
+
+.PARAMETER DepsRunner
+    Test seam. Replaces the process runner every probe and install goes through.
 
 .EXAMPLE
     pwsh -NoProfile -File install/Install-Account.ps1
@@ -83,11 +96,18 @@ param(
     [string]$VaultPath,
     [string]$HomeSlug,
     [bool]$TargetIsWindows = $(if ($PSVersionTable.PSVersion.Major -lt 6) { $true } else { $IsWindows }),
-    [switch]$SkipPreflight
+    [switch]$SkipPreflight,
+    [switch]$InstallDeps,
+    [string]$DepsManifestPath,
+    [scriptblock]$DepsRunner
 )
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'AccountShared.ps1')
+. (Join-Path $PSScriptRoot 'Deps.ps1')
+# Captured here, because the ShouldInstall callback runs inside Deps.ps1's functions, where a
+# bare $PSCmdlet could resolve to another command's.
+$script:accountCmdlet = $PSCmdlet
 
 $repoRoot = Split-Path $PSScriptRoot -Parent
 
@@ -224,25 +244,41 @@ Write-Host "Payload         : $PayloadRoot"
 Write-Host "Claude home     : $ClaudeHome"
 
 # Every consumer of these fails open when the tool is absent, so without this the kit goes
-# silently dead on a fresh box and looks installed. jq only matters on Linux when the
-# npm-absent branch points statusLine.command at statusline-command.sh, which calls jq three
-# times.
-function Test-Prerequisite {
-    param([bool]$NeedJq)
-    $wanted = @('pwsh', 'vale', 'bun', 'node', 'bash', 'uvx')
-    if ($NeedJq) { $wanted += 'jq' }
-    $missing = @()
-    foreach ($t in $wanted) {
-        if (-not (Get-Command $t -ErrorAction SilentlyContinue)) { $missing += $t }
-    }
-    return @($missing)
-}
-
+# silently dead on a fresh box and looks installed. The kernel's entries in core/claude/deps.json
+# replace the fixed list that used to live here. jq's condition (Linux, npm absent, because the
+# npm-absent branch points statusLine.command at statusline-command.sh, which calls jq) is the
+# entry's onlyWhenAbsent, decided here by $npmPresent, the value Convert-SettingsForTarget routes
+# the statusline on, not by the preflight's own npm probe. The two can disagree (-NpmGlobal '', or
+# npm root -g failing while npm --version answers), and only $npmPresent says which script runs.
+# -IsWindows is the target platform, not the host's: the suite runs Linux-target cases on the
+# Windows CI leg.
 if (-not $SkipPreflight) {
-    $needJq = (-not $TargetIsWindows) -and (-not $npmPresent)
-    $missing = @(Test-Prerequisite -NeedJq $needJq)
-    if ($missing.Count -gt 0) {
-        Write-Warning "Not on PATH: $($missing -join ', '). Each one's consumer fails open, so the feature it drives will be silently absent rather than reporting an error."
+    $depsPath = if ($DepsManifestPath) { $DepsManifestPath } else { Join-Path (Join-Path $repoRoot 'core/claude') 'deps.json' }
+    $depsManifest = Get-DepsManifest -Path $depsPath
+    $depsRunnerBlock = if ($DepsRunner) { $DepsRunner } else { ${function:Invoke-DefaultDepsRunner} }
+    $depsShouldInstall = { param($What, $Action) $script:accountCmdlet.ShouldProcess($What, $Action) }
+    # Plugins: this script owns user scope only, through -ClaudeHome. Its plugin commands run from
+    # the home directory, and their recorded hashes live under state/, which the exporter's
+    # allowlist does not reach, so a machine-local installPath never travels in the payload.
+    $pluginRecordsPath = Join-Path (Join-Path $ClaudeHome 'state') 'harness-plugin-hashes.json'
+    $pluginRecords = @{}
+    if (Test-Path -LiteralPath $pluginRecordsPath -PathType Leaf) {
+        try {
+            $loadedRecords = Get-Content -LiteralPath $pluginRecordsPath -Raw | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+            if ($loadedRecords -is [System.Collections.IDictionary]) {
+                foreach ($k in @($loadedRecords.Keys)) { $pluginRecords[$k] = $loadedRecords[$k] }
+            }
+        }
+        catch {
+            Write-Warning "Ignoring unparsable plugin hash records at $pluginRecordsPath. They are rebuilt from what is installed now, so drift since the last record is not reported this run."
+        }
+    }
+    $depsOutcome = Invoke-DepsPreflight -Manifest $depsManifest -Layers @('kernel') -IsWindows $TargetIsWindows `
+        -InstallDeps ([bool]$InstallDeps) -Runner $depsRunnerBlock -ShouldInstall $depsShouldInstall `
+        -PluginScope 'user' -PluginCwd $HOME -PluginRecords $pluginRecords -KnownPresence @{ npm = $npmPresent }
+    if ($depsOutcome.PluginRecordsChanged) {
+        $null = New-Item -ItemType Directory -Path (Split-Path -Parent $pluginRecordsPath) -Force
+        $depsOutcome.PluginRecords | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $pluginRecordsPath
     }
 }
 
@@ -508,7 +544,7 @@ function Convert-SettingsForTarget {
             #
             # Also wraps the pipeline OUTPUT: a single surviving hook unwraps to a bare scalar
             # and would serialise `"hooks": {...} instead of "hooks": [...]`
-            # (install/Install-Harness.ps1:2079-2082).
+            # (install/Install-Harness.ps1:2193-2196).
             $kept = @(@($group.hooks) | Where-Object {
                     $_ -and ($NpmPresent -or ($_.command -notmatch 'ccstatusline'))
                 })

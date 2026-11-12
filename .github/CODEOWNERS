@@ -12,6 +12,7 @@
 /core/claude/agents/                        @Cringely
 /core/claude/templates/                     @Cringely
 /core/claude/rules/                         @Cringely
+/core/claude/deps.json                     @Cringely
 /install/                                   @Cringely
 /tools/pr-review/                           @Cringely
 /account/claude/rules/                      @Cringely
