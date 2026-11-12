@@ -111,7 +111,7 @@
 // "spawned process" describe block at the end of that file.
 
 import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { isValidAgentName } from "./agent-name";
 /**
  * Project-specific escape hatch: subagent_type values this project has
@@ -245,9 +245,13 @@ const classificationCache = new Map<string, boolean>();
  * (`----`, `---x`) is not a close. Claude Code does not close there, so closing there would let
  * lines after it decide the classification against a block Claude Code reads differently. Such a
  * line inside the block makes the result null, as do a missing close, a missing opening fence and a
- * leading byte order mark. Null means the type requires isolation. The fence rule matches the shared
- * writeScope parser's (write-scope-parse.ts), which this file does not import: a static import that
- * failed to link would exit before the entrypoint's try, and Claude Code reads that as no opinion.
+ * leading byte order mark. Null means the type requires isolation.
+ *
+ * This is deliberately not the shared writeScope parser's fence code (write-scope-parse.ts). The
+ * two sides need opposite failure directions. This gate decides whether a type may skip isolation,
+ * so it must under-detect: anything odd reads as no frontmatter. The write-scope gate decides what
+ * to confine, so it must over-detect: it strips a byte order mark and ignores a dash-led line. One
+ * shared function would force a single direction on both. The plain fence test is the same in both.
  */
 export function frontmatterLines(text: string): string[] | null {
   const lines = text.split(/\r?\n/);

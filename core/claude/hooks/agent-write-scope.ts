@@ -148,7 +148,17 @@ function canonicalize(p: string): string {
  */
 const SEPARATORS = process.platform === "win32" ? /[\\/]+/ : /\/+/;
 
-const segmentsOf = (p: string): string[] => p.split(SEPARATORS).map((s) => s.toLowerCase());
+/**
+ * Lowercased segments of a resolved path, without a trailing empty one. A filesystem root splits as
+ * `["", ""]` for `/` and `["c:", ""]` for `C:\`, and with that last empty segment kept, no file
+ * path starts with the project's segments, so every target would read as outside a project at a
+ * root. A resolved file path never ends in a separator, so only a root is affected.
+ */
+function segmentsOf(p: string): string[] {
+  const parts = p.split(SEPARATORS).map((s) => s.toLowerCase());
+  while (parts.length > 1 && parts[parts.length - 1] === "") parts.pop();
+  return parts;
+}
 const startsWith = (a: string[], b: string[]): boolean => a.length >= b.length && b.every((s, i) => a[i] === s);
 
 /**

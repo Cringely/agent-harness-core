@@ -355,6 +355,42 @@ describe("inScratch(): an aliased spelling of a project path is never scratch", 
   });
 });
 
+// A project whose root is a filesystem root splits into a path with an empty last segment unless the
+// producer drops it, and then no target is "inside" the project. Every instruction path below would
+// fall to the outside rule, where any scratch-named segment counts. The Windows spelling is built from
+// character codes: drive C, a colon and a backslash.
+describe("inScratch(): a project at a filesystem root still restricts scratch to .claude/scratch", () => {
+  const driveRoot = String.fromCharCode(67, 58, 92);
+  const roots: Array<[string, string]> = [["/", "/"]];
+  if (process.platform === "win32") roots.push(["C:" + BS, driveRoot]);
+  else roots.push(["the host root again", "/"]);
+
+  test.each(roots)("project root %p: instruction paths are not scratch", (_label, root) => {
+    for (const rel of [
+      ["scratch", "CLAUDE.md"],
+      [".claude", "skills", "scratch", "SKILL.md"],
+      [".claude", "commands", "scratch", "x.md"],
+      ["src", "scratchpad", "a.ts"],
+      [".scratch", "n.md"],
+    ]) {
+      const target = join(root, ...rel);
+      expect(inScratch(target, root, root)).toBe(false);
+      expect(decide("scratch", target, root, root).action).toBe("deny");
+    }
+  });
+
+  test.each(roots)("project root %p: .claude/scratch is still the drop box", (_label, root) => {
+    const target = join(root, ".claude", "scratch", "r.md");
+    expect(inScratch(target, root, root)).toBe(true);
+    expect(decide("scratch", target, root, root)).toEqual({ action: "allow" });
+  });
+
+  test.each(roots)("project root %p: a relative write resolves against the cwd", (_label, root) => {
+    expect(inScratch(join("scratch", "CLAUDE.md"), root, root)).toBe(false);
+    expect(inScratch(join(".claude", "scratch", "r.md"), root, root)).toBe(true);
+  });
+});
+
 describe("decide() — only scratch-scoped agents are gated", () => {
   test("scoped agent writing outside scratch is denied", () => {
     const verdict = decide("scratch", "/home/runner/project/src/index.ts", CWD, CWD);
