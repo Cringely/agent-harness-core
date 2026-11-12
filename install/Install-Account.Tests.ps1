@@ -1711,7 +1711,7 @@ Describe "Install-Account" {
     # which Convert-SettingsForTarget already sanitises before Merge-AccountSettings ever sees
     # it. The receiver's own settings.json takes no such pass, and Merge-AccountSettings and
     # Merge-HookEvent do their own @()-wrapping of its properties, so the same
-    # "Cannot index into a null array" hazard documented at Install-Account.ps1:696-707 recurs
+    # "Cannot index into a null array" hazard documented at Install-Account.ps1:810-821 recurs
     # here, fed this time by hand-edited data instead of the exporter's own output. Four cases
     # below, one It per site, matching this file's convention for the three sites already pinned
     # on the payload side.
@@ -2540,6 +2540,297 @@ Describe "Install-Account" {
             $report | Should -Not -Match 'Scan-MemorySecrets'
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # Task 10 (#310). The retire list is how a removal from the account layer reaches a receiver.
+    # Each case plants its own payload, home and list, so the assertions read one install.
+    Context "retired paths" {
+        BeforeAll {
+            function script:New-RetiredList {
+                param([object[]]$Entries = @(), [string]$Raw)
+                $f = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-retired-" + [guid]::NewGuid() + '.json')
+                if ($PSBoundParameters.ContainsKey('Raw')) { Set-Content -LiteralPath $f -Value $Raw }
+                else {
+                    [ordered]@{ schemaVersion = 1; retired = @($Entries) } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $f
+                }
+                $f
+            }
+            function script:Invoke-Retire {
+                param([string]$Payload, [string]$HomeDir, [string]$List, [switch]$WhatIfRun)
+                $extra = @{}
+                if ($WhatIfRun) { $extra['WhatIf'] = $true }
+                & $script:install @script:dep -PayloadRoot $Payload -ClaudeHome $HomeDir `
+                    -ClaudeJson (Join-Path $HomeDir 'claude.json') -SkipPreflight -RetiredListPath $List @extra *>&1 | Out-String -Width 500
+            }
+            function script:Get-RetiredCopies {
+                param([string]$Dir, [string]$Leaf)
+                @(Get-ChildItem -LiteralPath $Dir -Force | Where-Object { $_.Name -like "$Leaf.retired-*" })
+            }
+        }
+
+        It "renames a retired file on the receiver, keeps its content, and says what to run next" {
+            $p = New-StandInPayload; $h = New-StandInClaudeHome
+            $l = New-RetiredList @(@{ path = 'rules/old.md'; reason = 'Moved into the code layer.' })
+            try {
+                New-Item -ItemType Directory -Path (Join-Path $h 'rules') -Force | Out-Null
+                Set-Content -LiteralPath (Join-Path $h 'rules/old.md') -Value 'the old rule'
+                $out = Invoke-Retire -Payload $p -HomeDir $h -List $l
+                Test-Path -LiteralPath (Join-Path $h 'rules/old.md') | Should -BeFalse
+                $copies = @(Get-RetiredCopies (Join-Path $h 'rules') 'old.md')
+                $copies.Count | Should -Be 1
+                $copies[0].Name | Should -Match '^old\.md\.retired-\d{8}T\d{6}Z$'
+                (Get-Content -LiteralPath $copies[0].FullName -Raw).Trim() | Should -Be 'the old rule'
+                $out | Should -Match 'Retired rules/old\.md'
+                $out | Should -Match 'Moved into the code layer\.'
+                $out | Should -Match 'Install-Harness\.ps1 -Target'
+                Test-Path -LiteralPath (Join-Path $h 'rules/security.md') | Should -BeTrue -Because "the install still completes"
+            }
+            finally { Remove-Item -Recurse -Force $p, $h, $l -ErrorAction SilentlyContinue }
+        }
+
+        It "refuses a directory entry before renaming anything, and says to list the SKILL.md" {
+            $p = New-StandInPayload; $h = New-StandInClaudeHome
+            $l = New-RetiredList @(@{ path = 'rules/keep.md'; reason = 'Retired.' }, @{ path = 'skills/gone'; reason = 'Retired.' })
+            try {
+                New-Item -ItemType Directory -Path (Join-Path $h 'rules') -Force | Out-Null
+                Set-Content -LiteralPath (Join-Path $h 'rules/keep.md') -Value 'keep'
+                New-Item -ItemType Directory -Path (Join-Path $h 'skills/gone') -Force | Out-Null
+                Set-Content -LiteralPath (Join-Path $h 'skills/gone/SKILL.md') -Value 'x'
+                { Invoke-Retire -Payload $p -HomeDir $h -List $l | Out-Null } | Should -Throw -ExpectedMessage '*retired-paths list*skills/gone*is a directory*SKILL.md*'
+                Test-Path -LiteralPath (Join-Path $h 'skills/gone/SKILL.md') | Should -BeTrue
+                Test-Path -LiteralPath (Join-Path $h 'rules/keep.md') | Should -BeTrue -Because "validation covers every entry before any rename"
+                Test-Path -LiteralPath (Join-Path $h 'rules/security.md') | Should -BeFalse
+            }
+            finally { Remove-Item -Recurse -Force $p, $h, $l -ErrorAction SilentlyContinue }
+        }
+
+        It "refuses an entry that is a link to a directory, and leaves the target alone" {
+            $p = New-StandInPayload; $h = New-StandInClaudeHome
+            $target = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-linktarget-" + [guid]::NewGuid())
+            $l = New-RetiredList @(@{ path = 'skills/gone'; reason = 'Retired.' })
+            try {
+                New-Item -ItemType Directory -Path $target -Force | Out-Null
+                Set-Content -LiteralPath (Join-Path $target 'SKILL.md') -Value 'x'
+                New-Item -ItemType Directory -Path (Join-Path $h 'skills') -Force | Out-Null
+                $kind = if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }
+                New-Item -ItemType $kind -Path (Join-Path $h 'skills/gone') -Target $target | Out-Null
+                { Invoke-Retire -Payload $p -HomeDir $h -List $l | Out-Null } | Should -Throw -ExpectedMessage '*is a directory*'
+                Test-Path -LiteralPath (Join-Path $target 'SKILL.md') | Should -BeTrue
+                @(Get-RetiredCopies (Join-Path $h 'skills') 'gone').Count | Should -Be 0
+            }
+            finally {
+                if (Test-Path -LiteralPath (Join-Path $h 'skills/gone')) { (Get-Item -LiteralPath (Join-Path $h 'skills/gone') -Force).Delete() }
+                Remove-Item -Recurse -Force $p, $h, $l, $target -ErrorAction SilentlyContinue
+            }
+        }
+
+        It "renames an entry that is a link to a file and never touches the target" {
+            $p = New-StandInPayload; $h = New-StandInClaudeHome
+            $targetDir = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-linktarget-" + [guid]::NewGuid())
+            $l = New-RetiredList @(@{ path = 'rules/linked.md'; reason = 'Retired.' })
+            try {
+                New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+                Set-Content -LiteralPath (Join-Path $targetDir 'real.md') -Value 'target'
+                New-Item -ItemType Directory -Path (Join-Path $h 'rules') -Force | Out-Null
+                try { New-Item -ItemType SymbolicLink -Path (Join-Path $h 'rules/linked.md') -Target (Join-Path $targetDir 'real.md') -ErrorAction Stop | Out-Null }
+                catch { Set-ItResult -Skipped -Because "this account cannot create file symlinks: $($_.Exception.Message)"; return }
+                Invoke-Retire -Payload $p -HomeDir $h -List $l | Out-Null
+                @(Get-RetiredCopies (Join-Path $h 'rules') 'linked.md').Count | Should -Be 1
+                Test-Path -LiteralPath (Join-Path $h 'rules/linked.md') | Should -BeFalse
+                (Get-Content -LiteralPath (Join-Path $targetDir 'real.md') -Raw).Trim() | Should -Be 'target'
+            }
+            finally { Remove-Item -Recurse -Force $p, $h, $l, $targetDir -ErrorAction SilentlyContinue }
+        }
+
+        It "does nothing and prints no advice for a retired path the receiver does not have" {
+            $p = New-StandInPayload; $h = New-StandInClaudeHome
+            $l = New-RetiredList @(@{ path = 'rules/never-installed.md'; reason = 'Retired.' })
+            try {
+                $out = Invoke-Retire -Payload $p -HomeDir $h -List $l
+                $out | Should -Not -Match 'Retired rules'
+                $out | Should -Not -Match 'Install-Harness\.ps1 -Target'
+            }
+            finally { Remove-Item -Recurse -Force $p, $h, $l -ErrorAction SilentlyContinue }
+        }
+
+        It "refuses before copying anything when the payload still carries a retired path" {
+            $p = New-StandInPayload; $h = New-StandInClaudeHome
+            $l = New-RetiredList @(@{ path = 'rules/security.md'; reason = 'Retired.' })
+            try {
+                New-Item -ItemType Directory -Path (Join-Path $h 'rules') -Force | Out-Null
+                Set-Content -LiteralPath (Join-Path $h 'rules/security.md') -Value 'receiver copy'
+                $msg = $null
+                try { Invoke-Retire -Payload $p -HomeDir $h -List $l | Out-Null } catch { $msg = $_.Exception.Message }
+                $msg | Should -Match 'rules/security\.md'
+                $msg | Should -Match 'payload'
+                Test-Path -LiteralPath (Join-Path $h 'agents/appsec-sme.md') | Should -BeFalse -Because "a payload file absent from the home stays absent"
+                (Get-Content -LiteralPath (Join-Path $h 'rules/security.md') -Raw).Trim() | Should -Be 'receiver copy' -Because "the receiver's file is neither renamed nor overwritten"
+                @(Get-RetiredCopies (Join-Path $h 'rules') 'security.md').Count | Should -Be 0
+            }
+            finally { Remove-Item -Recurse -Force $p, $h, $l -ErrorAction SilentlyContinue }
+        }
+
+        It "refuses when the payload carries a file inside a retired directory" {
+            $p = New-StandInPayload; $h = New-StandInClaudeHome
+            $l = New-RetiredList @(@{ path = 'skills/prose-lint'; reason = 'Retired.' })
+            try {
+                { Invoke-Retire -Payload $p -HomeDir $h -List $l | Out-Null } | Should -Throw -ExpectedMessage '*skills/prose-lint*'
+                Test-Path -LiteralPath (Join-Path $h 'rules/security.md') | Should -BeFalse
+            }
+            finally { Remove-Item -Recurse -Force $p, $h, $l -ErrorAction SilentlyContinue }
+        }
+
+        It "rejects the entry <_> before renaming or copying anything" -ForEach @(
+            '../x.md', 'rules/../x.md', 'rules/../../x.md', '/etc/passwd', '/rules/x.md', 'C:/x.md', 'C:x.md', 'rules/C:x.md',
+            '//server/share/x.md', '\\server\share\x.md', 'rules\x.md', 'rules\..\x.md', 'tools/x.md', 'settings.json',
+            'rules', 'rules/', 'rules//x.md', 'rules/./x.md', 'rules/x.md/', 'rules/x.', 'rules/con.md', 'rules/x.md:stream',
+            'Rules/x.md', '', ' '
+        ) {
+            $p = New-StandInPayload; $h = New-StandInClaudeHome
+            $l = New-RetiredList @(@{ path = 'rules/keep.md'; reason = 'Retired.' }, @{ path = $_; reason = 'Retired.' })
+            try {
+                New-Item -ItemType Directory -Path (Join-Path $h 'rules') -Force | Out-Null
+                Set-Content -LiteralPath (Join-Path $h 'rules/keep.md') -Value 'keep'
+                { Invoke-Retire -Payload $p -HomeDir $h -List $l | Out-Null } | Should -Throw -ExpectedMessage '*retired-paths list*'
+                Test-Path -LiteralPath (Join-Path $h 'rules/keep.md') | Should -BeTrue -Because "validation covers every entry before any rename"
+                Test-Path -LiteralPath (Join-Path $h 'rules/security.md') | Should -BeFalse
+            }
+            finally { Remove-Item -Recurse -Force $p, $h, $l -ErrorAction SilentlyContinue }
+        }
+
+        It "rejects a path ending in a line feed: <Name>" -ForEach @(
+            @{ Name = 'file'; Entry = "rules/x.md`n" }
+            @{ Name = 'dot dot'; Entry = "rules/..`n" }
+        ) {
+            $p = New-StandInPayload; $h = New-StandInClaudeHome
+            $l = New-RetiredList @(@{ path = 'rules/keep.md'; reason = 'Retired.' }, @{ path = $Entry; reason = 'Retired.' })
+            try {
+                New-Item -ItemType Directory -Path (Join-Path $h 'rules') -Force | Out-Null
+                Set-Content -LiteralPath (Join-Path $h 'rules/keep.md') -Value 'keep'
+                { Invoke-Retire -Payload $p -HomeDir $h -List $l | Out-Null } | Should -Throw -ExpectedMessage '*retired-paths list*not a relative path*'
+                Test-Path -LiteralPath (Join-Path $h 'rules/keep.md') | Should -BeTrue
+            }
+            finally { Remove-Item -Recurse -Force $p, $h, $l -ErrorAction SilentlyContinue }
+        }
+
+        It "rejects an entry whose parent directory is a link out of the account home" {
+            $p = New-StandInPayload; $h = New-StandInClaudeHome
+            $outside = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-outside-" + [guid]::NewGuid())
+            $l = New-RetiredList @(@{ path = 'rules/victim.md'; reason = 'Retired.' })
+            try {
+                New-Item -ItemType Directory -Path $outside -Force | Out-Null
+                Set-Content -LiteralPath (Join-Path $outside 'victim.md') -Value 'outside'
+                $kind = if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }
+                New-Item -ItemType $kind -Path (Join-Path $h 'rules') -Target $outside | Out-Null
+                { Invoke-Retire -Payload $p -HomeDir $h -List $l | Out-Null } | Should -Throw -ExpectedMessage '*outside*'
+                Test-Path -LiteralPath (Join-Path $outside 'victim.md') | Should -BeTrue
+                @(Get-ChildItem -LiteralPath $outside -Force).Count | Should -Be 1
+            }
+            finally {
+                if (Test-Path -LiteralPath (Join-Path $h 'rules')) { (Get-Item -LiteralPath (Join-Path $h 'rules') -Force).Delete() }
+                Remove-Item -Recurse -Force $p, $h, $l, $outside -ErrorAction SilentlyContinue
+            }
+        }
+
+        It "stops rather than overwrite when the retired name is already taken" {
+            $p = New-StandInPayload; $h = New-StandInClaudeHome
+            $l = New-RetiredList @(@{ path = 'rules/old.md'; reason = 'Retired.' })
+            try {
+                New-Item -ItemType Directory -Path (Join-Path $h 'rules') -Force | Out-Null
+                # Occupy every second the run could stamp, so the collision is certain.
+                $planted = foreach ($s in 0..40) {
+                    $f = Join-Path $h ("rules/old.md.retired-" + (Get-Date -AsUTC).AddSeconds($s - 5).ToString('yyyyMMddTHHmmssZ'))
+                    Set-Content -LiteralPath $f -Value 'earlier'
+                    $f
+                }
+                Set-Content -LiteralPath (Join-Path $h 'rules/old.md') -Value 'the old rule'
+                { Invoke-Retire -Payload $p -HomeDir $h -List $l | Out-Null } | Should -Throw
+                (Get-Content -LiteralPath (Join-Path $h 'rules/old.md') -Raw).Trim() | Should -Be 'the old rule'
+                foreach ($f in $planted) { (Get-Content -LiteralPath $f -Raw).Trim() | Should -Be 'earlier' }
+            }
+            finally { Remove-Item -Recurse -Force $p, $h, $l -ErrorAction SilentlyContinue }
+        }
+
+        It "-WhatIf renames nothing and does not claim it did" {
+            $p = New-StandInPayload; $h = New-StandInClaudeHome
+            $l = New-RetiredList @(@{ path = 'rules/old.md'; reason = 'Retired.' })
+            try {
+                New-Item -ItemType Directory -Path (Join-Path $h 'rules') -Force | Out-Null
+                Set-Content -LiteralPath (Join-Path $h 'rules/old.md') -Value 'the old rule'
+                $out = Invoke-Retire -Payload $p -HomeDir $h -List $l -WhatIfRun
+                Test-Path -LiteralPath (Join-Path $h 'rules/old.md') | Should -BeTrue
+                @(Get-RetiredCopies (Join-Path $h 'rules') 'old.md').Count | Should -Be 0
+                $out | Should -Not -Match 'Retired rules/old\.md'
+                $out | Should -Not -Match 'Install-Harness\.ps1 -Target'
+            }
+            finally { Remove-Item -Recurse -Force $p, $h, $l -ErrorAction SilentlyContinue }
+        }
+
+        It "an empty list changes nothing and prints no Install-Harness advice" {
+            $p = New-StandInPayload; $h = New-StandInClaudeHome
+            $l = New-RetiredList @()
+            try {
+                New-Item -ItemType Directory -Path (Join-Path $h 'rules') -Force | Out-Null
+                Set-Content -LiteralPath (Join-Path $h 'rules/old.md') -Value 'kept'
+                $out = Invoke-Retire -Payload $p -HomeDir $h -List $l
+                Test-Path -LiteralPath (Join-Path $h 'rules/old.md') | Should -BeTrue
+                $out | Should -Not -Match 'Install-Harness\.ps1 -Target'
+                $out | Should -Not -Match 'Retired '
+            }
+            finally { Remove-Item -Recurse -Force $p, $h, $l -ErrorAction SilentlyContinue }
+        }
+
+        It "a missing list file throws and installs nothing" {
+            $p = New-StandInPayload; $h = New-StandInClaudeHome
+            try {
+                $missing = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-no-such-" + [guid]::NewGuid() + '.json')
+                { Invoke-Retire -Payload $p -HomeDir $h -List $missing | Out-Null } | Should -Throw -ExpectedMessage '*retired-paths list*'
+                Test-Path -LiteralPath (Join-Path $h 'rules/security.md') | Should -BeFalse
+            }
+            finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+        }
+
+        It "a list that does not parse or has the wrong shape throws: <Name>" -ForEach @(
+            @{ Name = 'not json'; Raw = '{ nope' }
+            @{ Name = 'empty file'; Raw = '' }
+            @{ Name = 'wrong schemaVersion'; Raw = '{"schemaVersion":2,"retired":[]}' }
+            @{ Name = 'no retired key'; Raw = '{"schemaVersion":1}' }
+            @{ Name = 'retired null'; Raw = '{"schemaVersion":1,"retired":null}' }
+            @{ Name = 'retired a string'; Raw = '{"schemaVersion":1,"retired":"rules/x.md"}' }
+            @{ Name = 'entry a bare string'; Raw = '{"schemaVersion":1,"retired":["rules/x.md"]}' }
+            @{ Name = 'entry without reason'; Raw = '{"schemaVersion":1,"retired":[{"path":"rules/x.md"}]}' }
+            @{ Name = 'entry path not a string'; Raw = '{"schemaVersion":1,"retired":[{"path":5,"reason":"r"}]}' }
+        ) {
+            $p = New-StandInPayload; $h = New-StandInClaudeHome
+            $l = New-RetiredList -Raw $Raw
+            try {
+                { Invoke-Retire -Payload $p -HomeDir $h -List $l | Out-Null } | Should -Throw -ExpectedMessage '*retired-paths list*'
+                Test-Path -LiteralPath (Join-Path $h 'rules/security.md') | Should -BeFalse
+            }
+            finally { Remove-Item -Recurse -Force $p, $h, $l -ErrorAction SilentlyContinue }
+        }
+
+        It "the shipped list parses and has the expected shape" {
+            $shipped = Get-Content -LiteralPath (Join-Path $script:repoRoot 'install/account-retired.json') -Raw | ConvertFrom-Json -AsHashtable
+            $shipped['schemaVersion'] | Should -Be 1
+            $shipped.Contains('retired') | Should -BeTrue
+            $shipped['retired'] -is [System.Collections.IList] | Should -BeTrue
+        }
+
+        It "a dependency refusal comes before any rename" {
+            $p = New-StandInPayload; $h = New-StandInClaudeHome
+            $l = New-RetiredList @(@{ path = 'rules/old.md'; reason = 'Retired.' })
+            try {
+                New-Item -ItemType Directory -Path (Join-Path $h 'rules') -Force | Out-Null
+                Set-Content -LiteralPath (Join-Path $h 'rules/old.md') -Value 'the old rule'
+                $stub = New-DepsStub -Absent 'bun'
+                { & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson (Join-Path $h 'claude.json') `
+                        -CoreRepo $script:repoRoot -TargetIsWindows:$false -RetiredListPath $l -DepsRunner $stub.Runner *>&1 | Out-Null } |
+                    Should -Throw -ExpectedMessage 'missing hard dependency*'
+                Test-Path -LiteralPath (Join-Path $h 'rules/old.md') | Should -BeTrue
+            }
+            finally { Remove-Item -Recurse -Force $p, $h, $l -ErrorAction SilentlyContinue }
+        }
     }
 
     # Issue #290. {{WSL_HOME}} has no entry in Get-AccountTokenMap by design, so a payload the

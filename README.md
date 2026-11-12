@@ -450,10 +450,35 @@ statusline script for the platform instead. Where `npm` is present, those hook e
 `ccstatusline` itself to be installed globally, so `node` can resolve it under the global
 `node_modules` path rather than a project-local one.
 
-Two limits follow from having no manifest, and both are intended. A file or hook entry deleted
-on the canonical box stays on receivers, because the copy overwrites and the merge adds. And a
+Two limits follow from having no manifest, and both are intended. A hook entry deleted from
+`settings.account.json` stays in a receiver's `settings.json`, because the merge only adds. And a
 receiver's own edit to an installed file is reverted by the next install without comment.
-`settings.local.json` is the per-machine escape hatch and never travels. The round trip and the
+`settings.local.json` is the per-machine escape hatch and never travels.
+
+A file deleted from the layer would also stay on receivers, because the copy only overwrites. The
+retire list, `install/account-retired.json`, is how that removal reaches a receiver:
+
+```
+{ "schemaVersion": 1, "retired": [ { "path": "rules/old.md", "reason": "Moved into the code layer." } ] }
+```
+
+Each path names a file under `rules/`, `agents/`, `skills/` or `hooks/`, and a skill is retired by
+listing its `SKILL.md`. The installer validates every entry before it renames anything. A path that
+is absolute, drive-qualified, written with backslashes, or climbs with `..` is refused with nothing
+renamed. So is a path with a link out of the account home anywhere on the way to the item, and so is
+a path that is a directory on the receiver or a link to one, since a renamed directory keeps
+loading. A listed path that is itself a link to a file is different: the link is renamed and its
+target is never touched. The installer renames the receiver's copy to `<path>.retired-<UTC stamp>`
+and never deletes it, so a local edit survives. Claude Code loads only `*.md` from `rules/`, so the
+renamed file stops loading. A rename never overwrites an earlier one, because a name collision
+stops the run, and `-WhatIf` renames nothing. A list
+that cannot be read or parsed stops the install, and so does a payload that still carries a listed
+path. The rename runs after the dependency preflight and before the first copy.
+
+When a rule moves from the account layer into a project layer, the receiver needs the project copy
+before the account copy goes. So the update order on a receiver is `git pull`, then
+`Install-Harness.ps1 -Target <project>` in each project that uses the harness, then
+`Install-Account.ps1`. After a rename the installer prints that instruction again. The round trip and the
 install into an empty home are both exercised by the Pester suites beside the scripts, in fixture
 homes. Whether either script has yet been run for real on a second machine is not recorded in this
 repository.
