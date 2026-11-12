@@ -11,6 +11,7 @@
 /core/claude/hooks/                         @Cringely
 /core/claude/agents/                        @Cringely
 /core/claude/templates/                     @Cringely
+/core/claude/rules/                         @Cringely
 /install/                                   @Cringely
 /tools/pr-review/                           @Cringely
 /account/claude/rules/                      @Cringely

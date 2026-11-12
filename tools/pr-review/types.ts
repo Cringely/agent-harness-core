@@ -128,6 +128,7 @@ export interface TokenMinter {
 export const TRUSTED_CONTEXT_PATHS = [
   "CONTRIBUTING.md",
   "core/claude/templates/guardrails.template.md",
+  "core/claude/rules/fix-quality.md",
   "account/claude/rules/fix-quality.md",
   "account/claude/rules/security.md",
 ] as const;

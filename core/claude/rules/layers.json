@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "rules": {
+    "change-management-code.md": ["code"],
+    "fix-quality.md": ["code"]
+  }
+}
