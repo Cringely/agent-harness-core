@@ -5,7 +5,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import {
   DEFAULT_EXCLUDES,
   classify,
@@ -157,6 +157,46 @@ describe("classify", () => {
     expect(rows.map((r) => r.status)).toEqual(["current", "behind"]);
     expect(rows[0]!.value).toBe("claude-sonnet-5.5"); // model-currency: ignore
   });
+  describe("membership in the listed ids", () => {
+    // Dated builds only: the undated alias-style id is not itself listed.
+    const LISTED: LatestTable = {
+      source: "api",
+      models: { sonnet: "claude-sonnet-5-5-20260101" }, // model-currency: ignore
+      ids: ["claude-sonnet-4-5-20250929", "claude-sonnet-5-5-20260101"], // model-currency: ignore
+    };
+    const status = (value: string, resolved: Record<string, string | null> = {}): string =>
+      classify([f(value, value.startsWith("claude") ? "pin" : "alias")], LISTED, resolved)[0]!.status;
+    test("the exact listed latest is current", () => {
+      expect(status("claude-sonnet-5-5-20260101")).toBe("current"); // model-currency: ignore
+    });
+    test("an undated id matches a dated listed build of the same version", () => {
+      expect(status("claude-sonnet-5-5")).toBe("current"); // model-currency: ignore
+      expect(status("claude-sonnet-5.5")).toBe("current"); // model-currency: ignore
+    });
+    test("a listed older build is behind", () => {
+      expect(status("claude-sonnet-4-5-20250929")).toBe("behind"); // model-currency: ignore
+    });
+    test("an older version is behind even when its exact build is not listed", () => {
+      expect(status("claude-sonnet-4-5-20240101")).toBe("behind"); // model-currency: ignore
+    });
+    test("a version above every listed one is unknown", () => {
+      expect(status("claude-sonnet-5-6")).toBe("unknown"); // model-currency: ignore
+      expect(status("claude-sonnet-6")).toBe("unknown"); // model-currency: ignore
+    });
+    test("a date that matches no listed build is unknown", () => {
+      expect(status("claude-sonnet-5-5-20250101")).toBe("unknown"); // model-currency: ignore
+    });
+    test("a dated pin is not matched by an undated listing", () => {
+      const undated: LatestTable = { source: "api", models: { sonnet: "claude-sonnet-5-5" }, ids: ["claude-sonnet-5-5"] }; // model-currency: ignore
+      expect(classify([f("claude-sonnet-5-5-20260101", "pin")], undated, {})[0]!.status).toBe("unknown"); // model-currency: ignore
+    });
+    test("a resolved alias must be listed too", () => {
+      expect(status("sonnet", { sonnet: "claude-sonnet-5-5" })).toBe("current"); // model-currency: ignore
+      expect(status("sonnet", { sonnet: "claude-sonnet-4-5" })).toBe("stale-alias"); // model-currency: ignore
+      expect(status("sonnet", { sonnet: "claude-sonnet-5-6" })).toBe("unknown"); // model-currency: ignore
+      expect(status("sonnet", { sonnet: "claude-sonnet-5-5-20250101" })).toBe("unknown"); // model-currency: ignore
+    });
+  });
   test("with no latest table everything is unknown", () => {
     const rows = classify([f("claude-sonnet-5", "pin"), f("sonnet", "alias")], null, {}); // model-currency: ignore
     expect(rows.map((r) => r.status)).toEqual(["unknown", "unknown"]);
@@ -224,7 +264,7 @@ describe("fetchLatestFromApi", () => {
       headers = init.headers;
       return new Response(JSON.stringify({ data: [{ id: "claude-opus-5" }, { id: "claude-opus-5-5" }] })); // model-currency: ignore
     }) as unknown as typeof fetch;
-    expect(await fetchLatestFromApi("k", stub)).toEqual({ source: "api", models: { opus: "claude-opus-5-5" } }); // model-currency: ignore
+    expect(await fetchLatestFromApi("k", stub)).toEqual({ source: "api", models: { opus: "claude-opus-5-5" }, ids: ["claude-opus-5", "claude-opus-5-5"] }); // model-currency: ignore
     expect(url).toBe("https://api.anthropic.com/v1/models?limit=1000");
     expect(headers["x-api-key"]).toBe("k");
     expect(headers["anthropic-version"]).toBe("2023-06-01");
@@ -469,6 +509,45 @@ describe("run", () => {
     const r = await run(["--root", root, "--latest", latest], deps({}));
     expect(rowsOf(r.output, "current").length).toBe(1);
     expect(r.exitCode).toBe(0);
+  });
+  test("a --latest file may list several ids per family, and an unlisted pin is exit 2", async () => {
+    const latest = join(tempRoot(), "latest.json");
+    writeFileSync(latest, '{"sonnet":["claude-sonnet-5-5-20260101","claude-sonnet-4-5-20250929"]}'); // model-currency: ignore
+    const listed = tempRoot();
+    put(listed, "a.sh", "claude --model claude-sonnet-5-5-20260101 -p x\n"); // model-currency: ignore
+    const ok = await run(["--root", listed, "--latest", latest], deps({}));
+    expect(rowsOf(ok.output, "current").length).toBe(1);
+    expect(ok.exitCode).toBe(0);
+    const older = tempRoot();
+    put(older, "a.sh", "claude --model claude-sonnet-4-5-20250929 -p x\n"); // model-currency: ignore
+    const behind = await run(["--root", older, "--latest", latest], deps({}));
+    expect(rowsOf(behind.output, "behind").length).toBe(1);
+    expect(behind.exitCode).toBe(1);
+    const above = tempRoot();
+    put(above, "a.sh", "claude --model claude-sonnet-5-6 -p x\n"); // model-currency: ignore
+    const r = await run(["--root", above, "--latest", latest], deps({}));
+    expect(rowsOf(r.output, "unknown").length).toBe(1);
+    expect(r.exitCode).toBe(2);
+  });
+  test("under the API source a pin with a nonexistent date is exit 2", async () => {
+    const root = tempRoot();
+    put(root, "a.sh", "claude --model claude-sonnet-5-5-20250101 -p x\n"); // model-currency: ignore
+    const api = (async () => new Response(JSON.stringify({ data: [{ id: "claude-sonnet-5-5-20260101" }] }))) as unknown as typeof fetch; // model-currency: ignore
+    const r = await run(["--root", root], { ...deps({}, { ANTHROPIC_API_KEY: "k" }), fetchImpl: api });
+    expect(rowsOf(r.output, "unknown").length).toBe(1);
+    expect(r.exitCode).toBe(2);
+  });
+  test("rows show paths relative to the root, led by the root's basename, never the absolute root", async () => {
+    const root = tempRoot();
+    put(root, "sub/a.sh", PIN_FILE);
+    const r = await run(["--root", root, "--no-resolve"], deps({}));
+    const row = rowsOf(r.output, "unknown")[0]!;
+    expect(row).toContain(`${basename(root)}/sub/a.sh:1`);
+    expect(r.output).not.toContain(root);
+    expect(r.output).not.toContain(root.replace(/\\/g, "/"));
+    const single = await run(["--root", join(root, "sub", "a.sh"), "--no-resolve"], deps({}));
+    expect(rowsOf(single.output, "unknown")[0]).toContain("\ta.sh:1");
+    expect(single.output).not.toContain(root);
   });
   test("the Models API outranks --latest, and found aliases are resolved against it", async () => {
     const root = tempRoot();

@@ -7,12 +7,26 @@
 //                                     [--latest <file.json>] [--no-resolve]
 //
 // Latest-model source, first that answers: the Models API (needs ANTHROPIC_API_KEY), the --latest
-// JSON file (family name to model id), then the live resolution of each tier alias through
-// `claude -p`. The alias source is unverified, because an alias can itself resolve to an older
-// model, so it can prove a pin is behind but never that anything is current.
+// JSON file (family name to one model id or a list of them), then the live resolution of each tier
+// alias through `claude -p`. The alias source is unverified, because an alias can itself resolve to
+// an older model, so it can prove a pin is behind but never that anything is current.
+//
+// "current" means the exact id was confirmed to exist in the source's list and is the newest in its
+// family. The api and file sources keep every id they list. A pin, or a resolved alias, is:
+//   behind (stale-alias for an alias)  its version is below the family's latest. Whether its exact
+//                                      build is listed does not matter, it is out of date either way.
+//   current                            its version is the latest and the id is listed.
+//   unknown                            its version is above every listed one, or it is at the latest
+//                                      version but not listed (a date that matches no build), or the
+//                                      family has no latest. The run is then inconclusive (exit 2).
+// Matching against the list: dotted and hyphenated spellings are the same version. A dated id
+// matches only a listed build with the same date. An undated id, the alias-style form such as
+// claude-opus-5-5, matches any listed build of that version, dated or not.
 //
 // Output: a first line naming the source, then one row per finding:
 //   <status>\t<file>:<line>\t<value>\t<latest or ->
+// where <file> is relative to the --root it was found under, led by that root's basename, so an
+// absolute path (and the user name in it) never reaches the output.
 // then a last line "scanned N files, skipped M, excluded K".
 //
 // The invariant: exit 0 means every file in scope was read. Anything in scope that was not read is
@@ -40,7 +54,7 @@
 
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join, resolve as resolvePath } from "node:path";
 import { parseArgs } from "node:util";
 
 export type Family = "fable" | "opus" | "sonnet" | "haiku";
@@ -125,6 +139,8 @@ export function scanText(file: string, text: string): Finding[] {
 export interface LatestTable {
   source: "api" | "file" | "alias";
   models: Partial<Record<Family, string>>;
+  // Every id the source listed (api and file). When absent, the ids in `models` are the list.
+  ids?: string[];
 }
 
 export interface Row {
@@ -133,6 +149,32 @@ export interface Row {
   line: number;
   value: string;
   latest: string | null;
+}
+
+// How an id is matched against the source's list. Dotted and hyphenated spellings are the same
+// version. A dated id matches only a listed build of the same version with the same date. An
+// undated id (the alias-style form) matches any listed build of that version, dated or not.
+function isListed(id: ModelId, listed: ModelId[]): boolean {
+  return listed.some(
+    (l) => l.family === id.family && l.major === id.major && l.minor === id.minor && (id.date === null || id.date === l.date),
+  );
+}
+
+type Verdict = "older" | "same" | "unknown";
+
+// older: the version is below the family's latest, whether or not that exact build is listed.
+// same: the version is the latest and the exact id is listed. unknown: above the latest, a date
+// or version the source does not list, or no usable latest for the family.
+function judge(id: ModelId | null, latest: LatestTable | null): Verdict {
+  if (id === null || latest === null) return "unknown";
+  const latestId = latest.models[id.family];
+  const latestParsed = latestId === undefined ? null : parseModelId(latestId);
+  if (latestParsed === null) return "unknown";
+  const cmp = compareModelIds(id, latestParsed);
+  if (cmp < 0) return "older";
+  if (cmp > 0) return "unknown";
+  const listed = (latest.ids ?? Object.values(latest.models) as string[]).map(parseModelId).filter((m): m is ModelId => m !== null);
+  return isListed(id, listed) ? "same" : "unknown";
 }
 
 export function classify(
@@ -144,24 +186,18 @@ export function classify(
     const base = { file: f.file, line: f.line, value: f.value };
     if (f.kind === "pin") {
       const pin = parseModelId(f.value);
-      const latestId = pin === null || latest === null ? undefined : latest.models[pin.family];
-      const latestParsed = latestId === undefined ? null : parseModelId(latestId);
-      if (pin === null || latest === null || latestId === undefined || latestParsed === null) {
-        return { ...base, status: "unknown", latest: latestId ?? null };
-      }
-      if (compareModelIds(pin, latestParsed) < 0) return { ...base, status: "behind", latest: latestId };
-      // An alias-derived latest is unverified, so a pin at or above it is not shown to be current.
-      return { ...base, status: latest.source === "alias" ? "unknown" : "current", latest: latestId };
+      const latestId = pin === null || latest === null ? null : (latest.models[pin.family] ?? null);
+      const v = judge(pin, latest);
+      if (v === "older") return { ...base, status: "behind", latest: latestId };
+      // An alias-derived latest is unverified, so a pin at it is not shown to be current.
+      return { ...base, status: v === "same" && latest!.source !== "alias" ? "current" : "unknown", latest: latestId };
     }
     const family = f.value as Family;
-    const latestId = latest === null ? undefined : latest.models[family];
-    const latestParsed = latestId === undefined ? null : parseModelId(latestId);
+    const latestId = latest === null ? null : (latest.models[family] ?? null);
+    if (latest === null || latest.source === "alias") return { ...base, status: "unknown", latest: latestId };
     const resolvedId = resolved[family] ?? null;
-    const resolvedParsed = resolvedId === null ? null : parseModelId(resolvedId);
-    if (latest === null || latest.source === "alias" || latestParsed === null || resolvedParsed === null) {
-      return { ...base, status: "unknown", latest: latestId ?? null };
-    }
-    return { ...base, status: compareModelIds(resolvedParsed, latestParsed) < 0 ? "stale-alias" : "current", latest: latestId! };
+    const v = judge(resolvedId === null ? null : parseModelId(resolvedId), latest);
+    return { ...base, status: v === "older" ? "stale-alias" : v === "same" ? "current" : "unknown", latest: latestId };
   });
 }
 
@@ -176,7 +212,7 @@ export async function fetchLatestFromApi(apiKey: string | undefined, fetchImpl: 
     if (!Array.isArray(body.data)) return null;
     const ids = body.data.map((d) => (d as { id?: unknown } | null)?.id).filter((x): x is string => typeof x === "string");
     const models = latestByFamily(ids);
-    return Object.keys(models).length === 0 ? null : { source: "api", models };
+    return Object.keys(models).length === 0 ? null : { source: "api", models, ids: ids.filter((i) => parseModelId(i) !== null) };
   } catch {
     return null;
   }
@@ -350,10 +386,12 @@ function readLatestFile(path: string): LatestTable | null {
     const ids: string[] = [];
     for (const f of FAMILIES) {
       const v = obj[f];
-      if (typeof v === "string" && parseModelId(v)?.family === f) ids.push(v);
+      for (const id of Array.isArray(v) ? v : [v]) {
+        if (typeof id === "string" && parseModelId(id)?.family === f) ids.push(id);
+      }
     }
     const models = latestByFamily(ids);
-    return Object.keys(models).length === 0 ? null : { source: "file", models };
+    return Object.keys(models).length === 0 ? null : { source: "file", models, ids };
   } catch {
     return null;
   }
@@ -382,8 +420,8 @@ export async function run(argv: string[], deps: RunDeps): Promise<{ exitCode: 0 
   const cov: Coverage = { scanned: 0, skipped: 0, excluded: 0, unread: [] };
   for (const root of values.root ?? ["."]) {
     try {
-      if (statSync(root).isDirectory()) walk(root, root, excludes, files, cov);
-      else files.push({ abs: root, shown: root });
+      if (statSync(root).isDirectory()) walk(root, basename(resolvePath(root)), excludes, files, cov);
+      else files.push({ abs: root, shown: basename(resolvePath(root)) });
     } catch {
       return fail(`cannot read root: ${root}`);
     }
