@@ -4,7 +4,7 @@ This is a process layer and pattern documentation, extracted from the SpaceMolt 
 
 ## Layering model
 
-Three layers make up a working setup. This repo is the core layer: the shared agent definitions, hooks, and templates that apply to any project. `~/.claude` is the user's global layer, already carrying personal skills and rules that apply across every repo the user touches. A project's own `.claude/` directory is the installed copy of core plus whatever that project adds on its own.
+Three layers make up a working setup. This repo is the core layer: the shared agent definitions, hooks, and templates that apply to any project. `~/.claude` is the user's global layer, already carrying personal skills and rules that apply across every repo the user touches. A project's own `.claude/` directory is the installed copy of core plus whatever that project adds on its own. The account layer is the kernel, and layer rules ship from core into each project.
 
 The rule that keeps these from drifting into a mess: core is upstream. Projects never edit an installed file in place. If a project needs something different, it adds a project-local file alongside the installed one rather than changing it, and if the change turns out to be broadly useful, it goes back to core through the flow in CONTRIBUTING.md. Editing installed files directly is how forks rot: the next install silently overwrites the edit, or the project drifts far enough that re-installing breaks it.
 
@@ -14,7 +14,8 @@ The rule that keeps these from drifting into a mess: core is upstream. Projects 
 |---|---|
 | `core/claude/agents/` | Self-contained process roles `adversarial-reviewer`, `doc-steward`, `research-scout`, `soc-monitor`, `task-reviewer`. See `patterns/agent-def-shape.md` on why none point at a charter yet |
 | `core/claude/hooks/` | Worktree gate, write-scope gate, model-tier gate, session guardrails, drift check, wave-close handoff, prose-lint-on-write. `core/claude/templates/settings.hooks.json` is the list of Claude Code hooks that actually gets wired. This row goes stale, that file does not. The three git hooks in the same directory, `pre-commit`, `pre-push` and `commit-msg`, are wired a second way, through `core.hooksPath` (see Install) |
-| `core/claude/templates/` | `guardrails.template.md`, a settings fragment, a scratch `.gitignore` and `manifest-local.gitignore`, installed as `.claude/.gitignore` to keep the per-machine sidecar out of a commit, all of which the installer applies on every run, a ceremony ledger template it applies only under `-IncludeCeremonies`, plus three reference templates it leaves in core: agent-def authoring, the reviewer-lockout protocol, and the untrusted-content boundary block |
+| `core/claude/templates/` | `guardrails.template.md`, a settings fragment, a scratch `.gitignore` and `manifest-local.gitignore`, installed as `.claude/.gitignore` to keep the per-machine sidecar out of a commit, and `project-settings.template.md`, rendered into `.claude/rules/harness/project-settings.md`, all of which the installer applies on every run, a ceremony ledger template it applies only under `-IncludeCeremonies`, plus three reference templates it leaves in core: agent-def authoring, the reviewer-lockout protocol, and the untrusted-content boundary block |
+| `core/claude/rules/` | Layer rule files and layers.json, which assigns each file to the code, documents or physical layer and defines the project settings. The installer copies the layers a project records into its .claude/rules/harness/ |
 | `patterns/` | The design docs behind the above, listed in [`patterns/INDEX.md`](patterns/INDEX.md) |
 | `install/` | The installer that copies core into a project's `.claude/`. The `Export-Account.ps1` and `Install-Account.ps1` pair that carries the account layer between machines (see below), with `AccountShared.ps1`, the library both dot-source for the payload tables they have to agree on. `Restore-ClaudeProject.ps1` for moving a project, its session history and the `~/.claude` global layer to another machine. `Start-CappedCopilot.ps1`, which launches Copilot CLI with a per-session credit cap. And the Pester suites beside them |
 | `tools/pr-review/` | This repository's own pull request reviewer, run by hand: a tool-less model reviews the diff, code computes the verdict, and a GitHub App posts it (#120). Outside the paths `.github/CODEOWNERS` assigns, its approval is what normally supplies the one approving review `master` requires before a merge. On an owned path the operator merges through the recorded administrator bypass alongside the App approval (see Testing and merging). Not part of core, and nothing installs it. [`tools/pr-review/README.md`](tools/pr-review/README.md) covers setup and commands |
@@ -22,7 +23,7 @@ The rule that keeps these from drifting into a mess: core is upstream. Projects 
 | `packs.json`, `packs/` | The source of the installable plugin packs and the packs generated from it, with `.claude-plugin/marketplace.json` beside them. Generated by `tools/packs/cli.ts`, never hand-edited (see Packs) |
 | `tools/packs/` | The pack generator and its `--check` drift gate (#254). Not part of core, and nothing installs it |
 | `tools/model-currency/` | The kernel's model currency check: every exact model ID, and every tier alias written as a `model` setting or a `--model` option, under the roots given, against the latest models, with aliases resolved live. Anything in scope it did not read (an unreadable, oversize or binary file, or a symlink) makes the run inconclusive instead of clean. Excluded classes (`.jsonl` files, backup names, and a default list of directories such as `worktrees` and `.superpowers`) are counted in the last line as excluded. Run by hand. Nothing installs it |
-| `test/` | The `bun test` suite, covering the hooks, the agent definitions (frontmatter keys, names, and the doc-steward tool grant), `tools/pr-review/`, `tools/packs/` and `tools/model-currency/`, plus the CI secret-scan job's workflow steps (`secret-scan-ci.test.ts`) |
+| `test/` | The `bun test` suite, covering the hooks, the agent definitions (frontmatter keys, names, and the doc-steward tool grant), `tools/pr-review/`, `tools/packs/` and `tools/model-currency/`, plus the CI secret-scan job's workflow steps (`secret-scan-ci.test.ts`), and the layer rules: `layer-rules.test.ts` checks the shape of `core/claude/rules/layers.json` and pins the split of the core rule files against the originals in `test/fixtures/rules-premove/` |
 | `docs/` | Design specs and plans under `docs/superpowers/`, the security control register (`docs/security-controls.md`, pinned by `test/security-controls.test.ts`), and two HTML writeups at the top level: a memory-systems assessment and a two-day recap from 2026-08-02 |
 | `.github/workflows/` | `test.yml`, the one workflow. `tools/pr-review/verdict.ts`'s `REQUIRED_CHECKS` names which of its jobs the pull request reviewer reads to decide what CI vouches for (see Testing and merging). `.gitleaks.toml` at the repo root configures its secret-scan job |
 
@@ -93,6 +94,35 @@ pwsh install/Install-Harness.ps1 -Target <project-root>
 runs standup/wave ceremonies. `-Force` overwrites files the project has modified since install. The
 default is to skip a modified file and warn.
 
+`-Layers` names the project layers: `code`, `documents`, `physical`, or `none` for no project
+layers. It takes a list (`-Layers code,documents`) or one comma-separated string. The kernel is
+always on and is never listed, and `none` cannot be combined with a layer. The choice is recorded
+in the manifest, so a later run without `-Layers` keeps it. A fresh install, and a manifest written
+before layers existed, record `code`. Each layer's rule files, listed in
+`core/claude/rules/layers.json`, install into `.claude/rules/harness/` and are tracked like any
+other managed file. A hand-written file already at one of those paths is kept and reported, the
+same as anywhere else in the layer.
+
+Three settings are recorded beside the layers. `-StatusCadence` is `silent` or `heartbeat`,
+`-Audience` is `peer-engineer` or `plain-all-roles`, and `-LengthBudget` sets a default word
+budget, with `0` clearing it. A flag sets its value, the recorded value stays when the flag is
+omitted, and a project with nothing recorded gets a default from its layers: `heartbeat` when they
+include `documents` or `physical`, `plain-all-roles` when they include `documents` without `code`,
+and no length budget. Changing `-Layers` alone never changes a recorded setting. The four flags
+apply to an install run only, and the installer refuses them beside `-Audit`, `-Accept`,
+`-Unaccept` or `-Prune`.
+
+Every install writes `.claude/rules/harness/project-settings.md` from the recorded layers and
+settings, using `core/claude/templates/project-settings.template.md`. It is not tracked in the
+manifest's `files` map. Instead its first line is a marker holding a hash of the rest, and an
+install regenerates the file only when it is absent or still matches that marker. A hand edit, or
+a file at that path the installer never wrote, is kept with a warning, as with any other modified
+managed file, and `-Force` replaces it. Change a setting by re-running the installer with its flag.
+
+Dropping a layer never deletes its rule files. A file still on disk is left in place with a
+warning, since it may carry project edits. Delete it by hand if the layer is gone for good, and the
+next install drops its record from the manifest.
+
 `pre-commit`, `pre-push` and `commit-msg` are git hooks rather than Claude Code hooks. The
 installer copies them into `.claude/hooks/` with the rest and then, when the target
 is a git repository, sets `core.hooksPath` to that directory, so git runs them on every commit and
@@ -141,7 +171,10 @@ each installed path to the SHA256 it had at install time, which is what makes a 
 detectable. `accepted` maps a path to the hash of the project's own fork, pinned deliberately, and
 says the divergence is the intended state. `coreCommit` is the third field, recording which core
 commit the layer was installed from. A manifest written before this shape existed, a flat
-path-to-hash map, is migrated on the next run with every hash preserved under `files`.
+path-to-hash map, is migrated on the next run with every hash preserved under `files`. The
+current shape adds `schemaVersion` (3), `layers` and `settings`, described with the install flags
+above, without dropping any of those fields. A `layers` or `settings` value outside what
+`core/claude/rules/layers.json` defines stops every installer command before it writes anything.
 
 None of that travels between clones, which is exactly why two other fields never reach this file:
 `coreRepo` (an absolute path to the core checkout) and `stackDetected` (the per-machine plugin,
@@ -221,6 +254,17 @@ splits three ways instead: a key core no longer ships whose file already left th
 `orphaned (already removed)`, one where the on-disk copy still matches the hash recorded at install
 reads `orphaned (unmodified)`, and one the project edited since reads `orphaned (modified)`. All
 three are `-Prune`'s job, the last of them followed by `-Accept` to pin the fork.
+
+Layers add six statuses. `not-installed (layer not selected)` is a rule file for a layer the
+project does not record, and like `not-installed (ceremony-gated)` it is listed but not counted.
+`installed (layer not selected)` is one still on disk after its layer was dropped. Delete it by
+hand, and the next install drops its record. `settings-missing` and `settings-stale` mean
+`project-settings.md` is absent, or is as the installer wrote it but differs, line endings aside,
+from what the manifest now renders, and a re-run rewrites it. `settings-modified` means it was
+edited by hand or never written by the installer, so installs keep it. Move the change into the
+manifest with the setting's flag, then delete the file and re-run. `manifest-invalid` means the manifest's `layers` or `settings` value is one
+the installer refuses. Fix the value the error names. Under `-Audit -Quiet` that is the only row
+printed.
 
 This is the mechanical half of the findings flow in CONTRIBUTING.md.
 Run it periodically per project (SpaceMolt wires it into a `core_harvest` ceremony, see that
