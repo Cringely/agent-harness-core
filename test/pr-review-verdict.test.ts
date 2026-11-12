@@ -208,6 +208,15 @@ describe("computeVerification()", () => {
     expect(verify(green(), ["install/AccountShared.ps1"], onlyExport).state).toBe("passed");
   });
 
+  // #310: install/Deps.ps1 has no sibling suite. Both installer suites drive it and both run in
+  // the real workflow. A workflow naming neither stays incomplete.
+  test("install/Deps.ps1 is covered by its declared suites on the real workflow", () => {
+    expect(verify(green(), ["install/Deps.ps1"], REAL_WORKFLOW).state).toBe("passed");
+  });
+  test("install/Deps.ps1 is incomplete when neither declared suite runs", () => {
+    expect(verify(green(), ["install/Deps.ps1"]).state).toBe("incomplete");
+  });
+
   // #209: account/claude/hooks/*.ps1 has no sibling suite, but install/Account-Hooks.Tests.ps1
   // exercises it and runs on a line in the real workflow (#207), so the declared mapping in
   // SHARED_MODULE_SUITES must read the file as covered. Case-insensitive on the extension only
