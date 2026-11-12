@@ -123,8 +123,8 @@ export interface TokenMinter {
 
 // Read at the pull request's BASE commit, so a PR that edits one of these files cannot change the
 // standard it is reviewed against. #120 names CONTRIBUTING.md, the guardrails file and the
-// relevant account rules. `.claude/guardrails.md` is gitignored in this repository, so the
-// template it is installed from stands in for it.
+// relevant rules, in core and in the account layer. `.claude/guardrails.md` is gitignored in this
+// repository, so the template it is installed from stands in for it.
 export const TRUSTED_CONTEXT_PATHS = [
   "CONTRIBUTING.md",
   "core/claude/templates/guardrails.template.md",

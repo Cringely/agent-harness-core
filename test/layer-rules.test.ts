@@ -4,7 +4,8 @@
 //
 // Task 14 deletes this file and the fixtures once the account copies are retired.
 import { describe, expect, test } from "bun:test";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 export const SPLITS = {
@@ -85,45 +86,68 @@ describe("layers.json", () => {
   });
 });
 
+type Split = (typeof SPLITS)[keyof typeof SPLITS];
+
+// Checks one split against an account rules directory. Throws on any mismatch, so a test can
+// point it at a temp directory without touching the account tree.
+function verifySplit(original: string, split: Split, accountDir: string): void {
+  const fixtureText = read(join(fixtures, original));
+  const fx = sectionsOf(fixtureText);
+  const codeSecs = pick(fx.sections, split.codeSections);
+  const kernelSecs = fx.sections.filter((s) => !split.codeSections.some((h) => h === s.heading));
+
+  const codePre = split.preambleStaysIn === "code" ? fx.preamble : split.newPreamble;
+  const kernelPre = split.preambleStaysIn === "kernel" ? fx.preamble : split.newPreamble;
+
+  // Core code half: its preamble, then exactly the listed sections in original order.
+  const core = sectionsOf(read(join(coreRules, split.codeFile)));
+  expect(core.preamble).toBe(trimEnd(codePre));
+  expect(core.sections).toEqual(codeSecs);
+
+  // Which side of the cutover is the account tree on.
+  const accountOriginal = join(accountDir, original);
+  const accountKernel = join(accountDir, split.kernelFile);
+  const sourceMoved = new Error(
+    `account/claude/rules/${original} matches neither the pre-move fixture nor the post-move ` +
+      `kernel half. The source changed since the move and must be ported into core.`,
+  );
+
+  if (existsSync(accountOriginal) && read(accountOriginal) === fixtureText) {
+    return; // Before cutover: the account copy is the original, and the core half is pinned above.
+  }
+  // After cutover the original name is absent only when the kernel half has a different name.
+  const absentOk = split.kernelFile !== original;
+  if (!existsSync(accountOriginal) && !absentOk) throw sourceMoved;
+  if (existsSync(accountOriginal) && absentOk) throw sourceMoved;
+  if (!existsSync(accountKernel)) throw sourceMoved;
+
+  // After cutover: the kernel half must be the fixture minus the code sections.
+  const kernel = sectionsOf(read(accountKernel));
+  const kernelMatches =
+    kernel.preamble === trimEnd(kernelPre) && JSON.stringify(kernel.sections) === JSON.stringify(kernelSecs);
+  if (!kernelMatches) throw sourceMoved;
+  expect(kernel.preamble).toBe(trimEnd(kernelPre));
+  expect(kernel.sections).toEqual(kernelSecs);
+}
+
 describe("the split loses and adds nothing", () => {
   for (const [original, split] of Object.entries(SPLITS)) {
-    test(original, () => {
-      const fixtureText = read(join(fixtures, original));
-      const fx = sectionsOf(fixtureText);
-      const codeSecs = pick(fx.sections, split.codeSections);
-      const kernelSecs = fx.sections.filter((s) => !split.codeSections.some((h) => h === s.heading));
-
-      const codePre = split.preambleStaysIn === "code" ? fx.preamble : split.newPreamble;
-      const kernelPre = split.preambleStaysIn === "kernel" ? fx.preamble : split.newPreamble;
-
-      // Core code half: its preamble, then exactly the listed sections in original order.
-      const core = sectionsOf(read(join(coreRules, split.codeFile)));
-      expect(core.preamble).toBe(trimEnd(codePre));
-      expect(core.sections).toEqual(codeSecs);
-
-      // Which side of the cutover is the account tree on.
-      const accountOriginal = join(accountRules, original);
-      const accountKernel = join(accountRules, split.kernelFile);
-      const sourceMoved =
-        `account/claude/rules/${original} matches neither the pre-move fixture nor the post-move ` +
-        `kernel half. The source changed since the move and must be ported into core.`;
-
-      if (existsSync(accountOriginal) && read(accountOriginal) === fixtureText) {
-        return; // Before cutover: the account copy is the original, and the core half is pinned above.
-      }
-      const absentOk = split.kernelFile !== original;
-      if (!existsSync(accountOriginal) && !absentOk) throw new Error(sourceMoved);
-      if (existsSync(accountOriginal) && split.kernelFile !== original) throw new Error(sourceMoved);
-      if (!existsSync(accountKernel)) throw new Error(sourceMoved);
-
-      // After cutover: kernel half plus code half equal the fixture, section by section.
-      const kernel = sectionsOf(read(accountKernel));
-      expect(kernel.preamble).toBe(trimEnd(kernelPre));
-      expect(kernel.sections).toEqual(kernelSecs);
-      const union = [...kernel.sections, ...core.sections].map((s) => s.heading).sort();
-      expect(union).toEqual(fx.sections.map((s) => s.heading).sort());
-    });
+    test(original, () => verifySplit(original, split, accountRules));
   }
+
+  test("an edited account change-management.md fails with the source-changed message", () => {
+    const dir = mkdtempSync(join(tmpdir(), "layer-rules-"));
+    try {
+      const edited = read(join(fixtures, "change-management.md")).replace("## Homelab Context", "## Homelab Context (edited)");
+      expect(edited).not.toBe(read(join(fixtures, "change-management.md")));
+      writeFileSync(join(dir, "change-management.md"), edited);
+      expect(() => verifySplit("change-management.md", SPLITS["change-management.md"], dir)).toThrow(
+        /source changed since the move and must be ported into core/,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("sectionsOf", () => {
