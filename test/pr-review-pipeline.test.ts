@@ -6,12 +6,30 @@
 
 import { describe, expect, test } from "bun:test";
 import type { IdentityDecl } from "../tools/pr-review/identity";
-import { syntheticCheckRuns } from "../tools/pr-review/local-source";
+import { LocalGitSource, syntheticCheckRuns } from "../tools/pr-review/local-source";
 import { runReview, type ReviewDeps, type ReviewOptions } from "../tools/pr-review/pipeline";
-import { RefusalError, type Finding, type PrSnapshot, type ReviewEvent, type ReviewPoster, type ReviewerRunner, type RunnerResult, type Severity } from "../tools/pr-review/types";
+import {
+  RefusalError,
+  type Finding,
+  type PrSnapshot,
+  type RepoPolicy,
+  type ReviewEvent,
+  type ReviewPoster,
+  type ReviewerRunner,
+  type RunnerResult,
+  type Severity,
+} from "../tools/pr-review/types";
 import { MAX_DIFF_BYTES } from "../tools/pr-review/types";
 
 const HEAD = "c".repeat(40);
+
+// #318: the policy the fixture snapshot is reviewed under, keyed to the snapshot's own repository.
+const POLICY: RepoPolicy = {
+  repo: "owner/name",
+  ciWorkflowPath: ".github/workflows/ci.yml",
+  requiredChecks: [{ name: "build", appSlug: "github-actions" }],
+  pesterCoverage: false,
+};
 
 const snapshot = (overrides: Partial<PrSnapshot> = {}): PrSnapshot => ({
   repo: "owner/name",
@@ -30,8 +48,8 @@ const snapshot = (overrides: Partial<PrSnapshot> = {}): PrSnapshot => ({
   linkedIssues: [],
   trustedContext: [],
   livingDocs: [],
-  workflowText: "jobs:\n",
-  checkRuns: syntheticCheckRuns("passed"),
+  workflowText: "jobs:\n  build:\n    name: build\n",
+  checkRuns: syntheticCheckRuns("passed", POLICY.requiredChecks),
   ...overrides,
 });
 
@@ -71,6 +89,7 @@ const deps = (overrides: Partial<ReviewDeps> = {}): ReviewDeps => ({
   accountEmail: true,
   toolRevision: "e".repeat(40),
   toolDirty: false,
+  policy: POLICY,
   ...overrides,
 });
 
@@ -103,7 +122,7 @@ describe("runReview(): the posted event follows severities and CI, never prose",
   });
 
   test("CI incomplete with a clean review posts COMMENT", async () => {
-    const source = { snapshot: async () => snapshot({ checkRuns: syntheticCheckRuns("incomplete") }) };
+    const source = { snapshot: async () => snapshot({ checkRuns: syntheticCheckRuns("incomplete", POLICY.requiredChecks) }) };
     const outcome = await runReview(deps({ source }), OPTIONS);
     expect(outcome.event).toBe("COMMENT");
   });
@@ -113,6 +132,65 @@ describe("runReview(): the posted event follows severities and CI, never prose",
     expect((await runReview(deps({ source }), OPTIONS)).event).toBe("COMMENT");
     const rejected = await runReview(deps({ source, runner: runnerWith([finding("correctness")]) }), OPTIONS);
     expect(rejected.event).toBe("REQUEST_CHANGES");
+  });
+});
+
+// #318: the policy deps carries must belong to the repository the snapshot came from. cli.ts builds
+// both from one --repo, so this is defence in depth against a caller that wires them apart.
+describe("runReview(): the policy must match the reviewed repository (#318)", () => {
+  test("a policy for another repository refuses before the model runs, and posts nothing", async () => {
+    const poster = new FakePoster();
+    const runner = runnerWith([]);
+    const attempt = runReview(deps({ poster, runner, policy: { ...POLICY, repo: "owner/example" } }), OPTIONS);
+    await expect(attempt).rejects.toBeInstanceOf(RefusalError);
+    await expect(attempt).rejects.toThrow("policy");
+    expect(poster.posts).toEqual([]);
+    expect(runner.calls).toBe(0);
+  });
+
+  test("the refusal names neither repository", async () => {
+    const attempt = runReview(deps({ poster: null, policy: { ...POLICY, repo: "owner/example" } }), OPTIONS);
+    const error = await attempt.catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(RefusalError);
+    expect((error as Error).message).not.toContain("owner/example");
+    expect((error as Error).message).not.toContain("owner/name");
+  });
+
+  test("a dry run from a non-local source is still checked", async () => {
+    const attempt = runReview(deps({ poster: null, policy: { ...POLICY, repo: "owner/example" } }), OPTIONS);
+    await expect(attempt).rejects.toBeInstanceOf(RefusalError);
+  });
+
+  // The local source names its repository "local" and has no pull request number, so the check is
+  // skipped for it, and only on a dry run: nothing from it can post.
+  const localSource = () =>
+    Object.assign(Object.create(LocalGitSource.prototype) as LocalGitSource, {
+      snapshot: async () => snapshot({ repo: "local", number: null }),
+    });
+
+  test("a dry run from the local source skips the check", async () => {
+    const outcome = await runReview(deps({ source: localSource(), poster: null }), OPTIONS);
+    expect(outcome.status).toBe("dry-run");
+    expect(outcome.event).toBe("APPROVE");
+  });
+
+  test("a posting run from the local source is still checked", async () => {
+    const poster = new FakePoster();
+    await expect(runReview(deps({ source: localSource(), poster }), OPTIONS)).rejects.toBeInstanceOf(RefusalError);
+    expect(poster.posts).toEqual([]);
+  });
+
+  test("a source merely claiming to be local is checked", async () => {
+    const source = { snapshot: async () => snapshot({ repo: "local", number: null }) };
+    await expect(runReview(deps({ source, poster: null }), OPTIONS)).rejects.toBeInstanceOf(RefusalError);
+  });
+
+  test("verification is computed under the policy in deps", async () => {
+    // The fixture's run is for "build" only. Under a policy requiring "ci" it cannot approve.
+    const policy = { ...POLICY, requiredChecks: [{ name: "ci", appSlug: "github-actions" }] };
+    const outcome = await runReview(deps({ policy }), OPTIONS);
+    expect(outcome.verification.state).toBe("incomplete");
+    expect(outcome.event).toBe("COMMENT");
   });
 });
 

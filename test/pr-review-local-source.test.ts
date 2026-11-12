@@ -7,8 +7,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { LocalGitSource, syntheticCheckRuns } from "../tools/pr-review/local-source";
+import { CORE_POLICY } from "../tools/pr-review/repo-policy";
 import { linkedIssueNumbers, selectHeadFiles } from "../tools/pr-review/snapshot";
-import { MAX_HEAD_FILE_BYTES } from "../tools/pr-review/types";
+import { MAX_HEAD_FILE_BYTES, type RepoPolicy } from "../tools/pr-review/types";
 import { computeVerification } from "../tools/pr-review/verdict";
 
 const dirs: string[] = [];
@@ -38,6 +39,7 @@ function makeRepo() {
   write(dir, "README.md", "BASE README\n");
   write(dir, "tools/pr-review/README.md", "BASE PR-REVIEW README\n");
   write(dir, ".github/workflows/test.yml", "jobs:\n");
+  write(dir, ".github/workflows/ci.yml", "OTHER WORKFLOW\n");
   write(dir, "src/a.ts", "export const a = 1;\n");
   write(dir, "src/removed.ts", "gone\n");
   git(dir, "add", "-A");
@@ -61,7 +63,7 @@ describe("LocalGitSource.snapshot()", () => {
   test("assembles the diff, files, commits and base-commit context", async () => {
     const { dir, base, head } = makeRepo();
     const issues = [{ number: 98, title: "issue", body: "issue body" }];
-    const snap = await new LocalGitSource({ repoDir: dir, base: "HEAD~1", head: "HEAD", checks: "passed", issues, title: "T", body: "B" }).snapshot();
+    const snap = await new LocalGitSource({ repoDir: dir, base: "HEAD~1", head: "HEAD", checks: "passed", policy: CORE_POLICY, issues, title: "T", body: "B" }).snapshot();
 
     expect(snap.baseSha).toBe(base);
     expect(snap.headSha).toBe(head);
@@ -83,7 +85,7 @@ describe("LocalGitSource.snapshot()", () => {
 
   test("trusted context is the base commit's copy, even when the change edits it", async () => {
     const { dir } = makeRepo();
-    const snap = await new LocalGitSource({ repoDir: dir, base: "HEAD~1", head: "HEAD", checks: "passed" }).snapshot();
+    const snap = await new LocalGitSource({ repoDir: dir, base: "HEAD~1", head: "HEAD", checks: "passed", policy: CORE_POLICY }).snapshot();
     expect(snap.trustedContext).toEqual([{ path: "CONTRIBUTING.md", content: "BASE CONTRIBUTING\n" }]);
     expect(snap.headFiles.find((f) => f.path === "CONTRIBUTING.md")?.content).toBe("HEAD CONTRIBUTING\n");
   });
@@ -91,7 +93,7 @@ describe("LocalGitSource.snapshot()", () => {
   // #217: same base-commit mechanism as trusted context above.
   test("living documents are the base commit's copy", async () => {
     const { dir } = makeRepo();
-    const snap = await new LocalGitSource({ repoDir: dir, base: "HEAD~1", head: "HEAD", checks: "passed" }).snapshot();
+    const snap = await new LocalGitSource({ repoDir: dir, base: "HEAD~1", head: "HEAD", checks: "passed", policy: CORE_POLICY }).snapshot();
     expect(snap.livingDocs).toEqual([
       { path: "README.md", content: "BASE README\n" },
       { path: "tools/pr-review/README.md", content: "BASE PR-REVIEW README\n" },
@@ -100,17 +102,40 @@ describe("LocalGitSource.snapshot()", () => {
 
   test("an unknown revision rejects rather than reviewing something else", async () => {
     const { dir } = makeRepo();
-    await expect(new LocalGitSource({ repoDir: dir, base: "no-such-rev", head: "HEAD", checks: "passed" }).snapshot()).rejects.toThrow();
+    await expect(new LocalGitSource({ repoDir: dir, base: "no-such-rev", head: "HEAD", checks: "passed", policy: CORE_POLICY }).snapshot()).rejects.toThrow();
+  });
+
+  // #318: the workflow and the synthetic check names both come from the policy handed in.
+  test("reads the policy's own workflow at the base commit and builds runs for the policy's own checks", async () => {
+    const { dir } = makeRepo();
+    const policy: RepoPolicy = {
+      repo: "owner/example",
+      ciWorkflowPath: ".github/workflows/ci.yml",
+      requiredChecks: [{ name: "ci", appSlug: "github-actions" }],
+      pesterCoverage: false,
+    };
+    const snap = await new LocalGitSource({ repoDir: dir, base: "HEAD~1", head: "HEAD", checks: "passed", policy }).snapshot();
+    expect(snap.workflowText).toBe("OTHER WORKFLOW\n");
+    expect(snap.checkRuns).toEqual([{ name: "ci", appSlug: "github-actions", status: "completed", conclusion: "success" }]);
+  });
+
+  test.each([
+    ["no policy", undefined],
+    ["a dot-dot workflow path", { ...CORE_POLICY, ciWorkflowPath: ".github/workflows/../../x.yml" }],
+    ["a non-string workflow path", { ...CORE_POLICY, ciWorkflowPath: 7 }],
+  ])("refuses to construct with %s", (_label, policy) => {
+    expect(() => new LocalGitSource({ repoDir: ".", base: "HEAD~1", head: "HEAD", checks: "passed", policy: policy as unknown as RepoPolicy })).toThrow();
   });
 });
 
 describe("syntheticCheckRuns()", () => {
   test.each(["passed", "failed", "incomplete"] as const)("%s produces that verification state", (state) => {
     const verification = computeVerification({
-      checkRuns: syntheticCheckRuns(state),
+      checkRuns: syntheticCheckRuns(state, CORE_POLICY.requiredChecks),
       changedFiles: ["README.md"],
-      workflowText: "jobs:\n",
+      workflowText: ["jobs:", ...CORE_POLICY.requiredChecks.map((c) => `    name: ${c.name}`)].join("\n"),
       changedFilesComplete: true,
+      policy: CORE_POLICY,
     });
     expect(verification.state).toBe(state);
   });
