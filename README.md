@@ -25,8 +25,8 @@ The rule that keeps these from drifting into a mess: core is upstream. Projects 
 | `tools/packs/` | The pack generator and its `--check` drift gate (#254). Not part of core, and nothing installs it |
 | `tools/model-currency/` | The kernel's model currency check: every exact model ID, and every tier alias written as a `model` setting or a `--model` option, under the roots given, against the latest models, with aliases resolved live. Anything in scope it did not read (an unreadable, oversize or binary file, or a symlink) makes the run inconclusive instead of clean. Excluded classes (`.jsonl` files, backup names, and a default list of directories such as `worktrees` and `.superpowers`) are counted in the last line as excluded. Run by hand. Nothing installs it |
 | `test/` | The `bun test` suite, covering the hooks, the agent definitions (frontmatter keys, names, and the doc-steward tool grant), `tools/pr-review/`, `tools/packs/` and `tools/model-currency/`, plus the CI secret-scan job's workflow steps (`secret-scan-ci.test.ts`), and the layer rules: `layer-rules.test.ts` checks the shape of `core/claude/rules/layers.json` and pins the split of the core rule files against the originals in `test/fixtures/rules-premove/` |
-| `docs/` | Design specs and plans under `docs/superpowers/`, the security control register (`docs/security-controls.md`, pinned by `test/security-controls.test.ts`), and two HTML writeups at the top level: a memory-systems assessment and a two-day recap from 2026-08-02 |
-| `.github/workflows/` | `test.yml`, the one workflow. `tools/pr-review/verdict.ts`'s `REQUIRED_CHECKS` names which of its jobs the pull request reviewer reads to decide what CI vouches for (see Testing and merging). `.gitleaks.toml` at the repo root configures its secret-scan job |
+| `docs/` | Design specs and plans under `docs/superpowers/`, the security control register (`docs/security-controls.md`, pinned by `test/security-controls.test.ts`), the decision log (`docs/decision-log.md`), and two HTML writeups at the top level: a memory-systems assessment and a two-day recap from 2026-08-02 |
+| `.github/workflows/` | `test.yml`, the one workflow. `CORE_POLICY` in `tools/pr-review/repo-policy.ts` names which of its jobs the pull request reviewer reads to decide what CI vouches for (see Testing and merging). `.gitleaks.toml` at the repo root configures its secret-scan job |
 
 ## What's deliberately absent
 
@@ -501,10 +501,10 @@ after it proceeds on a red run. CONTRIBUTING.md has the measurements behind that
 
 CI is one workflow, `.github/workflows/test.yml`. A Linux job runs `bun test`. Separate jobs run
 every Pester suite under `install/` end to end, one on Windows and one again on Linux, one step per
-suite so a `run:` line names each individually. `tools/pr-review/verdict.ts`'s `REQUIRED_CHECKS` is
+suite so a `run:` line names each individually. `CORE_POLICY` in `tools/pr-review/repo-policy.ts` is
 the source of truth for which of those jobs gate the pull request reviewer's own verification
 state, the Linux Pester job included. The reviewer counts a suite as covered only when `test.yml` at the pull request's base
-names it on a `run:` line, and takes its verification state from what `REQUIRED_CHECKS` reported
+names it on a `run:` line, and takes its verification state from what `CORE_POLICY`'s checks reported
 for the head commit.
 
 The workflow also carries a Gitleaks secret scan that runs on pull requests only, configured by
@@ -518,7 +518,7 @@ same rules, and a binary that scans clean passes. The scan reads `.gitleaks.toml
 working tree detached to the base commit and `--ignore-gitleaks-allow`, so a pull request cannot
 allowlist its own secret through `.gitleaks.toml`, `.gitleaksignore` or an inline `gitleaks:allow`
 comment. When the base has no config file, the built-in rules apply. The job
-is in `REQUIRED_CHECKS`, so a failed or missing scan keeps the reviewer from approving. A pull
+is in `CORE_POLICY`, so a failed or missing scan keeps the reviewer from approving. A pull
 request that edits `.gitleaks.toml`, `.gitleaksignore` or a `.gitattributes` at any depth reads as incomplete, the same way an edit under
 `.github/workflows/` does. Adding the job to the "CI required" ruleset is an operator change made
 once the job has run on a pull request.
@@ -534,7 +534,7 @@ is configured to record as a rule-suite bypass (pending live verification under 
 bypass skips only the default ruleset: its review rule (the approval, the code-owner review and the
 last-push approval), its code quality rule and its Copilot review. It cannot skip the second
 ruleset, "CI required", which has no bypass list. That ruleset requires the `bun test` job and the
-Pester jobs on Windows and on Linux to pass (the same set `REQUIRED_CHECKS` reads),
+Pester jobs on Windows and on Linux to pass (the same set `CORE_POLICY` reads),
 blocks a merge on a CodeQL error-level alert or a security alert at high severity or higher, and
 forbids force-pushing to or deleting `master`. It holds for every merge, the operator's included,
 so a CI outage blocks every merge until the operator edits the ruleset. The bypass is policy, not
