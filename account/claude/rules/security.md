@@ -120,6 +120,7 @@ An agent auditing any tenant, cloud account or directory is a reading step under
 - Never pipe curl to bash. Verify checksums before executing downloaded scripts
 - Keep build/deploy scripts in version control. Production state must be reproducible from git
 - Check any dependency an agent adds before commit: it exists on its registry under that exact name, its first release is at least 30 days old unless the operator signs off, and the lockfile pins it by integrity hash. A name that does not resolve is a hallucination, and a near miss of a popular name is a typosquat until shown otherwise.
+- Claude Code plugins (operator ruling 2026-11-11, #310). Plugins from Anthropic first-party marketplaces (`claude-plugins-official`, `anthropics/skills`) are trusted without a commit pin. The installer is to record a content hash of the installed copy and warn when it drifts. That check is not built yet and is tracked in #310. A plugin from any other marketplace needs a commit pin, or an explicit per-project opt-in that names the risk. The registry and lockfile bullet above does not apply to plugins. Trust covers the marketplace, not every skill inside a plugin: a skill that breaks another rule (the Pocock `wizard` writing secrets into `.env`) stays out on that rule's ground.
 
 ## Defense in Depth
 
