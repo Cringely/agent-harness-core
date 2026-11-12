@@ -255,8 +255,29 @@ if (-not $SkipPreflight) {
     $depsManifest = Get-DepsManifest -Path $depsPath
     $depsRunnerBlock = if ($DepsRunner) { $DepsRunner } else { ${function:Invoke-DefaultDepsRunner} }
     $depsShouldInstall = { param($What, $Action) $script:accountCmdlet.ShouldProcess($What, $Action) }
-    Invoke-DepsPreflight -Manifest $depsManifest -Layers @('kernel') -IsWindows $TargetIsWindows `
-        -InstallDeps ([bool]$InstallDeps) -Runner $depsRunnerBlock -ShouldInstall $depsShouldInstall
+    # Plugins: this script owns user scope only, through -ClaudeHome. Its plugin commands run from
+    # the home directory, and their recorded hashes live under state/, which the exporter's
+    # allowlist does not reach, so a machine-local installPath never travels in the payload.
+    $pluginRecordsPath = Join-Path (Join-Path $ClaudeHome 'state') 'harness-plugin-hashes.json'
+    $pluginRecords = @{}
+    if (Test-Path -LiteralPath $pluginRecordsPath -PathType Leaf) {
+        try {
+            $loadedRecords = Get-Content -LiteralPath $pluginRecordsPath -Raw | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+            if ($loadedRecords -is [System.Collections.IDictionary]) {
+                foreach ($k in @($loadedRecords.Keys)) { $pluginRecords[$k] = $loadedRecords[$k] }
+            }
+        }
+        catch {
+            Write-Warning "Ignoring unparsable plugin hash records at $pluginRecordsPath. They are rebuilt from what is installed now, so drift since the last record is not reported this run."
+        }
+    }
+    $depsOutcome = Invoke-DepsPreflight -Manifest $depsManifest -Layers @('kernel') -IsWindows $TargetIsWindows `
+        -InstallDeps ([bool]$InstallDeps) -Runner $depsRunnerBlock -ShouldInstall $depsShouldInstall `
+        -PluginScope 'user' -PluginCwd $HOME -PluginRecords $pluginRecords
+    if ($depsOutcome.PluginRecordsChanged) {
+        $null = New-Item -ItemType Directory -Path (Split-Path -Parent $pluginRecordsPath) -Force
+        $depsOutcome.PluginRecords | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $pluginRecordsPath
+    }
 }
 
 function Copy-PayloadTree {
@@ -521,7 +542,7 @@ function Convert-SettingsForTarget {
             #
             # Also wraps the pipeline OUTPUT: a single surviving hook unwraps to a bare scalar
             # and would serialise `"hooks": {...} instead of "hooks": [...]`
-            # (install/Install-Harness.ps1:2113-2116).
+            # (install/Install-Harness.ps1:2157-2160).
             $kept = @(@($group.hooks) | Where-Object {
                     $_ -and ($NpmPresent -or ($_.command -notmatch 'ccstatusline'))
                 })

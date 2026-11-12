@@ -32,17 +32,139 @@ Describe "Install-Harness" {
             [pscustomobject]@{ Runner = $runner; Calls = $calls }
         }
 
-        # Every probe present, except a command named in -Absent, which answers 127.
-        function New-DepsStub {
-            param([string[]]$Absent = @())
+        # A stateful stand-in for the claude plugin CLI, layered on New-DepsRecorder. -Installed
+        # maps a plugin id to scope, installPath and optionally projectPath, enabled and version.
+        # -AnyProject makes every project-scope row answer for the call's cwd. -Marketplaces maps a
+        # marketplace name to its folder. -OnAdd maps a marketplace add source to @{ Name; Location }.
+        # -OnInstall maps a plugin id to the row an install adds, its projectPath being the cwd.
+        # -Head answers git rev-parse. -ExtraRowJson is spliced into the plugin list verbatim.
+        # A command named in -Absent, or missing from a non-null -OnlyPresent, answers 127.
+        function New-PluginMock {
+            param([hashtable]$Installed = @{}, [switch]$AnyProject, [hashtable]$Marketplaces = @{},
+                [hashtable]$OnAdd = @{}, [hashtable]$OnInstall = @{}, [string]$Head, [string]$ExtraRowJson,
+                [string[]]$Absent = @(), [string[]]$OnlyPresent)
+            $state = @{
+                Installed = $Installed; AnyProject = [bool]$AnyProject; Marketplaces = $Marketplaces
+                OnAdd = $OnAdd; OnInstall = $OnInstall; Head = $Head; Extra = $ExtraRowJson
+            }
             $execPath = $script:depsStubExecPath
+            $only = $OnlyPresent
             $answer = {
                 param($argv, $cwd)
-                if ($Absent -contains $argv[0]) { return @{ ExitCode = 127; Output = '' } }
                 if ($argv[0] -eq 'git' -and $argv[1] -eq '--exec-path') { return @{ ExitCode = 0; Output = $execPath } }
+                if ($null -ne $only -and $only -notcontains $argv[0] -and $only -notcontains (Split-Path -Leaf $argv[0])) { return @{ ExitCode = 127; Output = '' } }
+                if ($Absent -contains $argv[0]) { return @{ ExitCode = 127; Output = '' } }
+                $line = @($argv) -join ' '
+                if ($line -eq 'claude plugin list --json') {
+                    $rows = [System.Collections.Generic.List[object]]::new()
+                    foreach ($k in @($state.Installed.Keys)) {
+                        $v = $state.Installed[$k]
+                        $row = [ordered]@{ id = $k; version = '1.0.0'; scope = $v['scope']; enabled = $true; installPath = $v['installPath'] }
+                        if ($v.Contains('enabled')) { $row['enabled'] = $v['enabled'] }
+                        if ($v.Contains('projectPath')) { $row['projectPath'] = $v['projectPath'] }
+                        if ($state.AnyProject -and $v['scope'] -eq 'project') { $row['projectPath'] = $cwd }
+                        $rows.Add($row)
+                    }
+                    $json = ConvertTo-Json -InputObject @($rows.ToArray()) -Depth 6 -Compress
+                    if ($state.Extra) {
+                        $json = if ($rows.Count -gt 0) { $json.Substring(0, $json.Length - 1) + ',' + $state.Extra + ']' } else { '[' + $state.Extra + ']' }
+                    }
+                    return @{ ExitCode = 0; Output = $json }
+                }
+                if ($line -eq 'claude plugin marketplace list --json') {
+                    $rows = @(foreach ($k in @($state.Marketplaces.Keys)) { [ordered]@{ name = $k; source = 'github'; installLocation = $state.Marketplaces[$k] } })
+                    return @{ ExitCode = 0; Output = (ConvertTo-Json -InputObject $rows -Depth 4 -Compress) }
+                }
+                if ($argv[0] -eq 'claude' -and $argv[2] -eq 'marketplace' -and $argv[3] -eq 'add') {
+                    if ($state.OnAdd.Contains($argv[4])) { $a = $state.OnAdd[$argv[4]]; $state.Marketplaces[$a.Name] = $a.Location }
+                    return @{ ExitCode = 0; Output = '' }
+                }
+                if ($argv[0] -eq 'claude' -and $argv[2] -eq 'install') {
+                    if ($state.OnInstall.Contains($argv[3])) {
+                        $row = @{} + $state.OnInstall[$argv[3]]
+                        if ($row['scope'] -eq 'project') { $row['projectPath'] = $cwd }
+                        $state.Installed[$argv[3]] = $row
+                    }
+                    return @{ ExitCode = 0; Output = '' }
+                }
+                if ($argv[0] -eq 'claude' -and $argv[2] -eq 'uninstall') { $state.Installed.Remove($argv[3]); return @{ ExitCode = 0; Output = '' } }
+                if ($argv[0] -eq 'claude' -and $argv[2] -eq 'update') { return @{ ExitCode = 0; Output = '' } }
+                if ($argv[0] -eq 'git' -and $argv[3] -eq 'rev-parse') { return @{ ExitCode = 0; Output = $state.Head } }
                 return $null
             }.GetNewClosure()
-            New-DepsRecorder -Answer $answer
+            $rec = New-DepsRecorder -Answer $answer
+            $rec | Add-Member -NotePropertyName State -NotePropertyValue $state
+            $rec
+        }
+
+        # The shipped deps.json's plugins, all installed and enabled where it declares them, with
+        # every first-party sha and the one directory commit as the marketplaces would list them.
+        $script:depsStubPluginDir = Join-Path $script:depsStubRoot 'plugin'
+        New-Item -ItemType Directory -Path $script:depsStubPluginDir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $script:depsStubPluginDir 'plugin.json') -Value '{}'
+        $script:depsStubMarketplaceDir = Join-Path $script:depsStubRoot 'marketplace'
+        New-Item -ItemType Directory -Path (Join-Path $script:depsStubMarketplaceDir '.claude-plugin') -Force | Out-Null
+        $shipped = Get-Content -LiteralPath "$PSScriptRoot/../core/claude/deps.json" -Raw | ConvertFrom-Json -AsHashtable
+        $script:depsStubInstalled = @{}
+        $script:depsStubMarketplaces = @{}
+        $script:depsStubHead = $null
+        $listed = [System.Collections.Generic.List[object]]::new()
+        foreach ($e in @($shipped['deps'] | Where-Object { $_['kind'] -eq 'plugin' })) {
+            $script:depsStubInstalled[$e['plugin']] = @{ scope = $e['scope']; installPath = $script:depsStubPluginDir }
+            $script:depsStubMarketplaces[$e['marketplace']['name']] = $script:depsStubMarketplaceDir
+            if ($e['pin'].Contains('commit')) { $script:depsStubHead = $e['pin']['commit'] }
+            $src = [ordered]@{ source = 'url' }
+            if ($e['pin'].Contains('sha')) { $src['sha'] = $e['pin']['sha'] }
+            $listed.Add([ordered]@{ name = ($e['plugin'] -split '@')[0]; source = $src })
+        }
+        [ordered]@{ plugins = @($listed.ToArray()) } | ConvertTo-Json -Depth 6 |
+            Set-Content -LiteralPath (Join-Path $script:depsStubMarketplaceDir '.claude-plugin/marketplace.json')
+
+        # Every probe present, except a command named in -Absent, or, with -OnlyPresent, every
+        # probe absent except the commands it names.
+        function New-DepsStub {
+            param([string[]]$Absent = @(), [string[]]$OnlyPresent)
+            New-PluginMock -Installed (@{} + $script:depsStubInstalled) -AnyProject -Marketplaces (@{} + $script:depsStubMarketplaces) `
+                -Head $script:depsStubHead -Absent $Absent -OnlyPresent $OnlyPresent
+        }
+
+        function New-FakePlugin {
+            param([string]$Name = 'fake-plugin', [hashtable]$Severity = @{ code = 'optional' }, [string]$Scope = 'project',
+                [string]$Marketplace = 'claude-plugins-official', [hashtable]$Source = @{ github = 'anthropics/claude-plugins-official' },
+                [System.Collections.IDictionary]$Pin = ([ordered]@{ firstParty = $true }))
+            [ordered]@{
+                kind = 'plugin'; name = $Name; plugin = "$Name@$Marketplace"
+                marketplace = [ordered]@{ name = $Marketplace; source = $Source }
+                pin = $Pin; scope = $Scope; severity = $Severity
+                failMode = "Without $Name, the fake skills are absent."
+            }
+        }
+
+        # A plugin install directory with a little content, so its hash means something.
+        function New-FakePluginDir {
+            $d = Join-Path $script:depsStubRoot ("plugin-" + [guid]::NewGuid())
+            New-Item -ItemType Directory -Path (Join-Path $d 'skills/one') -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $d 'skills/one/SKILL.md') -Value 'a skill'
+            Set-Content -LiteralPath (Join-Path $d 'plugin.json') -Value '{"name":"fake-plugin"}'
+            $d
+        }
+
+        # A registered marketplace folder whose marketplace.json lists fake-plugin, at -Sha if given.
+        function New-FakeMarketplaceDir {
+            param([string]$Sha, [string]$Path)
+            $d = if ($Path) { $Path } else { Join-Path $script:depsStubRoot ("marketplace-" + [guid]::NewGuid()) }
+            New-Item -ItemType Directory -Path (Join-Path $d '.claude-plugin') -Force | Out-Null
+            $src = [ordered]@{ source = 'url'; url = 'https://example.invalid/fake-plugin.git' }
+            if ($Sha) { $src['sha'] = $Sha }
+            [ordered]@{ plugins = @([ordered]@{ name = 'fake-plugin'; source = $src }) } | ConvertTo-Json -Depth 5 |
+                Set-Content -LiteralPath (Join-Path $d '.claude-plugin/marketplace.json')
+            $d
+        }
+
+        function Read-PluginRecord {
+            param([string]$Target, [string]$Id = 'fake-plugin@claude-plugins-official')
+            $sidecar = Get-Content -LiteralPath "$Target/.claude/.harness-manifest.local.json" -Raw | ConvertFrom-Json -AsHashtable
+            $sidecar['pluginHashes'][$Id]
         }
 
         function Get-DepsInstallCalls {
@@ -2861,6 +2983,292 @@ Describe "Install-Harness" {
             $dep['install'] = [ordered]@{ linux = [ordered]@{ apt = 'fake-hard'; version = $_ } }
             $fixture = New-DepsFixture -Deps @($dep)
             { Get-DepsManifest -Path $fixture } | Should -Not -Throw
+        }
+
+        # --- plugins (part 2) ---------------------------------------------------------------
+
+        It "a missing project-scope plugin with -InstallDeps adds its marketplace, installs at project scope in the target, and records the hash" {
+            $fixture = New-DepsFixture -Deps @(New-FakePlugin)
+            $dir = New-FakePluginDir
+            $mock = New-PluginMock -OnAdd @{ 'anthropics/claude-plugins-official' = @{ Name = 'claude-plugins-official'; Location = (New-FakeMarketplaceDir) } } `
+                -OnInstall @{ 'fake-plugin@claude-plugins-official' = @{ scope = 'project'; installPath = $dir } }
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -InstallDeps -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-Null
+            $abs = (Resolve-Path -LiteralPath $script:target).Path
+            $plugin = @($mock.Calls | Where-Object { $_.Argv[0] -eq 'claude' })
+            @($plugin | ForEach-Object { @($_.Argv) -join ' ' }) | Should -Be @(
+                'claude plugin list --json',
+                'claude plugin marketplace list --json',
+                'claude plugin marketplace add anthropics/claude-plugins-official',
+                'claude plugin install fake-plugin@claude-plugins-official --scope project',
+                'claude plugin list --json')
+            foreach ($c in $plugin) { $c.Cwd | Should -Be $abs }
+            $sidecar = Get-Content -LiteralPath "$script:target/.claude/.harness-manifest.local.json" -Raw | ConvertFrom-Json -AsHashtable
+            $sidecar['pluginHashes']['fake-plugin@claude-plugins-official']['hash'] | Should -Be (Get-PluginContentHash -Path $dir)
+            $sidecar['pluginHashes']['fake-plugin@claude-plugins-official']['installPath'] | Should -Be $dir
+        }
+
+        It "Install-Harness skips user-scope plugins" {
+            $fixture = New-DepsFixture -Deps @(New-FakePlugin -Name 'fake-kernel' -Severity @{ kernel = 'optional' } -Scope 'user')
+            $mock = New-PluginMock
+            $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -InstallDeps -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-String -Width 500
+            @($mock.Calls | Where-Object { $_.Argv[0] -eq 'claude' }).Count | Should -Be 0
+            $out | Should -Match 'user-scope plugin fake-kernel@claude-plugins-official: Install-Account owns user scope'
+        }
+
+        It "a known marketplace is not added again" {
+            $fixture = New-DepsFixture -Deps @(New-FakePlugin)
+            $dir = New-FakePluginDir
+            $mock = New-PluginMock -Marketplaces @{ 'claude-plugins-official' = (New-FakeMarketplaceDir) } `
+                -OnInstall @{ 'fake-plugin@claude-plugins-official' = @{ scope = 'project'; installPath = $dir } }
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -InstallDeps -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-Null
+            $lines = @($mock.Calls | ForEach-Object { @($_.Argv) -join ' ' })
+            @($lines | Where-Object { $_ -match 'marketplace add' }).Count | Should -Be 0
+            $lines | Should -Contain 'claude plugin install fake-plugin@claude-plugins-official --scope project'
+        }
+
+        It "a first-party plugin whose content changed warns, and -InstallDeps re-records it" {
+            $fixture = New-DepsFixture -Deps @(New-FakePlugin)
+            $dir = New-FakePluginDir
+            $abs = (Resolve-Path -LiteralPath $script:target).Path
+            $mock = New-PluginMock -Installed @{ 'fake-plugin@claude-plugins-official' = @{ scope = 'project'; projectPath = $abs; installPath = $dir } }
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-Null
+            $first = Get-PluginContentHash -Path $dir
+            (Read-PluginRecord $script:target)['hash'] | Should -Be $first
+
+            Set-Content -LiteralPath (Join-Path $dir 'skills/one/SKILL.md') -Value 'changed after recording'
+            $second = Get-PluginContentHash -Path $dir
+            $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-String -Width 500
+            $out | Should -Match 'changed since recorded'
+            (Read-PluginRecord $script:target)['hash'] | Should -Be $first
+
+            $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-String -Width 500
+            $audit | Should -Match 'plugin-changed'
+            $audit | Should -Match 're-run the installer with -InstallDeps to re-record after reviewing the change'
+
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -InstallDeps -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-Null
+            (Read-PluginRecord $script:target)['hash'] | Should -Be $second
+            $after = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-String -Width 500
+            $after | Should -Not -Match 'plugin-changed'
+        }
+
+        It "Get-PluginContentHash is order- and line-ending-stable" {
+            $a = Join-Path $script:depsStubRoot ("hash-a-" + [guid]::NewGuid())
+            $b = Join-Path $script:depsStubRoot ("hash-b-" + [guid]::NewGuid())
+            New-Item -ItemType Directory -Path (Join-Path $a 'sub'), (Join-Path $b 'sub') -Force | Out-Null
+            [System.IO.File]::WriteAllText((Join-Path $a 'one.md'), "first`nline`n")
+            [System.IO.File]::WriteAllText((Join-Path $a 'sub/two.md'), "second`n")
+            [System.IO.File]::WriteAllText((Join-Path $b 'sub/two.md'), "second`r`n")
+            [System.IO.File]::WriteAllText((Join-Path $b 'one.md'), "first`r`nline`r`n")
+            $hashA = Get-PluginContentHash -Path $a
+            $hashA | Should -Match '^sha256:[0-9a-f]{64}$'
+            Get-PluginContentHash -Path $b | Should -Be $hashA
+            # A .git directory is not plugin content.
+            New-Item -ItemType Directory -Path (Join-Path $b '.git') | Out-Null
+            Set-Content -LiteralPath (Join-Path $b '.git/HEAD') -Value 'ref: refs/heads/main'
+            Get-PluginContentHash -Path $b | Should -Be $hashA
+
+            [System.IO.File]::WriteAllText((Join-Path $b 'one.md'), "first`r`nlinE`r`n")
+            Get-PluginContentHash -Path $b | Should -Not -Be $hashA
+            [System.IO.File]::WriteAllText((Join-Path $b 'one.md'), "first`nline`n")
+            Get-PluginContentHash -Path $b | Should -Be $hashA
+            Rename-Item -LiteralPath (Join-Path $b 'one.md') -NewName 'uno.md'
+            Get-PluginContentHash -Path $b | Should -Not -Be $hashA
+        }
+
+        It "a first-party plugin's sha move warns, and -InstallDeps re-records" {
+            $shaA = 'a' * 40
+            $shaB = 'b' * 40
+            $fixture = New-DepsFixture -Deps @(New-FakePlugin -Pin ([ordered]@{ firstParty = $true; sha = $shaA }))
+            $dir = New-FakePluginDir
+            $mpDir = New-FakeMarketplaceDir -Sha $shaA
+            $abs = (Resolve-Path -LiteralPath $script:target).Path
+            $mock = New-PluginMock -Installed @{ 'fake-plugin@claude-plugins-official' = @{ scope = 'project'; projectPath = $abs; installPath = $dir } } `
+                -Marketplaces @{ 'claude-plugins-official' = $mpDir }
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-Null
+            $rec = Read-PluginRecord $script:target
+            $rec['sha'] | Should -Be $shaA
+            $oldHash = $rec['hash']
+
+            New-FakeMarketplaceDir -Sha $shaB -Path $mpDir | Out-Null
+            Set-Content -LiteralPath (Join-Path $dir 'skills/one/SKILL.md') -Value 'version 7.0.2'
+            $mock.Calls.Clear()
+            $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-String -Width 500
+            $out | Should -Match $shaA
+            $out | Should -Match $shaB
+            @($mock.Calls | Where-Object { $_.Argv[0] -eq 'claude' -and @('install', 'update', 'uninstall') -contains $_.Argv[2] }).Count | Should -Be 0
+            $same = Read-PluginRecord $script:target
+            $same['sha'] | Should -Be $shaA
+            $same['hash'] | Should -Be $oldHash
+
+            $mock.Calls.Clear()
+            { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -InstallDeps -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-Null } |
+                Should -Not -Throw
+            @($mock.Calls | Where-Object { (@($_.Argv) -join ' ') -eq 'claude plugin update fake-plugin@claude-plugins-official --scope project' }).Count | Should -Be 1
+            @($mock.Calls | Where-Object { $_.Argv[2] -eq 'uninstall' }).Count | Should -Be 0
+            $new = Read-PluginRecord $script:target
+            $new['sha'] | Should -Be $shaB
+            $new['hash'] | Should -Be (Get-PluginContentHash -Path $dir)
+        }
+
+        It "a third-party sha-pinned plugin is checked before install" {
+            $pin = [ordered]@{ sha = ('a' * 40); contentHash = ('sha256:' + ('0' * 64)) }
+            foreach ($sev in 'hard', 'optional') {
+                $fixture = New-DepsFixture -Deps @(New-FakePlugin -Marketplace 'fake-mp' -Source @{ github = 'example/fake-mp' } -Pin $pin -Severity @{ code = $sev })
+                $mock = New-PluginMock -Marketplaces @{ 'fake-mp' = (New-FakeMarketplaceDir -Sha ('b' * 40)) } `
+                    -OnInstall @{ 'fake-plugin@fake-mp' = @{ scope = 'project'; installPath = (New-FakePluginDir) } }
+                $target = "$($script:target)-$sev"
+                New-Item -ItemType Directory -Path $target | Out-Null
+                try {
+                    $msg = $null
+                    $out = $null
+                    try { $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $target -InstallDeps -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-String -Width 500 }
+                    catch { $msg = $_.Exception.Message }
+                    if ($sev -eq 'hard') { $msg | Should -Match '^missing hard dependency'; $msg | Should -Match 'not the pinned' }
+                    else { $msg | Should -BeNullOrEmpty; $out | Should -Match 'missing optional dependency plugin fake-plugin@fake-mp' }
+                    @($mock.Calls | Where-Object { $_.Argv[0] -eq 'claude' -and $_.Argv[2] -eq 'install' }).Count | Should -Be 0
+                }
+                finally { Remove-Item -Recurse -Force $target -ErrorAction SilentlyContinue }
+            }
+        }
+
+        It "a third-party pinned plugin is rolled back when the installed copy does not verify" {
+            $sha = 'a' * 40
+            $pin = [ordered]@{ sha = $sha; contentHash = ('sha256:' + ('0' * 64)) }
+            foreach ($sev in 'hard', 'optional') {
+                $fixture = New-DepsFixture -Deps @(New-FakePlugin -Marketplace 'fake-mp' -Source @{ github = 'example/fake-mp' } -Pin $pin -Severity @{ code = $sev })
+                $mock = New-PluginMock -Marketplaces @{ 'fake-mp' = (New-FakeMarketplaceDir -Sha $sha) } `
+                    -OnInstall @{ 'fake-plugin@fake-mp' = @{ scope = 'project'; installPath = (New-FakePluginDir) } }
+                $target = "$($script:target)-$sev"
+                New-Item -ItemType Directory -Path $target | Out-Null
+                try {
+                    $msg = $null
+                    $out = $null
+                    try { $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $target -InstallDeps -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-String -Width 500 }
+                    catch { $msg = $_.Exception.Message }
+                    $plugin = @($mock.Calls | Where-Object { $_.Argv[0] -eq 'claude' })
+                    $installAt = [array]::FindIndex([object[]]$plugin, [Predicate[object]] { param($c) $c.Argv[2] -eq 'install' })
+                    $installAt | Should -BeGreaterThan -1
+                    (@($plugin[$installAt + 1].Argv) -join ' ') | Should -Be 'claude plugin list --json'
+                    (@($plugin[$installAt + 2].Argv) -join ' ') | Should -Be 'claude plugin uninstall fake-plugin@fake-mp --scope project'
+                    $plugin[$installAt + 2].Cwd | Should -Be $plugin[$installAt].Cwd
+                    if ($sev -eq 'hard') { $msg | Should -Match '^missing hard dependency'; $msg | Should -Match 'uninstalled again' }
+                    else { $msg | Should -BeNullOrEmpty; $out | Should -Match 'uninstalled again' }
+                }
+                finally { Remove-Item -Recurse -Force $target -ErrorAction SilentlyContinue }
+            }
+        }
+
+        It "a plugin present but not enabled at the declared scope counts as missing" {
+            $fixture = New-DepsFixture -Deps @(New-FakePlugin -Severity @{ code = 'hard' })
+            $abs = (Resolve-Path -LiteralPath $script:target).Path
+            $mock = New-PluginMock -Installed @{ 'fake-plugin@claude-plugins-official' = @{ scope = 'project'; projectPath = $abs; installPath = (New-FakePluginDir); enabled = $false } }
+            { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-Null } |
+                Should -Throw -ExpectedMessage '*not enabled at project scope*'
+            # Installed at another project's path is not installed here either.
+            $mock2 = New-PluginMock -Installed @{ 'fake-plugin@claude-plugins-official' = @{ scope = 'project'; projectPath = "$abs-elsewhere"; installPath = (New-FakePluginDir) } }
+            { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -DepsManifestPath $fixture -DepsRunner $mock2.Runner *>&1 | Out-Null } |
+                Should -Throw -ExpectedMessage '*not installed at project scope*'
+        }
+
+        It "an unpinned third-party plugin is refused without the project opt-in" {
+            $fixture = New-DepsFixture -Deps @(New-FakePlugin -Marketplace 'fake-mp' -Source @{ github = 'example/fake-mp' } -Pin @{ unpinned = $true } -Severity @{ code = 'hard' })
+            $abs = (Resolve-Path -LiteralPath $script:target).Path
+            $installed = @{ 'fake-plugin@fake-mp' = @{ scope = 'project'; projectPath = $abs; installPath = (New-FakePluginDir) } }
+            $mock = New-PluginMock -Installed $installed -OnInstall $installed
+            { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -InstallDeps -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-Null } |
+                Should -Throw -ExpectedMessage '*allowUnpinnedPlugins*'
+            @($mock.Calls | Where-Object { $_.Argv[0] -eq 'claude' -and $_.Argv[2] -eq 'install' }).Count | Should -Be 0
+
+            New-Item -ItemType Directory -Path "$script:target/.claude" | Out-Null
+            $risk = 'Example risk: this plugin runs unreviewed hooks from a personal repository.'
+            @{ files = @{}; allowUnpinnedPlugins = @(@{ plugin = 'fake-plugin@fake-mp'; risk = $risk }) } | ConvertTo-Json -Depth 5 |
+                Set-Content -LiteralPath "$script:target/.claude/.harness-manifest.json"
+            $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-String -Width 500
+            $out.Contains($risk) | Should -BeTrue
+            Test-Path -LiteralPath "$script:target/.claude/agents/task-reviewer.md" | Should -BeTrue
+        }
+
+        It "an allowUnpinnedPlugins entry with no risk sentence is refused before any write" {
+            New-Item -ItemType Directory -Path "$script:target/.claude" | Out-Null
+            @{ files = @{}; allowUnpinnedPlugins = @(@{ plugin = 'fake-plugin@fake-mp'; risk = '' }) } | ConvertTo-Json -Depth 5 |
+                Set-Content -LiteralPath "$script:target/.claude/.harness-manifest.json"
+            { & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target *>&1 | Out-Null } |
+                Should -Throw -ExpectedMessage '*allowUnpinnedPlugins*'
+            Test-Path -LiteralPath "$script:target/.claude/agents" | Should -BeFalse
+        }
+
+        It "an allowUnpinnedPlugins entry naming no unpinned third-party plugin is refused before any write" {
+            New-Item -ItemType Directory -Path "$script:target/.claude" | Out-Null
+            # superpowers is first-party, so an opt-in for it accepts a risk nothing carries.
+            @{ files = @{}; allowUnpinnedPlugins = @(@{ plugin = 'superpowers@claude-plugins-official'; risk = 'Example risk sentence.' }) } |
+                ConvertTo-Json -Depth 5 | Set-Content -LiteralPath "$script:target/.claude/.harness-manifest.json"
+            { & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target *>&1 | Out-Null } |
+                Should -Throw -ExpectedMessage '*does not declare as an unpinned third-party plugin*'
+            Test-Path -LiteralPath "$script:target/.claude/agents" | Should -BeFalse
+        }
+
+        It "plugin list output is never echoed" {
+            $secret = "harness-secret-$([guid]::NewGuid())"
+            $extra = '{"id":"mcp-carrier@elsewhere","scope":"user","enabled":true,"mcpServers":{"api":{"headers":{"Authorization":"Bearer ' + $secret + '"}}}}'
+            $fixture = New-DepsFixture -Deps @(New-FakePlugin -Severity @{ code = 'hard' })
+            $failing = New-PluginMock -ExtraRowJson $extra
+            $msg = $null
+            $out1 = $null
+            try { $out1 = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -DepsManifestPath $fixture -DepsRunner $failing.Runner *>&1 | Out-String -Width 2000 }
+            catch { $msg = $_.Exception.Message }
+            $msg | Should -Match '^missing hard dependency'
+            "$out1 $msg".Contains($secret) | Should -BeFalse
+
+            $abs = (Resolve-Path -LiteralPath $script:target).Path
+            $passing = New-PluginMock -ExtraRowJson $extra -Installed @{ 'fake-plugin@claude-plugins-official' = @{ scope = 'project'; projectPath = $abs; installPath = (New-FakePluginDir) } }
+            $warnings = $null
+            $out2 = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -DepsManifestPath $fixture -DepsRunner $passing.Runner -WarningVariable warnings *>&1 | Out-String -Width 2000
+            $out2.Contains($secret) | Should -BeFalse
+            (@($warnings) -join "`n").Contains($secret) | Should -BeFalse
+            Test-Path -LiteralPath "$script:target/.claude/.harness-manifest.local.json" | Should -BeTrue
+            foreach ($f in @(Get-ChildItem -LiteralPath $script:target -Recurse -File -Force)) {
+                ([System.IO.File]::ReadAllText($f.FullName)).Contains($secret) | Should -BeFalse -Because "$($f.FullName) must not carry the plugin list"
+            }
+        }
+
+        It "the shipped deps.json plugin entries validate" {
+            $m = Get-DepsManifest -Path $script:shippedDeps
+            $plugins = @($m['deps'] | Where-Object { $_['kind'] -eq 'plugin' })
+            $plugins.Count | Should -BeGreaterThan 0
+            $byName = @{}
+            foreach ($p in $plugins) {
+                $byName[$p['plugin']] = $p
+                if ($p['severity'].Contains('kernel')) { $p['scope'] | Should -Be 'user' } else { $p['scope'] | Should -Be 'project' }
+                if ($p['pin'].Contains('firstParty')) {
+                    @('claude-plugins-official', 'anthropic-agent-skills') | Should -Contain $p['marketplace']['name']
+                }
+            }
+            $sp = $byName['superpowers@claude-plugins-official']
+            $sp['pin']['firstParty'] | Should -BeTrue
+            $sp['pin']['sha'] | Should -Match '^[0-9a-f]{40}$'
+            $sp['pin'].Contains('contentHash') | Should -BeFalse
+            $cp = $byName['core-presentations@agent-skills-core']
+            $cp['pin']['commit'] | Should -Match '^[0-9a-f]{40}$'
+            $cp['pin']['contentHash'] | Should -Match '^sha256:[0-9a-f]{64}$'
+            $ds = $byName['document-skills@anthropic-agent-skills']
+            $ds['pin']['firstParty'] | Should -BeTrue
+            $ds['pin'].Contains('unpinned') | Should -BeFalse
+            foreach ($gone in 'caveman@caveman', 'ponytail@ponytail', 'core-workflow@agent-skills-core') { $byName.Contains($gone) | Should -BeFalse }
+            foreach ($code in 'code-review', 'feature-dev', 'security-guidance', 'github') {
+                $byName["$code@claude-plugins-official"]['severity'].Contains('code') | Should -BeTrue
+            }
+        }
+
+        It "Get-DepsManifest refuses <Case>" -ForEach @(
+            @{ Case = 'a kernel plugin at project scope'; Expect = '*kernel plugin, so its scope must be user*'; Over = @{ severity = @{ kernel = 'optional' }; scope = 'project' } },
+            @{ Case = 'a layer plugin at user scope'; Expect = '*layer plugin, so its scope must be project*'; Over = @{ scope = 'user' } },
+            @{ Case = 'firstParty on another marketplace'; Expect = '*marks firstParty on marketplace*'; Over = @{ marketplace = @{ name = 'fake-mp'; source = @{ github = 'example/fake-mp' } }; plugin = 'fake-plugin@fake-mp' } },
+            @{ Case = 'firstParty under a first-party name at another source'; Expect = '*marks firstParty on marketplace*'; Over = @{ marketplace = @{ name = 'claude-plugins-official'; source = @{ github = 'example/claude-plugins-official' } } } },
+            @{ Case = 'a third-party entry with no sha, commit or unpinned'; Expect = '*none of sha, commit or unpinned*'; Over = @{ marketplace = @{ name = 'fake-mp'; source = @{ github = 'example/fake-mp' } }; plugin = 'fake-plugin@fake-mp'; pin = @{ contentHash = ('sha256:' + ('0' * 64)) } } }
+        ) {
+            $p = New-FakePlugin
+            foreach ($k in $Over.Keys) { $p[$k] = $Over[$k] }
+            { Get-DepsManifest -Path (New-DepsFixture -Deps @($p)) } | Should -Throw -ExpectedMessage $Expect
         }
     }
 }

@@ -124,6 +124,76 @@
         "windows": { "winget": "Anthropic.ClaudeCode", "version": "2.1.289" },
         "linux": { "npm": "@anthropic-ai/claude-code", "version": "2.1.289" }
       }
+    },
+    {
+      "kind": "plugin",
+      "name": "superpowers",
+      "plugin": "superpowers@claude-plugins-official",
+      "marketplace": { "name": "claude-plugins-official", "source": { "github": "anthropics/claude-plugins-official" } },
+      "pin": { "firstParty": true, "sha": "bb92a77741419a4ab5f06e711a283343f1ada0c3" },
+      "scope": "user",
+      "severity": { "kernel": "optional" },
+      "failMode": "Without superpowers, brainstorming does not open new work and plans have no execution skill to run through."
+    },
+    {
+      "kind": "plugin",
+      "name": "code-review",
+      "plugin": "code-review@claude-plugins-official",
+      "marketplace": { "name": "claude-plugins-official", "source": { "github": "anthropics/claude-plugins-official" } },
+      "pin": { "firstParty": true },
+      "scope": "project",
+      "severity": { "code": "optional" },
+      "failMode": "Without code-review, the pull request review flow is absent."
+    },
+    {
+      "kind": "plugin",
+      "name": "feature-dev",
+      "plugin": "feature-dev@claude-plugins-official",
+      "marketplace": { "name": "claude-plugins-official", "source": { "github": "anthropics/claude-plugins-official" } },
+      "pin": { "firstParty": true },
+      "scope": "project",
+      "severity": { "code": "optional" },
+      "failMode": "Without feature-dev, the code-architect and code-explorer agents are absent."
+    },
+    {
+      "kind": "plugin",
+      "name": "security-guidance",
+      "plugin": "security-guidance@claude-plugins-official",
+      "marketplace": { "name": "claude-plugins-official", "source": { "github": "anthropics/claude-plugins-official" } },
+      "pin": { "firstParty": true },
+      "scope": "project",
+      "severity": { "code": "optional" },
+      "failMode": "Without security-guidance, edits to code get no security reminders."
+    },
+    {
+      "kind": "plugin",
+      "name": "github",
+      "plugin": "github@claude-plugins-official",
+      "marketplace": { "name": "claude-plugins-official", "source": { "github": "anthropics/claude-plugins-official" } },
+      "pin": { "firstParty": true },
+      "scope": "project",
+      "severity": { "code": "optional" },
+      "failMode": "Without the github plugin, pull request and issue work has no GitHub MCP server."
+    },
+    {
+      "kind": "plugin",
+      "name": "document-skills",
+      "plugin": "document-skills@anthropic-agent-skills",
+      "marketplace": { "name": "anthropic-agent-skills", "source": { "github": "anthropics/skills" } },
+      "pin": { "firstParty": true },
+      "scope": "project",
+      "severity": { "documents": "optional" },
+      "failMode": "Without document-skills, the Office file skills are absent."
+    },
+    {
+      "kind": "plugin",
+      "name": "core-presentations",
+      "plugin": "core-presentations@agent-skills-core",
+      "marketplace": { "name": "agent-skills-core", "source": { "directory": true } },
+      "pin": { "commit": "216cb1435df677bff7280b28860a27ee60ace5b3", "contentHash": "sha256:949545140d77c96b434efe024679968443bc1ac10f31ec87ad01a9f55fbfd119" },
+      "scope": "project",
+      "severity": { "documents": "optional" },
+      "failMode": "Without core-presentations, the deck and briefing skills are absent."
     }
   ]
 }

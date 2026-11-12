@@ -29,10 +29,21 @@ BeforeAll {
         [pscustomobject]@{ Runner = $runner; Calls = $calls }
     }
 
-    # Every probe present except a command named in -Absent, or, with -OnlyPresent, every probe
-    # absent except the commands it names.
-    function New-DepsStub {
-        param([string[]]$Absent = @(), [string[]]$OnlyPresent)
+    # A stateful stand-in for the claude plugin CLI, layered on New-DepsRecorder. -Installed
+    # maps a plugin id to scope, installPath and optionally projectPath, enabled and version.
+    # -AnyProject makes every project-scope row answer for the call's cwd. -Marketplaces maps a
+    # marketplace name to its folder. -OnAdd maps a marketplace add source to @{ Name; Location }.
+    # -OnInstall maps a plugin id to the row an install adds, its projectPath being the cwd.
+    # -Head answers git rev-parse. -ExtraRowJson is spliced into the plugin list verbatim.
+    # A command named in -Absent, or missing from a non-null -OnlyPresent, answers 127.
+    function New-PluginMock {
+        param([hashtable]$Installed = @{}, [switch]$AnyProject, [hashtable]$Marketplaces = @{},
+            [hashtable]$OnAdd = @{}, [hashtable]$OnInstall = @{}, [string]$Head, [string]$ExtraRowJson,
+            [string[]]$Absent = @(), [string[]]$OnlyPresent)
+        $state = @{
+            Installed = $Installed; AnyProject = [bool]$AnyProject; Marketplaces = $Marketplaces
+            OnAdd = $OnAdd; OnInstall = $OnInstall; Head = $Head; Extra = $ExtraRowJson
+        }
         $execPath = $script:depsStubExecPath
         $only = $OnlyPresent
         $answer = {
@@ -40,9 +51,111 @@ BeforeAll {
             if ($argv[0] -eq 'git' -and $argv[1] -eq '--exec-path') { return @{ ExitCode = 0; Output = $execPath } }
             if ($null -ne $only -and $only -notcontains $argv[0] -and $only -notcontains (Split-Path -Leaf $argv[0])) { return @{ ExitCode = 127; Output = '' } }
             if ($Absent -contains $argv[0]) { return @{ ExitCode = 127; Output = '' } }
+            $line = @($argv) -join ' '
+            if ($line -eq 'claude plugin list --json') {
+                $rows = [System.Collections.Generic.List[object]]::new()
+                foreach ($k in @($state.Installed.Keys)) {
+                    $v = $state.Installed[$k]
+                    $row = [ordered]@{ id = $k; version = '1.0.0'; scope = $v['scope']; enabled = $true; installPath = $v['installPath'] }
+                    if ($v.Contains('enabled')) { $row['enabled'] = $v['enabled'] }
+                    if ($v.Contains('projectPath')) { $row['projectPath'] = $v['projectPath'] }
+                    if ($state.AnyProject -and $v['scope'] -eq 'project') { $row['projectPath'] = $cwd }
+                    $rows.Add($row)
+                }
+                $json = ConvertTo-Json -InputObject @($rows.ToArray()) -Depth 6 -Compress
+                if ($state.Extra) {
+                    $json = if ($rows.Count -gt 0) { $json.Substring(0, $json.Length - 1) + ',' + $state.Extra + ']' } else { '[' + $state.Extra + ']' }
+                }
+                return @{ ExitCode = 0; Output = $json }
+            }
+            if ($line -eq 'claude plugin marketplace list --json') {
+                $rows = @(foreach ($k in @($state.Marketplaces.Keys)) { [ordered]@{ name = $k; source = 'github'; installLocation = $state.Marketplaces[$k] } })
+                return @{ ExitCode = 0; Output = (ConvertTo-Json -InputObject $rows -Depth 4 -Compress) }
+            }
+            if ($argv[0] -eq 'claude' -and $argv[2] -eq 'marketplace' -and $argv[3] -eq 'add') {
+                if ($state.OnAdd.Contains($argv[4])) { $a = $state.OnAdd[$argv[4]]; $state.Marketplaces[$a.Name] = $a.Location }
+                return @{ ExitCode = 0; Output = '' }
+            }
+            if ($argv[0] -eq 'claude' -and $argv[2] -eq 'install') {
+                if ($state.OnInstall.Contains($argv[3])) {
+                    $row = @{} + $state.OnInstall[$argv[3]]
+                    if ($row['scope'] -eq 'project') { $row['projectPath'] = $cwd }
+                    $state.Installed[$argv[3]] = $row
+                }
+                return @{ ExitCode = 0; Output = '' }
+            }
+            if ($argv[0] -eq 'claude' -and $argv[2] -eq 'uninstall') { $state.Installed.Remove($argv[3]); return @{ ExitCode = 0; Output = '' } }
+            if ($argv[0] -eq 'claude' -and $argv[2] -eq 'update') { return @{ ExitCode = 0; Output = '' } }
+            if ($argv[0] -eq 'git' -and $argv[3] -eq 'rev-parse') { return @{ ExitCode = 0; Output = $state.Head } }
             return $null
         }.GetNewClosure()
-        New-DepsRecorder -Answer $answer
+        $rec = New-DepsRecorder -Answer $answer
+        $rec | Add-Member -NotePropertyName State -NotePropertyValue $state
+        $rec
+    }
+
+    # The shipped deps.json's plugins, all installed and enabled where it declares them, with
+    # every first-party sha and the one directory commit as the marketplaces would list them.
+    $script:depsStubPluginDir = Join-Path $script:depsStubRoot 'plugin'
+    New-Item -ItemType Directory -Path $script:depsStubPluginDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $script:depsStubPluginDir 'plugin.json') -Value '{}'
+    $script:depsStubMarketplaceDir = Join-Path $script:depsStubRoot 'marketplace'
+    New-Item -ItemType Directory -Path (Join-Path $script:depsStubMarketplaceDir '.claude-plugin') -Force | Out-Null
+    $shipped = Get-Content -LiteralPath "$PSScriptRoot/../core/claude/deps.json" -Raw | ConvertFrom-Json -AsHashtable
+    $script:depsStubInstalled = @{}
+    $script:depsStubMarketplaces = @{}
+    $script:depsStubHead = $null
+    $listed = [System.Collections.Generic.List[object]]::new()
+    foreach ($e in @($shipped['deps'] | Where-Object { $_['kind'] -eq 'plugin' })) {
+        $script:depsStubInstalled[$e['plugin']] = @{ scope = $e['scope']; installPath = $script:depsStubPluginDir }
+        $script:depsStubMarketplaces[$e['marketplace']['name']] = $script:depsStubMarketplaceDir
+        if ($e['pin'].Contains('commit')) { $script:depsStubHead = $e['pin']['commit'] }
+        $src = [ordered]@{ source = 'url' }
+        if ($e['pin'].Contains('sha')) { $src['sha'] = $e['pin']['sha'] }
+        $listed.Add([ordered]@{ name = ($e['plugin'] -split '@')[0]; source = $src })
+    }
+    [ordered]@{ plugins = @($listed.ToArray()) } | ConvertTo-Json -Depth 6 |
+        Set-Content -LiteralPath (Join-Path $script:depsStubMarketplaceDir '.claude-plugin/marketplace.json')
+
+    # Every probe present, except a command named in -Absent, or, with -OnlyPresent, every
+    # probe absent except the commands it names.
+    function New-DepsStub {
+        param([string[]]$Absent = @(), [string[]]$OnlyPresent)
+        New-PluginMock -Installed (@{} + $script:depsStubInstalled) -AnyProject -Marketplaces (@{} + $script:depsStubMarketplaces) `
+            -Head $script:depsStubHead -Absent $Absent -OnlyPresent $OnlyPresent
+    }
+
+    function New-FakePlugin {
+        param([string]$Name = 'fake-plugin', [hashtable]$Severity = @{ code = 'optional' }, [string]$Scope = 'project',
+            [string]$Marketplace = 'claude-plugins-official', [hashtable]$Source = @{ github = 'anthropics/claude-plugins-official' },
+            [System.Collections.IDictionary]$Pin = ([ordered]@{ firstParty = $true }))
+        [ordered]@{
+            kind = 'plugin'; name = $Name; plugin = "$Name@$Marketplace"
+            marketplace = [ordered]@{ name = $Marketplace; source = $Source }
+            pin = $Pin; scope = $Scope; severity = $Severity
+            failMode = "Without $Name, the fake skills are absent."
+        }
+    }
+
+    # A plugin install directory with a little content, so its hash means something.
+    function New-FakePluginDir {
+        $d = Join-Path $script:depsStubRoot ("plugin-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path (Join-Path $d 'skills/one') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $d 'skills/one/SKILL.md') -Value 'a skill'
+        Set-Content -LiteralPath (Join-Path $d 'plugin.json') -Value '{"name":"fake-plugin"}'
+        $d
+    }
+
+    # A registered marketplace folder whose marketplace.json lists fake-plugin, at -Sha if given.
+    function New-FakeMarketplaceDir {
+        param([string]$Sha, [string]$Path)
+        $d = if ($Path) { $Path } else { Join-Path $script:depsStubRoot ("marketplace-" + [guid]::NewGuid()) }
+        New-Item -ItemType Directory -Path (Join-Path $d '.claude-plugin') -Force | Out-Null
+        $src = [ordered]@{ source = 'url'; url = 'https://example.invalid/fake-plugin.git' }
+        if ($Sha) { $src['sha'] = $Sha }
+        [ordered]@{ plugins = @([ordered]@{ name = 'fake-plugin'; source = $src }) } | ConvertTo-Json -Depth 5 |
+            Set-Content -LiteralPath (Join-Path $d '.claude-plugin/marketplace.json')
+        $d
     }
 
     function Get-DepsInstallCalls {
@@ -260,6 +373,52 @@ Describe "Install-Account" {
             @(Get-DepsInstallCalls $stub).Count | Should -Be 0
             $out | Should -Match 'WhatIf: would run winget install --id Oven-sh\.Bun --version 1\.3\.14'
             Test-Path -LiteralPath (Join-Path $h 'rules/security.md') | Should -BeFalse
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "Install-Account handles only user-scope plugins" {
+        . "$PSScriptRoot/Deps.ps1"
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            $fixture = Join-Path $script:depsStubRoot ("deps-" + [guid]::NewGuid() + '.json')
+            [ordered]@{ schemaVersion = 1; deps = @(
+                    (New-FakePlugin -Name 'fake-kernel' -Severity @{ kernel = 'optional' } -Scope 'user'),
+                    (New-FakePlugin -Name 'fake-layer')) } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $fixture
+            $dir = New-FakePluginDir
+            $mock = New-PluginMock -Installed @{ 'fake-kernel@claude-plugins-official' = @{ scope = 'user'; installPath = $dir } }
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson (Join-Path $h 'claude.json') `
+                -CoreRepo $script:repoRoot -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-String -Width 500
+            $lists = @($mock.Calls | Where-Object { (@($_.Argv) -join ' ') -eq 'claude plugin list --json' })
+            $lists.Count | Should -BeGreaterThan 0
+            foreach ($c in $lists) { $c.Cwd | Should -Be $HOME }
+            @($mock.Calls | Where-Object { (@($_.Argv) -join ' ') -match 'fake-layer@' }).Count | Should -Be 0
+            $out | Should -Match 'project-scope plugin fake-layer@claude-plugins-official is installed per project by Install-Harness'
+            $records = Get-Content -LiteralPath (Join-Path $h 'state/harness-plugin-hashes.json') -Raw | ConvertFrom-Json -AsHashtable
+            $records['fake-kernel@claude-plugins-official']['hash'] | Should -Be (Get-PluginContentHash -Path $dir)
+            $records['fake-kernel@claude-plugins-official']['recordedAt'] | Should -Not -BeNullOrEmpty
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "-InstallDeps installs a missing user-scope plugin at user scope, from the home directory" {
+        . "$PSScriptRoot/Deps.ps1"
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            $fixture = Join-Path $script:depsStubRoot ("deps-" + [guid]::NewGuid() + '.json')
+            [ordered]@{ schemaVersion = 1; deps = @(New-FakePlugin -Name 'fake-kernel' -Severity @{ kernel = 'optional' } -Scope 'user') } |
+                ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $fixture
+            $dir = New-FakePluginDir
+            $mock = New-PluginMock -Marketplaces @{ 'claude-plugins-official' = (New-FakeMarketplaceDir) } `
+                -OnInstall @{ 'fake-kernel@claude-plugins-official' = @{ scope = 'user'; installPath = $dir } }
+            & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson (Join-Path $h 'claude.json') `
+                -CoreRepo $script:repoRoot -InstallDeps -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-Null
+            $install = @($mock.Calls | Where-Object { (@($_.Argv) -join ' ') -eq 'claude plugin install fake-kernel@claude-plugins-official --scope user' })
+            $install.Count | Should -Be 1
+            $install[0].Cwd | Should -Be $HOME
+            $install[0].Timeout | Should -Be 900
+            $records = Get-Content -LiteralPath (Join-Path $h 'state/harness-plugin-hashes.json') -Raw | ConvertFrom-Json -AsHashtable
+            $records['fake-kernel@claude-plugins-official']['hash'] | Should -Be (Get-PluginContentHash -Path $dir)
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
@@ -1427,7 +1586,7 @@ Describe "Install-Account" {
             # Task 10 review, finding 3: the line above re-wraps $s.hooks.PreToolUse in @() before
             # reading it, so it reads the same whether the merged event serialised as a genuine
             # one-element JSON array or a bare object (the single-element pipeline-output collapse
-            # Install-Harness.ps1:2113-2116 already names as `"hooks": {...} instead of "hooks": [...]`).
+            # Install-Harness.ps1:2157-2160 already names as `"hooks": {...} instead of "hooks": [...]`).
             # Asserted against the raw file text, which a re-parse cannot paper over.
             $raw | Should -Match '"PreToolUse":\s*\['
         }
@@ -1493,7 +1652,7 @@ Describe "Install-Account" {
     # which Convert-SettingsForTarget already sanitises before Merge-AccountSettings ever sees
     # it. The receiver's own settings.json takes no such pass, and Merge-AccountSettings and
     # Merge-HookEvent do their own @()-wrapping of its properties, so the same
-    # "Cannot index into a null array" hazard documented at Install-Account.ps1:675-686 recurs
+    # "Cannot index into a null array" hazard documented at Install-Account.ps1:696-707 recurs
     # here, fed this time by hand-edited data instead of the exporter's own output. Four cases
     # below, one It per site, matching this file's convention for the three sites already pinned
     # on the payload side.

@@ -68,19 +68,22 @@ function Get-DepsManifest {
 
     $entries = @($m['deps'] | Where-Object { $null -ne $_ })
     $names = @{}
+    $allNames = @{}
     foreach ($e in $entries) {
         if ($e -isnot [System.Collections.IDictionary]) { throw "deps manifest: every entry must be an object." }
         $n = $e['name']
         if ($n -isnot [string] -or $n -notmatch '^[A-Za-z0-9][A-Za-z0-9._@-]*$') { throw "deps manifest: entry name '$n' is missing or malformed." }
-        if ($names.Contains($n)) { throw "deps manifest: duplicate name '$n'. One entry per tool." }
-        $names[$n] = $true
+        if ($allNames.Contains($n)) { throw "deps manifest: duplicate name '$n'. One entry per tool." }
+        $allNames[$n] = $true
+        # needs and onlyWhenAbsent are probed as tools, so only a tool name can satisfy them.
+        if ($e['kind'] -ne 'plugin') { $names[$n] = $true }
     }
 
     foreach ($e in $entries) {
         $n = $e['name']
         $kind = 'tool'
         if ($e.Contains('kind')) { $kind = $e['kind'] }
-        if ($kind -ne 'tool') { throw "deps manifest: '$n' has unknown kind '$kind'." }
+        if (@('tool', 'plugin') -notcontains $kind) { throw "deps manifest: '$n' has unknown kind '$kind'." }
 
         $sev = $e['severity']
         if ($sev -isnot [System.Collections.IDictionary] -or $sev.Count -eq 0) { throw "deps manifest: '$n' needs a severity map." }
@@ -89,6 +92,10 @@ function Get-DepsManifest {
             if (@('hard', 'optional') -notcontains $sev[$layer]) { throw "deps manifest: '$n' has unknown severity '$($sev[$layer])' for $layer." }
         }
         if ($e['failMode'] -isnot [string] -or -not $e['failMode'].Trim()) { throw "deps manifest: '$n' needs a failMode sentence." }
+        if ($kind -eq 'plugin') {
+            Assert-DepsPluginEntry -Entry $e
+            continue
+        }
 
         if ($e.Contains('platforms')) {
             $p = $e['platforms']
@@ -339,7 +346,15 @@ function Invoke-DepsPreflight {
         [Alias('IsWindows')][bool]$OnWindows,
         [bool]$InstallDeps,
         [scriptblock]$Runner,
-        [scriptblock]$ShouldInstall
+        [scriptblock]$ShouldInstall,
+        # Plugins: the one scope this caller owns (project for Install-Harness, user for
+        # Install-Account), the working directory its plugin commands run in, the recorded hashes
+        # (updated in place), and the project manifest's allowUnpinnedPlugins entries.
+        [ValidateSet('', 'project', 'user')]
+        [string]$PluginScope = '',
+        [string]$PluginCwd,
+        [hashtable]$PluginRecords = @{},
+        [object[]]$AllowUnpinned = @()
     )
 
     $gitExe = (Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source
@@ -354,7 +369,18 @@ function Invoke-DepsPreflight {
         $cache[$Name]
     }
 
+    # An opt-in that names nothing deps.json declares as unpinned third-party is a typo or a stale
+    # entry, and silently ignoring it would leave the operator believing a risk was accepted.
+    foreach ($opt in @($AllowUnpinned | Where-Object { $_ })) {
+        $named = @($Manifest['deps'] | Where-Object { $_['kind'] -eq 'plugin' -and $_['plugin'] -eq $opt['plugin'] -and $_['pin'].Contains('unpinned') })
+        if ($named.Count -eq 0) {
+            throw "allowUnpinnedPlugins names '$($opt['plugin'])', which core/claude/deps.json does not declare as an unpinned third-party plugin. Remove the entry from .claude/.harness-manifest.json, or fix the name."
+        }
+    }
+
     $required = @(Get-RequiredDeps -Manifest $Manifest -Layers $Layers -IsWindows $OnWindows)
+    $pluginRequired = @($required | Where-Object { $_.Dep['kind'] -eq 'plugin' })
+    $required = @($required | Where-Object { $_.Dep['kind'] -ne 'plugin' })
     $problems = [System.Collections.Generic.List[object]]::new()
     foreach ($req in $required) {
         $dep = $req.Dep
@@ -410,6 +436,18 @@ function Invoke-DepsPreflight {
         $remaining = @($problems)
     }
 
+    # Plugins next. A run that is already going to refuse on a tool installs no plugin: it still
+    # probes and reports them, so the one refusal lists everything.
+    $pluginProblems = [System.Collections.Generic.List[object]]::new()
+    $recordsChanged = $false
+    if ($PluginScope) {
+        $toolRefusal = @($remaining | Where-Object { $_.Req.Severity -eq 'hard' }).Count -gt 0
+        $recordsChanged = Invoke-PluginDepsPreflight -Manifest $Manifest -Required $pluginRequired -Scope $PluginScope -Cwd $PluginCwd `
+            -Records $PluginRecords -AllowUnpinned $AllowUnpinned -InstallDeps ($InstallDeps -and -not $toolRefusal) `
+            -Runner $Runner -ShouldInstall $ShouldInstall -Problems $pluginProblems
+    }
+    $remaining = @($remaining) + @($pluginProblems)
+
     foreach ($prob in @($remaining | Where-Object { $_.Req.Severity -eq 'optional' })) {
         Write-Warning "missing optional dependency $($prob.Text)"
     }
@@ -419,4 +457,435 @@ function Invoke-DepsPreflight {
         $how = if ($InstallDeps) { 'Install each one below by hand and re-run.' } else { 'Install each one below and re-run, or re-run with -InstallDeps to run the pinned commands.' }
         throw "missing hard dependency: nothing was written. $how`n$($lines -join "`n")"
     }
+    return [pscustomobject]@{ PluginRecords = $PluginRecords; PluginRecordsChanged = [bool]$recordsChanged }
+}
+
+# --- Claude Code plugins ---------------------------------------------------------------------
+#
+# CLI syntax, read from `claude plugin <command> --help` on Claude Code 2.1.322 (2026-11-11):
+#   claude plugin list --json
+#       A JSON array, one object per plugin and scope: id ("<name>@<marketplace>"), version,
+#       scope (user, project, local, or synced), enabled (bool), installPath, installedAt,
+#       lastUpdated, and for project scope projectPath and projectEnabled. It can carry other
+#       fields (MCP server configuration, headers), so its output is parsed in memory and never
+#       printed, logged or written.
+#   claude plugin marketplace list --json
+#       A JSON array: name, source (github, git or directory), repo for github, path for a
+#       directory, and installLocation, the registered checkout or folder.
+#   claude plugin marketplace add <source> [--scope user|project|local]
+#       <source> is owner/repo, a git URL, or a path. The default scope is user.
+#   claude plugin install <plugin>@<marketplace> --scope user|project|local
+#       Installs and enables at that scope. There is no install-without-enabling form, so a
+#       third-party pin is verified after the install and rolled back by uninstall on a mismatch.
+#       -y would accept a marketplace-declared install command unseen. The installer never
+#       passes it.
+#   claude plugin update <plugin> --scope <scope>
+#       Moves an installed plugin to the marketplace's current version.
+#   claude plugin uninstall <plugin> --scope <scope>
+#   claude plugin disable <plugin> --scope <scope>
+# The installer never reads an installed commit from the CLI. It hashes installPath itself.
+
+# Trusted without a commit pin (operator ruling, #310). Each name is tied to its source repository,
+# so a marketplace that merely reuses the name is not first-party.
+$script:DepsFirstPartyMarketplaces = @{
+    'claude-plugins-official' = 'anthropics/claude-plugins-official'
+    'anthropic-agent-skills'  = 'anthropics/skills'
+}
+
+function Assert-DepsPluginEntry {
+    param($Entry)
+    $n = $Entry['name']
+    $id = $Entry['plugin']
+    if ($id -isnot [string] -or $id -notmatch '^([A-Za-z0-9][A-Za-z0-9._-]*)@([A-Za-z0-9][A-Za-z0-9._-]*)$') {
+        throw "deps manifest: '$n' plugin must be <id>@<marketplace>."
+    }
+    $mpPart = $Matches[2]
+    $mp = $Entry['marketplace']
+    if ($mp -isnot [System.Collections.IDictionary] -or $mp['name'] -ne $mpPart) {
+        throw "deps manifest: '$n' marketplace.name must match the marketplace in '$id'."
+    }
+    $src = $mp['source']
+    if ($src -isnot [System.Collections.IDictionary] -or $src.Count -ne 1) {
+        throw "deps manifest: '$n' marketplace.source must name exactly one of github, git or directory."
+    }
+    if ($src.Contains('github')) {
+        if ($src['github'] -isnot [string] -or $src['github'] -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') { throw "deps manifest: '$n' marketplace.source.github must be owner/repo." }
+    }
+    elseif ($src.Contains('git')) {
+        if ($src['git'] -isnot [string] -or $src['git'] -notmatch '^https://\S+$') { throw "deps manifest: '$n' marketplace.source.git must be an https URL." }
+    }
+    elseif ($src.Contains('directory')) {
+        if ($src['directory'] -ne $true) { throw "deps manifest: '$n' marketplace.source.directory must be true. A path is machine-specific." }
+    }
+    else { throw "deps manifest: '$n' marketplace.source must name exactly one of github, git or directory." }
+
+    $scope = $Entry['scope']
+    if (@('user', 'project') -notcontains $scope) { throw "deps manifest: '$n' scope must be user or project." }
+    $isKernel = $Entry['severity'].Contains('kernel')
+    if ($isKernel -and $scope -ne 'user') { throw "deps manifest: '$n' is a kernel plugin, so its scope must be user." }
+    if (-not $isKernel -and $scope -ne 'project') { throw "deps manifest: '$n' is a layer plugin, so its scope must be project." }
+
+    $pin = $Entry['pin']
+    if ($pin -isnot [System.Collections.IDictionary]) { throw "deps manifest: '$n' needs a pin." }
+    $hex40 = '^[0-9a-f]{40}$'
+    $hash = '^sha256:[0-9a-f]{64}$'
+    if ($pin.Contains('firstParty')) {
+        $expectedRepo = $script:DepsFirstPartyMarketplaces[$mp['name']]
+        if ($pin['firstParty'] -ne $true -or -not $expectedRepo -or $src['github'] -ne $expectedRepo) {
+            throw "deps manifest: '$n' marks firstParty on marketplace '$($mp['name'])', which is not one of $(@($script:DepsFirstPartyMarketplaces.Keys | Sort-Object) -join ', ') at its own source."
+        }
+        foreach ($k in @($pin.Keys)) { if (@('firstParty', 'sha') -notcontains $k) { throw "deps manifest: '$n' firstParty pin takes only an optional sha." } }
+        if ($pin.Contains('sha') -and $pin['sha'] -cnotmatch $hex40) { throw "deps manifest: '$n' pin.sha must be 40 lowercase hex." }
+        return
+    }
+    if ($pin.Contains('unpinned')) {
+        if ($pin['unpinned'] -ne $true -or $pin.Count -ne 1) { throw "deps manifest: '$n' unpinned takes no other pin field." }
+        return
+    }
+    foreach ($k in @('sha', 'commit')) {
+        if ($pin.Contains($k)) {
+            if ($pin['contentHash'] -isnot [string] -or $pin['contentHash'] -cnotmatch $hash) { throw "deps manifest: '$n' pin.$k needs a contentHash of sha256:<64 hex>." }
+            if ($pin[$k] -cnotmatch $hex40) { throw "deps manifest: '$n' pin.$k must be 40 lowercase hex." }
+            if ($pin.Count -ne 2) { throw "deps manifest: '$n' pin takes $k and contentHash only." }
+            return
+        }
+    }
+    throw "deps manifest: '$n' is a third-party plugin with none of sha, commit or unpinned."
+}
+
+# sha256:<hex> over every regular file under -Path, so the same tree hashes the same on any
+# machine and checkout. Files are ordered by their /-separated relative path, compared ordinally
+# on its UTF-8 bytes. Each file's content is hashed after CRLF becomes LF (git's autocrlf would
+# otherwise make one tree hash two ways), unless it holds a NUL byte, which marks it binary and
+# hashes it raw. A .git directory is skipped. A symlink is not followed and contributes
+# link:<target> in place of content. One SHA-256 over `<path>\n<file hash>\n` for every file.
+function Get-PluginContentHash {
+    param([string]$Path)
+    $root = [System.IO.Path]::GetFullPath($Path)
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw "plugin directory not found: $Path" }
+    $rels = [System.Collections.Generic.List[string]]::new()
+    $values = [System.Collections.Generic.List[string]]::new()
+    $stack = [System.Collections.Generic.Stack[System.IO.DirectoryInfo]]::new()
+    $stack.Push([System.IO.DirectoryInfo]::new($root))
+    $latin1 = [System.Text.Encoding]::Latin1
+    while ($stack.Count -gt 0) {
+        $dir = $stack.Pop()
+        foreach ($item in $dir.EnumerateFileSystemInfos()) {
+            $rel = [System.IO.Path]::GetRelativePath($root, $item.FullName).Replace('\', '/')
+            if ($item.LinkTarget) {
+                $rels.Add($rel); $values.Add("link:$($item.LinkTarget)")
+                continue
+            }
+            if ($item -is [System.IO.DirectoryInfo]) {
+                if ($item.Name -ne '.git') { $stack.Push($item) }
+                continue
+            }
+            $bytes = [System.IO.File]::ReadAllBytes($item.FullName)
+            if ([Array]::IndexOf($bytes, [byte]0) -lt 0) {
+                # Latin-1 maps every byte to one char and back, so this is a byte-level replace.
+                $bytes = $latin1.GetBytes($latin1.GetString($bytes).Replace("`r`n", "`n"))
+            }
+            $rels.Add($rel)
+            $values.Add([Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant())
+        }
+    }
+    # Fixed-width hex of the UTF-8 bytes sorts ordinally exactly as the bytes do.
+    $keys = [string[]]@($rels | ForEach-Object { [Convert]::ToHexString([System.Text.Encoding]::UTF8.GetBytes($_)) })
+    $index = [int[]](0..([Math]::Max(0, $rels.Count - 1)))
+    if ($rels.Count -eq 0) { $index = [int[]]@() }
+    [Array]::Sort($keys, $index, [System.StringComparer]::Ordinal)
+    $sb = [System.Text.StringBuilder]::new()
+    foreach ($i in $index) { $null = $sb.Append($rels[$i]).Append("`n").Append($values[$i]).Append("`n") }
+    $digest = [System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($sb.ToString()))
+    return 'sha256:' + [Convert]::ToHexString($digest).ToLowerInvariant()
+}
+
+function Test-DepsSamePath {
+    param([string]$A, [string]$B)
+    if (-not $A -or -not $B) { return $false }
+    $norm = { param($p) [System.IO.Path]::GetFullPath($p).TrimEnd('\', '/').Replace('\', '/') }
+    $cmp = if (($PSVersionTable.PSVersion.Major -lt 6) -or $IsWindows) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
+    return [string]::Equals((& $norm $A), (& $norm $B), $cmp)
+}
+
+# Runs a CLI listing through the runner and parses it in memory. $null means it did not answer:
+# a non-zero exit, a timeout, or output that is not JSON. The output itself is never returned in
+# a message, because the plugin list can carry MCP server headers.
+function Invoke-DepsJsonListing {
+    param([scriptblock]$Runner, [string[]]$Argv, [string]$Cwd)
+    $r = & $Runner $Argv $script:DepsProbeTimeout $Cwd
+    if (-not $r -or $r.TimedOut -or $r.ExitCode -ne 0) { return $null }
+    try { $parsed = (Get-DepsOutputText $r.Output) | ConvertFrom-Json -AsHashtable -ErrorAction Stop }
+    catch { return $null }
+    return [pscustomobject]@{ Rows = @(@($parsed) | Where-Object { $_ -is [System.Collections.IDictionary] }) }
+}
+
+function Get-PluginMarketplaces {
+    param([scriptblock]$Runner, [string]$Cwd)
+    $list = Invoke-DepsJsonListing -Runner $Runner -Argv @('claude', 'plugin', 'marketplace', 'list', '--json') -Cwd $Cwd
+    if ($null -eq $list) { return $null }
+    $map = @{}
+    foreach ($row in $list.Rows) {
+        if ($row['name'] -isnot [string]) { continue }
+        $loc = $row['installLocation']
+        if (-not $loc) { $loc = $row['path'] }
+        $map[$row['name']] = [string]$loc
+    }
+    return $map
+}
+
+# The sha a registered marketplace's own marketplace.json lists for this plugin, or $null.
+function Get-PluginMarketplaceSha {
+    param($Dep, [string]$Location)
+    if (-not $Location) { return $null }
+    $file = Join-Path (Join-Path $Location '.claude-plugin') 'marketplace.json'
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return $null }
+    try { $doc = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json -AsHashtable -ErrorAction Stop }
+    catch { return $null }
+    if ($doc -isnot [System.Collections.IDictionary]) { return $null }
+    $short = ($Dep['plugin'] -split '@')[0]
+    foreach ($p in @($doc['plugins'] | Where-Object { $_ -is [System.Collections.IDictionary] })) {
+        if ($p['name'] -ne $short) { continue }
+        $src = $p['source']
+        if ($src -is [System.Collections.IDictionary] -and $src['sha'] -is [string]) { return $src['sha'] }
+        return $null
+    }
+    return $null
+}
+
+function Get-DepsGitHead {
+    param([scriptblock]$Runner, [string]$Location, [string]$Cwd)
+    if (-not $Location) { return $null }
+    $r = & $Runner @('git', '-C', $Location, 'rev-parse', 'HEAD') $script:DepsProbeTimeout $Cwd
+    if (-not $r -or $r.TimedOut -or $r.ExitCode -ne 0) { return $null }
+    $line = @((Get-DepsOutputText $r.Output) -split '\r?\n' | Where-Object { $_.Trim() })
+    if ($line.Count -eq 0) { return $null }
+    return $line[0].Trim()
+}
+
+# -List is the parsed plugin listing when the caller already holds one, so one preflight lists
+# once rather than once per plugin. Omitted, the listing runs here.
+function Test-PluginDep {
+    param($Dep, [scriptblock]$Runner, [string]$Target, [string]$RecordedHash, $List)
+    $res = [pscustomobject]@{
+        Name = $Dep['name']; Present = $false; Version = $null; MeetsMin = $false; Reason = ''
+        InstallPath = $null; Hash = $null; Changed = $false
+    }
+    $id = $Dep['plugin']
+    $scope = $Dep['scope']
+    $list = $List
+    if (-not $PSBoundParameters.ContainsKey('List')) {
+        $list = Invoke-DepsJsonListing -Runner $Runner -Argv @('claude', 'plugin', 'list', '--json') -Cwd $Target
+    }
+    if ($null -eq $list) { $res.Reason = 'the plugin list did not answer'; return $res }
+    $rows = @($list.Rows | Where-Object { $_['id'] -eq $id -and $_['scope'] -eq $scope })
+    if ($scope -eq 'project') { $rows = @($rows | Where-Object { Test-DepsSamePath ([string]$_['projectPath']) $Target }) }
+    if ($rows.Count -eq 0) { $res.Reason = "not installed at $scope scope"; return $res }
+    $row = $rows[0]
+    if ($row['enabled'] -ne $true) { $res.Reason = "installed but not enabled at $scope scope"; return $res }
+    $path = [string]$row['installPath']
+    if (-not $path -or -not (Test-Path -LiteralPath $path -PathType Container)) { $res.Reason = 'its installPath is missing'; return $res }
+    $res.InstallPath = $path
+    $res.Version = [string]$row['version']
+    $res.Hash = Get-PluginContentHash -Path $path
+    $expected = $RecordedHash
+    if ($Dep['pin'].Contains('contentHash')) { $expected = $Dep['pin']['contentHash'] }
+    $res.Changed = [bool]$expected -and $res.Hash -ne $expected
+    $res.Present = $true
+    $res.MeetsMin = $true
+    return $res
+}
+
+function Get-PluginInstallCommands {
+    param($Dep, [bool]$MarketplaceKnown)
+    $cmds = [System.Collections.Generic.List[string[]]]::new()
+    if (-not $MarketplaceKnown) {
+        $src = $Dep['marketplace']['source']
+        if ($src.Contains('github')) { $cmds.Add([string[]]@('claude', 'plugin', 'marketplace', 'add', $src['github'])) }
+        elseif ($src.Contains('git')) { $cmds.Add([string[]]@('claude', 'plugin', 'marketplace', 'add', $src['git'])) }
+        else { return $null }
+    }
+    $cmds.Add([string[]]@('claude', 'plugin', 'install', $Dep['plugin'], '--scope', $Dep['scope']))
+    return , $cmds.ToArray()
+}
+
+function New-PluginRecord {
+    param($Result, [string]$Sha)
+    $rec = [ordered]@{ hash = $Result.Hash; installPath = $Result.InstallPath; version = $Result.Version }
+    if ($Sha) { $rec['sha'] = $Sha }
+    $rec['recordedAt'] = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
+    return $rec
+}
+
+# The plugin half of the preflight. Adds a problem per plugin that is missing or fails its pin,
+# and updates -Records in place. Returns whether any record changed.
+function Invoke-PluginDepsPreflight {
+    param($Manifest, [object[]]$Required, [string]$Scope, [string]$Cwd, $Records, [object[]]$AllowUnpinned,
+        [bool]$InstallDeps, [scriptblock]$Runner, [scriptblock]$ShouldInstall, $Problems)
+
+    $changed = $false
+    # One listing of each kind per run, refreshed after anything that changes what is installed.
+    $cache = @{}
+    $getList = {
+        if (-not $cache.Contains('list')) { $cache['list'] = Invoke-DepsJsonListing -Runner $Runner -Argv @('claude', 'plugin', 'list', '--json') -Cwd $Cwd }
+        $cache['list']
+    }
+    $getMarketplaces = {
+        if (-not $cache.Contains('mps')) { $cache['mps'] = Get-PluginMarketplaces -Runner $Runner -Cwd $Cwd }
+        $cache['mps']
+    }
+    $runChange = {
+        param([string[]]$Cmd)
+        $null = & $Runner $Cmd $script:DepsInstallTimeout $Cwd
+        $cache.Clear()
+    }
+    $probe = {
+        param($Recorded)
+        Test-PluginDep -Dep $dep -Runner $Runner -Target $Cwd -RecordedHash $Recorded -List (& $getList)
+    }
+
+    foreach ($e in @($Manifest['deps'] | Where-Object { $null -ne $_ -and $_['kind'] -eq 'plugin' -and $_['scope'] -ne $Scope })) {
+        if ($Scope -eq 'project') { Write-Host "Skipping user-scope plugin $($e['plugin']): Install-Account owns user scope." }
+        else { Write-Host "Skipping project-scope plugin $($e['plugin']): project-scope plugin $($e['plugin']) is installed per project by Install-Harness." }
+    }
+
+    foreach ($req in @($Required | Where-Object { $_.Dep['kind'] -eq 'plugin' -and $_.Dep['scope'] -eq $Scope })) {
+        $dep = $req.Dep
+        $id = $dep['plugin']
+        $pin = $dep['pin']
+        $firstParty = $pin.Contains('firstParty')
+        $tracksSha = $firstParty -and $pin.Contains('sha')
+        $thirdPinned = $pin.Contains('commit') -or ($pin.Contains('sha') -and -not $firstParty)
+        $mpName = $dep['marketplace']['name']
+        $fail = {
+            param([string]$Reason)
+            $Problems.Add([pscustomobject]@{ Req = $req; Reason = $Reason; Text = "plugin ${id}: $Reason. $($dep['failMode'])" })
+        }
+
+        if ($pin.Contains('unpinned')) {
+            $opt = @($AllowUnpinned | Where-Object { $_ -is [System.Collections.IDictionary] -and $_['plugin'] -eq $id })
+            if ($opt.Count -eq 0) {
+                & $fail 'it is an unpinned third-party plugin, and the project manifest has no allowUnpinnedPlugins entry for it'
+                continue
+            }
+            Write-Warning "plugin $id is unpinned third-party code, allowed by this project's manifest. Recorded risk: $($opt[0]['risk'])"
+        }
+
+        $rec = $null
+        if ($Records.Contains($id) -and $Records[$id] -is [System.Collections.IDictionary]) { $rec = $Records[$id] }
+        $recHash = if ($rec) { [string]$rec['hash'] } else { $null }
+        $r = & $probe $recHash
+
+        if ($r.Present) {
+            if ($thirdPinned) {
+                if ($r.Changed) { & $fail 'the installed copy does not match its pinned contentHash'; continue }
+                if ($pin.Contains('commit')) {
+                    $mps = & $getMarketplaces
+                    $head = if ($mps) { Get-DepsGitHead -Runner $Runner -Location $mps[$mpName] -Cwd $Cwd } else { $null }
+                    if ($head -ne $pin['commit']) { & $fail "its registered marketplace is not at the pinned commit $($pin['commit'])"; continue }
+                }
+                continue
+            }
+
+            $currentSha = $null
+            if ($tracksSha) {
+                $mps = & $getMarketplaces
+                if ($mps) { $currentSha = Get-PluginMarketplaceSha -Dep $dep -Location $mps[$mpName] }
+                $expectedSha = if ($rec -and $rec['sha']) { [string]$rec['sha'] } else { $pin['sha'] }
+                if (-not $currentSha) {
+                    Write-Warning "plugin ${id}: its marketplace entry's sha could not be read, so a version move cannot be checked."
+                }
+                elseif ($currentSha -ne $expectedSha) {
+                    Write-Warning "plugin ${id}: its marketplace sha moved from $expectedSha to $currentSha. Read that diff, then re-run with -InstallDeps to install the marketplace's version and re-record it."
+                    if ($InstallDeps) {
+                        $cmd = [string[]]@('claude', 'plugin', 'update', $id, '--scope', $dep['scope'])
+                        $display = Format-DepsArgv $cmd
+                        if (& $ShouldInstall $display 'install') {
+                            & $runChange $cmd
+                            $r2 = & $probe $null
+                            if ($r2.Present) { $Records[$id] = New-PluginRecord -Result $r2 -Sha $currentSha; $changed = $true }
+                            else { & $fail "the update did not verify ($($r2.Reason))" }
+                        }
+                        else { Write-Host "WhatIf: would run $display" }
+                    }
+                    continue
+                }
+            }
+            if (-not $rec) {
+                $Records[$id] = New-PluginRecord -Result $r -Sha $currentSha
+                $changed = $true
+                continue
+            }
+            if ($r.Changed) {
+                Write-Warning "plugin $id changed since recorded: $($r.InstallPath) now hashes to $($r.Hash), recorded $recHash. Review the change, then re-run with -InstallDeps to re-record it."
+                if ($InstallDeps) { $Records[$id] = New-PluginRecord -Result $r -Sha $currentSha; $changed = $true }
+            }
+            continue
+        }
+
+        # Read even without -InstallDeps, so the printed guidance leaves out a marketplace add the
+        # machine does not need. Only an install has to stop when the listing does not answer.
+        $mps = & $getMarketplaces
+        if ($InstallDeps -and $null -eq $mps) { & $fail "$($r.Reason), and the marketplace list did not answer"; continue }
+        $known = [bool]($mps -and $mps.Contains($mpName))
+        $cmds = Get-PluginInstallCommands -Dep $dep -MarketplaceKnown $known
+        if ($null -eq $cmds) {
+            & $fail "$($r.Reason), and its directory marketplace $mpName is not registered here. Add it by hand with claude plugin marketplace add <path>, then re-run"
+            continue
+        }
+        if (-not $InstallDeps) {
+            $how = @($cmds | ForEach-Object { Format-DepsArgv $_ }) -join ', then '
+            & $fail "$($r.Reason). Install with: $how"
+            continue
+        }
+
+        $stopped = $false
+        foreach ($cmd in $cmds) {
+            if ($cmd[2] -eq 'install' -and $thirdPinned) {
+                $mpsNow = & $getMarketplaces
+                $loc = if ($mpsNow) { $mpsNow[$mpName] } else { $null }
+                if ($pin.Contains('sha')) {
+                    $listed = Get-PluginMarketplaceSha -Dep $dep -Location $loc
+                    if ($listed -ne $pin['sha']) { & $fail "its marketplace lists sha $listed, not the pinned $($pin['sha']), so nothing was installed"; $stopped = $true; break }
+                }
+                else {
+                    $head = Get-DepsGitHead -Runner $Runner -Location $loc -Cwd $Cwd
+                    if ($head -ne $pin['commit']) { & $fail "its marketplace is at $head, not the pinned commit $($pin['commit']), so nothing was installed"; $stopped = $true; break }
+                }
+            }
+            $display = Format-DepsArgv $cmd
+            if (-not (& $ShouldInstall $display 'install')) {
+                Write-Host "WhatIf: would run $display"
+                $stopped = $true
+                break
+            }
+            & $runChange $cmd
+        }
+        if ($stopped) { continue }
+
+        $r2 = & $probe $null
+        if (-not $r2.Present) { & $fail "the install did not verify ($($r2.Reason))"; continue }
+        if ($thirdPinned) {
+            $bad = $r2.Changed
+            if (-not $bad -and $pin.Contains('commit')) {
+                $mpsNow = & $getMarketplaces
+                $bad = -not $mpsNow -or (Get-DepsGitHead -Runner $Runner -Location $mpsNow[$mpName] -Cwd $Cwd) -ne $pin['commit']
+            }
+            if ($bad) {
+                $un = [string[]]@('claude', 'plugin', 'uninstall', $id, '--scope', $dep['scope'])
+                $display = Format-DepsArgv $un
+                if (& $ShouldInstall $display 'uninstall') { & $runChange $un }
+                & $fail 'the installed copy did not verify against its pin, so it was uninstalled again'
+            }
+            continue
+        }
+        $sha = $null
+        if ($tracksSha) {
+            $mpsNow = & $getMarketplaces
+            if ($mpsNow) { $sha = Get-PluginMarketplaceSha -Dep $dep -Location $mpsNow[$mpName] }
+        }
+        $Records[$id] = New-PluginRecord -Result $r2 -Sha $sha
+        $changed = $true
+    }
+    return $changed
 }

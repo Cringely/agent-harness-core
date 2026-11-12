@@ -809,6 +809,23 @@ function ConvertTo-ManifestV3 {
         $m['settings'] = $checked
     }
 
+    # Shape only. Whether each name is an unpinned third-party entry is the preflight's check,
+    # since it is the one place that loads core/claude/deps.json. Read from the input for the
+    # same reason as layers: the v1 branch above rebuilds the map without it.
+    if ($source.Contains('allowUnpinnedPlugins')) {
+        $rawAllow = $source['allowUnpinnedPlugins']
+        $allowShape = ".harness-manifest.json 'allowUnpinnedPlugins' must be a list of objects, each with a non-empty string plugin (<id>@<marketplace>) and a non-empty string risk sentence."
+        if ($rawAllow -isnot [System.Collections.IList]) { throw $allowShape }
+        foreach ($o in $rawAllow) {
+            if ($o -isnot [System.Collections.IDictionary] -or
+                $o['plugin'] -isnot [string] -or -not $o['plugin'].Trim() -or
+                $o['risk'] -isnot [string] -or -not $o['risk'].Trim()) {
+                throw $allowShape
+            }
+        }
+        $m['allowUnpinnedPlugins'] = @($rawAllow)
+    }
+
     return $m
 }
 
@@ -1747,6 +1764,23 @@ if ($Audit) {
         }
     }
 
+    # Plugin drift, from the sidecar's recorded hashes alone: -Audit never calls the CLI. A missing
+    # install directory counts as changed, since the recorded content is no longer there.
+    if ($sidecar['pluginHashes'] -is [System.Collections.IDictionary]) {
+        foreach ($pluginId in @($sidecar['pluginHashes'].Keys | Sort-Object)) {
+            $pluginRec = $sidecar['pluginHashes'][$pluginId]
+            if ($pluginRec -isnot [System.Collections.IDictionary]) { continue }
+            $nowHash = $null
+            $recPath = [string]$pluginRec['installPath']
+            if ($recPath -and (Test-Path -LiteralPath $recPath -PathType Container)) {
+                try { $nowHash = Get-PluginContentHash -Path $recPath } catch { $nowHash = $null }
+            }
+            if ($nowHash -ne $pluginRec['hash']) {
+                $results.Add([pscustomobject]@{ File = "plugin:$pluginId"; Status = 'plugin-changed' })
+            }
+        }
+    }
+
     if (-not $Quiet) { $results | Format-Table -AutoSize | Out-String | Write-Host }
 
     # 'overlay (accepted)' is silent by design: the pin exists precisely so a deliberate fork
@@ -1785,7 +1819,7 @@ if ($Audit) {
         # recovery for one and the pin-drop for the other rather than sending both to the
         # installer. (CONTRIBUTING.md's drift-detection gate: every class the audit reports needs
         # a standing response, and the classes that must never be auto-repaired are named as such.)
-        Write-Host "$($attention.Count) file(s) need attention. project-modified/untracked-differs = candidates to promote into core; core-updated/not-installed = re-run installer to pull down; overlay-changed = re-review the fork, then re-pin with -Accept; missing = re-run the installer if the row is a tracked file, but a missing pinned overlay exists only in the project's own history, so restore it from there or drop the pin with -Unaccept; orphaned (already removed/unmodified/modified) = -Prune the key to drop the stale manifest record -- the file, if any is still there, is left on disk for you to delete by hand or -Accept to pin as an overlay. installed (layer not selected) = delete the file by hand, and the next install drops its record. settings-missing/settings-stale = re-run the installer, which rewrites .claude/rules/harness/project-settings.md from the manifest. settings-modified = the installer keeps that file because it was edited by hand or never written by the installer, so move the change into the manifest with the setting's flag, then delete the file and re-run. manifest-invalid = fix the layers or settings value the error names."
+        Write-Host "$($attention.Count) file(s) need attention. project-modified/untracked-differs = candidates to promote into core; core-updated/not-installed = re-run installer to pull down; overlay-changed = re-review the fork, then re-pin with -Accept; missing = re-run the installer if the row is a tracked file, but a missing pinned overlay exists only in the project's own history, so restore it from there or drop the pin with -Unaccept; orphaned (already removed/unmodified/modified) = -Prune the key to drop the stale manifest record -- the file, if any is still there, is left on disk for you to delete by hand or -Accept to pin as an overlay. installed (layer not selected) = delete the file by hand, and the next install drops its record. settings-missing/settings-stale = re-run the installer, which rewrites .claude/rules/harness/project-settings.md from the manifest. settings-modified = the installer keeps that file because it was edited by hand or never written by the installer, so move the change into the manifest with the setting's flag, then delete the file and re-run. manifest-invalid = fix the layers or settings value the error names. plugin-changed = re-run the installer with -InstallDeps to re-record after reviewing the change."
     }
 
     # Stack drift: report-only, same as the file audit above — never writes the manifest or
@@ -1965,8 +1999,18 @@ $depsManifest = Get-DepsManifest -Path $depsPath
 $depsRunnerBlock = if ($DepsRunner) { $DepsRunner } else { ${function:Invoke-DefaultDepsRunner} }
 $depsShouldInstall = { param($What, $Action) $script:harnessCmdlet.ShouldProcess($What, $Action) }
 $onWindowsHost = ($PSVersionTable.PSVersion.Major -lt 6) -or $IsWindows
-Invoke-DepsPreflight -Manifest $depsManifest -Layers ([string[]](@('kernel') + @($projectLayers))) -IsWindows $onWindowsHost `
-    -InstallDeps ([bool]$InstallDeps) -Runner $depsRunnerBlock -ShouldInstall $depsShouldInstall
+# Plugins: this installer owns project scope only, and its plugin commands run in the target, so
+# Claude Code resolves the project from their working directory. Recorded content hashes live in
+# the sidecar, never the committed manifest: an installPath is a machine-local path.
+$pluginRecords = @{}
+if ($sidecar['pluginHashes'] -is [System.Collections.IDictionary]) {
+    foreach ($k in @($sidecar['pluginHashes'].Keys)) { $pluginRecords[$k] = $sidecar['pluginHashes'][$k] }
+}
+$depsOutcome = Invoke-DepsPreflight -Manifest $depsManifest -Layers ([string[]](@('kernel') + @($projectLayers))) -IsWindows $onWindowsHost `
+    -InstallDeps ([bool]$InstallDeps) -Runner $depsRunnerBlock -ShouldInstall $depsShouldInstall `
+    -PluginScope 'project' -PluginCwd (Resolve-Path -LiteralPath $Target).Path -PluginRecords $pluginRecords `
+    -AllowUnpinned @($manifest['allowUnpinnedPlugins'] | Where-Object { $_ })
+if ($depsOutcome.PluginRecordsChanged) { $sidecar['pluginHashes'] = $depsOutcome.PluginRecords }
 
 # A dry run stops here. Every write below is either a built-in cmdlet that would honour -WhatIf on
 # its own or a native command (git config core.hooksPath, chmod) that would not, and stopping
@@ -2275,6 +2319,9 @@ $sidecarOutcome = Invoke-SidecarPlan -Plan $sidecarPlan -Sidecar $sidecar
 # having touched the file -- the two used to share one label ('skipped-unprotected'), which
 # made a run that just deleted something read as though nothing had happened to it.
 $sidecarAction = if ($sidecarOutcome -eq 'removed') { 'removed' } elseif ($sidecarOutcome -eq 'written') { 'written' } else { 'skipped-unprotected' }
+if ($depsOutcome.PluginRecordsChanged -and $sidecarOutcome -ne 'written') {
+    Write-Warning "Plugin content hashes were not recorded, because the sidecar was not written (see the warning above). Plugin drift cannot be checked until the ignore rule is fixed and the installer runs again."
+}
 $results.Add([pscustomobject]@{ File = '.harness-manifest.local.json'; Action = $sidecarAction })
 
 # Rendered from the manifest values above, with LF endings, and never tracked in `files`, since the

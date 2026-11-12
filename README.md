@@ -46,7 +46,16 @@ launcher. The code layer adds `git` as a hard dependency. A missing optional one
 the prose-lint hook, `gh` or the `claude` CLI, gets a warning with its command and the install
 carries on. Nothing is installed unless you pass `-InstallDeps`, which runs each missing
 dependency's pinned command and probes it again. `-WhatIf` runs the probes, prints each command
-`-InstallDeps` would run, and stops before writing anything. The prose-lint hook also wants the
+`-InstallDeps` would run, and stops before writing anything.
+
+Claude Code plugins are declared in the same file. This installer handles the project-scope ones a
+layer uses, such as `code-review` and `feature-dev` for the code layer, and leaves user-scope
+plugins to the account installer. A plugin from Anthropic's two marketplaces is trusted without a
+commit pin. The installer records a content hash of its install directory in the sidecar and warns
+when that hash changes, and `-InstallDeps` records it again once you have looked at the change. A
+third-party plugin needs either a pin, checked before it is installed and again after, or an
+`allowUnpinnedPlugins` entry in the project manifest whose `risk` sentence says what the project is
+accepting. The prose-lint hook also wants the
 prose-lint styles kit on the machine. Missing it degrades to an advisory skip, never a blocked
 write. `session-start-drift-check.sh` also wants `sed`, `tr` and `awk`
 (Git Bash ships all three) plus a reachable core checkout. Missing any of them makes it print
@@ -272,6 +281,10 @@ manifest with the setting's flag, then delete the file and re-run. `manifest-inv
 the installer refuses. Fix the value the error names. Under `-Audit -Quiet` that is the only row
 printed.
 
+`plugin-changed` means a project-scope plugin's install directory no longer hashes to what the
+sidecar recorded. `-Audit` hashes the recorded directory itself and never calls the Claude Code CLI.
+Review the change, then re-run the installer with `-InstallDeps` to record it again.
+
 This is the mechanical half of the findings flow in CONTRIBUTING.md.
 Run it periodically per project (SpaceMolt wires it into a `core_harvest` ceremony, see that
 project's `docs/wiki/team-ceremonies.md`).
@@ -419,7 +432,9 @@ preflight against the kernel entries in `core/claude/deps.json`. `bun`, and Git 
 hard and refuse the install before anything is copied. `git`, `vale`, `python3`, `npm`,
 `ccstatusline`, `op` and, on a Linux box with no `npm`, `jq` each drive one feature that fails open
 without it, so each gets a warning naming its pinned command. `-InstallDeps` and `-WhatIf` work as
-they do for the project installer. Separately, `npm root -g` fills the `{{NPM_GLOBAL}}` token: without
+they do for the project installer. The kernel's user-scope plugins, `superpowers` among them, are
+this script's to handle, with their content hashes recorded in `state/harness-plugin-hashes.json`
+under the Claude home, a folder the exporter never copies. Separately, `npm root -g` fills the `{{NPM_GLOBAL}}` token: without
 `npm` the two `ccstatusline` hook entries are dropped and `statusLine.command` is pointed at the shipped
 statusline script for the platform instead. Where `npm` is present, those hook entries still expect
 `ccstatusline` itself to be installed globally, so `node` can resolve it under the global
