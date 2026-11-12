@@ -84,6 +84,23 @@ describe("layers.json", () => {
       for (const l of layers) expect(["code", "documents", "physical"]).toContain(l);
     }
   });
+
+  // Install-Harness.ps1 validates recorded settings against these keys, and its -StatusCadence and
+  // -Audience ValidateSets are pinned to them by the Pester suite.
+  test("settings define exactly the values the installer accepts", () => {
+    const settings = manifest.settings;
+    expect(Object.keys(settings).sort()).toEqual(["audience", "lengthBudgetDefault", "statusCadence"]);
+    expect(Object.keys(settings.statusCadence).sort()).toEqual(["heartbeat", "silent"]);
+    expect(Object.keys(settings.audience).sort()).toEqual(["peer-engineer", "plain-all-roles"]);
+    expect(Object.keys(settings.lengthBudgetDefault).sort()).toEqual(["none", "words"]);
+    for (const group of Object.values(settings) as Record<string, unknown>[]) {
+      for (const text of Object.values(group)) {
+        expect(typeof text).toBe("string");
+        expect((text as string).length).toBeGreaterThan(0);
+      }
+    }
+    expect(settings.lengthBudgetDefault.words).toContain("{{WORDS}}");
+  });
 });
 
 type Split = (typeof SPLITS)[keyof typeof SPLITS];

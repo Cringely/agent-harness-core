@@ -19,6 +19,21 @@
     tracked files, and one folded in under `files` becomes an audit row for a file
     that does not exist.
 
+    The manifest is now v3. A v2 (or v1) manifest gains `schemaVersion` (3), `layers` and
+    `settings` on load without dropping any v2 field. `layers` lists the project layers it
+    records, drawn from code, documents and physical, with the kernel always on and never
+    listed. A manifest with no `layers` key was written before layers existed and loads as
+    the code layer. An empty list means no project layers and stays empty. `settings`
+    records statusCadence, audience and lengthBudgetDefault. A layers or settings value
+    outside what core/claude/rules/layers.json defines stops every command before it writes.
+
+    Each layer's rule files, listed in core/claude/rules/layers.json, install under
+    .claude/rules/harness/ for the layers the project records. Beside them the installer
+    writes .claude/rules/harness/project-settings.md from the manifest's layers and settings.
+    That file is regenerated on every install and is not tracked in `files`, so a hand edit
+    there is lost on the next install, and -Audit's settings-stale row is the only signal
+    that one happened.
+
     `coreRepo` (an absolute filesystem path) and `stackDetected` (the per-machine plugin,
     output-style, and MCP-server inventory, plus the timestamp of the scan that found
     them) never go in the committed manifest: neither travels between clones, and a
@@ -137,6 +152,20 @@
                          never installed here. Listed, deliberately not counted as drift:
                          the gate working is not a fault, and the response is to re-run with
                          -IncludeCeremonies if this project wants ceremonies at all.
+      not-installed (layer not selected)
+                         a layer rule for a layer the manifest does not record, absent from
+                         the project. Listed, not counted, for the ceremony gate's reason.
+      installed (layer not selected)
+                         a layer rule for a layer the manifest no longer records, still on
+                         disk. Counted. Delete the file by hand, and the next install drops
+                         its record.
+      settings-missing   .claude/rules/harness/project-settings.md is absent. Counted.
+                         Re-run the installer, which rewrites it from the manifest.
+      settings-stale     project-settings.md differs, line endings aside, from what the
+                         manifest renders. Counted. Re-run the installer, which rewrites it.
+      manifest-invalid   the manifest's layers or settings value is outside what layers.json
+                         defines. Counted. Fix the value the error names. -Audit prints this
+                         one row and stops, and every other command refuses.
 
 .PARAMETER Quiet
     Audit only. Drops every human-facing line of the report — the no-manifest notice, the
@@ -144,6 +173,30 @@
     prints one row per file needing attention instead, as `<status><TAB><relative path>`.
     Prints nothing at all when nothing needs attention. For hook consumption:
     core/claude/hooks/session-start-drift-check.sh counts those rows by status.
+
+.PARAMETER Layers
+    The project layers to record and install rules for: code, documents, physical, or none for
+    no project layers. Takes a list (-Layers code,documents) or one comma-separated string,
+    which is what a spawned `pwsh -File` passes. The kernel is always on and is never listed,
+    and none cannot be combined with a layer. Omitted, the run keeps the layers the manifest
+    records, and a fresh install or a manifest with no layers key records code. Rule files of
+    a layer dropped this way stay on disk with a warning. Install runs only.
+
+.PARAMETER StatusCadence
+    silent or heartbeat. Recorded in the manifest and rendered into project-settings.md.
+    Omitted, the recorded value stays, and a project with none recorded gets heartbeat when
+    its layers include documents or physical, else silent. Changing -Layers alone never
+    re-derives a recorded setting. Install runs only.
+
+.PARAMETER Audience
+    peer-engineer or plain-all-roles. Omitted, the recorded value stays, and a project with
+    none recorded gets plain-all-roles when its layers include documents and not code, else
+    peer-engineer. Install runs only.
+
+.PARAMETER LengthBudget
+    A default length budget in words for the project's deliverables, from 1 to 100000.
+    0 clears it, which records null. Omitted, the recorded value stays, and a project with
+    none recorded has no budget. Install runs only.
 #>
 [CmdletBinding()]
 param(
@@ -162,7 +215,20 @@ param(
 
     [switch]$Audit,
 
-    [switch]$Quiet
+    [switch]$Quiet,
+
+    # No ValidateSet: a spawned `pwsh -File ... -Layers code,documents` binds one string, which
+    # ValidateSet would reject before the script could split it. ConvertTo-LayerList validates.
+    [string[]]$Layers,
+
+    [ValidateSet('silent', 'heartbeat')]
+    [string]$StatusCadence,
+
+    [ValidateSet('peer-engineer', 'plain-all-roles')]
+    [string]$Audience,
+
+    [ValidateRange(0, 100000)]
+    [int]$LengthBudget
 )
 
 $ErrorActionPreference = 'Stop'
@@ -173,6 +239,23 @@ $ErrorActionPreference = 'Stop'
 # as a misused one, and go looking in the wrong place.
 if ($Quiet -and -not $Audit) {
     throw "-Quiet applies to -Audit only. Re-run with -Audit -Quiet for the machine-readable drift report, or drop -Quiet."
+}
+
+# Same reasoning as the -Quiet guard: the layer and settings flags reach only the install path,
+# which is the one place the manifest's layers and settings are written. -Audit, -Accept, -Unaccept
+# and -Prune read what the manifest records and leave it alone, so a flag typed beside them would
+# do nothing. Checked through $PSBoundParameters because `-LengthBudget 0` is a real value.
+$standaloneCommand = $null
+if ($Audit) { $standaloneCommand = 'Audit' }
+foreach ($flagName in @('Accept', 'Unaccept', 'Prune')) {
+    if (-not $standaloneCommand -and $PSBoundParameters.ContainsKey($flagName)) { $standaloneCommand = $flagName }
+}
+if ($standaloneCommand) {
+    foreach ($flagName in @('Layers', 'StatusCadence', 'Audience', 'LengthBudget')) {
+        if ($PSBoundParameters.ContainsKey($flagName)) {
+            throw "-$flagName applies to an install run only. -$standaloneCommand reads the layers and settings the manifest records and never changes them. Re-run the installer without -$standaloneCommand to change it."
+        }
+    }
 }
 
 # All three take [string], so `-Accept ""` binds an empty string rather than leaving the
@@ -195,21 +278,22 @@ $coreDir = Join-Path $repoRoot 'core/claude'
 $agentsSrc = Join-Path $coreDir 'agents'
 $hooksSrc = Join-Path $coreDir 'hooks'
 $templatesSrc = Join-Path $coreDir 'templates'
+$rulesSrc = Join-Path $coreDir 'rules'
 
 $claudeDir = Join-Path $Target '.claude'
 $agentsDst = Join-Path $claudeDir 'agents'
 $hooksDst = Join-Path $claudeDir 'hooks'
 $scratchDst = Join-Path $claudeDir 'scratch'
+$rulesHarnessDst = Join-Path $claudeDir 'rules/harness'
 
 # Components that require -IncludeCeremonies (wave/standup ceremony infrastructure
 # most projects lack).
 $ceremonyAgentNames = @('soc-monitor.md')
 $ceremonyHookNames = @('wave-close-handoff.sh')
-$ceremonyCommandPattern = 'wave-close-handoff\.sh'
 
-# The same gate expressed as manifest keys, for the audit. Derived from the two lists above
-# rather than written out a third time: a separate literal list is one rename away from
-# disagreeing with the copy the install path uses, and the disagreement would be silent.
+# The same gate expressed as manifest keys, which is all Get-ComponentGate reads. Derived from the
+# two lists above rather than written out a third time: a separate literal list is one rename away
+# from disagreeing with them, and the disagreement would be silent.
 $ceremonyKeys = @($ceremonyAgentNames | ForEach-Object { "agents/$_" }) +
     @($ceremonyHookNames | ForEach-Object { "hooks/$_" })
 
@@ -308,6 +392,12 @@ function Get-CoreFilesMap {
     $map['guardrails.md'] = Join-Path $templatesSrc 'guardrails.template.md'
     $map['scratch/.gitignore'] = Join-Path $templatesSrc 'scratch.gitignore'
     $map['.gitignore'] = Join-Path $templatesSrc 'manifest-local.gitignore'
+    # Every layer rule, selected or not, for the same reason ceremony files are listed: a project
+    # that dropped a layer still holds its files, and they must not read as orphaned. The generated
+    # project-settings.md is not here, since core ships a template for it rather than the file.
+    foreach ($ruleFile in @($script:layerRegistry.Rules.Keys)) {
+        $map["rules/harness/$ruleFile"] = Join-Path $rulesSrc $ruleFile
+    }
     return $map
 }
 
@@ -493,15 +583,16 @@ function ConvertTo-ManifestV2 {
     $isV2 = $m.Contains('files') -and $m['files'] -is [System.Collections.IDictionary]
 
     if (-not $isV2) {
-        # The four skipped keys are manifest records rather than tracked files (coreRepo and
+        # The skipped keys are manifest records rather than tracked files (coreRepo and
         # stackDetected are dropped outright below; folding either into `files` buys it a row
         # in the audit table for a file that does not exist, the same false alarm the pin
         # mechanism exists to remove). Only coreCommit needs carrying here: it is rewritten
         # from the current checkout at the bottom of this block, so its stale value is meant
-        # to be dropped.
+        # to be dropped. schemaVersion, layers and settings are v3 records that
+        # ConvertTo-ManifestV3 reads from its own input, so dropping them here loses nothing.
         $files = @{}
         foreach ($key in @($m.Keys)) {
-            if ($key -in @('stackDetected', 'accepted', 'coreRepo', 'coreCommit')) { continue }
+            if ($key -in @('stackDetected', 'accepted', 'coreRepo', 'coreCommit', 'schemaVersion', 'layers', 'settings', 'allowUnpinnedPlugins')) { continue }
             $files[$key] = $m[$key]
         }
 
@@ -532,6 +623,247 @@ function ConvertTo-ManifestV2 {
     return $m
 }
 
+# The layer registry, core/claude/rules/layers.json: which layer each rule file belongs to, and the
+# values each project setting can take. Every layer name and setting value the installer accepts
+# comes from here, so this function holds the one list of accepted layer names.
+#
+# Refuses rather than degrading. An empty or unreadable registry would make Get-CoreFilesMap stop
+# listing the installed rule files, and the audit would then read every one of them as orphaned,
+# which is the scope-filter failure Get-CoreFilesMap already refuses for agents and hooks.
+function Get-LayerRegistry {
+    $path = Join-Path $script:rulesSrc 'layers.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "Get-LayerRegistry: $path is missing. Refusing rather than reading every installed layer rule as orphaned."
+    }
+    $reg = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -AsHashtable
+    if ($reg -isnot [System.Collections.IDictionary] -or $reg['schemaVersion'] -ne 1) {
+        throw "Get-LayerRegistry: $path does not declare schemaVersion 1."
+    }
+    $layerNames = [string[]]@('code', 'documents', 'physical')
+
+    $rules = $reg['rules']
+    if ($rules -isnot [System.Collections.IDictionary] -or $rules.Count -eq 0) {
+        throw "Get-LayerRegistry: $path lists no rules. Refusing rather than reading every installed layer rule as orphaned."
+    }
+    $ruleMap = [ordered]@{}
+    foreach ($file in @($rules.Keys)) {
+        # The name becomes part of an install path, so it is held to a bare file name.
+        if ($file -notmatch '^[A-Za-z0-9._-]+\.md$' -or -not (Test-Path -LiteralPath (Join-Path $script:rulesSrc $file) -PathType Leaf)) {
+            throw "Get-LayerRegistry: rule '$file' in $path is not a .md file in $($script:rulesSrc)."
+        }
+        $fileLayers = @($rules[$file] | Where-Object { $null -ne $_ })
+        if ($fileLayers.Count -eq 0) { throw "Get-LayerRegistry: rule '$file' in $path names no layer." }
+        foreach ($l in $fileLayers) {
+            if ($l -isnot [string] -or $layerNames -cnotcontains $l) {
+                throw "Get-LayerRegistry: rule '$file' in $path names layer '$l'. Layers are $($layerNames -join ', ')."
+            }
+        }
+        $ruleMap[$file] = [string[]]$fileLayers
+    }
+
+    $settings = $reg['settings']
+    $required = [ordered]@{
+        statusCadence       = @('silent', 'heartbeat')
+        audience            = @('peer-engineer', 'plain-all-roles')
+        lengthBudgetDefault = @('none', 'words')
+    }
+    if ($settings -isnot [System.Collections.IDictionary]) { throw "Get-LayerRegistry: $path has no settings object." }
+    foreach ($name in @($required.Keys)) {
+        $group = $settings[$name]
+        foreach ($value in $required[$name]) {
+            if ($group -isnot [System.Collections.IDictionary] -or -not $group.Contains($value) -or
+                $group[$value] -isnot [string] -or -not $group[$value]) {
+                throw "Get-LayerRegistry: $path has no text for settings.$name.$value."
+            }
+        }
+    }
+    if (-not $settings['lengthBudgetDefault']['words'].Contains('{{WORDS}}')) {
+        throw "Get-LayerRegistry: settings.lengthBudgetDefault.words in $path has no {{WORDS}} placeholder."
+    }
+
+    return [pscustomobject]@{ LayerNames = $layerNames; Rules = $ruleMap; Settings = $settings }
+}
+
+# A settings value as the registry spells it, matched without regard to case because ValidateSet
+# accepts `-Audience PEER-ENGINEER` and the registry lookup that renders the text should not care.
+# Throws, naming the accepted values, for anything else.
+function Resolve-SettingValue {
+    param([string]$Name, $Value)
+    $allowed = @($script:layerRegistry.Settings[$Name].Keys | Sort-Object)
+    if ($Value -is [string]) {
+        $match = @($allowed | Where-Object { $_ -eq $Value })
+        if ($match.Count -eq 1) { return $match[0] }
+    }
+    throw ".harness-manifest.json settings.$Name is '$Value'. It takes $($allowed -join ' or '). Fix the value, or delete the key and re-run the installer to record the default."
+}
+
+# The -Layers tokens as a layer list in registry order. Each element is split on commas because a
+# spawned `pwsh -File` binds `-Layers code,documents` as one string, while an in-process call binds
+# an array. Returned with the unary comma so a one-element or empty list survives the pipeline.
+function ConvertTo-LayerList {
+    param([string[]]$Requested)
+    $names = $script:layerRegistry.LayerNames
+    $valid = "-Layers takes $($names -join ', '), or none. The kernel is always on and is never listed."
+    $tokens = @(@($Requested | Where-Object { $null -ne $_ }) | ForEach-Object { $_ -split ',' } |
+        ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($tokens.Count -eq 0) { throw "-Layers was given no layer name. $valid" }
+    foreach ($t in $tokens) {
+        if ($t -ne 'none' -and $names -notcontains $t) { throw "-Layers '$t' is not a layer. $valid" }
+    }
+    if ($tokens -contains 'none') {
+        if (@($tokens | Where-Object { $_ -ne 'none' }).Count -gt 0) {
+            throw "-Layers none means no project layers, so it cannot be combined with a layer name. $valid"
+        }
+        return , ([string[]]@())
+    }
+    return , ([string[]]@($names | Where-Object { $tokens -contains $_ }))
+}
+
+# Manifest v3: v2 plus schemaVersion, the project's layers and its settings. Validates rather than
+# degrades, unlike the v2 fields, because a wrong layers value decides which rule files a project
+# gets: a hand-edited "layers": "code" read leniently would install or withhold rules nobody chose.
+# Called once, above every write, so a throw here leaves the disk untouched.
+#
+# layers and settings are read from the input, not from ConvertTo-ManifestV2's output, because its
+# v1 branch rebuilds the map from files, accepted and coreCommit alone.
+function ConvertTo-ManifestV3 {
+    param($Loaded)
+
+    $m = ConvertTo-ManifestV2 -Loaded $Loaded
+    $source = @{}
+    if ($Loaded -is [System.Collections.IDictionary]) { $source = $Loaded }
+    $names = $script:layerRegistry.LayerNames
+    $m['schemaVersion'] = 3
+    $null = $m.Remove('settings')
+
+    # Presence, never truthiness: a recorded empty list means the project chose no layers, and
+    # reading it as absent would install the code rules into it on the next run.
+    if (-not $source.Contains('layers')) {
+        # A manifest from before layers existed was a code project by construction.
+        $m['layers'] = [string[]]@('code')
+    }
+    else {
+        $raw = $source['layers']
+        $validLayers = ".harness-manifest.json 'layers' must be a list drawn from $($names -join ', '), or an empty list for no project layers. The kernel is always on and is never listed."
+        if ($raw -isnot [System.Collections.IList]) {
+            throw "$validLayers Found a $(if ($null -eq $raw) { 'null' } else { $raw.GetType().Name }) instead of a list. Fix the value, or re-run the installer with -Layers after fixing it."
+        }
+        foreach ($v in $raw) {
+            if ($v -isnot [string] -or $names -notcontains $v) {
+                throw "$validLayers Found '$v'. Fix the value, then re-run."
+            }
+        }
+        $m['layers'] = [string[]]@($names | Where-Object { $raw -contains $_ })
+    }
+
+    if ($source.Contains('settings')) {
+        $rawSettings = $source['settings']
+        if ($rawSettings -isnot [System.Collections.IDictionary]) {
+            throw ".harness-manifest.json 'settings' must be an object holding statusCadence, audience and lengthBudgetDefault. Fix it, or delete it and re-run the installer to record the defaults."
+        }
+        $checked = [ordered]@{}
+        foreach ($name in @('statusCadence', 'audience')) {
+            if ($rawSettings.Contains($name)) { $checked[$name] = Resolve-SettingValue -Name $name -Value $rawSettings[$name] }
+        }
+        if ($rawSettings.Contains('lengthBudgetDefault')) {
+            $budget = $rawSettings['lengthBudgetDefault']
+            $isWhole = $budget -is [int] -or $budget -is [long]
+            if ($null -ne $budget -and -not ($isWhole -and $budget -ge 0 -and $budget -le 100000)) {
+                throw ".harness-manifest.json settings.lengthBudgetDefault is '$budget'. It takes null for no budget, or a whole number of words from 1 to 100000. Fix the value, or re-run the installer with -LengthBudget."
+            }
+            $checked['lengthBudgetDefault'] = if ($null -eq $budget -or $budget -eq 0) { $null } else { [int]$budget }
+        }
+        $m['settings'] = $checked
+    }
+
+    return $m
+}
+
+# The project's layers for this install: -Layers when given, otherwise what the manifest records.
+# The manifest has already been through ConvertTo-ManifestV3, so its layers key is always present.
+function Resolve-ProjectLayers {
+    param([string[]]$Requested, $Manifest)
+    if ($null -ne $Requested) {
+        $list = ConvertTo-LayerList -Requested $Requested
+        return , ([string[]]@($list))
+    }
+    return , ([string[]]@($Manifest['layers'] | Where-Object { $_ }))
+}
+
+# Defaults derived from the layers, used only for a setting neither a flag nor the manifest names.
+# A project whose output reaches people outside engineering (documents without code) gets the
+# plain register, and any non-code layer gets a visible heartbeat during long work.
+function Get-DefaultProjectSettings {
+    param([string[]]$Layers)
+    $selected = @($Layers | Where-Object { $_ })
+    $cadence = 'silent'
+    if ($selected -contains 'documents' -or $selected -contains 'physical') { $cadence = 'heartbeat' }
+    $audienceValue = 'peer-engineer'
+    if ($selected -contains 'documents' -and $selected -notcontains 'code') { $audienceValue = 'plain-all-roles' }
+    return [ordered]@{ statusCadence = $cadence; audience = $audienceValue; lengthBudgetDefault = $null }
+}
+
+# A bound flag wins, then the recorded value, then the default. Presence decides at each step, so a
+# recorded null length budget stays null. -Layers is not an input: changing the layers alone never
+# re-derives a setting the manifest already records.
+function Resolve-ProjectSettings {
+    param($Recorded, $Defaults, $Bound)
+    $resolved = [ordered]@{}
+    foreach ($name in @('statusCadence', 'audience', 'lengthBudgetDefault')) {
+        if ($Bound -is [System.Collections.IDictionary] -and $Bound.Contains($name)) { $resolved[$name] = $Bound[$name] }
+        elseif ($Recorded -is [System.Collections.IDictionary] -and $Recorded.Contains($name)) { $resolved[$name] = $Recorded[$name] }
+        else { $resolved[$name] = $Defaults[$name] }
+    }
+    return $resolved
+}
+
+# The text of .claude/rules/harness/project-settings.md, LF only, rendered from the template and
+# the registry's setting texts. The audit compares a project's copy against this same render.
+function Get-ProjectSettingsText {
+    param([string[]]$Layers, $Settings, $Registry)
+    $template = (Get-Content -LiteralPath (Join-Path $script:templatesSrc 'project-settings.template.md') -Raw).Replace("`r`n", "`n")
+    $selected = @($Layers | Where-Object { $_ })
+    $layerText = 'no project layers'
+    if ($selected.Count -gt 0) { $layerText = $selected -join ', ' }
+    $budget = $Settings['lengthBudgetDefault']
+    $budgetText = $Registry.Settings['lengthBudgetDefault']['none']
+    if ($null -ne $budget) { $budgetText = $Registry.Settings['lengthBudgetDefault']['words'].Replace('{{WORDS}}', [string]$budget) }
+    $text = $template.Replace('{{STATUS_CADENCE_TEXT}}', $Registry.Settings['statusCadence'][$Settings['statusCadence']])
+    $text = $text.Replace('{{AUDIENCE_TEXT}}', $Registry.Settings['audience'][$Settings['audience']])
+    $text = $text.Replace('{{LENGTH_BUDGET_TEXT}}', $budgetText)
+    $text = $text.Replace('{{STATUS_CADENCE}}', $Settings['statusCadence'])
+    $text = $text.Replace('{{AUDIENCE}}', $Settings['audience'])
+    return $text.Replace('{{LAYERS}}', $layerText)
+}
+
+# The one answer to "does this project get this component". $null means selected. Otherwise the
+# reason it is held back: 'ceremony-gated' (not installed without -IncludeCeremonies) or
+# 'layer not selected' (a layer rule none of whose layers the project records). The install loops,
+# the settings-hook filter and the audit all ask this instead of reading the gate lists themselves.
+function Get-ComponentGate {
+    param([string]$Key, [string[]]$Layers, [bool]$IncludeCeremonies)
+    if (-not $IncludeCeremonies -and $script:ceremonyKeys -contains $Key) { return 'ceremony-gated' }
+    $rulePrefix = 'rules/harness/'
+    if ($Key.StartsWith($rulePrefix, [System.StringComparison]::Ordinal)) {
+        $file = $Key.Substring($rulePrefix.Length)
+        if ($script:layerRegistry.Rules.Contains($file)) {
+            $selected = @($Layers | Where-Object { $_ })
+            $shared = @($script:layerRegistry.Rules[$file] | Where-Object { $selected -contains $_ })
+            if ($shared.Count -eq 0) { return 'layer not selected' }
+        }
+    }
+    return $null
+}
+
+# Loaded before anything else reads core, and -Layers checked against it, so a bad value is refused
+# before the manifest is read and long before the first write.
+$layerRegistry = Get-LayerRegistry
+$requestedLayers = $null
+if ($PSBoundParameters.ContainsKey('Layers')) {
+    $requestedLayers = [string[]]@($Layers)
+    $null = ConvertTo-LayerList -Requested $requestedLayers
+}
+
 $manifestPath = Join-Path $claudeDir '.harness-manifest.json'
 $sidecarPath = Join-Path $claudeDir '.harness-manifest.local.json'
 $manifest = @{}
@@ -549,7 +881,25 @@ if (Test-Path -LiteralPath $manifestPath) {
 $legacyCoreRepo = $manifest['coreRepo']
 $legacyStackDetected = $manifest['stackDetected']
 
-$manifest = ConvertTo-ManifestV2 -Loaded $manifest
+# Every command migrates through v3 here, above every write, so -Accept, -Unaccept and -Prune
+# carry layers and settings through and an invalid value stops each of them before it writes.
+# -Audit -Quiet is the exception that reports instead of throwing: session-start-drift-check.sh
+# reads only its rows, and a throw there would print nothing, which reads as "no drift".
+try {
+    $manifest = ConvertTo-ManifestV3 -Loaded $manifest
+}
+catch {
+    if ($Audit -and $Quiet) {
+        Write-Host "manifest-invalid`t.harness-manifest.json"
+        return
+    }
+    if ($Audit) {
+        Write-Host ".harness-manifest.json  manifest-invalid"
+        Write-Host "1 file(s) need attention. manifest-invalid = fix the layers or settings value the error names: $($_.Exception.Message)"
+        return
+    }
+    throw
+}
 
 # Sidecar: coreRepo (absolute path to the core checkout) and stackDetected (the per-machine
 # plugin/output-style/MCP-server inventory). Neither travels between clones, so neither goes in
@@ -1176,6 +1526,12 @@ $detectedMcpServers = @(Get-DetectedMcpServers -TargetPath $Target)
 if ($Audit) {
     $coreFiles = Get-CoreFilesMap
 
+    # Layers and settings as the manifest records them, with absent settings defaulted in memory
+    # only. -IncludeCeremonies is not recorded, so the audit never treats ceremonies as selected,
+    # matching how it reported them before layers existed.
+    $auditLayers = [string[]]@($manifest['layers'] | Where-Object { $_ })
+    $auditSettings = Resolve-ProjectSettings -Recorded $manifest['settings'] -Defaults (Get-DefaultProjectSettings -Layers $auditLayers) -Bound @{}
+
     if (-not $Quiet -and -not (Test-Path -LiteralPath $manifestPath)) {
         Write-Host "No .harness-manifest.json in $claudeDir — harness was never installed here via the installer."
         Write-Host "Files below compare the project's .claude directly against core:"
@@ -1239,6 +1595,7 @@ if ($Audit) {
         }
 
         $srcHash = Get-FileHashHex -Path $srcPath
+        $gate = Get-ComponentGate -Key $key -Layers $auditLayers -IncludeCeremonies $false
         if (-not $dstExists) {
             # A ceremony-gated file core ships and this project never installed is the gate
             # doing its job, not drift. Classified apart from plain 'not-installed' because
@@ -1248,11 +1605,23 @@ if ($Audit) {
             # dropped from it: absent-and-available is worth seeing, and the response is to
             # re-run with -IncludeCeremonies if the project wants ceremonies.
             # 'missing' still wins the tracked case: a ceremony file recorded in `files` was
-            # installed and then lost, which a re-run with that switch really does repair.
+            # installed and then lost, which a re-run with that switch really does repair. A layer
+            # rule recorded in `files` and gone from disk is repaired by a re-run too, which drops
+            # the record. A layer rule the project does not select reads
+            # 'not-installed (layer not selected)', uncounted for the ceremony gate's reason.
             $status = if ($inManifest) { 'missing' }
-            elseif ($ceremonyKeys -contains $key) { 'not-installed (ceremony-gated)' }
+            elseif ($gate) { "not-installed ($gate)" }
             else { 'not-installed' }
             $results.Add([pscustomobject]@{ File = $key; Status = $status })
+            continue
+        }
+
+        # A present ceremony file keeps its ordinary status below, because the manifest does not
+        # record whether the project ran with -IncludeCeremonies. A layer rule is different: the
+        # manifest records the layers, so a present rule for an unselected layer is known to be left
+        # over, and the next install drops its record once the file is deleted.
+        if ($gate -eq 'layer not selected') {
+            $results.Add([pscustomobject]@{ File = $key; Status = 'installed (layer not selected)' })
             continue
         }
 
@@ -1270,6 +1639,20 @@ if ($Audit) {
         else { 'conflict' }
         $results.Add([pscustomobject]@{ File = $key; Status = $status })
     }
+
+    # The generated settings file is not hash-tracked: every install rewrites it from the manifest,
+    # so the audit renders the same text and compares. Line endings are normalised on both sides,
+    # since a checkout with core.autocrlf turns the LF the installer writes into CRLF.
+    $settingsKey = 'rules/harness/project-settings.md'
+    $settingsDst = Join-Path $claudeDir $settingsKey
+    $settingsStatus = 'settings-missing'
+    if (Test-Path -LiteralPath $settingsDst -PathType Leaf) {
+        $expectedSettings = Get-ProjectSettingsText -Layers $auditLayers -Settings $auditSettings -Registry $layerRegistry
+        $onDiskSettings = Get-Content -LiteralPath $settingsDst -Raw
+        if ($null -eq $onDiskSettings) { $onDiskSettings = '' }
+        $settingsStatus = if ($onDiskSettings.Replace("`r`n", "`n") -ceq $expectedSettings) { 'in-sync' } else { 'settings-stale' }
+    }
+    $results.Add([pscustomobject]@{ File = $settingsKey; Status = $settingsStatus })
 
     # Reachability (#136/#126). Computed once per run, not once per hook key: it depends on the
     # target's current core.hooksPath, not on any individual file's content, and re-checking it
@@ -1303,7 +1686,9 @@ if ($Audit) {
     # the one class no command clears, since a re-run skips the file by design and -Accept
     # refuses a file that does not exist. Counted, it would put two permanent rows in front of
     # every default install forever, which is the decoration CONTRIBUTING.md's drift gate names.
-    $attention = @($results | Where-Object { $_.Status -notin @('in-sync', 'stateful (not audited)', 'overlay (accepted)', 'not-installed (ceremony-gated)') })
+    # 'not-installed (layer not selected)' is uncounted for the same reason: the project's recorded
+    # layers leave the file out by design.
+    $attention = @($results | Where-Object { $_.Status -notin @('in-sync', 'stateful (not audited)', 'overlay (accepted)', 'not-installed (ceremony-gated)', 'not-installed (layer not selected)') })
 
     # -Quiet returns here rather than guarding each Write-Host below it. Everything past this
     # point prints on a clean run: the summary line, and then a header plus a
@@ -1330,7 +1715,7 @@ if ($Audit) {
         # recovery for one and the pin-drop for the other rather than sending both to the
         # installer. (CONTRIBUTING.md's drift-detection gate: every class the audit reports needs
         # a standing response, and the classes that must never be auto-repaired are named as such.)
-        Write-Host "$($attention.Count) file(s) need attention. project-modified/untracked-differs = candidates to promote into core; core-updated/not-installed = re-run installer to pull down; overlay-changed = re-review the fork, then re-pin with -Accept; missing = re-run the installer if the row is a tracked file, but a missing pinned overlay exists only in the project's own history, so restore it from there or drop the pin with -Unaccept; orphaned (already removed/unmodified/modified) = -Prune the key to drop the stale manifest record -- the file, if any is still there, is left on disk for you to delete by hand or -Accept to pin as an overlay."
+        Write-Host "$($attention.Count) file(s) need attention. project-modified/untracked-differs = candidates to promote into core; core-updated/not-installed = re-run installer to pull down; overlay-changed = re-review the fork, then re-pin with -Accept; missing = re-run the installer if the row is a tracked file, but a missing pinned overlay exists only in the project's own history, so restore it from there or drop the pin with -Unaccept; orphaned (already removed/unmodified/modified) = -Prune the key to drop the stale manifest record -- the file, if any is still there, is left on disk for you to delete by hand or -Accept to pin as an overlay. installed (layer not selected) = delete the file by hand, and the next install drops its record. settings-missing/settings-stale = re-run the installer, which rewrites .claude/rules/harness/project-settings.md from the manifest. manifest-invalid = fix the layers or settings value the error names."
     }
 
     # Stack drift: report-only, same as the file audit above — never writes the manifest or
@@ -1500,12 +1885,27 @@ if (-not (Get-Command bun -ErrorAction SilentlyContinue)) {
 # Get-SidecarPlan call after the loops re-reads only the ignored answer (see that function).
 $sidecarPlan = Get-SidecarPlan -TargetDir $Target
 
+# The layers and settings this install records. Resolved before the first write, and nothing in
+# either can throw past this point: -Layers was validated at the top, the recorded values by
+# ConvertTo-ManifestV3, and each settings flag by its ValidateSet.
+$projectLayers = Resolve-ProjectLayers -Requested $requestedLayers -Manifest $manifest
+$boundSettings = @{}
+if ($PSBoundParameters.ContainsKey('StatusCadence')) { $boundSettings['statusCadence'] = Resolve-SettingValue -Name 'statusCadence' -Value $StatusCadence }
+if ($PSBoundParameters.ContainsKey('Audience')) { $boundSettings['audience'] = Resolve-SettingValue -Name 'audience' -Value $Audience }
+if ($PSBoundParameters.ContainsKey('LengthBudget')) {
+    # 0 is how an operator clears a budget, and the manifest records that as null.
+    $boundSettings['lengthBudgetDefault'] = $null
+    if ($LengthBudget -gt 0) { $boundSettings['lengthBudgetDefault'] = $LengthBudget }
+}
+$projectSettings = Resolve-ProjectSettings -Recorded $manifest['settings'] -Defaults (Get-DefaultProjectSettings -Layers $projectLayers) -Bound $boundSettings
+$includeCeremoniesFlag = [bool]$IncludeCeremonies
+
 # Created here, after the decision above, not at the top of the script: a refused run must not
 # leave new directories behind either. Only a plain install reaches this point. -Accept, -Unaccept,
 # -Prune and -Audit all return earlier, and none of them may conjure a .claude tree: a missing
 # directory there is the "file does not exist" / "nothing is pinned" case each one's own guard
 # reports, and reporting that beats silently creating an empty layout.
-foreach ($dir in @($claudeDir, $agentsDst, $hooksDst, $scratchDst)) {
+foreach ($dir in @($claudeDir, $agentsDst, $hooksDst, $scratchDst, $rulesHarnessDst)) {
     if (-not (Test-Path -LiteralPath $dir)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
@@ -1513,13 +1913,13 @@ foreach ($dir in @($claudeDir, $agentsDst, $hooksDst, $scratchDst)) {
 
 # Agents
 Get-ChildItem -LiteralPath $agentsSrc -Filter '*.md' -File | ForEach-Object {
-    if (-not $IncludeCeremonies -and $ceremonyAgentNames -contains $_.Name) { return }
+    if (Get-ComponentGate -Key "agents/$($_.Name)" -Layers $projectLayers -IncludeCeremonies $includeCeremoniesFlag) { return }
     Install-ManagedFile -SourcePath $_.FullName -DestPath (Join-Path $agentsDst $_.Name) -ManifestKey "agents/$($_.Name)"
 }
 
 # Hooks
 Get-ChildItem -LiteralPath $hooksSrc -File | Where-Object { $_.Name -ne '.gitkeep' } | ForEach-Object {
-    if (-not $IncludeCeremonies -and $ceremonyHookNames -contains $_.Name) { return }
+    if (Get-ComponentGate -Key "hooks/$($_.Name)" -Layers $projectLayers -IncludeCeremonies $includeCeremoniesFlag) { return }
     Install-ManagedFile -SourcePath $_.FullName -DestPath (Join-Path $hooksDst $_.Name) -ManifestKey "hooks/$($_.Name)"
 }
 
@@ -1580,6 +1980,27 @@ Install-ManagedFile -SourcePath (Join-Path $templatesSrc 'manifest-local.gitigno
     -DestPath (Join-Path $claudeDir '.gitignore') `
     -ManifestKey '.gitignore'
 
+# Layer rules, installed under .claude/rules/harness/ for the layers the project records. A rule of
+# a layer the project no longer records is never deleted: it may carry project edits, and this
+# installer holds no delete primitive for managed files (see -Prune). It is reported while it is on
+# disk, and its record goes once the operator has removed it.
+foreach ($ruleFile in @($layerRegistry.Rules.Keys)) {
+    $ruleKey = "rules/harness/$ruleFile"
+    $ruleDst = Join-Path $rulesHarnessDst $ruleFile
+    if (-not (Get-ComponentGate -Key $ruleKey -Layers $projectLayers -IncludeCeremonies $includeCeremoniesFlag)) {
+        Install-ManagedFile -SourcePath (Join-Path $rulesSrc $ruleFile) -DestPath $ruleDst -ManifestKey $ruleKey
+        continue
+    }
+    if (Test-Path -LiteralPath $ruleDst) {
+        Write-Warning "'$ruleKey' belongs to a layer this project no longer records. It was left in place. Delete it by hand if the layer is gone for good, and the next install drops its record."
+        $results.Add([pscustomobject]@{ File = $ruleKey; Action = 'left-in-place (layer not selected)' })
+    }
+    elseif ($manifest['files'].Contains($ruleKey)) {
+        $manifest['files'].Remove($ruleKey)
+        $results.Add([pscustomobject]@{ File = $ruleKey; Action = 'record-dropped (layer not selected)' })
+    }
+}
+
 # Ceremony ledger: never overwritten once it exists (it holds live state), and only
 # installed at all under -IncludeCeremonies.
 if ($IncludeCeremonies) {
@@ -1608,14 +2029,18 @@ $hooksTemplate = (Get-Content -LiteralPath (Join-Path $templatesSrc 'settings.ho
 foreach ($eventType in $hooksTemplate.PSObject.Properties.Name) {
     $templateGroups = @($hooksTemplate.$eventType)
 
-    # Drop ceremony-gated hook entries unless -IncludeCeremonies was passed.
+    # Drop a hook entry whose script Get-ComponentGate holds back (the ceremony hook, unless
+    # -IncludeCeremonies was passed). The script is named by its path in the command, and an entry
+    # naming no .claude/hooks/ script is always kept.
     $filteredGroups = New-Object System.Collections.Generic.List[pscustomobject]
     foreach ($group in $templateGroups) {
         # Wrap the pipeline OUTPUT (not just the input) in @(): PowerShell unwraps a
         # single-match Where-Object result to a bare scalar, which would later
         # serialize "hooks": {...} instead of "hooks": [...] in settings.json.
         $groupHooks = @($group.hooks | Where-Object {
-            $IncludeCeremonies -or ($_.command -notmatch $ceremonyCommandPattern)
+            $named = [regex]::Match([string]$_.command, '/\.claude/hooks/([^/"''\s]+)')
+            -not $named.Success -or
+                -not (Get-ComponentGate -Key "hooks/$($named.Groups[1].Value)" -Layers $projectLayers -IncludeCeremonies $includeCeremoniesFlag)
         })
         if ($groupHooks.Count -gt 0) {
             $newGroup = [pscustomobject]@{}
@@ -1754,6 +2179,14 @@ $sidecar['stackDetected'] = [ordered]@{
 }
 Write-Host "Plugins detected: $($detectedPlugins.Count); output styles: $($detectedOutputStyles.Count); MCP servers: $($detectedMcpServers.Count)"
 
+# Recorded on every install. layers is assigned as a typed array so a one-element list serialises
+# as ["code"] rather than as the bare string the next load would refuse.
+$manifest['layers'] = [string[]]@($projectLayers)
+$manifest['settings'] = $projectSettings
+$budgetLabel = if ($null -eq $projectSettings['lengthBudgetDefault']) { 'none' } else { "$($projectSettings['lengthBudgetDefault']) words" }
+$layerLabel = if (@($projectLayers).Count -eq 0) { 'kernel only' } else { 'kernel, ' + (@($projectLayers) -join ', ') }
+Write-Host "Layers: $layerLabel. Settings: status cadence $($projectSettings['statusCadence']), audience $($projectSettings['audience']), length budget $budgetLabel."
+
 # Installing manifest-local.gitignore above is not proof the sidecar just populated is actually
 # covered, so the ignored answer is asked again here, after the copy loops. The refusal was already
 # decided above the loops, before any write, so this call passes those facts through and cannot
@@ -1767,6 +2200,13 @@ $sidecarOutcome = Invoke-SidecarPlan -Plan $sidecarPlan -Sidecar $sidecar
 # made a run that just deleted something read as though nothing had happened to it.
 $sidecarAction = if ($sidecarOutcome -eq 'removed') { 'removed' } elseif ($sidecarOutcome -eq 'written') { 'written' } else { 'skipped-unprotected' }
 $results.Add([pscustomobject]@{ File = '.harness-manifest.local.json'; Action = $sidecarAction })
+
+# Regenerated on every install from the manifest values above, with LF endings, and never tracked
+# in `files`: the manifest is its source, so a hand edit here is overwritten by design and -Audit's
+# settings-stale row is the only signal one happened.
+$projectSettingsText = Get-ProjectSettingsText -Layers $projectLayers -Settings $projectSettings -Registry $layerRegistry
+Set-Content -LiteralPath (Join-Path $rulesHarnessDst 'project-settings.md') -Value $projectSettingsText -NoNewline
+$results.Add([pscustomobject]@{ File = 'rules/harness/project-settings.md'; Action = 'generated' })
 
 $settings | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $settingsPath
 $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath

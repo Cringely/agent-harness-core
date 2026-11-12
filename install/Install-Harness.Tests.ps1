@@ -2177,4 +2177,250 @@ Describe "Install-Harness" {
         & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -IncludeCeremonies
         Get-Content "$script:target/.claude/settings.json" -Raw | Should -Be $first
     }
+
+    Context 'layers and settings' {
+        BeforeAll {
+            function Read-TestManifest {
+                param([string]$Root)
+                Get-Content -LiteralPath "$Root/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+            }
+            function Write-TestManifest {
+                param([string]$Root, $Manifest)
+                $Manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath "$Root/.claude/.harness-manifest.json"
+            }
+        }
+
+        It "records schemaVersion 3 and layers code on a fresh install and installs the code rules" {
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-Null
+            Test-Path "$script:target/.claude/rules/harness/change-management-code.md" -PathType Leaf | Should -BeTrue
+            Test-Path "$script:target/.claude/rules/harness/fix-quality.md" -PathType Leaf | Should -BeTrue
+            $m = Read-TestManifest $script:target
+            $m['schemaVersion'] | Should -Be 3
+            @($m['layers']) | Should -Be @('code')
+            # A one-element array unrolled to a scalar serialises as a string and fails the next load.
+            Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | Should -Match '"layers":\s*\[\s*"code"\s*\]'
+            $m['files'].Contains('rules/harness/fix-quality.md') | Should -BeTrue
+            $m['files'].Contains('rules/harness/project-settings.md') | Should -BeFalse
+            $m['settings']['statusCadence'] | Should -Be 'silent'
+            $m['settings']['audience'] | Should -Be 'peer-engineer'
+            $m['settings'].Contains('lengthBudgetDefault') | Should -BeTrue
+            $m['settings']['lengthBudgetDefault'] | Should -BeNullOrEmpty
+            $text = Get-Content "$script:target/.claude/rules/harness/project-settings.md" -Raw
+            $text | Should -Match 'Status cadence, `silent`'
+            $text | Should -Match 'Layers: kernel \(always on\), code\.'
+            $text | Should -Not -Match '\{\{'
+            $text.Contains("`r") | Should -BeFalse
+        }
+
+        It "a comma list binds from a spawned shell" {
+            & pwsh -NoProfile -File "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Layers 'code,documents' *>&1 | Out-Null
+            $LASTEXITCODE | Should -Be 0
+            @((Read-TestManifest $script:target)['layers']) | Should -Be @('code', 'documents')
+        }
+
+        It "migrates a v2 manifest with no layers key as the code layer" {
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-Null
+            $m = Read-TestManifest $script:target
+            foreach ($k in 'schemaVersion', 'layers', 'settings') { $m.Remove($k) }
+            foreach ($f in 'change-management-code.md', 'fix-quality.md') {
+                $m['files'].Remove("rules/harness/$f")
+                Remove-Item -LiteralPath "$script:target/.claude/rules/harness/$f"
+            }
+            Write-TestManifest $script:target $m
+
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-Null
+            $m = Read-TestManifest $script:target
+            $m['schemaVersion'] | Should -Be 3
+            @($m['layers']) | Should -Be @('code')
+            Test-Path "$script:target/.claude/rules/harness/change-management-code.md" -PathType Leaf | Should -BeTrue
+            Test-Path "$script:target/.claude/rules/harness/fix-quality.md" -PathType Leaf | Should -BeTrue
+            # The v2 fields ride through untouched.
+            $m['files'].Contains('agents/task-reviewer.md') | Should -BeTrue
+            $m.Contains('accepted') | Should -BeTrue
+        }
+
+        It "-Layers documents installs no code rules and derives heartbeat and plain-all-roles" {
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Layers documents *>&1 | Out-Null
+            Test-Path "$script:target/.claude/rules/harness/fix-quality.md" | Should -BeFalse
+            Test-Path "$script:target/.claude/rules/harness/change-management-code.md" | Should -BeFalse
+            $m = Read-TestManifest $script:target
+            @($m['layers']) | Should -Be @('documents')
+            $m['settings']['statusCadence'] | Should -Be 'heartbeat'
+            $m['settings']['audience'] | Should -Be 'plain-all-roles'
+            Get-Content "$script:target/.claude/rules/harness/project-settings.md" -Raw | Should -Match 'Audience, `plain-all-roles`'
+        }
+
+        It "-Layers none records an empty list and installs no layer rules" {
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Layers none *>&1 | Out-Null
+            $m = Read-TestManifest $script:target
+            $m.Contains('layers') | Should -BeTrue
+            @($m['layers']).Count | Should -Be 0
+            Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | Should -Match '"layers":\s*\[\s*\]'
+            @(Get-ChildItem -LiteralPath "$script:target/.claude/rules/harness" -Force | ForEach-Object { $_.Name }) |
+                Should -Be @('project-settings.md')
+            Get-Content "$script:target/.claude/rules/harness/project-settings.md" -Raw | Should -Match 'no project layers'
+        }
+
+        It "an empty layer list survives a re-run with no flags" {
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Layers none *>&1 | Out-Null
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-Null
+            $m = Read-TestManifest $script:target
+            $m.Contains('layers') | Should -BeTrue
+            @($m['layers']).Count | Should -Be 0
+            Test-Path "$script:target/.claude/rules/harness/fix-quality.md" | Should -BeFalse
+        }
+
+        It "rejects none combined with a layer, kernel, and an unknown name" {
+            foreach ($bad in @(@('none', 'code'), @('kernel'), @('prose'), @('none,code'))) {
+                { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Layers $bad *>&1 | Out-Null } |
+                    Should -Throw -ExpectedMessage '*code, documents, physical, or none*'
+            }
+            Test-Path "$script:target/.claude" | Should -BeFalse
+        }
+
+        It "keeps recorded settings when -Layers changes and sets them when a flag is given" {
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Layers code *>&1 | Out-Null
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Layers code, documents *>&1 | Out-Null
+            $m = Read-TestManifest $script:target
+            @($m['layers']) | Should -Be @('code', 'documents')
+            $m['settings']['statusCadence'] | Should -Be 'silent'
+            $m['settings']['audience'] | Should -Be 'peer-engineer'
+
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -StatusCadence heartbeat -LengthBudget 1200 *>&1 | Out-Null
+            $m = Read-TestManifest $script:target
+            @($m['layers']) | Should -Be @('code', 'documents')
+            $m['settings']['statusCadence'] | Should -Be 'heartbeat'
+            $m['settings']['lengthBudgetDefault'] | Should -Be 1200
+            $text = Get-Content "$script:target/.claude/rules/harness/project-settings.md" -Raw
+            $text | Should -Match '1200 words or fewer'
+            $text | Should -Not -Match '\{\{WORDS\}\}'
+
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -LengthBudget 0 *>&1 | Out-Null
+            $m = Read-TestManifest $script:target
+            $m['settings'].Contains('lengthBudgetDefault') | Should -BeTrue
+            $m['settings']['lengthBudgetDefault'] | Should -BeNullOrEmpty
+            $m['settings']['statusCadence'] | Should -Be 'heartbeat'
+            Get-Content "$script:target/.claude/rules/harness/project-settings.md" -Raw | Should -Match 'No default length budget'
+        }
+
+        It "a dropped layer's rule file is left in place, warned about, and counted by the audit" {
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Layers code *>&1 | Out-Null
+            $rule = "$script:target/.claude/rules/harness/fix-quality.md"
+            "PROJECT EDIT" | Add-Content -LiteralPath $rule
+
+            $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Layers documents *>&1 | Out-String -Width 500
+            Test-Path -LiteralPath $rule -PathType Leaf | Should -BeTrue
+            Get-Content -LiteralPath $rule -Raw | Should -Match 'PROJECT EDIT'
+            $out | Should -Match 'layer not selected'
+            $out | Should -Match "'rules/harness/fix-quality\.md' belongs to a layer this project no longer records"
+
+            $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit -Quiet *>&1 | Out-String -Width 500
+            $audit | Should -Match "installed \(layer not selected\)`trules/harness/fix-quality\.md"
+
+            Remove-Item -LiteralPath $rule
+            $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500
+            $out | Should -Match 'record-dropped \(layer not selected\)'
+            $m = Read-TestManifest $script:target
+            $m['files'].Contains('rules/harness/fix-quality.md') | Should -BeFalse
+            # The unmodified sibling is still on disk, so its record stays.
+            $m['files'].Contains('rules/harness/change-management-code.md') | Should -BeTrue
+        }
+
+        It "an invalid recorded layers value fails before any write and is reported under -Quiet" {
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-Null
+            $manifestFile = "$script:target/.claude/.harness-manifest.json"
+            $settingsFile = "$script:target/.claude/settings.json"
+            foreach ($bad in @('code', @('kernel'), @('prose'))) {
+                $m = Read-TestManifest $script:target
+                $m['layers'] = $bad
+                Write-TestManifest $script:target $m
+                $before = @((Get-FileHash $manifestFile).Hash, (Get-FileHash $settingsFile).Hash)
+
+                { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-Null } |
+                    Should -Throw -ExpectedMessage '*layers*'
+                @((Get-FileHash $manifestFile).Hash, (Get-FileHash $settingsFile).Hash) | Should -Be $before
+
+                $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit -Quiet *>&1 | Out-String -Width 500
+                $audit | Should -Match "manifest-invalid`t\.harness-manifest\.json"
+                @($audit -split '\r?\n' | Where-Object { $_.Trim() }).Count | Should -Be 1
+                $loud = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String -Width 500
+                $loud | Should -Match 'manifest-invalid = fix the layers or settings value the error names'
+                @((Get-FileHash $manifestFile).Hash, (Get-FileHash $settingsFile).Hash) | Should -Be $before
+            }
+        }
+
+        It "an invalid recorded settings value fails before any write" {
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-Null
+            $m = Read-TestManifest $script:target
+            $m['settings']['audience'] = 'everyone'
+            Write-TestManifest $script:target $m
+            $before = (Get-FileHash "$script:target/.claude/.harness-manifest.json").Hash
+            { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-Null } |
+                Should -Throw -ExpectedMessage '*peer-engineer*plain-all-roles*'
+            (Get-FileHash "$script:target/.claude/.harness-manifest.json").Hash | Should -Be $before
+        }
+
+        It "a hand-written rule file at the install path is kept and reported" {
+            New-Item -ItemType Directory -Path "$script:target/.claude/rules/harness" -Force | Out-Null
+            $rule = "$script:target/.claude/rules/harness/fix-quality.md"
+            'project rule' | Set-Content -LiteralPath $rule
+            $before = (Get-FileHash -LiteralPath $rule).Hash
+            $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-String -Width 500
+            (Get-FileHash -LiteralPath $rule).Hash | Should -Be $before
+            $out | Should -Match "Skipping 'rules/harness/fix-quality\.md'"
+        }
+
+        It "audit reports settings-stale after a hand edit but not after CRLF conversion, and writes nothing" {
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-Null
+            $settingsMd = "$script:target/.claude/rules/harness/project-settings.md"
+            $manifestFile = "$script:target/.claude/.harness-manifest.json"
+            $before = (Get-FileHash $manifestFile).Hash
+
+            $lf = [System.IO.File]::ReadAllText($settingsMd)
+            [System.IO.File]::WriteAllText($settingsMd, $lf.Replace("`r`n", "`n").Replace("`n", "`r`n"))
+            [System.IO.File]::ReadAllText($settingsMd).Contains("`r`n") | Should -BeTrue
+            $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String -Width 500
+            $audit | Should -Not -Match 'settings-stale'
+            $audit | Should -Match 'All managed files in sync with core\.'
+
+            'hand edit' | Add-Content -LiteralPath $settingsMd
+            $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String -Width 500
+            $audit | Should -Match 'rules/harness/project-settings\.md\s+settings-stale'
+            $quiet = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit -Quiet *>&1 | Out-String -Width 500
+            $quiet | Should -Match "settings-stale`trules/harness/project-settings\.md"
+
+            Remove-Item -LiteralPath $settingsMd
+            $quiet = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit -Quiet *>&1 | Out-String -Width 500
+            $quiet | Should -Match "settings-missing`trules/harness/project-settings\.md"
+            Test-Path -LiteralPath $settingsMd | Should -BeFalse
+            (Get-FileHash $manifestFile).Hash | Should -Be $before
+        }
+
+        It "audit leaves rules of unselected layers uncounted" {
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Layers documents *>&1 | Out-Null
+            $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String -Width 500
+            $audit | Should -Match 'rules/harness/fix-quality\.md\s+not-installed \(layer not selected\)'
+            $audit | Should -Match 'All managed files in sync with core\.'
+        }
+
+        It "the layer and settings flags are refused with -Audit" {
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target *>&1 | Out-Null
+            { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit -Layers code } |
+                Should -Throw -ExpectedMessage '*applies to an install run only*'
+            { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit -StatusCadence silent } |
+                Should -Throw -ExpectedMessage '*applies to an install run only*'
+            { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Prune 'agents/x.md' -LengthBudget 10 } |
+                Should -Throw -ExpectedMessage '*applies to an install run only*'
+        }
+
+        It "each settings ValidateSet matches layers.json" {
+            $params = (Get-Command "$PSScriptRoot/Install-Harness.ps1").Parameters
+            $registry = Get-Content "$PSScriptRoot/../core/claude/rules/layers.json" -Raw | ConvertFrom-Json -AsHashtable
+            foreach ($pair in @(@('StatusCadence', 'statusCadence'), @('Audience', 'audience'))) {
+                $set = @($params[$pair[0]].Attributes | Where-Object { $_ -is [System.Management.Automation.ValidateSetAttribute] })
+                $set.Count | Should -Be 1
+                @($set[0].ValidValues | Sort-Object) | Should -Be @($registry['settings'][$pair[1]].Keys | Sort-Object)
+            }
+        }
+    }
 }

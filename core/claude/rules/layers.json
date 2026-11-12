@@ -3,5 +3,19 @@
   "rules": {
     "change-management-code.md": ["code"],
     "fix-quality.md": ["code"]
+  },
+  "settings": {
+    "statusCadence": {
+      "silent": "Between tool calls, and on any turn opened by an agent or workflow completion notification, emit no text. Read the report file, update the Needs-you queue, and continue. Explanatory-style insights are held until the close, not printed beside the code they explain.",
+      "heartbeat": "During long work, post one line each time the work moves to a new phase, and never end a turn without text. The operator should not have to ask for status."
+    },
+    "audience": {
+      "peer-engineer": "Write for engineers who share this project's vocabulary, as writing-style.md describes.",
+      "plain-all-roles": "Write anything the operator or their readers will see for people in any role. Gloss or drop internal IDs, issue numbers, agent names and house vocabulary. For this project this replaces writing-style.md's \"senior engineer talking to peers\" principle and its Scannable Structure section."
+    },
+    "lengthBudgetDefault": {
+      "none": "No default length budget. Follow the length the operator asks for.",
+      "words": "A deliverable aims at {{WORDS}} words or fewer unless the operator asks for something else. A reviewer who says something is missing names what to cut to make room for it."
+    }
   }
 }
