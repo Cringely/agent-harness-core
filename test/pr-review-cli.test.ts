@@ -25,6 +25,7 @@ import {
 } from "../tools/pr-review/cli";
 import { syntheticCheckRuns } from "../tools/pr-review/local-source";
 import type { ReviewOutcome } from "../tools/pr-review/pipeline";
+import { CORE_POLICY } from "../tools/pr-review/repo-policy";
 import { REPO_ROOT } from "../tools/pr-review/tool-state";
 import { RefusalError, type PrSnapshot, type PrSource, type ReviewPoster } from "../tools/pr-review/types";
 
@@ -50,7 +51,21 @@ describe("parseCliArgs(): review", () => {
       commentOnly: false,
       json: true,
       expectHead: null,
+      policyPath: null,
     });
+  });
+
+  // #318
+  test("parses --repo with an absolute --policy", () => {
+    const policyPath = join(NEUTRAL_DIR, "policy.json");
+    expect(parseCliArgs(["review", "--pr", "7", "--app-id", "1", "--key-stdin", "--repo", "owner/example", "--policy", policyPath], NO_ENV)).toMatchObject({
+      repo: "owner/example",
+      policyPath,
+    });
+  });
+
+  test("DEFAULT_REPO is the repository CORE_POLICY is built in for", () => {
+    expect(DEFAULT_REPO).toBe(CORE_POLICY.repo);
   });
 
   // #155
@@ -79,6 +94,12 @@ describe("parseCliArgs(): review", () => {
     [["review", "--pr", "7", "--app-id", "1", "--key-stdin", "--expect-head", "not-a-sha"]],
     [["review", "--pr", "7", "--app-id", "1", "--key-stdin", "--expect-head", "A".repeat(40)]],
     [["review", "--pr", "7", "--app-id", "1", "--key-stdin", "--expect-head", "a".repeat(39)]],
+    // #318: a relative --policy, and --policy without --repo (critique item 5: an operator who
+    // forgot --repo would otherwise review this repository's pull request of the same number).
+    [["review", "--pr", "7", "--app-id", "1", "--key-stdin", "--repo", "owner/example", "--policy", "policy.json"]],
+    [["review", "--pr", "7", "--app-id", "1", "--key-stdin", "--policy", join(NEUTRAL_DIR, "policy.json")]],
+    [["snapshot", "--pr", "7", "--app-id", "1", "--key-stdin", "--policy", join(NEUTRAL_DIR, "policy.json")]],
+    [["review", "--pr", "7", "--app-id", "1", "--key-stdin", "--repo", "owner/example", "--policy", ""]],
     [["no-such-command"]],
   ])("rejects %p", (argv) => {
     expect(() => parseCliArgs(argv, NO_ENV)).toThrow(UsageError);
@@ -100,6 +121,7 @@ describe("parseCliArgs(): snapshot", () => {
       commentOnly: false,
       json: true,
       expectHead: null,
+      policyPath: null,
     });
   });
 
@@ -139,11 +161,12 @@ describe("summarizeSnapshot()", () => {
       linkedIssues: [{ number: 127, title: "ISSUE-TITLE", body: "ISSUE-BODY" }],
       trustedContext: [{ path: "CONTRIBUTING.md", content: "TRUSTED-TEXT" }],
       livingDocs: [{ path: "README.md", content: "LIVING-DOC-TEXT" }],
-      workflowText: "jobs:\n",
-      checkRuns: syntheticCheckRuns("passed"),
+      workflowText: ["jobs:", ...CORE_POLICY.requiredChecks.map((c) => `    name: ${c.name}`)].join("\n"),
+      checkRuns: syntheticCheckRuns("passed", CORE_POLICY.requiredChecks),
     };
-    const summary = summarizeSnapshot(snapshot);
+    const summary = summarizeSnapshot(snapshot, CORE_POLICY);
     expect(summary.verification).toEqual({ state: "passed", reasons: [] });
+    expect(Object.keys(summary)).not.toContain("policyRepo");
     expect(summary.linkedIssues).toEqual([127]);
     expect(summary.changedFilesComplete).toBe(true);
     expect(summary.livingDocs).toEqual(["README.md"]);
@@ -654,7 +677,7 @@ function fixtureSnapshot(headSha: string): PrSnapshot {
     trustedContext: [],
     livingDocs: [],
     workflowText: "jobs:\n",
-    checkRuns: syntheticCheckRuns("passed"),
+    checkRuns: syntheticCheckRuns("passed", CORE_POLICY.requiredChecks),
   };
 }
 
@@ -775,5 +798,122 @@ describe("main(): snapshot's own refusals reach the same JSON shape as review's 
     } finally {
       console.log = log;
     }
+  });
+});
+
+// #318: an unconfigured repository gets no review. main() resolves the policy after the BUN-CWD
+// check and before the key is read, so a refusal here never reads stdin, never builds a GitHub
+// client, and never makes a network call.
+describe("main(): the repository policy (#318)", () => {
+  const POLICY_DIR = mkdtempSync(join(tmpdir(), "pr-review-cli-policy-"));
+  afterAll(() => {
+    rmSync(POLICY_DIR, { recursive: true, force: true });
+  });
+  const writePolicy = (name: string, repos: unknown[]) => {
+    const path = join(POLICY_DIR, name);
+    writeFileSync(path, JSON.stringify({ version: 1, repos }));
+    return path;
+  };
+  const listed = writePolicy("listed.json", [
+    { repo: "owner/other", ciWorkflowPath: ".github/workflows/ci.yml", requiredChecks: [{ name: "build", appSlug: "github-actions" }] },
+    { repo: "owner/example", ciWorkflowPath: ".github/workflows/ci.yml", requiredChecks: [{ name: "build", appSlug: "github-actions" }] },
+  ]);
+  const invalid = writePolicy("invalid.json", [{ repo: "owner/other", ciWorkflowPath: "../x.yml", requiredChecks: [] }]);
+
+  // Every seam that would mean the run got past the policy records the call instead.
+  function spyIo() {
+    const calls = { stdin: 0, buildSource: [] as unknown[][] };
+    const io = {
+      cwd: () => NEUTRAL_DIR,
+      exit: fakeExit,
+      stdin: {
+        isTTY: false,
+        read: async () => {
+          calls.stdin++;
+          return FAKE_PEM;
+        },
+      },
+      buildSource: (...args: unknown[]) => {
+        calls.buildSource.push(args);
+        return new FakeSource({ ...fixtureSnapshot("a".repeat(40)), repo: "owner/example" });
+      },
+      loadIdentity: () => ({ ok: true as const, decl: FIXTURE_IDENTITY, declared: true, accountEmail: false }),
+    };
+    return { io, calls };
+  }
+
+  async function capture(argv: string[], io: ReturnType<typeof spyIo>["io"]) {
+    const out: string[] = [];
+    const err: string[] = [];
+    const log = console.log;
+    const error = console.error;
+    console.log = (...args: unknown[]) => out.push(args.join(" "));
+    console.error = (...args: unknown[]) => err.push(args.join(" "));
+    try {
+      const code = await main(argv, io);
+      return { code, out: out.join("\n"), err: err.join("\n") };
+    } finally {
+      console.log = log;
+      console.error = error;
+    }
+  }
+
+  const base = ["--pr", "9", "--app-id", "1", "--key-stdin"];
+
+  test("another repository with no --policy refuses with exit 2, before the key is read", async () => {
+    const { io, calls } = spyIo();
+    const result = await capture(["review", ...base, "--json", "--repo", "owner/example"], io);
+    expect(result.code).toBe(2);
+    const parsed = JSON.parse(result.out);
+    expect(parsed.status).toBe("refused");
+    expect(parsed.refusal).toContain("--policy");
+    expect(calls.stdin).toBe(0);
+    expect(calls.buildSource).toEqual([]);
+  });
+
+  test("a repository the policy file does not list refuses, naming no path and no other repository", async () => {
+    const { io, calls } = spyIo();
+    const result = await capture(["review", ...base, "--json", "--repo", "owner/unlisted", "--policy", listed], io);
+    expect(result.code).toBe(2);
+    expect(JSON.parse(result.out).status).toBe("refused");
+    for (const text of [result.out, result.err]) {
+      expect(text).not.toContain(POLICY_DIR);
+      expect(text).not.toContain("listed.json");
+      expect(text).not.toContain("owner/other");
+      expect(text).not.toContain("owner/example");
+      expect(text).not.toContain("build");
+    }
+    expect(calls.stdin).toBe(0);
+    expect(calls.buildSource).toEqual([]);
+  });
+
+  test("an invalid policy file refuses even for the built-in repository", async () => {
+    const { io, calls } = spyIo();
+    const result = await capture(["snapshot", ...base, "--repo", CORE_POLICY.repo, "--policy", invalid], io);
+    expect(result.code).toBe(2);
+    expect(JSON.parse(result.out).refusal).toContain("policy file is invalid");
+    expect(result.out).not.toContain(POLICY_DIR);
+    expect(calls.stdin).toBe(0);
+    expect(calls.buildSource).toEqual([]);
+  });
+
+  test("a listed repository proceeds, and the client is built with that entry's workflow path", async () => {
+    const { io, calls } = spyIo();
+    const result = await capture(["snapshot", ...base, "--repo", "owner/example", "--policy", listed], io);
+    expect(result.code).toBe(0);
+    expect(calls.buildSource.length).toBe(1);
+    expect(calls.buildSource[0]![0]).toBe("owner/example");
+    expect(calls.buildSource[0]![4]).toBe(".github/workflows/ci.yml");
+    // Verification in the summary is computed under the entry's checks, not this repository's.
+    const summary = JSON.parse(result.out);
+    expect(summary.verification.reasons.join(" ")).toContain('"build"');
+    expect(summary.verification.reasons.join(" ")).not.toContain(CORE_POLICY.requiredChecks[0]!.name);
+  });
+
+  test("the built-in repository with no --policy still proceeds with CORE_POLICY's workflow path", async () => {
+    const { io, calls } = spyIo();
+    const result = await capture(["snapshot", ...base], io);
+    expect(result.code).toBe(0);
+    expect(calls.buildSource[0]![4]).toBe(CORE_POLICY.ciWorkflowPath);
   });
 });

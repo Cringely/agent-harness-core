@@ -8,26 +8,20 @@
 // in #120's ruling. The reviewing model has no tools and cannot run anything, and running the pull
 // request's tests locally would execute its code as the operator while the App key is readable. So
 // verification is what CI reported for the exact head commit, discounted wherever CI cannot vouch.
+//
+// #318: which checks are required, and which workflow is read at the base commit, come from the
+// reviewed repository's own RepoPolicy (repo-policy.ts), never from this repository's.
 
 import {
   LOAD_BEARING_SET,
   SEVERITY_SET,
-  WORKFLOW_PATH,
   type CheckRun,
   type PrSnapshot,
+  type RepoPolicy,
   type ReviewEvent,
   type Severity,
   type Verification,
 } from "./types";
-
-// Keyed on name and app together, matching the jobs in .github/workflows/test.yml. A run with the
-// right name from any other app does not count.
-export const REQUIRED_CHECKS: ReadonlyArray<{ name: string; appSlug: string }> = [
-  { name: "bun test (TypeScript hook suite)", appSlug: "github-actions" },
-  { name: "Pester (fixture-built installer suites)", appSlug: "github-actions" },
-  { name: "Pester (fixture-built installer suites, Linux)", appSlug: "github-actions" },
-  { name: "secret scan (Gitleaks)", appSlug: "github-actions" },
-];
 
 const FAILED_CONCLUSIONS: ReadonlySet<string> = new Set(["failure", "timed_out"]);
 
@@ -84,19 +78,37 @@ export function uncoveredPowerShellFiles(changedFiles: readonly string[], workfl
   });
 }
 
+// #318 (critique item 11): a required check counts only when the base-commit workflow declares it
+// as a job name, using the same whole-line match test/pr-review-verdict.test.ts pins CORE_POLICY's
+// names with. Without it, a green run with the right name from some other workflow satisfies a
+// check whose own workflow never ran, for example one a path filter skipped. A name the workflow
+// builds from an expression, or quotes, does not match, and that reads incomplete.
+export function workflowDeclaresName(workflowText: string, name: string): boolean {
+  return workflowText.split(/\r?\n/).some((line) => line.trim() === `name: ${name}`);
+}
+
 export function computeVerification(input: {
   checkRuns: readonly CheckRun[];
   changedFiles: readonly string[];
   workflowText: string | null;
   changedFilesComplete: boolean;
+  policy: RepoPolicy;
 }): Verification {
   const failed: string[] = [];
   const incomplete: string[] = [];
 
+  // A policy with no checks, or none at all, can never read passed. repo-policy.ts already refuses
+  // an empty list, and this is the second line behind it, for a policy built by hand.
+  const requiredChecks = Array.isArray(input.policy?.requiredChecks) ? input.policy.requiredChecks : [];
+  if (requiredChecks.length === 0) incomplete.push("no required checks are configured for this repository");
+
   // Every run sharing a required check's name and app counts (I5), not just the first one the API
   // happens to return: a re-run or a reopened PR can leave more than one run on the same head SHA,
   // and picking one arbitrarily lets a failing run hide behind a passing one, or the reverse.
-  for (const required of REQUIRED_CHECKS) {
+  for (const required of requiredChecks) {
+    if (input.workflowText !== null && !workflowDeclaresName(input.workflowText, required.name)) {
+      incomplete.push(`required check "${required.name}" is not declared as a job name in the CI workflow at the base commit`);
+    }
     const runs = input.checkRuns.filter((r) => r.name === required.name && r.appSlug === required.appSlug);
     if (runs.length === 0) {
       incomplete.push(`required check "${required.name}" has no run on the head commit`);
@@ -135,7 +147,9 @@ export function computeVerification(input: {
     incomplete.push("the changed-file listing is incomplete, so files this review never saw could decide it");
   }
 
-  const workflowEdits = input.changedFiles.filter((path) => path.startsWith(".github/workflows/"));
+  // .github/actions/ too (#318): a local composite action is pulled from the pull request's own head
+  // by `uses: ./...`. Not all of .github/, so a CODEOWNERS edit stays approvable.
+  const workflowEdits = input.changedFiles.filter((path) => path.startsWith(".github/workflows/") || path.startsWith(".github/actions/"));
   if (workflowEdits.length > 0) {
     incomplete.push(`the pull request edits CI definitions, so its own checks cannot vouch for it: ${workflowEdits.join(", ")}`);
   }
@@ -152,8 +166,12 @@ export function computeVerification(input: {
   }
 
   if (input.workflowText === null) {
-    incomplete.push(`${WORKFLOW_PATH} is absent at the base commit`);
-  } else {
+    incomplete.push(`${input.policy?.ciWorkflowPath ?? "the CI workflow"} is absent at the base commit`);
+  } else if (input.policy?.pesterCoverage !== false) {
+    // Skipped only on a literal false (critique item 1): running this check is the branch that
+    // withholds approval, so a missing or non-boolean value must keep it, the reverse of I4's
+    // strict-true reads above. Only CORE_POLICY runs it: SHARED_MODULE_SUITES and the sibling
+    // .Tests.ps1 convention describe this repository, not any other.
     const uncovered = uncoveredPowerShellFiles(input.changedFiles, input.workflowText);
     if (uncovered.length > 0) incomplete.push(`CI runs no Pester suite for: ${uncovered.join(", ")}`);
   }
@@ -165,13 +183,15 @@ export function computeVerification(input: {
 
 // Tasks 8 and 11 both build a PrSnapshot and need its verification; this is the one place that
 // draws the four computeVerification fields out of it, so the two call sites cannot drift the way
-// the plan's own duplicates (named in types.ts) already had not.
-export function verificationOf(snapshot: PrSnapshot): Verification {
+// the plan's own duplicates (named in types.ts) already had not. The policy comes from the caller,
+// never from the snapshot, which a PrSource fills in.
+export function verificationOf(snapshot: PrSnapshot, policy: RepoPolicy): Verification {
   return computeVerification({
     checkRuns: snapshot.checkRuns,
     changedFiles: snapshot.changedFiles,
     workflowText: snapshot.workflowText,
     changedFilesComplete: snapshot.changedFilesComplete,
+    policy,
   });
 }
 

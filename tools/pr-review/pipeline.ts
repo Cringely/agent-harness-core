@@ -10,6 +10,7 @@
 import { findDocsVerdictLine } from "./docs-verdict";
 import { validateReviewerOutput } from "./findings";
 import { findIdentityHits, type IdentityDecl } from "./identity";
+import { LocalGitSource } from "./local-source";
 import { buildPrompt } from "./prompt";
 import { renderReviewBody } from "./render";
 import {
@@ -18,6 +19,7 @@ import {
   type Finding,
   type PostedReview,
   type PrSource,
+  type RepoPolicy,
   type ReviewEvent,
   type ReviewPoster,
   type ReviewerOutput,
@@ -38,6 +40,8 @@ export interface ReviewDeps {
   accountEmail: boolean;
   toolRevision: string;
   toolDirty: boolean;
+  // #318: the reviewed repository's own required checks and workflow path (repo-policy.ts).
+  policy: RepoPolicy;
 }
 
 export interface ReviewOptions {
@@ -102,7 +106,21 @@ export async function runReview(deps: ReviewDeps, options: ReviewOptions): Promi
     );
   }
 
-  const verification = verificationOf(snapshot);
+  // #318: defence in depth behind cli.ts, which builds the policy and the source from one --repo.
+  // Skipped only for a dry run from the local source, whose snapshot names its repository "local"
+  // and which can post nothing. Keyed on the source's class and the absent poster, not on a
+  // snapshot field, since every snapshot field is whatever the source returned. In API mode
+  // snapshot.repo is github.ts's own options.repo, which it has already required GitHub's head
+  // repository full_name to equal byte for byte. The base repository's full_name is not fetched,
+  // so that is what this compares against. The message names neither repository, since it can
+  // reach stdout under --json.
+  if (!(deps.poster === null && deps.source instanceof LocalGitSource) && snapshot.repo !== deps.policy.repo) {
+    throw new RefusalError(
+      "refusing to review: the verification policy is not the one for the repository this pull request is in; nothing was posted",
+    );
+  }
+
+  const verification = verificationOf(snapshot, deps.policy);
 
   let output: ReviewerOutput | null = null;
   let reviewerFailure: string | null = null;
