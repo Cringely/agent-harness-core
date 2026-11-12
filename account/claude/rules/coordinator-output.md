@@ -1,21 +1,17 @@
-# Coordinator Output: Silent Mid-Run, One Self-Contained Close
+# Coordinator Output: One Self-Contained Close
 
 Operator directive, 2026-10-12. Mid-run text scrolls away unread while work continues. The
 coordinator then says something like "still waiting on your decision" with no context, and the
 operator has to dig back through the console to find out what the decision was. Text nobody reads
 is waste, and a reference to text nobody read is worse.
 
-## Mid-run: say nothing
+## Mid-run cadence
 
-Between tool calls, and on any turn opened by an agent or workflow completion notification, emit
-no text. Read the report file, update the queue below, and continue.
+How much to say between tool calls is the project's `statusCadence` setting in `.claude/rules/harness/project-settings.md`. Where a folder has no project settings, stay silent between tool calls and hold explanatory insights for the close.
 
-One exception: any action on the `change-management.md` confirmation list (Risky Operations
-Requiring Confirmation), reversible or not, any other irreversible action, and any step that would
-introduce a known security weakness (`security.md`, Default Posture: flag before proceeding). Ask for that
-immediately, and make the question complete under the restating rule below.
+## Stop and ask before a risky step
 
-Explanatory-style insights are held until the close, not printed beside the code they explain.
+Whatever the cadence, ask before any action on the `change-management.md` confirmation list (Risky Operations Requiring Confirmation), reversible or not, any other irreversible action, and any step that would introduce a known security weakness (`security.md`, Default Posture: flag before proceeding). Ask immediately, and make the question complete under the restating rule below.
 
 ## Decisions: default, log, continue
 
