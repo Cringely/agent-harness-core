@@ -2989,7 +2989,10 @@ Describe "Install-Harness" {
             @($gitSev.Keys | Sort-Object) | Should -Be @('code', 'kernel')
             $gitSev['kernel'] | Should -Be 'optional'
             $gitSev['code'] | Should -Be 'hard'
-            $byName.Contains('uvx') | Should -BeFalse
+            # node, uvx and Linux bash came back as kernel optional: the ccstatusline hooks run
+            # node, the MCP server entries launch through uvx, and the account hooks need bash.
+            foreach ($n in 'node', 'uvx', 'bash') { $byName[$n]['severity']['kernel'] | Should -Be 'optional' }
+            @($byName['bash']['platforms']) | Should -Be @('linux')
             $byName.Contains('pwsh') | Should -BeFalse
             $specs = @($tools | Where-Object { $_.Contains('install') } | ForEach-Object { $i = $_['install']; @($i.Keys) | ForEach-Object { $i[$_] } })
             $specs.Count | Should -BeGreaterThan 5

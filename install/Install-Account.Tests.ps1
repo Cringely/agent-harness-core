@@ -333,8 +333,8 @@ Describe "Install-Account" {
     # Review round 2, item C: -ForEach makes each tool its own It. The install runs once in
     # BeforeAll for a Linux target, through a stub runner that answers 127 for every probe but
     # bun's, so every kernel optional entry deps.json defines for Linux is absent. bun is hard, so
-    # it stays present here and has its own refusal case below. jq is named because the npm probe
-    # misses too.
+    # it stays present here and has its own refusal case below. jq is named because -NpmGlobal ''
+    # routes the statusline to the jq script.
     Context "names every absent kernel optional dependency, and jq only while npm is absent" {
         BeforeAll {
             $script:t3p = New-StandInPayload
@@ -348,7 +348,7 @@ Describe "Install-Account" {
             Remove-Item -Recurse -Force $script:t3p, $script:t3h -ErrorAction SilentlyContinue
         }
 
-        It "names <_> as an absent prerequisite" -ForEach 'vale', 'npm', 'python3', 'op', 'ccstatusline', 'jq', 'git' {
+        It "names <_> as an absent prerequisite" -ForEach 'vale', 'npm', 'node', 'uvx', 'bash', 'python3', 'op', 'ccstatusline', 'jq', 'git' {
             $script:t3out | Should -Match "missing optional dependency $_\b" -Because "every consumer of $_ fails open, so an absent one is invisible without the warning"
         }
 
@@ -388,15 +388,16 @@ Describe "Install-Account" {
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
 
-    It "uvx and pwsh are no longer probed" {
+    # pwsh runs this script, so probing it can only answer yes. uvx was dropped with it at first,
+    # and came back as a deps.json entry because the MCP server entries launch through it.
+    It "pwsh is no longer probed" {
         $p = New-StandInPayload; $h = New-StandInClaudeHome
         try {
             $stub = New-DepsStub
             & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson (Join-Path $h 'claude.json') `
                 -CoreRepo $script:repoRoot -DepsRunner $stub.Runner *>&1 | Out-Null
             $first = @($stub.Calls | ForEach-Object { Split-Path -Leaf $_.Argv[0] })
-            $first | Should -Contain 'bun' -Because "the preflight must have run for the absences below to mean anything"
-            $first | Should -Not -Contain 'uvx'
+            $first | Should -Contain 'bun' -Because "the preflight must have run for the absence below to mean anything"
             $first | Should -Not -Contain 'pwsh'
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
@@ -462,10 +463,11 @@ Describe "Install-Account" {
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
 
-    # npm presence for jq's condition comes from the npm probe now, not from -NpmGlobal, so the pair
-    # differs only in what the stub answers for npm. Neither runs under the all-present stub, where
+    # jq follows the installer's own npm answer (-NpmGlobal, else npm root -g), the one that routes
+    # the statusline, not the preflight's npm probe. The last two cases make the two disagree, so a
+    # jq decision read from the probe fails one of them. None runs under the all-present stub, where
     # vale would be present and the positive control could not fire.
-    It "does not offer jq when the npm probe finds npm, since the shell statusline is never reached" {
+    It "does not offer jq when npm is present, since the shell statusline is never reached" {
         $p = New-StandInPayload; $h = New-StandInClaudeHome
         try {
             $stub = New-DepsStub -OnlyPresent 'bun', 'npm'
@@ -480,13 +482,27 @@ Describe "Install-Account" {
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
 
-    It "offers jq when the npm probe misses" {
+    It "does not offer jq when -NpmGlobal names npm's global root, even when the npm probe misses" {
         $p = New-StandInPayload; $h = New-StandInClaudeHome
         try {
             $stub = New-DepsStub -OnlyPresent 'bun'
             $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo $script:repoRoot `
                 -TargetIsWindows:$false -NpmGlobal '/usr/lib/node_modules' -DepsRunner $stub.Runner *>&1 | Out-String -Width 500
+            $out | Should -Match 'missing optional dependency npm\b' -Because "the npm probe must miss for this case to disagree with -NpmGlobal"
+            $out | Should -Not -Match '\bjq\b'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "offers jq when -NpmGlobal is empty, even when the npm probe answers" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            $stub = New-DepsStub -OnlyPresent 'bun', 'npm'
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo $script:repoRoot `
+                -TargetIsWindows:$false -NpmGlobal '' -DepsRunner $stub.Runner *>&1 | Out-String -Width 500
+            $out | Should -Not -Match 'missing optional dependency npm\b' -Because "the npm probe must answer for this case to disagree with -NpmGlobal"
             $out | Should -Match 'missing optional dependency jq\b'
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }

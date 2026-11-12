@@ -375,6 +375,10 @@ function Invoke-DepsPreflight {
         [string]$PluginCwd,
         [hashtable]$PluginRecords = @{},
         [object[]]$AllowUnpinned = @(),
+        # Presence the caller already knows, by dependency name, used for onlyWhenAbsent in place
+        # of a probe. Install-Account passes npm's, because the same value decides whether the
+        # statusline is routed to the jq script, and the two must not disagree.
+        [hashtable]$KnownPresence = @{},
         # Test seams for the Windows PATH refresh after a winget install. ReadScopedPath gets
         # 'Machine' or 'User' and returns that scope's PATH. ResolveGitExe returns the git.exe
         # location Git Bash is resolved from.
@@ -409,7 +413,11 @@ function Invoke-DepsPreflight {
     $problems = [System.Collections.Generic.List[object]]::new()
     foreach ($req in $required) {
         $dep = $req.Dep
-        if ($dep.Contains('onlyWhenAbsent') -and (& $probe $dep['onlyWhenAbsent']).Present) { continue }
+        if ($dep.Contains('onlyWhenAbsent')) {
+            $other = $dep['onlyWhenAbsent']
+            $otherPresent = if ($KnownPresence.Contains($other)) { [bool]$KnownPresence[$other] } else { (& $probe $other).Present }
+            if ($otherPresent) { continue }
+        }
         $res = & $probe $req.Name
         if ($res.Present) { continue }
         $problems.Add([pscustomobject]@{ Req = $req; Reason = $res.Reason; Text = $null })

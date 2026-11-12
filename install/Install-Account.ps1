@@ -246,8 +246,10 @@ Write-Host "Claude home     : $ClaudeHome"
 # Every consumer of these fails open when the tool is absent, so without this the kit goes
 # silently dead on a fresh box and looks installed. The kernel's entries in core/claude/deps.json
 # replace the fixed list that used to live here. jq's condition (Linux, npm absent, because the
-# npm-absent branch points statusLine.command at statusline-command.sh, which calls jq) is now the
-# entry's onlyWhenAbsent, so npm presence comes from the npm probe rather than from -NpmGlobal.
+# npm-absent branch points statusLine.command at statusline-command.sh, which calls jq) is the
+# entry's onlyWhenAbsent, decided here by $npmPresent, the value Convert-SettingsForTarget routes
+# the statusline on, not by the preflight's own npm probe. The two can disagree (-NpmGlobal '', or
+# npm root -g failing while npm --version answers), and only $npmPresent says which script runs.
 # -IsWindows is the target platform, not the host's: the suite runs Linux-target cases on the
 # Windows CI leg.
 if (-not $SkipPreflight) {
@@ -273,7 +275,7 @@ if (-not $SkipPreflight) {
     }
     $depsOutcome = Invoke-DepsPreflight -Manifest $depsManifest -Layers @('kernel') -IsWindows $TargetIsWindows `
         -InstallDeps ([bool]$InstallDeps) -Runner $depsRunnerBlock -ShouldInstall $depsShouldInstall `
-        -PluginScope 'user' -PluginCwd $HOME -PluginRecords $pluginRecords
+        -PluginScope 'user' -PluginCwd $HOME -PluginRecords $pluginRecords -KnownPresence @{ npm = $npmPresent }
     if ($depsOutcome.PluginRecordsChanged) {
         $null = New-Item -ItemType Directory -Path (Split-Path -Parent $pluginRecordsPath) -Force
         $depsOutcome.PluginRecords | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $pluginRecordsPath

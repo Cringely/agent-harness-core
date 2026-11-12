@@ -68,6 +68,38 @@
       }
     },
     {
+      "name": "node",
+      "severity": { "kernel": "optional" },
+      "minVersion": "14.0.0",
+      "failMode": "Without node, the ccstatusline statusline and its two hook entries, which run node, fail.",
+      "probe": ["node", "--version"],
+      "install": {
+        "windows": { "winget": "OpenJS.NodeJS.LTS", "version": "24.13.1" }
+      }
+    },
+    {
+      "name": "uvx",
+      "severity": { "kernel": "optional" },
+      "minVersion": "0.11.13",
+      "failMode": "Without uvx, every MCP server entry that launches through uvx fails to start.",
+      "probe": ["uvx", "--version"],
+      "install": {
+        "windows": { "winget": "astral-sh.uv", "version": "0.11.13" }
+      }
+    },
+    {
+      "name": "bash",
+      "severity": { "kernel": "optional" },
+      "platforms": ["linux"],
+      "minVersion": "5.2.0",
+      "failMode": "Without bash, the account hooks written for bash fail when Claude Code runs them.",
+      "probe": ["bash", "--version"],
+      "versionPattern": "GNU bash, version (\\d+\\.\\d+(?:\\.\\d+)?)",
+      "install": {
+        "linux": { "apt": "bash", "version": "5.2.21-2ubuntu4" }
+      }
+    },
+    {
       "name": "ccstatusline",
       "severity": { "kernel": "optional" },
       "needs": ["npm"],
