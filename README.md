@@ -35,14 +35,20 @@ Skills already global in `~/.claude` (prose review, prose linting, council revie
 
 ## Install
 
-Prerequisites: PowerShell 7 (`pwsh`). `bun` on PATH for the TypeScript hooks (every wired hook except
-the three `sh` ones), without it the gates stop enforcing and Claude Code surfaces an error notice on
-stderr per dispatch (the installer warns when it cannot find `bun`, and installs anyway, since the
-registrations it writes are correct either way). Git Bash or another POSIX `sh` on Windows for the
-three shell hooks (`session-start-guardrails.sh`, `session-start-drift-check.sh`,
-`wave-close-handoff.sh`). The prose-lint hook also
-wants `vale` and the prose-lint styles kit on the machine. Missing either degrades to an advisory
-skip, never a blocked write. `session-start-drift-check.sh` also wants `sed`, `tr` and `awk`
+Prerequisites: PowerShell 7 (`pwsh`). Every other tool a layer relies on is declared in
+`core/claude/deps.json`, with a probe, a minimum version and one pinned install command per platform:
+winget on Windows, apt or npm on Linux, each at an exact version. The installer probes them before
+its first write, and a missing hard dependency refuses the install and prints its pinned command.
+The hard ones are `bun`, since every TypeScript gate is registered as a bare `bun` command and fails
+open without it, and Git Bash on Windows, which Claude Code runs the three shell hooks through. Git
+Bash is found under the Git for Windows install, never from PATH, where a bare `bash` can be the WSL
+launcher. The code layer adds `git` as a hard dependency. A missing optional one, such as `vale` for
+the prose-lint hook, `gh` or the `claude` CLI, gets a warning with its command and the install
+carries on. Nothing is installed unless you pass `-InstallDeps`, which runs each missing
+dependency's pinned command and probes it again. `-WhatIf` runs the probes, prints each command
+`-InstallDeps` would run, and stops before writing anything. The prose-lint hook also wants the
+prose-lint styles kit on the machine. Missing it degrades to an advisory skip, never a blocked
+write. `session-start-drift-check.sh` also wants `sed`, `tr` and `awk`
 (Git Bash ships all three) plus a reachable core checkout. Missing any of them makes it print
 nothing, which is also what it does when the project has no drift.
 
@@ -408,10 +414,13 @@ PowerShell hook invocations for a non-Windows target, deep-merges
 `settings.json` rather than replacing it (Claude Code writes that file itself, and an overwrite
 would revert every `/plugin` toggle on every pull), adds missing `mcpServers` entries to
 `~/.claude.json` without touching an existing one, and prints every command still carrying a
-source-machine path. Prerequisites are `pwsh` 7 and git. `vale`, `bun`, `node`, `bash` (Git Bash on
-Windows), `uvx` and, on a Linux box with no `npm`, `jq` each drive one feature that fails open
-without it, which is what the preflight warning makes visible. `npm` is checked on its own: without
-it the two `ccstatusline` hook entries are dropped and `statusLine.command` is pointed at the shipped
+source-machine path. Prerequisites are `pwsh` 7 and git. The script runs the project installer's
+preflight against the kernel entries in `core/claude/deps.json`. `bun`, and Git Bash on Windows, are
+hard and refuse the install before anything is copied. `git`, `vale`, `python3`, `npm`,
+`ccstatusline`, `op` and, on a Linux box with no `npm`, `jq` each drive one feature that fails open
+without it, so each gets a warning naming its pinned command. `-InstallDeps` and `-WhatIf` work as
+they do for the project installer. Separately, `npm root -g` fills the `{{NPM_GLOBAL}}` token: without
+`npm` the two `ccstatusline` hook entries are dropped and `statusLine.command` is pointed at the shipped
 statusline script for the platform instead. Where `npm` is present, those hook entries still expect
 `ccstatusline` itself to be installed globally, so `node` can resolve it under the global
 `node_modules` path rather than a project-local one.

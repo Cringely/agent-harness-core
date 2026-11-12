@@ -1,4 +1,61 @@
 # install/Install-Account.Tests.ps1
+
+# Dependency preflight seams (Task 15), shared by both Describe blocks. Every installer call in
+# this file passes @script:dep, a stub runner that reports every probe present, so no case probes
+# or installs a real tool. The cases that test the preflight build their own runner.
+BeforeAll {
+    $script:depsStubRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-deps-stub-" + [guid]::NewGuid())
+    New-Item -ItemType Directory -Path (Join-Path $script:depsStubRoot 'git/mingw64/libexec/git-core') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $script:depsStubRoot 'git/usr/bin') -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $script:depsStubRoot 'git/usr/bin/bash.exe') -Value 'stub'
+    $script:depsStubExecPath = Join-Path $script:depsStubRoot 'git/mingw64/libexec/git-core'
+    $script:depsPresentBanner = 'GNU bash, version 99.9.9(1)-release ccstatusline@99.9.9'
+
+    # Records (argv, timeout, cwd). -Answer gets (argv, cwd) and returns a hashtable of
+    # ExitCode/Output/TimedOut, or $null for "present".
+    function New-DepsRecorder {
+        param([scriptblock]$Answer)
+        $calls = [System.Collections.Generic.List[object]]::new()
+        $banner = $script:depsPresentBanner
+        $runner = {
+            param($argv, $timeout, $cwd)
+            $argv = [string[]]@($argv)
+            $calls.Add([pscustomobject]@{ Argv = $argv; Timeout = $timeout; Cwd = $cwd })
+            $r = $null
+            if ($Answer) { $r = & $Answer $argv $cwd }
+            if ($null -eq $r) { $r = @{ ExitCode = 0; Output = $banner } }
+            [pscustomobject]@{ ExitCode = [int]$r['ExitCode']; Output = [string]$r['Output']; TimedOut = [bool]$r['TimedOut'] }
+        }.GetNewClosure()
+        [pscustomobject]@{ Runner = $runner; Calls = $calls }
+    }
+
+    # Every probe present except a command named in -Absent, or, with -OnlyPresent, every probe
+    # absent except the commands it names.
+    function New-DepsStub {
+        param([string[]]$Absent = @(), [string[]]$OnlyPresent)
+        $execPath = $script:depsStubExecPath
+        $only = $OnlyPresent
+        $answer = {
+            param($argv, $cwd)
+            if ($argv[0] -eq 'git' -and $argv[1] -eq '--exec-path') { return @{ ExitCode = 0; Output = $execPath } }
+            if ($null -ne $only -and $only -notcontains $argv[0] -and $only -notcontains (Split-Path -Leaf $argv[0])) { return @{ ExitCode = 127; Output = '' } }
+            if ($Absent -contains $argv[0]) { return @{ ExitCode = 127; Output = '' } }
+            return $null
+        }.GetNewClosure()
+        New-DepsRecorder -Answer $answer
+    }
+
+    function Get-DepsInstallCalls {
+        param($Recorder)
+        @($Recorder.Calls | Where-Object { @('winget', 'sudo', 'npm') -contains $_.Argv[0] -and (@($_.Argv) -join ' ') -match 'install' })
+    }
+
+    $script:dep = @{ DepsRunner = (New-DepsStub).Runner }
+}
+AfterAll {
+    Remove-Item -Recurse -Force $script:depsStubRoot -ErrorAction SilentlyContinue
+}
+
 Describe "Install-Account" {
     BeforeAll {
         $script:install = "$PSScriptRoot/Install-Account.ps1"
@@ -53,7 +110,7 @@ Describe "Install-Account" {
         BeforeAll {
             $script:t1p = New-StandInPayload
             $script:t1h = New-StandInClaudeHome
-            & $script:install -PayloadRoot $script:t1p -ClaudeHome $script:t1h `
+            & $script:install @script:dep -PayloadRoot $script:t1p -ClaudeHome $script:t1h `
                 -ClaudeJson (Join-Path $script:t1h 'claude.json') -SkipPreflight | Out-Null
         }
         AfterAll {
@@ -95,7 +152,7 @@ Describe "Install-Account" {
         try {
             Test-Path -LiteralPath (Join-Path $p 'hooks/model-tier-gate.ts') |
                 Should -BeFalse -Because "core owns that file and the exporter skips it"
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') `
                 -CoreRepo $script:repoRoot -SkipPreflight | Out-Null
             $installed = Join-Path $h 'hooks/model-tier-gate.ts'
@@ -111,7 +168,7 @@ Describe "Install-Account" {
         try {
             Test-Path -LiteralPath (Join-Path $p 'hooks/memory-transition-log.ts') |
                 Should -BeFalse -Because "core owns that file and the exporter skips it"
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') `
                 -CoreRepo $script:repoRoot -SkipPreflight | Out-Null
             $installed = Join-Path $h 'hooks/memory-transition-log.ts'
@@ -122,63 +179,117 @@ Describe "Install-Account" {
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
 
-    # Review round 2, item C: -ForEach makes each tool its own It. Measured: dropping vale, uvx
-    # and jq from the prerequisite list at once used to produce one failure line naming only
-    # vale, since Pester stops at the first failing Should in a bundled It. The install runs
-    # once in BeforeAll, under the same emptied PATH the original test used.
-    Context "names every absent prerequisite, and jq only when the Linux fallback needs it" {
+    # Review round 2, item C: -ForEach makes each tool its own It. The install runs once in
+    # BeforeAll for a Linux target, through a stub runner that answers 127 for every probe but
+    # bun's, so every kernel optional entry deps.json defines for Linux is absent. bun is hard, so
+    # it stays present here and has its own refusal case below. jq is named because the npm probe
+    # misses too.
+    Context "names every absent kernel optional dependency, and jq only while npm is absent" {
         BeforeAll {
             $script:t3p = New-StandInPayload
             $script:t3h = New-StandInClaudeHome
-            # PATH emptied to a directory holding nothing, so every probe misses. Without this
-            # the assertion would depend on what happens to be installed on the runner.
-            $emptyBin = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-bin-" + [guid]::NewGuid())
-            New-Item -ItemType Directory -Path $emptyBin -Force | Out-Null
-            $savedPath = $env:PATH
-            try {
-                $env:PATH = $emptyBin
-                $script:t3out = & $script:install -PayloadRoot $script:t3p -ClaudeHome $script:t3h `
-                    -ClaudeJson (Join-Path $script:t3h 'claude.json') `
-                    -CoreRepo $script:repoRoot -TargetIsWindows:$false -NpmGlobal '' *>&1 | Out-String
-            }
-            finally { $env:PATH = $savedPath; Remove-Item -Recurse -Force $emptyBin -EA SilentlyContinue }
+            $stub = New-DepsStub -OnlyPresent 'bun'
+            $script:t3out = & $script:install -PayloadRoot $script:t3p -ClaudeHome $script:t3h `
+                -ClaudeJson (Join-Path $script:t3h 'claude.json') `
+                -CoreRepo $script:repoRoot -TargetIsWindows:$false -NpmGlobal '' -DepsRunner $stub.Runner *>&1 | Out-String -Width 500
         }
         AfterAll {
             Remove-Item -Recurse -Force $script:t3p, $script:t3h -ErrorAction SilentlyContinue
         }
 
-        It "names <_> as an absent prerequisite" -ForEach 'vale', 'bun', 'node', 'bash', 'uvx', 'jq' {
-            $script:t3out | Should -Match "\b$_\b" -Because "every consumer of $_ fails open, so an absent one is invisible without the warning"
+        It "names <_> as an absent prerequisite" -ForEach 'vale', 'npm', 'python3', 'op', 'ccstatusline', 'jq', 'git' {
+            $script:t3out | Should -Match "missing optional dependency $_\b" -Because "every consumer of $_ fails open, so an absent one is invisible without the warning"
         }
 
-        It "still completes the install: preflight warns, it does not gate" {
+        It "still completes the install when only optional dependencies are missing" {
             Test-Path -LiteralPath (Join-Path $script:t3h 'rules/security.md') | Should -BeTrue
         }
     }
 
-    It "does not offer jq when npm is present, since the shell statusline is never reached" {
+    It "refuses the install when a hard dependency is missing" {
         $p = New-StandInPayload; $h = New-StandInClaudeHome
         try {
-            # Same PATH-emptying test 3 uses, and for the same reason: on a runner where every
-            # prerequisite except jq happens to already be installed, the preflight warning
-            # never fires at all, and 'jq' is absent from $out whether or not the jq condition
-            # actually works. Review round 1, item 4: measured this test passing for that wrong
-            # reason on this box, since nothing but jq was ever missing here to begin with.
-            $emptyBin = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-bin-" + [guid]::NewGuid())
-            New-Item -ItemType Directory -Path $emptyBin -Force | Out-Null
-            $savedPath = $env:PATH
-            try {
-                $env:PATH = $emptyBin
-                $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
-                    -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo $script:repoRoot `
-                    -TargetIsWindows:$false -NpmGlobal '/usr/lib/node_modules' *>&1 | Out-String
-            }
-            finally { $env:PATH = $savedPath; Remove-Item -Recurse -Force $emptyBin -EA SilentlyContinue }
+            $stub = New-DepsStub -Absent 'bun'
+            { & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson (Join-Path $h 'claude.json') `
+                    -CoreRepo $script:repoRoot -TargetIsWindows:$false -DepsRunner $stub.Runner *>&1 | Out-Null } |
+                Should -Throw -ExpectedMessage 'missing hard dependency*'
+            Test-Path -LiteralPath (Join-Path $h 'rules/security.md') | Should -BeFalse
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
 
+    It "a missing hard kernel dependency refuses the account install" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            $stub = New-DepsStub -Absent 'bun'
+            $msg = $null
+            try {
+                & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson (Join-Path $h 'claude.json') `
+                    -CoreRepo $script:repoRoot -TargetIsWindows:$true -DepsRunner $stub.Runner *>&1 | Out-Null
+            }
+            catch { $msg = $_.Exception.Message }
+            $msg | Should -Match '^missing hard dependency'
+            $msg | Should -Match '\bbun\b'
+            $msg | Should -Match 'every TypeScript gate fails open'
+            (@(Get-ChildItem -LiteralPath $h -Force)).Count | Should -Be 0 -Because "the refusal comes before the first write"
+            @(Get-DepsInstallCalls $stub).Count | Should -Be 0
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "uvx and pwsh are no longer probed" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            $stub = New-DepsStub
+            & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson (Join-Path $h 'claude.json') `
+                -CoreRepo $script:repoRoot -DepsRunner $stub.Runner *>&1 | Out-Null
+            $first = @($stub.Calls | ForEach-Object { Split-Path -Leaf $_.Argv[0] })
+            $first | Should -Contain 'bun' -Because "the preflight must have run for the absences below to mean anything"
+            $first | Should -Not -Contain 'uvx'
+            $first | Should -Not -Contain 'pwsh'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "-InstallDeps -WhatIf runs nothing" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            $stub = New-DepsStub -Absent 'bun'
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson (Join-Path $h 'claude.json') `
+                -CoreRepo $script:repoRoot -TargetIsWindows:$true -InstallDeps -WhatIf -DepsRunner $stub.Runner *>&1 | Out-String -Width 500
+            @(Get-DepsInstallCalls $stub).Count | Should -Be 0
+            $out | Should -Match 'WhatIf: would run winget install --id Oven-sh\.Bun --version 1\.3\.14'
+            Test-Path -LiteralPath (Join-Path $h 'rules/security.md') | Should -BeFalse
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    # npm presence for jq's condition comes from the npm probe now, not from -NpmGlobal, so the pair
+    # differs only in what the stub answers for npm. Neither runs under the all-present stub, where
+    # vale would be present and the positive control could not fire.
+    It "does not offer jq when the npm probe finds npm, since the shell statusline is never reached" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            $stub = New-DepsStub -OnlyPresent 'bun', 'npm'
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo $script:repoRoot `
+                -TargetIsWindows:$false -NpmGlobal '/usr/lib/node_modules' -DepsRunner $stub.Runner *>&1 | Out-String -Width 500
             # Positive control: without this, a broken jq condition and an empty $out are
             # indistinguishable from a working one, since both leave 'jq' absent from $out.
             $out | Should -Match '\bvale\b' -Because "the warning must actually fire for the jq check below to mean anything"
             $out | Should -Not -Match '\bjq\b'
+        }
+        finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+    }
+
+    It "offers jq when the npm probe misses" {
+        $p = New-StandInPayload; $h = New-StandInClaudeHome
+        try {
+            $stub = New-DepsStub -OnlyPresent 'bun'
+            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+                -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo $script:repoRoot `
+                -TargetIsWindows:$false -NpmGlobal '/usr/lib/node_modules' -DepsRunner $stub.Runner *>&1 | Out-String -Width 500
+            $out | Should -Match 'missing optional dependency jq\b'
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
@@ -210,7 +321,7 @@ Describe "Install-Account" {
         $savedLoc = Get-Location
         try {
             Set-Location $parent
-            & $script:install -PayloadRoot $leaf -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $leaf -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight | Out-Null
             Test-Path -LiteralPath (Join-Path $h 'rules/security.md') | Should -BeTrue
         }
@@ -227,7 +338,7 @@ Describe "Install-Account" {
         $savedLoc = Get-Location
         try {
             Set-Location $nested
-            & $script:install -PayloadRoot '..' -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot '..' -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight | Out-Null
             Test-Path -LiteralPath (Join-Path $h 'rules/security.md') | Should -BeTrue
         }
@@ -245,7 +356,7 @@ Describe "Install-Account" {
     It "refuses when -PayloadRoot and -ClaudeHome are the same directory" {
         $h = New-StandInClaudeHome
         try {
-            { & $script:install -PayloadRoot $h -ClaudeHome $h `
+            { & $script:install @script:dep -PayloadRoot $h -ClaudeHome $h `
                     -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight } |
                 Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
         }
@@ -256,7 +367,7 @@ Describe "Install-Account" {
         $h = New-StandInClaudeHome
         $nestedPayload = Join-Path $h 'payload'
         try {
-            { & $script:install -PayloadRoot $nestedPayload -ClaudeHome $h `
+            { & $script:install @script:dep -PayloadRoot $nestedPayload -ClaudeHome $h `
                     -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight } |
                 Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
         }
@@ -267,7 +378,7 @@ Describe "Install-Account" {
         $p = New-StandInPayload
         $nestedHome = Join-Path $p 'nested-home'
         try {
-            { & $script:install -PayloadRoot $p -ClaudeHome $nestedHome `
+            { & $script:install @script:dep -PayloadRoot $p -ClaudeHome $nestedHome `
                     -ClaudeJson (Join-Path $nestedHome 'claude.json') -SkipPreflight } |
                 Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
         }
@@ -291,7 +402,7 @@ Describe "Install-Account" {
         $nestedPayload = Join-Path $h 'payload'
         New-Item -ItemType Directory -Path $nestedPayload -Force | Out-Null
         try {
-            { & $script:install -PayloadRoot $nestedPayload -ClaudeHome "$h\" `
+            { & $script:install @script:dep -PayloadRoot $nestedPayload -ClaudeHome "$h\" `
                     -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight } |
                 Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
         }
@@ -310,7 +421,7 @@ Describe "Install-Account" {
         New-StandInPayload -Path $claudeDir | Out-Null
         New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
         try {
-            & $script:install -PayloadRoot $claudeDir -ClaudeHome $backupDir `
+            & $script:install @script:dep -PayloadRoot $claudeDir -ClaudeHome $backupDir `
                 -ClaudeJson (Join-Path $backupDir 'claude.json') -SkipPreflight | Out-Null
             Test-Path -LiteralPath (Join-Path $backupDir 'rules/security.md') | Should -BeTrue
         }
@@ -324,7 +435,7 @@ Describe "Install-Account" {
         New-StandInPayload -Path $backupDir | Out-Null
         New-Item -ItemType Directory -Path $claudeDir -Force | Out-Null
         try {
-            & $script:install -PayloadRoot $backupDir -ClaudeHome $claudeDir `
+            & $script:install @script:dep -PayloadRoot $backupDir -ClaudeHome $claudeDir `
                 -ClaudeJson (Join-Path $claudeDir 'claude.json') -SkipPreflight | Out-Null
             Test-Path -LiteralPath (Join-Path $claudeDir 'rules/security.md') | Should -BeTrue
         }
@@ -341,7 +452,7 @@ Describe "Install-Account" {
         $savedLoc = Get-Location
         try {
             Set-Location $shared
-            { & $script:install -PayloadRoot $shared -ClaudeHome '.' `
+            { & $script:install @script:dep -PayloadRoot $shared -ClaudeHome '.' `
                     -ClaudeJson (Join-Path $shared 'claude.json') -SkipPreflight } |
                 Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
         }
@@ -373,7 +484,7 @@ Describe "Install-Account" {
             # junction would leave -ClaudeHome pointing at nothing, the guard would correctly
             # not fire, and the failure would read as a regression in the guard.
             Test-Path -LiteralPath $junc | Should -BeTrue -Because 'the junction is the whole fixture'
-            { & $script:install -PayloadRoot $p -ClaudeHome $junc `
+            { & $script:install @script:dep -PayloadRoot $p -ClaudeHome $junc `
                     -ClaudeJson (Join-Path ([System.IO.Path]::GetTempPath()) "acct-cj-$([guid]::NewGuid()).json") `
                     -SkipPreflight } |
                 Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
@@ -399,7 +510,7 @@ Describe "Install-Account" {
                 Set-ItResult -Skipped -Because '8.3 name creation is disabled on this volume'
                 return
             }
-            { & $script:install -PayloadRoot $p -ClaudeHome $short `
+            { & $script:install @script:dep -PayloadRoot $p -ClaudeHome $short `
                     -ClaudeJson (Join-Path ([System.IO.Path]::GetTempPath()) "acct-cj-$([guid]::NewGuid()).json") `
                     -SkipPreflight } |
                 Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
@@ -414,7 +525,7 @@ Describe "Install-Account" {
         }
         $p = New-StandInPayload
         try {
-            { & $script:install -PayloadRoot $p -ClaudeHome "\\?\$p" `
+            { & $script:install @script:dep -PayloadRoot $p -ClaudeHome "\\?\$p" `
                     -ClaudeJson (Join-Path ([System.IO.Path]::GetTempPath()) "acct-cj-$([guid]::NewGuid()).json") `
                     -SkipPreflight } |
                 Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
@@ -442,7 +553,7 @@ Describe "Install-Account" {
                 Set-ItResult -Skipped -Because "this host will not create a directory symlink: $($_.Exception.Message)"
                 return
             }
-            { & $script:install -PayloadRoot $p -ClaudeHome $link `
+            { & $script:install @script:dep -PayloadRoot $p -ClaudeHome $link `
                     -ClaudeJson (Join-Path ([System.IO.Path]::GetTempPath()) "acct-cj-$([guid]::NewGuid()).json") `
                     -SkipPreflight } |
                 Should -Throw -ExpectedMessage '*must not be the same directory or nested*'
@@ -481,7 +592,7 @@ Describe "Install-Account" {
             # Escaped: a \\?\ prefix carries a literal '?', which -ExpectedMessage would otherwise
             # read as a single-character wildcard and match a spelling this test means to exclude.
             $wanted = [System.Management.Automation.WildcardPattern]::Escape("-ClaudeHome ('$spelling')")
-            { & $script:install -PayloadRoot $p -ClaudeHome $spelling `
+            { & $script:install @script:dep -PayloadRoot $p -ClaudeHome $spelling `
                     -ClaudeJson (Join-Path ([System.IO.Path]::GetTempPath()) "acct-cj-$([guid]::NewGuid()).json") `
                     -SkipPreflight } |
                 Should -Throw -ExpectedMessage "*$wanted*"
@@ -520,7 +631,7 @@ Describe "Install-Account" {
     It "refuses a -ClaudeJson that sits inside -PayloadRoot" {
         $p = New-StandInPayload; $h = New-StandInClaudeHome
         try {
-            { & $script:install -PayloadRoot $p -ClaudeHome $h `
+            { & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                     -ClaudeJson (Join-Path $p 'claude.json') -SkipPreflight } |
                 Should -Throw -ExpectedMessage '*-ClaudeJson*must not sit inside -PayloadRoot*'
         }
@@ -532,14 +643,14 @@ Describe "Install-Account" {
     # not ask" from "the caller asked for nothing". This never touches the live account layer:
     # a regression here throws before -ClaudeHome is read, so there is nothing to clean up.
     It "refuses an explicitly empty -ClaudeHome instead of falling back to the live default" {
-        { & $script:install -ClaudeHome '' -PayloadRoot 'irrelevant' -SkipPreflight } |
+        { & $script:install @script:dep -ClaudeHome '' -PayloadRoot 'irrelevant' -SkipPreflight } |
             Should -Throw -ExpectedMessage "*-ClaudeHome was passed empty*"
     }
 
     It "refuses an explicitly empty -PayloadRoot instead of falling back to the default" {
         $h = New-StandInClaudeHome
         try {
-            { & $script:install -ClaudeHome $h -PayloadRoot '' -SkipPreflight } |
+            { & $script:install @script:dep -ClaudeHome $h -PayloadRoot '' -SkipPreflight } |
                 Should -Throw -ExpectedMessage "*-PayloadRoot was passed empty*"
         }
         finally { Remove-Item -Recurse -Force $h -ErrorAction SilentlyContinue }
@@ -550,7 +661,7 @@ Describe "Install-Account" {
     It "supports -WhatIf, leaving the target claude home untouched" {
         $p = New-StandInPayload; $h = New-StandInClaudeHome
         try {
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -WhatIf | Out-Null
             Test-Path -LiteralPath (Join-Path $h 'rules/security.md') | Should -BeFalse
         }
@@ -564,7 +675,7 @@ Describe "Install-Account" {
         # same fix, as Export-Account.ps1's equivalent line.
         $p = New-StandInPayload; $h = New-StandInClaudeHome
         try {
-            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+            $out = & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -WhatIf *>&1 | Out-String
             $out | Should -Match 'rules: \d+ files \(dry run\)'
         }
@@ -577,7 +688,7 @@ Describe "Install-Account" {
         # Export-Account.ps1's own "does not print the completion message under -WhatIf" test.
         $p = New-StandInPayload; $h = New-StandInClaudeHome
         try {
-            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+            $out = & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -WhatIf *>&1 | Out-String
             $out | Should -Not -Match 'Install complete'
         }
@@ -615,7 +726,7 @@ Describe "Install-Account" {
             # neither the stub nor anything real. [System.IO.Path]::PathSeparator picks the
             # separator the running platform actually uses.
             $env:PATH = $stubBin + [System.IO.Path]::PathSeparator + $savedPath
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -TargetIsWindows:$false -WhatIf | Out-Null
             $logExisted = Test-Path -LiteralPath $log
         }
@@ -633,13 +744,13 @@ Describe "Install-Account" {
     It "overwrites an already-installed tree file and root file, leaving a receiver-only file alone" {
         $p = New-StandInPayload; $h = New-StandInClaudeHome
         try {
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight | Out-Null
             'receiver only, never in the payload' | Set-Content (Join-Path $h 'rules/local-only.md')
 
             'rule body v2' | Set-Content (Join-Path $p 'rules/security.md')
             'ps statusline v2' | Set-Content (Join-Path $p 'statusline-command.ps1')
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight | Out-Null
 
             Get-Content -Raw (Join-Path $h 'rules/security.md') | Should -Match 'rule body v2'
@@ -655,7 +766,7 @@ Describe "Install-Account" {
         $h = New-StandInClaudeHome
         $missing = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-nopayload-" + [guid]::NewGuid())
         try {
-            { & $script:install -PayloadRoot $missing -ClaudeHome $h `
+            { & $script:install @script:dep -PayloadRoot $missing -ClaudeHome $h `
                     -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight } |
                 Should -Throw -ExpectedMessage '*Run install/Export-Account.ps1*'
         }
@@ -669,7 +780,7 @@ Describe "Install-Account" {
         $emptyCore = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-nocore-" + [guid]::NewGuid())
         New-Item -ItemType Directory -Path $emptyCore -Force | Out-Null
         try {
-            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+            $out = & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo $emptyCore `
                 -SkipPreflight *>&1 | Out-String
             $out | Should -Match 'Absent:.*model-tier-gate\.ts'
@@ -690,20 +801,16 @@ Describe "Install-Account" {
     # real and its own text ("chmod not on PATH") satisfies -Match 'Not on PATH' case-
     # insensitively, failing an It that was never testing the chmod branch at all. Pinning Windows
     # isolates the assertion to the -SkipPreflight gate it names.
-    It "suppresses the preflight warning under -SkipPreflight even with every tool absent" {
+    It "suppresses the preflight under -SkipPreflight even with every tool absent" {
         $p = New-StandInPayload; $h = New-StandInClaudeHome
-        $emptyBin = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-bin-" + [guid]::NewGuid())
-        New-Item -ItemType Directory -Path $emptyBin -Force | Out-Null
-        $savedPath = $env:PATH
-        $out = $null
         try {
-            $env:PATH = $emptyBin
+            # Every probe absent, bun included, so a preflight that ran would refuse the install.
+            $stub = New-DepsStub -OnlyPresent @()
             $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
-                -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -TargetIsWindows:$true *>&1 | Out-String
-        }
-        finally { $env:PATH = $savedPath; Remove-Item -Recurse -Force $emptyBin -EA SilentlyContinue }
-        try {
-            $out | Should -Not -Match 'Not on PATH'
+                -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -TargetIsWindows:$true -DepsRunner $stub.Runner *>&1 | Out-String -Width 500
+            $out | Should -Not -Match 'missing (optional|hard) dependenc'
+            $stub.Calls.Count | Should -Be 0
+            Test-Path -LiteralPath (Join-Path $h 'rules/security.md') | Should -BeTrue
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
@@ -718,6 +825,8 @@ Describe "Install-Account" {
     # leaves a stale 0 that satisfies the exit-code check and hides the defect.
     It "probes npm for -NpmGlobal when the parameter is omitted, and finds it" {
         $p = New-StandInPayload; $h = New-StandInClaudeHome
+        @{ hooks = @{}; statusLine = @{ type = 'command'; command = 'node {{NPM_GLOBAL}}/ccstatusline/dist/ccstatusline.js' } } |
+            ConvertTo-Json -Depth 5 | Set-Content (Join-Path $p 'settings.account.json')
         $stubBin = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-npmstub-" + [guid]::NewGuid())
         New-Item -ItemType Directory -Path $stubBin -Force | Out-Null
         Set-Content (Join-Path $stubBin 'npm.cmd') "@echo off`r`necho C:\fake\global`r`nexit /b 0"
@@ -733,20 +842,19 @@ Describe "Install-Account" {
         try {
             $env:PATH = $stubBin
             $global:LASTEXITCODE = $null
-            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+            $out = & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo $script:repoRoot `
                 -TargetIsWindows:$false *>&1 | Out-String
         }
         finally { $env:PATH = $savedPath; Remove-Item -Recurse -Force $stubBin -EA SilentlyContinue }
         try {
-            # Backlog item 26: this It used to carry the negative alone, and an empty $out
-            # satisfies a negative. Making Test-Prerequisite return an empty list reddened eight
-            # tests and left this one green, so it could not tell whether the npm probe had found
-            # anything -- the only thing it claims to prove. Same positive control its sibling
-            # two Its down already carries. PATH holds nothing but the npm stub, so vale is
-            # genuinely absent and the preflight warning must name it.
-            $out | Should -Match '\bvale\b' -Because "the warning must actually fire for the jq check below to mean anything"
-            $out | Should -Not -Match '\bjq\b'
+            # The expansion is the observable now. jq's condition moved to the npm probe (Task 15),
+            # so jq's absence no longer says whether `npm root -g` was found. {{NPM_GLOBAL}} in the
+            # planted statusLine does: it expands to what the stub printed only if the probe ran
+            # and its answer was used.
+            $expected = if ($IsWindows) { 'C:/fake/global' } else { '/fake/global' }
+            $s = Get-Content -LiteralPath (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
+            $s.statusLine.command | Should -Be "node $expected/ccstatusline/dist/ccstatusline.js"
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
@@ -762,9 +870,11 @@ Describe "Install-Account" {
         $out = $null
         try {
             $env:PATH = $emptyBin
+            # bun and Git Bash present (both hard on Windows), every other probe absent, npm too.
+            $stub = New-DepsStub -OnlyPresent 'bun', 'bash.exe'
             $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo $script:repoRoot `
-                -TargetIsWindows:$true -NpmGlobal '' *>&1 | Out-String
+                -TargetIsWindows:$true -NpmGlobal '' -DepsRunner $stub.Runner *>&1 | Out-String
         }
         finally { $env:PATH = $savedPath; Remove-Item -Recurse -Force $emptyBin -EA SilentlyContinue }
         try {
@@ -781,7 +891,7 @@ Describe "Install-Account" {
     It "reports a mixed-state warning and re-throws when the copy fails partway through" {
         $p = New-StandInPayload; $h = New-StandInClaudeHome
         try {
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight | Out-Null
             $locked = Join-Path $h 'agents/appsec-sme.md'
             $stream = [System.IO.File]::Open($locked, 'Open', 'Read', 'None')
@@ -789,7 +899,7 @@ Describe "Install-Account" {
             $warnings = $null
             try {
                 try {
-                    & $script:install -PayloadRoot $p -ClaudeHome $h `
+                    & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                         -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight `
                         -WarningVariable warnings -WarningAction SilentlyContinue *>$null
                 }
@@ -826,7 +936,7 @@ Describe "Install-Account" {
             # neither the stub nor anything real. [System.IO.Path]::PathSeparator picks the
             # separator the running platform actually uses.
             $env:PATH = $stubBin + [System.IO.Path]::PathSeparator + $savedPath
-            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+            $out = & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -TargetIsWindows:$false *>&1 | Out-String
         }
         finally { $env:PATH = $savedPath; Remove-Item -Recurse -Force $stubBin -EA SilentlyContinue }
@@ -864,7 +974,7 @@ Describe "Install-Account" {
             # neither the stub nor anything real. [System.IO.Path]::PathSeparator picks the
             # separator the running platform actually uses.
             $env:PATH = $stubBin + [System.IO.Path]::PathSeparator + $savedPath
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -TargetIsWindows:$true | Out-Null
             # Checked before $stubBin is removed below: deleting the stub first would make
             # Test-Path return $false unconditionally, whether or not chmod had actually run.
@@ -900,7 +1010,7 @@ Describe "Install-Account" {
             # neither the stub nor anything real. [System.IO.Path]::PathSeparator picks the
             # separator the running platform actually uses.
             $env:PATH = $stubBin + [System.IO.Path]::PathSeparator + $savedPath
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -TargetIsWindows:$false | Out-Null
             # Read the log before the stub directory is removed below: the earlier version of
             # this test deleted $stubBin (and invoked.log with it) in this same finally, then
@@ -945,7 +1055,7 @@ Describe "Install-Account" {
             # neither the stub nor anything real. [System.IO.Path]::PathSeparator picks the
             # separator the running platform actually uses.
             $env:PATH = $stubBin + [System.IO.Path]::PathSeparator + $savedPath
-            & $script:install -PayloadRoot $p -ClaudeHome $hParent `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $hParent `
                 -ClaudeJson (Join-Path $hParent 'claude.json') -SkipPreflight -TargetIsWindows:$false | Out-Null
             if (Test-Path -LiteralPath $log) { $logContent = Get-Content -Raw $log }
         }
@@ -992,7 +1102,7 @@ Describe "Install-Account" {
             # neither the stub nor anything real. [System.IO.Path]::PathSeparator picks the
             # separator the running platform actually uses.
             $env:PATH = $stubBin + [System.IO.Path]::PathSeparator + $savedPath
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -TargetIsWindows:$false | Out-Null
             if (Test-Path -LiteralPath $log) { $logContent = Get-Content -Raw $log }
         }
@@ -1029,7 +1139,7 @@ Describe "Install-Account" {
             # neither the stub nor anything real. [System.IO.Path]::PathSeparator picks the
             # separator the running platform actually uses.
             $env:PATH = $stubBin + [System.IO.Path]::PathSeparator + $savedPath
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight -TargetIsWindows:$false | Out-Null
             if (Test-Path -LiteralPath $log) { $logContent = Get-Content -Raw $log }
         }
@@ -1065,7 +1175,7 @@ Describe "Install-Account" {
             # -HomeSlug, review round 1 F4: both parameters could be deleted without reddening
             # anything, since nothing ever asserted the skills/handoff/SKILL.md fixture this It
             # already plants.
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:\projects\agent-harness-core' `
                 -NpmGlobal 'C:\npm\node_modules' -VaultPath 'D:\My Vault\Claude Code' `
                 -HomeSlug 'STUB-SLUG' -SkipPreflight | Out-Null
@@ -1109,7 +1219,7 @@ Describe "Install-Account" {
                                     shell = 'powershell'; timeout = 5 }) }) }
             } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -NpmGlobal '/usr/lib/node_modules' -TargetIsWindows:$false -SkipPreflight | Out-Null
 
@@ -1136,7 +1246,7 @@ Describe "Install-Account" {
                                     shell = 'powershell' }) }) }
             } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -NpmGlobal 'C:/npm' -TargetIsWindows:$true -SkipPreflight | Out-Null
 
@@ -1167,7 +1277,7 @@ Describe "Install-Account" {
                     command = 'node {{NPM_GLOBAL}}/ccstatusline/dist/ccstatusline.js'; padding = 0 }
             } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
-            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+            $out = & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -NpmGlobal '' -TargetIsWindows:$true -SkipPreflight *>&1 | Out-String
 
@@ -1199,7 +1309,7 @@ Describe "Install-Account" {
             @{ hooks = @{}; statusLine = @{ type = 'command'
                     command = 'node {{NPM_GLOBAL}}/ccstatusline/dist/ccstatusline.js' } } |
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -NpmGlobal '' -TargetIsWindows:$false -SkipPreflight | Out-Null
             $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
@@ -1218,7 +1328,7 @@ Describe "Install-Account" {
         $p = New-StandInPayload; $h = New-StandInClaudeHome
         try {
             '{"hooks":{"PreToolUse":null}}' | Set-Content (Join-Path $p 'settings.account.json')
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight | Out-Null
             $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
@@ -1234,7 +1344,7 @@ Describe "Install-Account" {
                         @{ matcher = 'Write' },
                         @{ matcher = 'Edit'; hooks = $null }
                     ) } } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight | Out-Null
             $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
@@ -1249,7 +1359,7 @@ Describe "Install-Account" {
             @{ hooks = @{ PreToolUse = @( @{ matcher = 'Write'; hooks = @(
                                 @{ type = 'command' }) }) } } |
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight | Out-Null
             $s = Get-Content (Join-Path $h 'settings.json') -Raw | ConvertFrom-Json
@@ -1268,7 +1378,7 @@ Describe "Install-Account" {
         $p = New-StandInPayload; $h = New-StandInClaudeHome
         try {
             'core {{CORE_REPO}} mystery {{MYSTERY}}' | Set-Content (Join-Path $p 'rules/harness-core.md')
-            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+            $out = & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight *>&1 | Out-String
             $out | Should -Match 'MYSTERY'
@@ -1298,7 +1408,7 @@ Describe "Install-Account" {
                                     shell = 'powershell' }) }) }
             } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -NpmGlobal 'C:/npm' -TargetIsWindows:$true -SkipPreflight | Out-Null
 
@@ -1317,7 +1427,7 @@ Describe "Install-Account" {
             # Task 10 review, finding 3: the line above re-wraps $s.hooks.PreToolUse in @() before
             # reading it, so it reads the same whether the merged event serialised as a genuine
             # one-element JSON array or a bare object (the single-element pipeline-output collapse
-            # Install-Harness.ps1:2079-2082 already names as `"hooks": {...} instead of "hooks": [...]`).
+            # Install-Harness.ps1:2113-2116 already names as `"hooks": {...} instead of "hooks": [...]`).
             # Asserted against the raw file text, which a re-parse cannot paper over.
             $raw | Should -Match '"PreToolUse":\s*\['
         }
@@ -1336,8 +1446,8 @@ Describe "Install-Account" {
                 CoreRepo = 'C:/projects/agent-harness-core'; NpmGlobal = 'C:/npm'
                 TargetIsWindows = $true
             }
-            & $script:install @args -SkipPreflight | Out-Null
-            & $script:install @args -SkipPreflight | Out-Null
+            & $script:install @script:dep @args -SkipPreflight | Out-Null
+            & $script:install @script:dep @args -SkipPreflight | Out-Null
 
             $raw = Get-Content (Join-Path $h 'settings.json') -Raw
             $s = $raw | ConvertFrom-Json
@@ -1364,7 +1474,7 @@ Describe "Install-Account" {
                 effortLevel = 'xhigh' } |
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -NpmGlobal 'C:/npm' -TargetIsWindows:$true -SkipPreflight | Out-Null
 
@@ -1383,7 +1493,7 @@ Describe "Install-Account" {
     # which Convert-SettingsForTarget already sanitises before Merge-AccountSettings ever sees
     # it. The receiver's own settings.json takes no such pass, and Merge-AccountSettings and
     # Merge-HookEvent do their own @()-wrapping of its properties, so the same
-    # "Cannot index into a null array" hazard documented at Install-Account.ps1:662-673 recurs
+    # "Cannot index into a null array" hazard documented at Install-Account.ps1:675-686 recurs
     # here, fed this time by hand-edited data instead of the exporter's own output. Four cases
     # below, one It per site, matching this file's convention for the three sites already pinned
     # on the payload side.
@@ -1395,7 +1505,7 @@ Describe "Install-Account" {
                                 @{ type = 'command'; command = 'echo from-payload' }) }) } } |
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight | Out-Null
 
@@ -1420,7 +1530,7 @@ Describe "Install-Account" {
                         @{ matcher = 'Edit'; hooks = @(@{ type = 'command'; command = 'echo edit' }) }
                     ) } } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight | Out-Null
 
@@ -1443,7 +1553,7 @@ Describe "Install-Account" {
             @{ permissions = @{ allow = @('Bash(ls:*)') } } |
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight | Out-Null
 
@@ -1463,7 +1573,7 @@ Describe "Install-Account" {
             @{ permissions = @{ deny = @('Bash(rm:*)') } } |
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight | Out-Null
 
@@ -1480,7 +1590,7 @@ Describe "Install-Account" {
             @{ permissions = @{ deny = @('Bash(rm:*)') } } |
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight | Out-Null
 
@@ -1504,7 +1614,7 @@ Describe "Install-Account" {
             @{ permissions = @{ defaultMode = 'auto' } } |
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
-            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+            $out = & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight *>&1 | Out-String
 
@@ -1520,7 +1630,7 @@ Describe "Install-Account" {
             @{ skipDangerousModePermissionPrompt = $true } |
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
-            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+            $out = & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight *>&1 | Out-String
 
@@ -1537,7 +1647,7 @@ Describe "Install-Account" {
             @{ permissions = @{ defaultMode = 'auto' }; skipDangerousModePermissionPrompt = $true } |
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
-            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+            $out = & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight *>&1 | Out-String
 
@@ -1559,7 +1669,7 @@ Describe "Install-Account" {
                                 @{ type = 'command'; command = 'echo from-payload' }) }) } } |
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight | Out-Null
 
@@ -1577,7 +1687,7 @@ Describe "Install-Account" {
             @{ permissions = @{ allow = @('Bash(ls:*)') } } |
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight | Out-Null
 
@@ -1597,7 +1707,7 @@ Describe "Install-Account" {
             '[1,2,3]' | Set-Content (Join-Path $h 'settings.json')
             @{ effortLevel = 'xhigh' } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight -WarningAction SilentlyContinue | Out-Null
 
@@ -1614,7 +1724,7 @@ Describe "Install-Account" {
             '"hello"' | Set-Content (Join-Path $h 'settings.json')
             @{ effortLevel = 'xhigh' } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
-            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+            $out = & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight *>&1 | Out-String
 
@@ -1651,7 +1761,7 @@ Describe "Install-Account" {
     It "reports the mixed-state warning when the settings.json write fails, not just the tree copy" {
         $p = New-StandInPayload; $h = New-StandInClaudeHome
         try {
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight | Out-Null
             $liveSettings = Join-Path $h 'settings.json'
             $shareMode = if ($IsWindows) { 'Read' } else { 'None' }
@@ -1660,7 +1770,7 @@ Describe "Install-Account" {
             $warnings = $null
             try {
                 try {
-                    & $script:install -PayloadRoot $p -ClaudeHome $h `
+                    & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                         -ClaudeJson (Join-Path $h 'claude.json') -SkipPreflight `
                         -WarningVariable warnings -WarningAction SilentlyContinue *>$null
                 }
@@ -1685,7 +1795,7 @@ Describe "Install-Account" {
             'not valid { json' | Set-Content (Join-Path $h 'settings.json')
             @{ effortLevel = 'xhigh' } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
-            { & $script:install -PayloadRoot $p -ClaudeHome $h `
+            { & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                     -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                     -SkipPreflight -WarningAction SilentlyContinue | Out-Null } | Should -Not -Throw
 
@@ -1704,7 +1814,7 @@ Describe "Install-Account" {
         try {
             'not valid { json' | Set-Content (Join-Path $h 'settings.json')
 
-            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+            $out = & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight -WhatIf *>&1 | Out-String
 
@@ -1725,7 +1835,7 @@ Describe "Install-Account" {
             '{"env":{"X":"{{MYSTERY}}"}}' | Set-Content (Join-Path $h 'settings.json')
             @{ effortLevel = 'xhigh' } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
-            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+            $out = & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight *>&1 | Out-String
 
@@ -1741,7 +1851,7 @@ Describe "Install-Account" {
         try {
             @{ env = @{ X = '{{MYSTERY}}' } } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
-            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+            $out = & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight *>&1 | Out-String
 
@@ -1761,7 +1871,7 @@ Describe "Install-Account" {
         try {
             @{ env = @{ X = '{{PROJECT}}' } } | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
-            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+            $out = & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight *>&1 | Out-String
 
@@ -1785,7 +1895,7 @@ Describe "Install-Account" {
             'Core repo: `{{CORE_REPO}}`. Fill in `{{PROJECT}}` placeholders after install.' |
                 Set-Content (Join-Path $p 'rules/harness-core.md')
 
-            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+            $out = & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight *>&1 | Out-String
 
@@ -1803,7 +1913,7 @@ Describe "Install-Account" {
             'Core repo: {{CORE_REPO}}. See {{RENAMED_TOKEN}} for details.' |
                 Set-Content (Join-Path $p 'rules/harness-core.md')
 
-            $out = & $script:install -PayloadRoot $p -ClaudeHome $h `
+            $out = & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight *>&1 | Out-String
 
@@ -1824,7 +1934,7 @@ Describe "Install-Account" {
                 Set-Content (Join-Path $p 'rules/harness-core.md')
 
             $warnings = $null
-            & $script:install -PayloadRoot $p -ClaudeHome $h `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
                 -ClaudeJson (Join-Path $h 'claude.json') -CoreRepo 'C:/projects/agent-harness-core' `
                 -SkipPreflight -WarningVariable warnings -WarningAction SilentlyContinue *>$null
 
@@ -1873,7 +1983,7 @@ Describe "Install-Account" {
     It "refuses an explicitly empty -ClaudeJson instead of falling back to the live default" {
         $p = New-StandInPayload; $h = New-StandInClaudeHome
         try {
-            { & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson '' -SkipPreflight } |
+            { & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h -ClaudeJson '' -SkipPreflight } |
                 Should -Throw -ExpectedMessage "*-ClaudeJson was passed empty*"
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
@@ -1892,7 +2002,7 @@ Describe "Install-Account" {
         $savedLoc = Get-Location
         try {
             Set-Location $h
-            & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson 'claude.json' -SkipPreflight | Out-Null
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h -ClaudeJson 'claude.json' -SkipPreflight | Out-Null
             $j = Get-Content (Join-Path $h 'claude.json') -Raw | ConvertFrom-Json
             $j.mcpServers.acme.command | Should -Be 'uvx'
         }
@@ -1915,7 +2025,7 @@ Describe "Install-Account" {
                     acme = @{ type = 'stdio'; command = 'uvx'; args = @('acme-mcp'); env = @{} } } } |
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
 
-            & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
                 -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight | Out-Null
 
             $j = Get-Content $cj -Raw | ConvertFrom-Json
@@ -1943,7 +2053,7 @@ Describe "Install-Account" {
                         env = @{ HOME_DIR = '{{CLAUDE_HOME}}' } } } } |
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
 
-            & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
                 -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight | Out-Null
 
             $j = Get-Content $cj -Raw | ConvertFrom-Json
@@ -1972,7 +2082,7 @@ Describe "Install-Account" {
                     acme = @{ type = 'stdio'; command = 'uvx'; args = @('acme-mcp'); env = @{} } } } |
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
 
-            & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
                 -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight | Out-Null
 
             $j = Get-Content $cj -Raw | ConvertFrom-Json
@@ -1998,7 +2108,7 @@ Describe "Install-Account" {
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
             $before = (Get-Item $cj).LastWriteTimeUtc
 
-            & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
                 -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight | Out-Null
 
             (Get-Item $cj).LastWriteTimeUtc | Should -Be $before
@@ -2031,7 +2141,7 @@ Describe "Install-Account" {
             $warnings = $null
             try {
                 try {
-                    & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
+                    & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
                         -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight `
                         -WarningVariable warnings -WarningAction SilentlyContinue *>$null
                 }
@@ -2057,7 +2167,7 @@ Describe "Install-Account" {
             @{ mcpServers = @{ acme = @{ type = 'stdio'; command = 'uvx'; args = @('acme-mcp'); env = @{} } } } |
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
 
-            $out = & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
+            $out = & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
                 -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight *>&1 | Out-String
 
             $out | Should -Match 'mcpServers.*not a JSON object'
@@ -2082,7 +2192,7 @@ Describe "Install-Account" {
             @{ mcpServers = @{ acme = @{ type = 'stdio'; command = 'uvx'; args = @('acme-mcp'); env = @{} } } } |
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
 
-            $out = & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
+            $out = & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
                 -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight *>&1 | Out-String
 
             $out | Should -Match 'mcpServers.*not a JSON object'
@@ -2105,7 +2215,7 @@ Describe "Install-Account" {
             @{ mcpServers = @{ acme = @{ type = 'stdio'; command = 'uvx'; args = @('acme-mcp'); env = @{} } } } |
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
 
-            $out = & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
+            $out = & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
                 -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight -WhatIf *>&1 | Out-String
 
             $out | Should -Match 'mcpServers: 1 added \(acme\) \(dry run\)'
@@ -2132,13 +2242,13 @@ Describe "Install-Account" {
                 # filter drops on a Linux target, so a host-defaulted run has nothing to hand-fix.
                 CoreRepo = 'C:/projects/agent-harness-core'; NpmGlobal = 'C:/npm'; TargetIsWindows = $true
             }
-            & $script:install @args -SkipPreflight | Out-Null
+            & $script:install @script:dep @args -SkipPreflight | Out-Null
 
             $j = Get-Content $cj -Raw | ConvertFrom-Json
             $j.mcpServers.'1password'.command = '/usr/local/bin/op-mcp'
             $j | ConvertTo-Json -Depth 20 | Set-Content $cj
 
-            & $script:install @args -SkipPreflight | Out-Null
+            & $script:install @script:dep @args -SkipPreflight | Out-Null
             $j2 = Get-Content $cj -Raw | ConvertFrom-Json
             $j2.mcpServers.'1password'.command | Should -Be '/usr/local/bin/op-mcp'
         }
@@ -2168,7 +2278,7 @@ Describe "Install-Account" {
                                     shell = 'powershell' }) }) } } |
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'settings.account.json')
 
-            $out = & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
+            $out = & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
                 -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal '/usr/lib/node_modules' `
                 -TargetIsWindows:$true -SkipPreflight *>&1 | Out-String
 
@@ -2236,7 +2346,7 @@ Describe "Install-Account" {
                         acme = @{ type = 'stdio'; command = 'uvx'
                             args = @('--from', 'git+https://example.invalid/acme_mcp', 'acme-mcp'); env = @{} } } } |
                     ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
-                $out = & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
+                $out = & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
                     -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
                     -TargetIsWindows:$Windows -SkipPreflight *>&1 | Out-String
                 $servers = (Get-Content $cj -Raw | ConvertFrom-Json).mcpServers
@@ -2271,7 +2381,7 @@ Describe "Install-Account" {
             @{ mcpServers = @{ wsl = @{ type = 'stdio'; command = 'wsl'
                         args = @('-e', 'C:\Users\user\x.sh'); env = @{} } } } |
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
-            & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
+            & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
                 -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -TargetIsWindows:$true -SkipPreflight | Out-Null
             Test-Path -LiteralPath (Join-Path $h 'rules/security.md') | Should -BeTrue
             (Get-Content $cj -Raw | ConvertFrom-Json).mcpServers.wsl.command | Should -Be 'wsl'
@@ -2295,7 +2405,7 @@ Describe "Install-Account" {
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
 
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
-            $out = & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
+            $out = & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
                 -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal 'C:/npm' -SkipPreflight *>&1 | Out-String
             $sw.Stop()
 
@@ -2332,7 +2442,7 @@ Describe "Install-Account" {
                         args = @('-e', '/home/wsluser/code-context-mcp.sh'); env = @{} } } } |
                 ConvertTo-Json -Depth 20 | Set-Content (Join-Path $p 'mcp-servers.json')
 
-            $out = & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
+            $out = & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h -ClaudeJson $cj `
                 -CoreRepo 'C:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
                 -TargetIsWindows:$true -SkipPreflight -WhatIf *>&1 | Out-String
 
@@ -2460,7 +2570,7 @@ exit 0
             # and {{HOME_SLUG}} to values the canonical fixture never contained, and the second
             # export has nothing to fold back: the two payloads then differ on three files for
             # a reason that has nothing to do with the separator handling under test.
-            & $script:install -PayloadRoot $out1 -ClaudeHome (Join-Path $canonHome '.claude') `
+            & $script:install @script:dep -PayloadRoot $out1 -ClaudeHome (Join-Path $canonHome '.claude') `
                 -ClaudeJson (Join-Path $canonHome '.claude.json') `
                 -CoreRepo 'C:\projects\agent-harness-core' -NpmGlobal 'C:/npm/node_modules' `
                 -VaultPath $a.VaultPath -HomeSlug $a.HomeSlug `
@@ -2493,7 +2603,7 @@ exit 0
             & $script:export @a | Out-Null
 
             $freshClaude = Join-Path $fresh '.claude'
-            & $script:install -PayloadRoot $out -ClaudeHome $freshClaude `
+            & $script:install @script:dep -PayloadRoot $out -ClaudeHome $freshClaude `
                 -ClaudeJson (Join-Path $fresh '.claude.json') `
                 -CoreRepo $script:repoRoot -NpmGlobal 'C:/npm/node_modules' `
                 -TargetIsWindows:$true -SkipPreflight | Out-Null

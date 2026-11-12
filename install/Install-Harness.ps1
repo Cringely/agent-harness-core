@@ -202,8 +202,26 @@
     A default length budget in words for the project's deliverables, from 1 to 100000.
     0 clears it, which records null. Omitted, the recorded value stays, and a project with
     none recorded has no budget. Install runs only.
+
+.PARAMETER InstallDeps
+    Run the pinned install command for each missing dependency core/claude/deps.json declares
+    for the kernel and this project's layers, then re-probe it. Without it the preflight only
+    reports: a missing hard dependency refuses the install before its first write, and a missing
+    optional one warns. Each command goes through ShouldProcess, so -WhatIf prints it and runs
+    nothing. Install runs only.
+
+.PARAMETER DepsManifestPath
+    Test seam. The dependency manifest to read in place of core/claude/deps.json.
+
+.PARAMETER DepsRunner
+    Test seam. Replaces the process runner every probe and install goes through, so a test never
+    probes or installs a real tool.
+
+.PARAMETER WhatIf
+    Runs the dependency preflight, prints each pinned command -InstallDeps would run, and stops
+    before the first write with 'WhatIf: stopped before writing'.
 #>
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess)]
 param(
     [Parameter(Mandatory = $true)]
     [string]$Target,
@@ -233,10 +251,20 @@ param(
     [string]$Audience,
 
     [ValidateRange(0, 100000)]
-    [int]$LengthBudget
+    [int]$LengthBudget,
+
+    [switch]$InstallDeps,
+
+    [string]$DepsManifestPath,
+
+    [scriptblock]$DepsRunner
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Deps.ps1')
+# Captured here, because the ShouldInstall callback runs inside Deps.ps1's functions, where a
+# bare $PSCmdlet could resolve to another command's.
+$script:harnessCmdlet = $PSCmdlet
 
 # -Quiet reaches nothing outside the -Audit block, so on an install run it is a switch that
 # silently does nothing. Rejected the simpler alternative of ignoring it: an operator who typed
@@ -256,7 +284,7 @@ foreach ($flagName in @('Accept', 'Unaccept', 'Prune')) {
     if (-not $standaloneCommand -and $PSBoundParameters.ContainsKey($flagName)) { $standaloneCommand = $flagName }
 }
 if ($standaloneCommand) {
-    foreach ($flagName in @('Layers', 'StatusCadence', 'Audience', 'LengthBudget')) {
+    foreach ($flagName in @('Layers', 'StatusCadence', 'Audience', 'LengthBudget', 'InstallDeps')) {
         if ($PSBoundParameters.ContainsKey($flagName)) {
             throw "-$flagName applies to an install run only. -$standaloneCommand reads the layers and settings the manifest records and never changes them. Re-run the installer without -$standaloneCommand to change it."
         }
@@ -1904,22 +1932,6 @@ if ($settingsParseError) {
     throw "Target settings.json does not parse as JSON: $settingsPath. Merging the hook registrations into it would destroy whatever it holds, so nothing was copied and the manifest was not written. Fix or move that file, then re-run. Parser reported: $settingsParseError"
 }
 
-# Prerequisite probe. Every TypeScript hook this installs is registered below as a bare
-# `bun ...` command, so on a machine without bun the layer installs looking complete and the
-# gates never run. README.md's install section is the only place that has said so, and a
-# documented prerequisite nothing checks is a prerequisite that gets skipped.
-#   Warns rather than throws: installing the layer before installing bun is legitimate (a fresh
-# clone being equipped ahead of its toolchain), and nothing this run writes is wrong without it:
-# the registrations are correct either way, so bun arriving later needs no re-install.
-#   Only bun is probed, not the whole prerequisite list Install-Account.ps1 warns about. A vale
-# probe would be noise, since its consumer degrades to a documented advisory skip by design; an
-# sh probe would rest on an unverified claim about how Claude Code resolves `sh` for a hook
-# command, which is not resolved against this script's PATH. Widen this when either turns into
-# a measured failure rather than a guess.
-if (-not (Get-Command bun -ErrorAction SilentlyContinue)) {
-    Write-Warning "bun is not on PATH. The TypeScript hooks installed below are registered as bare 'bun' commands, so the gates stop enforcing and Claude Code surfaces an error notice on stderr per dispatch. Install bun to make them enforce; the registrations this run writes are already correct, so no re-install is needed."
-}
-
 # Sidecar decision, ahead of every write this install makes (round-4 C). Round 3 threw the R2-2
 # refusal from the sidecar write at the bottom of the script, after the copy loops below had
 # already updated agents, hooks and guardrails, so a refused run left a half-updated layer while
@@ -1941,6 +1953,28 @@ if ($PSBoundParameters.ContainsKey('LengthBudget')) {
 }
 $projectSettings = Resolve-ProjectSettings -Recorded $manifest['settings'] -Defaults (Get-DefaultProjectSettings -Layers $projectLayers) -Bound $boundSettings
 $includeCeremoniesFlag = [bool]$IncludeCeremonies
+
+# Dependency preflight, after every refusal above (the sidecar's included) and before the first
+# write, so a refusal here leaves the target untouched and -InstallDeps never installs anything
+# for a run that was going to refuse anyway. It replaces a bun-only probe that warned and
+# installed regardless: every TypeScript gate is registered as a bare bun command, so a layer
+# installed without bun looked complete while each gate failed open. -Audit, -Accept, -Unaccept
+# and -Prune returned above and never reach it.
+$depsPath = if ($DepsManifestPath) { $DepsManifestPath } else { Join-Path $coreDir 'deps.json' }
+$depsManifest = Get-DepsManifest -Path $depsPath
+$depsRunnerBlock = if ($DepsRunner) { $DepsRunner } else { ${function:Invoke-DefaultDepsRunner} }
+$depsShouldInstall = { param($What, $Action) $script:harnessCmdlet.ShouldProcess($What, $Action) }
+$onWindowsHost = ($PSVersionTable.PSVersion.Major -lt 6) -or $IsWindows
+Invoke-DepsPreflight -Manifest $depsManifest -Layers ([string[]](@('kernel') + @($projectLayers))) -IsWindows $onWindowsHost `
+    -InstallDeps ([bool]$InstallDeps) -Runner $depsRunnerBlock -ShouldInstall $depsShouldInstall
+
+# A dry run stops here. Every write below is either a built-in cmdlet that would honour -WhatIf on
+# its own or a native command (git config core.hooksPath, chmod) that would not, and stopping
+# before all of them is the only way the second kind stays dry.
+if ($WhatIfPreference) {
+    Write-Host 'WhatIf: stopped before writing'
+    return
+}
 
 # Created here, after the decision above, not at the top of the script: a refused run must not
 # leave new directories behind either. Only a plain install reaches this point. -Accept, -Unaccept,

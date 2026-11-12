@@ -65,8 +65,9 @@ jobs:
         with:
           persist-credentials: false
 
-      # Install-Harness.Tests.ps1 has a negative control asserting no "bun is not
-      # on PATH" warning, so bun must be present, pinned the same as the bun job.
+      # Pinned the same as the bun job. The installer suites no longer need it:
+      # their dependency preflight runs through a stub runner that reports bun
+      # present or absent as each case requires, so no case probes the real one.
       - name: Set up bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -122,8 +123,9 @@ jobs:
         with:
           persist-credentials: false
 
-      # Install-Harness.Tests.ps1 has a negative control asserting no "bun is not
-      # on PATH" warning, so bun must be present, pinned the same as the bun job.
+      # Pinned the same as the bun job. The installer suites no longer need it:
+      # their dependency preflight runs through a stub runner that reports bun
+      # present or absent as each case requires, so no case probes the real one.
       - name: Set up bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
