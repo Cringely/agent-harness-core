@@ -4,9 +4,9 @@
 // filesystem, and no agent definitions on disk.
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   WRITE_SCOPE_GATE_VERSION,
   decide,
@@ -37,12 +37,20 @@ const CWD = "/home/runner/project";
 const BS = String.fromCharCode(92);
 const NL = String.fromCharCode(10);
 
+// A backslash separates path segments only on Windows. On POSIX it is an ordinary file-name
+// character, so a Windows-style literal there names ONE file in the working directory. Fixtures
+// that mean "an absolute path on this host" are therefore spelled per platform, and the tests that
+// pin the literal's meaning on each platform say so explicitly.
+const WIN = process.platform === "win32";
+const hostPath = (win: string, posix: string): string => (WIN ? win : posix);
+
 describe("inScratch() — path classification", () => {
   test.each([
     "/tmp/claude/proj/sess/scratchpad/report.md",
-    "C:\\Users\\me\\AppData\\Local\\Temp\\claude\\proj\\sess\\scratchpad\\findings.md",
-    "/home/runner/project/.scratch/notes.md",
-    "scratchpad/relative.md",
+    hostPath(
+      "C:\\Users\\me\\AppData\\Local\\Temp\\claude\\proj\\sess\\scratchpad\\findings.md",
+      "/Users/me/AppData/Local/Temp/claude/proj/sess/scratchpad/findings.md",
+    ),
     "/tmp/SCRATCHPAD/case-insensitive.md",
   ])("in scope: %s", (p) => {
     expect(inScratch(p, CWD, CWD)).toBe(true);
@@ -50,13 +58,23 @@ describe("inScratch() — path classification", () => {
 
   test.each([
     "/home/runner/project/src/index.ts",
-    "C:\\Users\\me\\.claude\\rules\\agent-usage.md",
+    hostPath("C:\\Users\\me\\.claude\\rules\\agent-usage.md", "/Users/me/.claude/rules/agent-usage.md"),
     "docs/STATE.md",
     "/etc/hosts",
     // Traversal out of a scratch dir resolves away from it, so it must not pass.
     "/tmp/scratchpad/../../etc/passwd",
     // A file merely NAMED scratchpad is not a scratch directory.
     "/home/runner/project/scratchpad.md",
+    // Inside the project only `.claude/scratch` is scratch. Every other scratch-named folder is a
+    // tracked folder the main session may load from, `.claude/skills/scratch/SKILL.md` among them.
+    "/home/runner/project/.scratch/notes.md",
+    "/home/runner/project/scratchpad/relative.md",
+    "scratchpad/relative.md",
+    "/home/runner/project/.claude/skills/scratch/SKILL.md",
+    "/home/runner/project/.claude/commands/scratch/x.md",
+    "/home/runner/project/.claude/rules/scratch/x.md",
+    "/home/runner/project/scratch/CLAUDE.md",
+    "/home/runner/project/src/scratch/a.ts",
   ])("out of scope: %s", (p) => {
     expect(inScratch(p, CWD, CWD)).toBe(false);
   });
@@ -66,7 +84,24 @@ describe("inScratch() — path classification", () => {
   // the one scratch directory the harness ships.
   test("the installer-created .claude/scratch/ is in scope", () => {
     expect(inScratch("/home/runner/project/.claude/scratch/report.md", CWD, CWD)).toBe(true);
-    expect(inScratch("C:\\repo\\.claude\\scratch\\report.md", CWD, CWD)).toBe(true);
+    expect(inScratch(hostPath("C:\\repo\\.claude\\scratch\\report.md", "/repo/.claude/scratch/report.md"), CWD, CWD)).toBe(true);
+  });
+
+  // The same literal means different things per platform, and the gate must follow the host. On
+  // Windows the backslashes separate segments and the path is a scratch folder outside the project.
+  // On POSIX it is one file name created in the working directory, which is the project, so it is
+  // not scratch. Splitting on backslashes on POSIX would call it scratch.
+  test("a Windows-style literal is read with the host's separator rules", () => {
+    expect(inScratch("C:\\repo\\.claude\\scratch\\report.md", CWD, CWD)).toBe(WIN);
+  });
+
+  // A backslash that is not a separator must not let a name pose as a traversal or as a scratch
+  // directory on POSIX. Each of these is one file name there, in a directory that is not scratch.
+  test.each([
+    ["a dot-dot spelled with backslashes after a scratch name", "/home/runner/project/.claude/scratch\\..\\x.md"],
+    ["a scratch name glued to a file name with a backslash", "/tmp/scratchpad\\..\\x.md"],
+  ])("%s is not scratch on any host", (_label, p) => {
+    expect(inScratch(p, CWD, CWD)).toBe(false);
   });
 
   // Widening the segment set to accept `scratch` must not drag the rest of
@@ -76,7 +111,9 @@ describe("inScratch() — path classification", () => {
   });
 
   test("relative paths resolve against cwd, not the filesystem root", () => {
-    expect(inScratch("../.scratch/x.md", "/home/runner/project/sub", CWD)).toBe(true);
+    expect(inScratch("../../scratchpad/x.md", "/home/runner/project/sub", CWD)).toBe(true);
+    expect(inScratch("../.claude/scratch/x.md", "/home/runner/project/sub", CWD)).toBe(true);
+    expect(inScratch("../.scratch/x.md", "/home/runner/project/sub", CWD)).toBe(false);
     expect(inScratch("../src/x.ts", "/home/runner/project/sub", CWD)).toBe(false);
   });
 });
@@ -95,9 +132,10 @@ describe("inScratch(): a scratch-named ancestor of the project is not scratch", 
     expect(inScratch("/home/x/scratch/other/f.md", PROJ, PROJ)).toBe(false);
   });
 
-  test("a scratch folder inside the project still counts", () => {
+  test("inside the project only .claude/scratch counts", () => {
     expect(inScratch(`${PROJ}/.claude/scratch/r.md`, PROJ, PROJ)).toBe(true);
-    expect(inScratch(`${PROJ}/scratchpad/r.md`, PROJ, PROJ)).toBe(true);
+    expect(inScratch(`${PROJ}/scratchpad/r.md`, PROJ, PROJ)).toBe(false);
+    expect(inScratch(`${PROJ}/.scratch/r.md`, PROJ, PROJ)).toBe(false);
   });
 
   test("a scratch directory unrelated to the project still counts", () => {
@@ -134,6 +172,222 @@ describe("inScratch(): a scratch-named ancestor of the project is not scratch", 
 
   test("the gate version marks this fix", () => {
     expect(WRITE_SCOPE_GATE_VERSION).toBe(2);
+  });
+});
+
+describe("decide() — scratch-named folders inside the project instruction paths are refused", () => {
+  test.each([
+    ".claude/skills/scratch/SKILL.md",
+    ".claude/commands/scratch/x.md",
+    ".claude/rules/scratch/x.md",
+    "scratch/CLAUDE.md",
+  ])("a relative write to %s is denied", (rel) => {
+    const verdict = decide("scratch", rel, CWD, CWD);
+    expect(verdict.action).toBe("deny");
+  });
+
+  test("the drop box under .claude/scratch is still allowed", () => {
+    expect(decide("scratch", ".claude/scratch/r.md", CWD, CWD)).toEqual({ action: "allow" });
+  });
+});
+
+// Real directories: the gate canonicalises the project root and the target, so a link or short-name
+// alias into the project is seen for what it is. Each case would be allowed by a textual comparison.
+const realTmp = realpathSync.native(tmpdir());
+const linkRoot = mkdtempSync(join(realTmp, "write-scope-link-"));
+afterAll(() => {
+  rmSync(linkRoot, { recursive: true, force: true });
+});
+
+describe("inScratch(): an aliased spelling of a project path is never scratch", () => {
+  // The project sits under a scratch-named ancestor, so its real spelling is denied by containment.
+  // A link standing in for an ancestor BEFORE that segment (the Documents and Settings junction to
+  // Users is the Windows case, /tmp to /private/tmp the macOS one) keeps the scratch segment in the
+  // path but changes the text before it. A textual comparison sees an unrelated scratch folder.
+  const real = join(linkRoot, "real");
+  const proj = join(real, "scratch", "repo");
+  mkdirSync(join(proj, "src"), { recursive: true });
+  mkdirSync(join(proj, ".claude", "scratch"), { recursive: true });
+
+  const viaLink = join(linkRoot, "via-link");
+  let linked = true;
+  try {
+    symlinkSync(real, viaLink, "junction");
+  } catch {
+    linked = false;
+  }
+
+  test("the real spelling of a source file is denied", () => {
+    expect(inScratch(join(proj, "src", "a.ts"), proj, proj)).toBe(false);
+  });
+
+  test.skipIf(!linked)("the same file through a link standing in for an ancestor is denied", () => {
+    expect(inScratch(join(viaLink, "scratch", "repo", "src", "a.ts"), proj, proj)).toBe(false);
+  });
+
+  test.skipIf(!linked)("a project root given through the link is canonicalised, so its real files are still denied", () => {
+    const linkedProj = join(viaLink, "scratch", "repo");
+    expect(inScratch(join(proj, "src", "a.ts"), linkedProj, linkedProj)).toBe(false);
+  });
+
+  test.skipIf(!linked)("a link carrying a scratch-named segment into the project is not scratch", () => {
+    const scratchLink = join(linkRoot, "scratchpad");
+    symlinkSync(join(proj, "src"), scratchLink, "junction");
+    expect(inScratch(join(scratchLink, "new.ts"), proj, proj)).toBe(false);
+  });
+
+  // Outside the project the resolved path decides, whatever the spelling. A session scratchpad under
+  // a linked temp directory (macOS /var to /private/var) must keep working.
+  test.skipIf(!linked)("a scratchpad under a linked temp directory is scratch by either spelling", () => {
+    const tmpReal = join(linkRoot, "tmp-real");
+    const pad = join("claude", "sess", "scratchpad");
+    mkdirSync(join(tmpReal, pad), { recursive: true });
+    const tmpLink = join(linkRoot, "tmp-link");
+    symlinkSync(tmpReal, tmpLink, "junction");
+    expect(inScratch(join(tmpReal, pad, "r.md"), proj, proj)).toBe(true);
+    expect(inScratch(join(tmpLink, pad, "r.md"), proj, proj)).toBe(true);
+    expect(inScratch(join(tmpLink, pad, "new-dir", "r.md"), proj, proj)).toBe(true);
+  });
+
+  test.skipIf(!linked)("a scratch-named link to a folder that is not scratch is not scratch", () => {
+    const plain = join(linkRoot, "plain-target");
+    mkdirSync(plain, { recursive: true });
+    const named = join(linkRoot, "tmp-named", "scratchpad");
+    mkdirSync(dirname(named), { recursive: true });
+    symlinkSync(plain, named, "junction");
+    expect(inScratch(join(named, "f.md"), proj, proj)).toBe(false);
+  });
+
+  test.skipIf(!linked)("a project given by its link spelling allows its own .claude/scratch under that spelling", () => {
+    const linkedProj = join(viaLink, "scratch", "repo");
+    expect(inScratch(join(linkedProj, ".claude", "scratch", "r.md"), linkedProj, linkedProj)).toBe(true);
+    expect(inScratch(join(linkedProj, "src", "a.ts"), linkedProj, linkedProj)).toBe(false);
+  });
+
+  test.skipIf(!linked)("the project's .claude/scratch is allowed by its real spelling and denied through a link spelling", () => {
+    expect(inScratch(join(proj, ".claude", "scratch", "r.md"), proj, proj)).toBe(true);
+    expect(inScratch(join(viaLink, "scratch", "repo", ".claude", "scratch", "r.md"), proj, proj)).toBe(false);
+  });
+
+  test("a file that exists is canonicalised the same way as one that does not yet", () => {
+    writeFileSync(join(proj, ".claude", "scratch", "exists.md"), "x");
+    expect(inScratch(join(proj, ".claude", "scratch", "exists.md"), proj, proj)).toBe(true);
+    expect(inScratch(join(proj, ".claude", "scratch", "sub", "new.md"), proj, proj)).toBe(true);
+  });
+
+  // An 8.3 short name aliases a long one. Only a Windows volume with short names enabled has one,
+  // and the lookup is the same call the OS makes.
+  function shortPathOf(dir: string): string | null {
+    if (process.platform !== "win32") return null;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { dlopen, ptr } = require("bun:ffi");
+      const k = dlopen("kernel32.dll", { GetShortPathNameW: { args: ["ptr", "ptr", "u32"], returns: "u32" } });
+      const input = Buffer.from(dir + String.fromCharCode(0), "utf16le");
+      const out = Buffer.alloc(2048);
+      const n = k.symbols.GetShortPathNameW(ptr(input), ptr(out), 1024) as number;
+      const short = n > 0 ? out.toString("utf16le", 0, n * 2) : null;
+      return short !== null && short.toLowerCase() !== dir.toLowerCase() ? short : null;
+    } catch {
+      return null;
+    }
+  }
+  const longProject = join(linkRoot, "scratch", "a-long-project-name-for-short-alias");
+  mkdirSync(join(longProject, "src"), { recursive: true });
+  const shortProject = shortPathOf(longProject);
+
+  test.skipIf(shortProject === null)("an 8.3 short-name spelling of a project file is not scratch", () => {
+    expect(inScratch(join(longProject, "src", "a.ts"), longProject, longProject)).toBe(false);
+    expect(inScratch(join(shortProject!, "src", "a.ts"), longProject, longProject)).toBe(false);
+  });
+
+  test.skipIf(shortProject === null)("an 8.3 spelling of the scratch ancestor itself is not scratch", () => {
+    const shortRoot = shortPathOf(join(linkRoot, "scratch"));
+    expect(shortRoot).not.toBeNull();
+    expect(inScratch(join(shortRoot!, "a-long-project-name-for-short-alias", "src", "a.ts"), longProject, longProject)).toBe(false);
+  });
+
+  // An embedded NUL makes realpath throw something other than "absent". Each target is one the
+  // outside-the-project rule would accept if canonicalisation were skipped or its failure ignored,
+  // and each has a control with a resolvable twin that is accepted, so a pass here can only come
+  // from the failure being treated as "not scratch".
+  const NUL = String.fromCharCode(0);
+  test("a target the filesystem cannot canonicalise is not scratch", () => {
+    const outside = mkdtempSync(join(realTmp, "write-scope-nul-"));
+    try {
+      mkdirSync(join(outside, "scratchpad"));
+      expect(inScratch(join(outside, "scratchpad", "ok.md"), linkRoot, linkRoot)).toBe(true);
+      expect(inScratch(join(outside, "scratchpad", "bad" + NUL + ".md"), linkRoot, linkRoot)).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("a project root the filesystem cannot canonicalise makes every target not scratch", () => {
+    const outside = mkdtempSync(join(realTmp, "write-scope-nul-"));
+    try {
+      mkdirSync(join(outside, "scratchpad"));
+      const target = join(outside, "scratchpad", "ok.md");
+      expect(inScratch(target, linkRoot, linkRoot)).toBe(true);
+      expect(inScratch(target, linkRoot, linkRoot + NUL)).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("a dangling link in the path is not scratch, since where a write lands is unknown", () => {
+    const outside = mkdtempSync(join(realTmp, "write-scope-dangle-"));
+    try {
+      mkdirSync(join(outside, "scratchpad"));
+      let dangling = true;
+      try {
+        symlinkSync(join(outside, "nowhere"), join(outside, "scratchpad", "gap"), "junction");
+      } catch {
+        dangling = false;
+      }
+      if (dangling) {
+        expect(inScratch(join(outside, "scratchpad", "gap", "f.md"), linkRoot, linkRoot)).toBe(false);
+      }
+      expect(inScratch(join(outside, "scratchpad", "plain.md"), linkRoot, linkRoot)).toBe(true);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+});
+
+// A project whose root is a filesystem root splits into a path with an empty last segment unless the
+// producer drops it, and then no target is "inside" the project. Every instruction path below would
+// fall to the outside rule, where any scratch-named segment counts. The Windows spelling is built from
+// character codes: drive C, a colon and a backslash.
+describe("inScratch(): a project at a filesystem root still restricts scratch to .claude/scratch", () => {
+  const driveRoot = String.fromCharCode(67, 58, 92);
+  const roots: Array<[string, string]> = [["/", "/"]];
+  if (process.platform === "win32") roots.push(["C:" + BS, driveRoot]);
+  else roots.push(["the host root again", "/"]);
+
+  test.each(roots)("project root %p: instruction paths are not scratch", (_label, root) => {
+    for (const rel of [
+      ["scratch", "CLAUDE.md"],
+      [".claude", "skills", "scratch", "SKILL.md"],
+      [".claude", "commands", "scratch", "x.md"],
+      ["src", "scratchpad", "a.ts"],
+      [".scratch", "n.md"],
+    ]) {
+      const target = join(root, ...rel);
+      expect(inScratch(target, root, root)).toBe(false);
+      expect(decide("scratch", target, root, root).action).toBe("deny");
+    }
+  });
+
+  test.each(roots)("project root %p: .claude/scratch is still the drop box", (_label, root) => {
+    const target = join(root, ".claude", "scratch", "r.md");
+    expect(inScratch(target, root, root)).toBe(true);
+    expect(decide("scratch", target, root, root)).toEqual({ action: "allow" });
+  });
+
+  test.each(roots)("project root %p: a relative write resolves against the cwd", (_label, root) => {
+    expect(inScratch(join("scratch", "CLAUDE.md"), root, root)).toBe(false);
+    expect(inScratch(join(".claude", "scratch", "r.md"), root, root)).toBe(true);
   });
 });
 
@@ -295,6 +549,96 @@ describe("parseWriteScope() — frontmatter only, first key wins", () => {
   });
 });
 
+describe("parseWriteScope() — a fence is dashes plus ASCII spaces and tabs only", () => {
+  const NBSP = String.fromCharCode(0xa0);
+  const ZWNBSP = String.fromCharCode(0xfeff);
+  const N = String.fromCharCode(10);
+  const body = (open: string, close: string) => [open, "writeScope: scratch", close, "Body."].join(N);
+
+  test("trailing spaces and tabs are still a fence", () => {
+    expect(parseWriteScope(body("--- ", "---\t "))).toBe("scratch");
+  });
+
+  test.each([
+    ["a no-break space", NBSP],
+    ["a U+FEFF", ZWNBSP],
+  ])("%s after the opening fence is not a fence, so there is no frontmatter", (_label, ch) => {
+    expect(parseWriteScope(body("---" + ch, "---"))).toBeNull();
+  });
+
+  test.each([
+    ["a no-break space", NBSP],
+    ["a U+FEFF", ZWNBSP],
+  ])("%s after the closing fence is not a fence, so the block never closes", (_label, ch) => {
+    expect(parseWriteScope(body("---", "---" + ch))).toBeNull();
+  });
+});
+
+// The confinement side must over-detect. When the strict frontmatter parser cannot read the block
+// with confidence it returns null, and treating that as "undeclared" would lift the confinement the
+// definition asked for. readWriteScope falls back to a loose scan of the whole file for a writeScope
+// line (case-insensitive key, any position) and uses that value. The strict reading stays first.
+describe("readWriteScope() — an unreadable block that declares a scope is still confined", () => {
+  const NBSP = String.fromCharCode(0xa0);
+  const ZWNBSP = String.fromCharCode(0xfeff);
+  const N = String.fromCharCode(10);
+  const looseRoot = mkdtempSync(join(tmpdir(), "write-scope-loose-"));
+  const looseAgents = join(looseRoot, ".claude", "agents");
+  mkdirSync(looseAgents, { recursive: true });
+  afterAll(() => {
+    rmSync(looseRoot, { recursive: true, force: true });
+  });
+  function def(name: string, text: string) {
+    writeFileSync(join(looseAgents, name + ".md"), text);
+  }
+  def("nbsp-open", ["---" + NBSP, "name: x", "writeScope: scratch", "---", "Body."].join(N));
+  def("nbsp-close", ["---", "name: x", "writeScope: scratch", "---" + NBSP, "Body."].join(N));
+  def("zwnbsp-close", ["---", "name: x", "writeScope: scratch", "---" + ZWNBSP, "Body."].join(N));
+  def("unclosed", ["---", "name: x", "writeScope: scratch", "Body with no closing fence."].join(N));
+  def("bom-nbsp", ZWNBSP + ["---" + NBSP, "name: x", "writeScope: scratch", "---", "Body."].join(N));
+  def("loose-key-case", ["---", "name: x", "WriteScope: Scratch", "Body, no close."].join(N));
+  def("in-body", ["Just a body, no frontmatter.", "writeScope: scratch"].join(N));
+  def("late-in-file", ["---" + NBSP, "name: x", "x".repeat(5000), "writeScope: scratch", "---"].join(N));
+  // The strict reading wins whenever it finds a declaration.
+  def("strict-first", ["---", "writeScope: repo", "---", "writeScope: scratch"].join(N));
+  def("strict-repo-then-loose-scratch", ["---", "name: x", "writeScope: repo", "---", "Body.", "writeScope: scratch"].join(N));
+  // No declaration anywhere: stays undeclared, however broken the block is.
+  def("none-clean", ["---", "name: x", "tools: Read", "---", "Body."].join(N));
+  def("none-broken", ["---" + NBSP, "name: x", "tools: Read", "Body with no close."].join(N));
+  def("none-mentions-word", ["---", "name: x", "description: about write scope handling", "---", "Body."].join(N));
+
+  test.each([
+    ["nbsp-open", "an NBSP after the opening fence"],
+    ["nbsp-close", "an NBSP after the closing fence"],
+    ["zwnbsp-close", "a U+FEFF after the closing fence"],
+    ["unclosed", "no closing fence"],
+    ["bom-nbsp", "a BOM plus an NBSP-fenced opening"],
+    ["in-body", "a declaration with no frontmatter at all"],
+    ["late-in-file", "a declaration beyond the first 4096 characters"],
+  ])("%s (%s): confined as scratch", (name) => {
+    expect(readWriteScope(name, looseRoot)).toBe("scratch");
+  });
+
+  test("the key is matched case-insensitively and the value lowercased, so the gate's exact comparison still confines", () => {
+    expect(readWriteScope("loose-key-case", looseRoot)).toBe("scratch");
+    expect(decide(readWriteScope("loose-key-case", looseRoot), "/home/runner/project/src/a.ts", CWD, CWD).action).toBe("deny");
+  });
+
+  test("the strict reading stays first", () => {
+    expect(readWriteScope("strict-first", looseRoot)).toBe("repo");
+    expect(readWriteScope("strict-repo-then-loose-scratch", looseRoot)).toBe("repo");
+  });
+
+  test.each(["none-clean", "none-broken", "none-mentions-word"])("%s: no writeScope anywhere stays undeclared", (name) => {
+    expect(readWriteScope(name, looseRoot)).toBeNull();
+  });
+
+  test("an unreadable-block definition declaring scratch is denied a write outside scratch, end to end", () => {
+    const scope = readWriteScope("nbsp-open", looseRoot);
+    expect(decide(scope, join(looseRoot, "src", "a.ts"), looseRoot, looseRoot).action).toBe("deny");
+  });
+});
+
 describe("readWriteScope() — item 38: only a filename-safe agent name resolves a definition", () => {
   test("a normal agent name still resolves its definition", () => {
     expect(readWriteScope("valid-agent", scopeProjectDir)).toBe("scratch");
@@ -375,7 +719,7 @@ describe("spawned process — the deny path is observable", () => {
       JSON.stringify({
         agent_type: "scratch-spawn-agent",
         cwd: spawnScopeRoot,
-        tool_input: { file_path: join(spawnScopeRoot, "scratchpad", "report.md") },
+        tool_input: { file_path: join(spawnScopeRoot, ".claude", "scratch", "report.md") },
       }),
     );
     expect(result.exitCode).toBe(0);
@@ -428,7 +772,7 @@ describe("spawned process — scratch-named ancestor and NotebookEdit", () => {
       JSON.stringify({
         agent_type: "scratch-spawn-agent",
         cwd: spawnScopeRoot,
-        tool_input: { notebook_path: join(spawnScopeRoot, "scratchpad", "n.ipynb") },
+        tool_input: { notebook_path: join(spawnScopeRoot, ".claude", "scratch", "n.ipynb") },
       }),
       { CLAUDE_PROJECT_DIR: spawnScopeRoot },
     );

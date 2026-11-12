@@ -46,8 +46,19 @@
 //     scoped writes outside a deeper scratch folder. That is the fail-closed
 //     direction: the scoped agent can still write under `<project>/.claude/scratch`
 //     and in any scratch folder that does not contain the project root.
-//   - A tracked subfolder of the project named `scratch`, `scratchpad` or `.scratch`
-//     is still in scope, because it does not contain the project root.
+//   - Inside the project root only `<project>/.claude/scratch` is scratch. A folder
+//     named `scratch`, `scratchpad` or `.scratch` anywhere else in the project is
+//     tracked content the main session can load (`.claude/skills/scratch/SKILL.md`,
+//     `scratch/CLAUDE.md`), so a scoped agent is denied it.
+//   - The target and the project root are resolved with realpathSync.native first (the
+//     deepest existing ancestor, plus the tail that does not exist yet), and the
+//     decision is made on the resolved paths. A path that cannot be resolved and a
+//     dangling link are "not scratch". Inside the project, the spelling must also match
+//     the project's own: a junction, symlink or 8.3 short name that reaches a project
+//     file by another route is denied, since textual comparison alone let any such
+//     spelling make a scratch ancestor count again. Outside the project the resolved
+//     path decides, so a session scratchpad under a linked temp directory (macOS
+//     /var versus /private/var) still counts.
 //   - A long-path (backslash backslash question mark) or UNC (two leading separators)
 //     file path is never scratch. Those spellings alias a project file under a form
 //     that does not match the project's own segments, which would let a scratch
@@ -65,29 +76,31 @@
 // normal permission flow proceeds. Only a well-formed deny emits JSON. A
 // broken gate must never brick writing.
 //
-// Decision logic is the exported pure decide(); `bun test
-// test/agent-write-scope.test.ts` exercises it with no spawn and no filesystem.
+// Decision logic is the exported decide(). It touches the filesystem only through the
+// realpathSync and lstatSync calls in inScratch(), which resolve paths that need not exist, so
+// `bun test test/agent-write-scope.test.ts` exercises most of it with no spawn and no fixture.
+// The cases about links, short names and dangling links build real temporary directories.
 
-import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { isValidAgentName } from "./agent-name";
 import { parseWriteScope } from "./write-scope-parse";
 
 /**
- * Marks the scratch-parent fix and the shared writeScope parser. The worktree gate trusts a
- * definition's `writeScope` only when the installed scope gate is at this version or later. Bump it
- * whenever a change to this gate alters what `writeScope: scratch` confines.
+ * Marks the scratch-parent fix, the project-only drop box and the shared writeScope parser. Nothing
+ * reads it yet: a consumer that wants to rely on what `writeScope: scratch` confines (the worktree
+ * gate, once #312 redesigns that trust) can compare an installed copy against it. Bump it whenever
+ * a change to this gate alters what `writeScope: scratch` confines.
  */
 export const WRITE_SCOPE_GATE_VERSION = 2;
 
 /**
- * Directory names that count as scratch. A path is in scope if a segment matches and that
- * directory does not contain the project root (see the header).
- * `scratch` is here because it is the drop box `install/Install-Harness.ps1` creates
- * under a project's `.claude`; without it this gate denied the one scratch directory
- * the harness itself ships. Rejected matching the `.claude/scratch` suffix instead:
- * that adds a second matching rule beside segment matching to buy precision this gate
- * does not claim, per the coverage boundary above.
+ * Directory names that count as scratch OUTSIDE the project root: a path is in scope if a segment
+ * matches and that directory does not contain the project root (see the header). Inside the
+ * project root these names mean nothing. There the only scratch folder is `<project>/.claude/scratch`,
+ * the drop box `install/Install-Harness.ps1` creates, matched by its exact location rather than by
+ * name, because a scratch-named folder elsewhere in the project is tracked content the main session
+ * can load.
  */
 const SCRATCH_SEGMENTS = new Set(["scratchpad", ".scratch", "scratch"]);
 
@@ -97,11 +110,72 @@ const ALIASED_PREFIX = /^[\\/]{2}/;
 export type Decision = { action: "allow" } | { action: "deny"; reason: string };
 
 /**
- * Is `filePath` inside a scratch directory? Resolved against `cwd` when
- * relative, so a bare `../../etc/hosts` cannot slip through as "not absolute".
+ * The real location of `p`: `realpathSync.native` of its deepest existing ancestor, with the
+ * not-yet-existing tail appended. A write target usually does not exist yet, so the file itself
+ * cannot be resolved. Throws on anything but plain absence, and also on a dangling link, because a
+ * write through one lands somewhere this cannot know.
+ */
+function canonicalize(p: string): string {
+  let head = p;
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      const real = realpathSync.native(head);
+      return tail.length === 0 ? real : join(real, ...tail.reverse());
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw err;
+      let linkExists = true;
+      try {
+        lstatSync(head);
+      } catch {
+        linkExists = false;
+      }
+      if (linkExists) throw err; // present but unresolvable: a dangling link
+      const parent = dirname(head);
+      if (parent === head) throw err;
+      tail.push(basename(head));
+      head = parent;
+    }
+  }
+}
+
+/**
+ * Segment separators on this host. A backslash separates segments only on Windows. On POSIX it is
+ * an ordinary file-name character, so splitting on it there would read the single file name
+ * `scratch\..\x.md` as a scratch directory followed by a traversal, and call a file that lands in
+ * `.claude` scratch. Matching what the filesystem will do is the whole point of comparing segments.
+ */
+const SEPARATORS = process.platform === "win32" ? /[\\/]+/ : /\/+/;
+
+/**
+ * Lowercased segments of a resolved path, without a trailing empty one. A filesystem root splits as
+ * `["", ""]` for `/` and `["c:", ""]` for `C:\`, and with that last empty segment kept, no file
+ * path starts with the project's segments, so every target would read as outside a project at a
+ * root. A resolved file path never ends in a separator, so only a root is affected.
+ */
+function segmentsOf(p: string): string[] {
+  const parts = p.split(SEPARATORS).map((s) => s.toLowerCase());
+  while (parts.length > 1 && parts[parts.length - 1] === "") parts.pop();
+  return parts;
+}
+const startsWith = (a: string[], b: string[]): boolean => a.length >= b.length && b.every((s, i) => a[i] === s);
+
+/**
+ * Is `filePath` a place a scratch-scoped agent may write? Resolved against `cwd` when relative, so
+ * a bare `../../etc/hosts` cannot slip through as "not absolute".
  *
- * A scratch-named segment counts only when the project's own segments do not start with the file's
- * segments up to and including it, i.e. when that directory does not contain the project root.
+ * Both the target and the project root are canonicalised first (see canonicalize), and failing to
+ * canonicalise is "not scratch". The decision is then made on the canonical paths:
+ *   - Inside the project root, only `<project>/.claude/scratch` is scratch. Any other scratch-named
+ *     folder there is tracked content the main session can load (`.claude/skills/scratch/SKILL.md`,
+ *     `scratch/CLAUDE.md`), so a write to it is refused. The spelling used must also lead to that
+ *     folder through the project's own path, resolved or as given. A junction, symlink or 8.3 short
+ *     name that reaches it by another route is a deny, not an unrelated folder.
+ *   - Outside the project root, a scratch-named segment of the canonical path counts only when that
+ *     directory does not contain the project root. The spelling does not matter here, so a
+ *     scratchpad under a linked temp directory (macOS `/var` to `/private/var`) is still scratch,
+ *     and a scratch-named link to a folder that is not scratch is not.
  * Compared lowercased on every platform: case-insensitive containment can only add denies.
  */
 export function inScratch(filePath: string, cwd: string, projectDir: string): boolean {
@@ -109,20 +183,38 @@ export function inScratch(filePath: string, cwd: string, projectDir: string): bo
   // Long-path and UNC spellings alias a path the segment comparison below cannot match. Checked on
   // the raw input and on the resolved form, since a relative path can inherit a UNC cwd.
   if (ALIASED_PREFIX.test(filePath) || ALIASED_PREFIX.test(abs)) return false;
-  const segments = abs.split(/[\\/]+/).map((s) => s.toLowerCase());
-  const project = resolve(projectDir)
-    .split(/[\\/]+/)
-    .map((s) => s.toLowerCase());
-  return segments.some(
-    (segment, i) =>
-      SCRATCH_SEGMENTS.has(segment) &&
-      !(project.length > i && segments.slice(0, i + 1).every((s, j) => s === project[j])),
-  );
+  let canonicalAbs: string;
+  let canonicalProject: string;
+  try {
+    canonicalAbs = canonicalize(abs);
+    canonicalProject = canonicalize(resolve(projectDir));
+  } catch {
+    return false;
+  }
+  const raw = segmentsOf(abs);
+  const real = segmentsOf(canonicalAbs);
+  const project = segmentsOf(canonicalProject);
+  if (startsWith(real, project)) {
+    // Inside the project the route taken must be the project's own, either resolved or as the
+    // project was given. A link standing in for an ancestor of the project matches neither.
+    const dropBox = [...project, ".claude", "scratch"];
+    const givenDropBox = [...segmentsOf(resolve(projectDir)), ".claude", "scratch"];
+    return (
+      real.length > dropBox.length &&
+      startsWith(real, dropBox) &&
+      (startsWith(raw, dropBox) || startsWith(raw, givenDropBox))
+    );
+  }
+  return real.some((segment, i) => SCRATCH_SEGMENTS.has(segment) && !startsWith(project, real.slice(0, i + 1)));
 }
+
+/** A writeScope line anywhere in a file, key case-insensitive. Only the fallback in readWriteScope uses it. */
+const LOOSE_WRITE_SCOPE = /^[ \t]*writeScope[ \t]*:[ \t]*(\S+)[ \t]*\r?$/im;
 
 /**
  * The `writeScope` value declared in an agent definition's frontmatter, or null
- * when the file is absent, unreadable, or declares nothing. Null means this
+ * when the file is absent, unreadable, or declares nothing. When the frontmatter cannot be read
+ * with confidence, a loose scan of the whole file stands in (see the body). Null means this
  * hook has no opinion — absence of a declaration is not a reason to block.
  *
  * `agentType` is payload text and becomes a path one line down, so it is checked against the
@@ -138,7 +230,14 @@ export function readWriteScope(agentType: string, projectDir: string): string | 
   const defPath = join(projectDir, ".claude", "agents", `${agentType}.md`);
   if (!existsSync(defPath)) return null;
   try {
-    return parseWriteScope(readFileSync(defPath, "utf8"));
+    const text = readFileSync(defPath, "utf8");
+    // The strict frontmatter reading is the first choice. It returns null both for "no declaration"
+    // and for a block it cannot read with confidence (a fence followed by a no-break space, no
+    // closing fence), and the second must not lift the confinement the definition asked for. This
+    // gate decides what to confine, so it over-detects: when the strict reading finds nothing, a
+    // loose scan of the whole file for a writeScope line decides. The key is matched without regard
+    // to case, any position counts, and the value is lowercased so decide()'s exact comparison holds.
+    return parseWriteScope(text) ?? text.match(LOOSE_WRITE_SCOPE)?.[1]?.toLowerCase() ?? null;
   } catch {
     return null;
   }

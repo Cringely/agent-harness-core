@@ -1,6 +1,6 @@
 # Harness layering by project type: design
 
-Date: 2026-11-11. Status: design, awaiting operator approval. Source conversation: the 2026-11-11 decision pass and brainstorm. Evidence: issues #294 (physical workbench build, no git repo) and #308 (product and program analysis brief, no remote).
+Date: 2026-11-11. Status: design for #310. Source conversation: the 2026-11-11 decision pass and brainstorm. Evidence: issues #294 (physical workbench build, no git repo) and #308 (product and program analysis brief, no remote).
 
 ## Intent
 
@@ -97,8 +97,8 @@ Flips if: the operator wants a smaller kernel. The natural cut is items 5 and 7,
 
 ### Gates that check their own preconditions
 
-- **Worktree gate.** Today `core/claude/hooks/agent-worktree-gate.ts` reads no git state and does not look at an agent's `writeScope`. It denies a write-capable dispatch without isolation everywhere. Proposed: when the working directory is not a git repository, isolation is impossible, so the gate allows with a one-line note and offers `git init` (#294). When an agent type holds no shell and a declared write scope (for example `research-scout`, `writeScope: scratch`, enforced by `agent-write-scope.ts`), the gate treats it as a scoped writer, not a repo writer (#308 E1). The BASE-SHA rule merged for #36 still applies whenever isolation does.
-  - **Precondition (coordinator's call).** The gate trusts `writeScope` only after a known gap in `agent-write-scope.ts` is fixed: today any parent folder named `scratch`, `scratchpad` or `.scratch` puts every write in scope. Until that is fixed, the worktree gate is the backstop, and trusting `writeScope` first would let a code repo inside such a folder pass both gates, which the anti-goals forbid. The fix comes first in the plan.
+- **Worktree gate.** Today `core/claude/hooks/agent-worktree-gate.ts` reads no git state and does not look at an agent's `writeScope`. It denies a write-capable dispatch without isolation everywhere. Proposed: when the working directory is not a git repository, isolation is impossible, so the gate allows with a one-line note and offers `git init` (#294). An agent type that holds no shell and a declared write scope (for example `research-scout`, `writeScope: scratch`, enforced by `agent-write-scope.ts`) stays write-capable for this gate. Treating it as a scoped writer is deferred to a redesign in #312 (#308 E1). The BASE-SHA rule merged for #36 still applies whenever isolation does.
+  - **Hardening that stays.** `agent-write-scope.ts` no longer lets a scratch-named parent folder put every write in scope, and inside the project only `.claude/scratch` counts. Those fixes are independent of the deferred trust, and they are the precondition #312 builds on.
 - **Session close.** The push step is skipped, and says so, when `git remote` is empty (#308 E10, #294 had no repo at all). Today `change-management.md` "Session Close Protocol" step 2 is unconditional. This becomes rule text in the layer rules, not a new hook, so it needs no registration and does not meet the graduation bar for hooks. (Coordinator's call.)
 - **Worktree cleanup.** At session close, remove agent worktrees and report the count (#308 E3, nine orphans). This session also ended with dozens. A worktree is removed only when its tree is clean and it holds no commit unreachable from any other ref, so a worktree carrying unpushed work is never lost. (Coordinator's call.)
 
@@ -152,7 +152,7 @@ A setting that exists in both places (the operator's personal preference and a p
 
 | Item | Proposal | Where it lands | Note |
 |---|---|---|---|
-| #308 E1 | Write-scoped agents pass the worktree gate | Self-check | Reads the agent's existing `writeScope`, after the scratch-parent gap in `agent-write-scope.ts` is fixed. Two reports hit the gate. |
+| #308 E1 | Write-scoped agents pass the worktree gate | Deferred to #312 | Reading the agent's `writeScope` needs the two gates to agree on the definition, type name, project root and registration, and that redesign is tracked in #312. The scratch-parent gap in `agent-write-scope.ts` is fixed here as its precondition. Two reports hit the gate. |
 | #308 E2 | No isolation for single writers on analysis projects | Rejected as written | Covered by E1 plus the non-git check. A profile switch would weaken the gate on a code project mislabelled as analysis. |
 | #308 E3 | Remove unchanged worktrees at session close | Self-check | Kernel housekeeping. Clean tree and no unreachable commits only. |
 | #308 E4 | Heartbeat status | Layer (documents and physical) | Two reports. Code projects keep silent mid-run. |
@@ -168,7 +168,7 @@ A setting that exists in both places (the operator's personal preference and a p
 | #308 4.3 | Numbers ledger, decision log, human-check register templates | Decision log in kernel, the rest in the documents layer | |
 | #308 4.4 | Councils for method decisions, one reviewer for prose | Layer (documents) | |
 | #294 | Worktree gate on a non-git directory | Self-check | |
-| #294 | `web-fetch` treated as a writer | Self-check | Built-in type with only WebFetch. Same fix family as E1. Also hit in this session. |
+| #294 | `web-fetch` treated as a writer | Deferred to #312 | No source documents a grant for a built-in `web-fetch`, so the gate keeps treating it as an unknown type. Same fix family as E1. Also hit in this session. |
 | #294 | Model-tier hook demands xhigh effort | Bug, outside this design | The rule withdrew the mandate on 2026-09-05. A drift between hook and rule, filed separately. |
 | #294 | Offer `git init` | Layer (physical), and the self-check's note | |
 | #294 | Restate requirements in physical terms | Layer (physical) | |
