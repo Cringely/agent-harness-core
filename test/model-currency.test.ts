@@ -3,7 +3,7 @@
 // real claude CLI or the network: the runner and fetch are injected stubs.
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -98,6 +98,23 @@ describe("scanText", () => {
       { file: "b.md", line: 5, value: "haiku", kind: "alias" },
     ]);
   });
+  test("finds quoted YAML, trailing comments, bracket suffixes, JS object keys and quoted --model", () => {
+    const lines = [
+      'model: "haiku"', // model-currency: ignore
+      "model: sonnet # cheap tier", // model-currency: ignore
+      "model: opus[1m]", // model-currency: ignore
+      'agent({ model: "haiku", prompt })', // model-currency: ignore
+      "const o = { 'model': 'fable' };", // model-currency: ignore
+      'claude --model "opus" -p x', // model-currency: ignore
+      "claude --model opus[1m] -p x", // model-currency: ignore
+    ];
+    const f = scanText("c.ts", lines.join("\n"));
+    expect(f.map((x) => `${x.line}:${x.value}`)).toEqual(["1:haiku", "2:sonnet", "3:opus", "4:haiku", "5:fable", "6:opus", "7:opus"]);
+  });
+  test("does not read a longer key or a non-alias value as an alias", () => {
+    const lines = ['"default_model": "opus"', 'model: "claude-sonnet-5-5"', "model: sonnetish", "the model: sonnet is fine"]; // model-currency: ignore
+    expect(scanText("d.md", lines.join("\n")).map((x) => x.kind)).toEqual(["pin"]);
+  });
   test("handles CRLF text", () => {
     const f = scanText("c.md", "---\r\nmodel: sonnet\r\n---\r\n");
     expect(f).toEqual([{ file: "c.md", line: 2, value: "sonnet", kind: "alias" }]);
@@ -148,9 +165,15 @@ describe("classify", () => {
 
 describe("resolveAlias", () => {
   const out = (code: number, stdout: string): ClaudeRunner => () => ({ code, stdout });
-  test("reads the model for the asked family from modelUsage", () => {
-    const stdout = '{"modelUsage":{"claude-sonnet-5-5":{},"claude-haiku-5-5":{}}}'; // model-currency: ignore
-    expect(resolveAlias("sonnet", out(0, stdout))).toBe("claude-sonnet-5-5"); // model-currency: ignore
+  test("reads the one model the run reports for the alias", () => {
+    expect(resolveAlias("sonnet", out(0, '{"modelUsage":{"claude-sonnet-5-5":{}}}'))).toBe("claude-sonnet-5-5"); // model-currency: ignore
+    expect(resolveAlias("sonnet", out(0, '{"modelUsage":{"claude-sonnet-5-5[1m]":{}}}'))).toBe("claude-sonnet-5-5"); // model-currency: ignore
+  });
+  test("more than one model in modelUsage, same family or not, is unknown", () => {
+    const twoSonnets = '{"modelUsage":{"claude-sonnet-5":{},"claude-sonnet-5-5":{}}}'; // model-currency: ignore
+    expect(resolveAlias("sonnet", out(0, twoSonnets))).toBeNull();
+    const withHaiku = '{"modelUsage":{"claude-sonnet-5-5":{},"claude-haiku-5-5":{}}}'; // model-currency: ignore
+    expect(resolveAlias("sonnet", out(0, withHaiku))).toBeNull();
   });
   test("passes the alias and json output to the runner", () => {
     let seen: string[] = [];
@@ -174,6 +197,15 @@ describe("claudeChildEnv", () => {
     expect("CLAUDE_PROJECT_DIR" in e).toBe(false);
     expect(e.PATH).toBe("p");
     expect("FOO" in e).toBe(false);
+  });
+  test("drops API credential and endpoint overrides so the child uses the logged-in account", () => {
+    const e = claudeChildEnv({
+      ANTHROPIC_API_KEY: "k",
+      ANTHROPIC_AUTH_TOKEN: "t",
+      ANTHROPIC_BASE_URL: "https://gateway.invalid",
+      PATH: "p",
+    });
+    expect(Object.keys(e)).toEqual(["PATH"]);
   });
 });
 
@@ -222,6 +254,15 @@ function deps(resolves: Partial<Record<string, string | null>>, env: Record<stri
 }
 const ALL_FOUR = { fable: "claude-fable-5", opus: "claude-opus-5", sonnet: "claude-sonnet-5", haiku: "claude-haiku-5" }; // model-currency: ignore
 const rowsOf = (output: string, status: string): string[] => output.split("\n").filter((l) => l.startsWith(`${status}\t`));
+
+describe("README", () => {
+  test("the test/ row names the model-currency suite beside pr-review and packs", () => {
+    const lines = readFileSync(join(import.meta.dir, "..", "README.md"), "utf8").split(/\r?\n/);
+    const row = lines.find((l) => l.startsWith("| `test/` |"));
+    expect(row).toBeDefined();
+    for (const dir of ["tools/pr-review/", "tools/packs/", "tools/model-currency/"]) expect(row!).toContain(`\`${dir}\``);
+  });
+});
 
 describe("walker", () => {
   test("skips every default exclude, and an --exclude name", async () => {
@@ -309,13 +350,39 @@ describe("coverage", () => {
     expect(lastLine(r.output)).toBe("scanned 1 files, skipped 0");
     expect(r.exitCode).toBe(2);
   });
+  test("a symlinked or junctioned directory is counted as skipped and is an unknown row, so exit is not 0", async () => {
+    const root = tempRoot();
+    const target = tempRoot();
+    put(target, "hidden.sh", "claude --model claude-sonnet-5 -p x\n"); // model-currency: ignore
+    put(root, "ok.sh", "claude --model claude-sonnet-5-5 -p x\n"); // model-currency: ignore
+    symlinkSync(target, join(root, "linked"), "junction");
+    const r = await run(["--root", root, "--latest", await withLatestFile()], deps({}));
+    const rows = rowsOf(r.output, "unknown");
+    expect(rows.length).toBe(1);
+    expect(rows[0]).toContain("linked:0\tnot read: symlink");
+    expect(lastLine(r.output)).toBe("scanned 1 files, skipped 1");
+    expect(r.exitCode).toBe(2);
+  });
+  test("a UTF-16 file with a byte order mark is decoded and scanned, not skipped as binary", async () => {
+    const root = tempRoot();
+    const text = "claude --model claude-sonnet-5 -p x\r\n"; // model-currency: ignore
+    const le = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, "utf16le")]);
+    const be = Buffer.from(le);
+    for (let i = 0; i + 1 < be.length; i += 2) [be[i], be[i + 1]] = [be[i + 1]!, be[i]!];
+    writeFileSync(join(root, "le.ps1"), le);
+    writeFileSync(join(root, "be.ps1"), be);
+    const r = await run(["--root", root, "--latest", await withLatestFile()], deps({}));
+    expect(rowsOf(r.output, "behind").length).toBe(2);
+    expect(lastLine(r.output)).toBe("scanned 2 files, skipped 0");
+    expect(r.exitCode).toBe(1);
+  });
   test("an error without a plain code is reported as error", async () => {
     const root = tempRoot();
     put(root, "x.sh", "hi\n");
-    const d: RunDeps = { ...deps({}), readFile: () => { throw new Error("odd /path/with spaces"); } };
+    const d: RunDeps = { ...deps({}), readFile: () => { throw new Error("SENTINEL-MSG /path/with spaces"); } };
     const r = await run(["--root", root, "--latest", await withLatestFile()], d);
     expect(rowsOf(r.output, "unknown")[0]).toContain("x.sh:0\tunreadable: error");
-    expect(r.output).not.toContain("odd");
+    expect(r.output).not.toContain("SENTINEL-MSG");
     expect(r.exitCode).toBe(2);
   });
 });

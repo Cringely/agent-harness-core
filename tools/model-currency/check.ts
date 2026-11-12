@@ -14,8 +14,15 @@
 // Output: a first line naming the source, then one row per finding:
 //   <status>\t<file>:<line>\t<value>\t<latest or ->
 // then a last line "scanned N files, skipped M". A file or directory that cannot be read is an
-// unknown row naming it and the error class. Files skipped by rule (.jsonl, .bak, over 2 MB, NUL
-// bytes) are counted in M and not reported otherwise.
+// unknown row naming it and the error class. So is a symlink or other non-regular entry, which is
+// not followed. Files skipped by rule (.jsonl, .bak, over 2 MB, a NUL byte in a file with no UTF-16
+// byte order mark) are counted in M and not reported otherwise. UTF-16 files with a mark are decoded.
+//
+// What is detected. Pins: claude-<family>-<major>[-|.]<minor>[-<date>] and the older
+// claude-<major>[-|.]<minor>-<family>. Aliases (fable, opus, sonnet, haiku), only in these forms:
+// "model: <alias>" alone on a line (optionally quoted, with a [suffix] or a trailing comment), a
+// quoted alias under a model key in JSON, YAML or a JS or TS object, and "--model <alias>". An alias
+// in any other position, such as one built from a variable, is not seen.
 // Exit 1 when any row is behind or stale-alias. Otherwise 2 when any row is unknown, the source is
 // the alias source, there is no source, or no file was scanned. Otherwise 0.
 //
@@ -81,10 +88,13 @@ const PIN_PATTERNS = [
   /claude-(?:fable|opus|sonnet|haiku)-\d{1,2}(?:[-.]\d{1,2})?(?:-\d{8})?\b/g,
   /claude-\d(?:[-.]\d)?-(?:opus|sonnet|haiku)(?:-\d{8})?\b/g,
 ];
+const SUFFIX = "(?:\\[[^\\]]*\\])?";
 const ALIAS_PATTERNS = [
-  new RegExp(`^\\s*model:\\s*(${ALIAS})\\s*$`, "g"),
-  new RegExp(`"model"\\s*:\\s*"(${ALIAS})"`, "g"),
-  new RegExp(`--model[ =](${ALIAS})\\b`, "g"),
+  // YAML frontmatter: an unquoted alias, an optional bracket suffix and an optional trailing comment.
+  new RegExp(`^\\s*model:\\s*(${ALIAS})${SUFFIX}\\s*(?:#.*)?$`, "g"),
+  // A quoted alias under a model key: JSON, quoted YAML, and JS or TS object keys (quoted or not).
+  new RegExp(`(?<![\\w-])["']?model["']?\\s*:\\s*["'](${ALIAS})${SUFFIX}["']`, "g"),
+  new RegExp(`--model[ =]["']?(${ALIAS})${SUFFIX}(?![\\w-])`, "g"),
 ];
 
 export function scanText(file: string, text: string): Finding[] {
@@ -174,17 +184,23 @@ export function resolveAlias(alias: Family, runClaude: ClaudeRunner): string | n
     if (r.code !== 0) return null;
     const usage = (JSON.parse(r.stdout) as { modelUsage?: unknown }).modelUsage;
     if (typeof usage !== "object" || usage === null) return null;
+    // Exactly one model must be reported, and it must be the alias's family. Several models (a
+    // fallback, or a background call on another tier) leave the alias's own model undetermined.
     const ids = Object.keys(usage).map((k) => k.replace(/\[[^\]]*\]$/, ""));
-    return latestByFamily(ids.filter((id) => parseModelId(id)?.family === alias))[alias] ?? null;
+    if (ids.length !== 1) return null;
+    return parseModelId(ids[0]!)?.family === alias ? ids[0]! : null;
   } catch {
     return null;
   }
 }
 
 // The child is not told which project it runs for, so a SessionStart hook in it cannot act on one.
+// It also gets no API key, auth token or endpoint override, so it authenticates as the logged-in
+// account the operator dispatches with rather than as whatever account a key in this shell names.
+const CHILD_ENV_DROPPED = new Set(["CLAUDE_PROJECT_DIR", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]);
 export function claudeChildEnv(env: Record<string, string | undefined>): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(env)) if (v !== undefined && k !== "CLAUDE_PROJECT_DIR") out[k] = v;
+  for (const [k, v] of Object.entries(env)) if (v !== undefined && !CHILD_ENV_DROPPED.has(k)) out[k] = v;
   return out;
 }
 
@@ -224,7 +240,7 @@ interface FoundFile {
 interface Coverage {
   scanned: number;
   skipped: number;
-  unreadable: Row[];
+  unread: Row[];
 }
 
 function skipFile(name: string): boolean {
@@ -242,18 +258,27 @@ function unreadableRow(shown: string, e: unknown): Row {
   return { status: "unknown", file: shown, line: 0, value: `unreadable: ${errorClass(e)}`, latest: null };
 }
 
+function notReadRow(shown: string, why: string): Row {
+  return { status: "unknown", file: shown, line: 0, value: `not read: ${why}`, latest: null };
+}
+
 function walk(abs: string, shown: string, excludes: Set<string>, out: FoundFile[], cov: Coverage): void {
   let entries;
   try {
     entries = readdirSync(abs, { withFileTypes: true });
   } catch (e) {
-    cov.unreadable.push(unreadableRow(shown, e));
+    cov.unread.push(unreadableRow(shown, e));
     return;
   }
   for (const e of entries.sort((x, y) => (x.name < y.name ? -1 : x.name > y.name ? 1 : 0))) {
     const childAbs = join(abs, e.name);
     const childShown = `${shown.replace(/[\\/]$/, "")}/${e.name}`;
-    if (e.isSymbolicLink()) continue;
+    if (e.isSymbolicLink() || !(e.isDirectory() || e.isFile())) {
+      // Not followed, so not read. Counted, and an unknown row so the run cannot read as clean.
+      cov.skipped++;
+      cov.unread.push(notReadRow(childShown, e.isSymbolicLink() ? "symlink" : "special file"));
+      continue;
+    }
     if (e.isDirectory()) {
       if (!excludes.has(e.name)) walk(childAbs, childShown, excludes, out, cov);
     } else if (e.isFile()) {
@@ -263,6 +288,18 @@ function walk(abs: string, shown: string, excludes: Set<string>, out: FoundFile[
   }
 }
 
+// Windows tools save UTF-16 with a byte order mark, which is full of NUL bytes but is text that can
+// hold a pin. Returns null for anything without that mark.
+function decodeUtf16(buf: Buffer): string | null {
+  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) return buf.subarray(2).toString("utf16le");
+  if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) {
+    const swapped = Buffer.from(buf.subarray(2));
+    for (let i = 0; i + 1 < swapped.length; i += 2) [swapped[i], swapped[i + 1]] = [swapped[i + 1]!, swapped[i]!];
+    return swapped.toString("utf16le");
+  }
+  return null;
+}
+
 function scanFile(f: FoundFile, readFile: (path: string) => Buffer, cov: Coverage): Finding[] {
   try {
     if (statSync(f.abs).size > MAX_BYTES) {
@@ -270,14 +307,15 @@ function scanFile(f: FoundFile, readFile: (path: string) => Buffer, cov: Coverag
       return [];
     }
     const buf = readFile(f.abs);
-    if (buf.includes(0)) {
+    const text = decodeUtf16(buf);
+    if (text === null && buf.includes(0)) {
       cov.skipped++;
       return [];
     }
     cov.scanned++;
-    return scanText(f.shown, buf.toString("utf8"));
+    return scanText(f.shown, text ?? buf.toString("utf8"));
   } catch (e) {
-    cov.unreadable.push(unreadableRow(f.shown, e));
+    cov.unread.push(unreadableRow(f.shown, e));
     return [];
   }
 }
@@ -327,7 +365,7 @@ export async function run(argv: string[], deps: RunDeps): Promise<{ exitCode: 0 
 
   const excludes = new Set([...DEFAULT_EXCLUDES, ...(values.exclude ?? [])]);
   const files: FoundFile[] = [];
-  const cov: Coverage = { scanned: 0, skipped: 0, unreadable: [] };
+  const cov: Coverage = { scanned: 0, skipped: 0, unread: [] };
   for (const root of values.root ?? ["."]) {
     try {
       if (statSync(root).isDirectory()) walk(root, root, excludes, files, cov);
@@ -360,7 +398,7 @@ export async function run(argv: string[], deps: RunDeps): Promise<{ exitCode: 0 
     }
   }
 
-  const rows = [...classify(findings, latest, resolved), ...cov.unreadable];
+  const rows = [...classify(findings, latest, resolved), ...cov.unread];
   const head =
     latest === null
       ? "latest source: none (latest unknown)"
