@@ -7,7 +7,9 @@ is waste, and a reference to text nobody read is worse.
 
 ## Mid-run cadence
 
-How much to say between tool calls is the project's `statusCadence` setting in `.claude/rules/harness/project-settings.md`. Where a folder has no project settings, emit no text between tool calls or on any turn opened by an agent or workflow completion notification. Read the report file, update the queue below, continue, and hold explanatory insights for the close.
+How much to say between tool calls, and on any turn opened by an agent or workflow completion notification, is the project's `statusCadence` setting in `.claude/rules/harness/project-settings.md`. Where a folder has no project settings, emit no text in either case and hold explanatory insights for the close.
+
+Whatever the cadence, a completion notification means read the report file, update the queue below, and continue.
 
 ## Stop and ask before a risky step
 
