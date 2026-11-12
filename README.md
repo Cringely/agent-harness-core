@@ -42,7 +42,9 @@ its first write, and a missing hard dependency refuses the install and prints it
 The hard ones are `bun`, since every TypeScript gate is registered as a bare `bun` command and fails
 open without it, and Git Bash on Windows, which Claude Code runs the three shell hooks through. Git
 Bash is found under the Git for Windows install, never from PATH, where a bare `bash` can be the WSL
-launcher. The code layer adds `git` as a hard dependency. A missing optional one, such as `vale` for
+launcher. The code layer adds `git` as a hard dependency. It has no pinned Linux package, because
+the only Ubuntu build old enough for the 30-day rule is unpatched, so on Linux that refusal tells
+you to install git by hand. A missing optional one, such as `vale` for
 the prose-lint hook, `gh` or the `claude` CLI, gets a warning with its command and the install
 carries on. Nothing is installed unless you pass `-InstallDeps`, which runs each missing
 dependency's pinned command and probes it again. `-WhatIf` runs the probes, prints each command
@@ -51,7 +53,9 @@ dependency's pinned command and probes it again. `-WhatIf` runs the probes, prin
 Claude Code plugins are declared in the same file. This installer handles the project-scope ones a
 layer uses, such as `code-review` and `feature-dev` for the code layer, and leaves user-scope
 plugins to the account installer. A plugin from Anthropic's two marketplaces is trusted without a
-commit pin. The installer records a content hash of its install directory in the sidecar and warns
+commit pin, but only while that marketplace is registered from Anthropic's own repository. A
+marketplace registered under one of those names from anywhere else is refused, and nothing from it
+is installed or recorded. The installer records a content hash of its install directory in the sidecar and warns
 when that hash changes, and `-InstallDeps` records it again once you have looked at the change. A
 third-party plugin needs either a pin, checked before it is installed and again after, or an
 `allowUnpinnedPlugins` entry in the project manifest whose `risk` sentence says what the project is

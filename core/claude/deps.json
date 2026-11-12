@@ -33,8 +33,7 @@
       "failMode": "Without git, the commit and push hooks never run and the installer cannot wire core.hooksPath.",
       "probe": ["git", "--version"],
       "install": {
-        "windows": { "winget": "Git.Git", "version": "2.53.0" },
-        "linux": { "apt": "git", "version": "1:2.43.0-1ubuntu7" }
+        "windows": { "winget": "Git.Git", "version": "2.53.0" }
       }
     },
     {

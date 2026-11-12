@@ -42,10 +42,10 @@ Describe "Install-Harness" {
         function New-PluginMock {
             param([hashtable]$Installed = @{}, [switch]$AnyProject, [hashtable]$Marketplaces = @{},
                 [hashtable]$OnAdd = @{}, [hashtable]$OnInstall = @{}, [string]$Head, [string]$ExtraRowJson,
-                [string[]]$Absent = @(), [string[]]$OnlyPresent)
+                [string[]]$Absent = @(), [string[]]$OnlyPresent, [switch]$FailUninstall, [switch]$UninstallLeavesIt)
             $state = @{
                 Installed = $Installed; AnyProject = [bool]$AnyProject; Marketplaces = $Marketplaces
-                OnAdd = $OnAdd; OnInstall = $OnInstall; Head = $Head; Extra = $ExtraRowJson
+                OnAdd = $OnAdd; OnInstall = $OnInstall; Head = $Head; Extra = $ExtraRowJson; FailUninstall = [bool]$FailUninstall; LeavesIt = [bool]$UninstallLeavesIt
             }
             $execPath = $script:depsStubExecPath
             $only = $OnlyPresent
@@ -72,11 +72,19 @@ Describe "Install-Harness" {
                     return @{ ExitCode = 0; Output = $json }
                 }
                 if ($line -eq 'claude plugin marketplace list --json') {
-                    $rows = @(foreach ($k in @($state.Marketplaces.Keys)) { [ordered]@{ name = $k; source = 'github'; installLocation = $state.Marketplaces[$k] } })
+                    # A value is a folder, or @{ Location; Repo } to register the name from another repo.
+                    $firstPartyRepos = @{ 'claude-plugins-official' = 'anthropics/claude-plugins-official'; 'anthropic-agent-skills' = 'anthropics/skills' }
+                    $rows = @(foreach ($k in @($state.Marketplaces.Keys)) {
+                            $v = $state.Marketplaces[$k]
+                            $loc = $v; $repo = $firstPartyRepos[$k]
+                            if (-not $repo) { $repo = "example/$k" }
+                            if ($v -is [System.Collections.IDictionary]) { $loc = $v['Location']; $repo = $v['Repo'] }
+                            [ordered]@{ name = $k; source = 'github'; repo = $repo; installLocation = $loc }
+                        })
                     return @{ ExitCode = 0; Output = (ConvertTo-Json -InputObject $rows -Depth 4 -Compress) }
                 }
                 if ($argv[0] -eq 'claude' -and $argv[2] -eq 'marketplace' -and $argv[3] -eq 'add') {
-                    if ($state.OnAdd.Contains($argv[4])) { $a = $state.OnAdd[$argv[4]]; $state.Marketplaces[$a.Name] = $a.Location }
+                    if ($state.OnAdd.Contains($argv[4])) { $a = $state.OnAdd[$argv[4]]; $state.Marketplaces[$a.Name] = @{ Location = $a.Location; Repo = $argv[4] } }
                     return @{ ExitCode = 0; Output = '' }
                 }
                 if ($argv[0] -eq 'claude' -and $argv[2] -eq 'install') {
@@ -87,7 +95,11 @@ Describe "Install-Harness" {
                     }
                     return @{ ExitCode = 0; Output = '' }
                 }
-                if ($argv[0] -eq 'claude' -and $argv[2] -eq 'uninstall') { $state.Installed.Remove($argv[3]); return @{ ExitCode = 0; Output = '' } }
+                if ($argv[0] -eq 'claude' -and $argv[2] -eq 'uninstall') {
+                    if ($state.FailUninstall) { return @{ ExitCode = 1; Output = 'uninstall failed' } }
+                    if ($state.LeavesIt) { return @{ ExitCode = 0; Output = '' } }
+                    $state.Installed.Remove($argv[3]); return @{ ExitCode = 0; Output = '' }
+                }
                 if ($argv[0] -eq 'claude' -and $argv[2] -eq 'update') { return @{ ExitCode = 0; Output = '' } }
                 if ($argv[0] -eq 'git' -and $argv[3] -eq 'rev-parse') { return @{ ExitCode = 0; Output = $state.Head } }
                 return $null
@@ -3030,7 +3042,8 @@ Describe "Install-Harness" {
             $fixture = New-DepsFixture -Deps @(New-FakePlugin)
             $dir = New-FakePluginDir
             $abs = (Resolve-Path -LiteralPath $script:target).Path
-            $mock = New-PluginMock -Installed @{ 'fake-plugin@claude-plugins-official' = @{ scope = 'project'; projectPath = $abs; installPath = $dir } }
+            $mock = New-PluginMock -Installed @{ 'fake-plugin@claude-plugins-official' = @{ scope = 'project'; projectPath = $abs; installPath = $dir } } `
+                -Marketplaces @{ 'claude-plugins-official' = (New-FakeMarketplaceDir) }
             & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-Null
             $first = Get-PluginContentHash -Path $dir
             (Read-PluginRecord $script:target)['hash'] | Should -Be $first
@@ -3158,6 +3171,87 @@ Describe "Install-Harness" {
             }
         }
 
+        It "a first-party marketplace name registered from another repo is refused, and nothing is installed or recorded" {
+            # Optional on purpose: the refusal must not depend on the plugin's own severity.
+            $fixture = New-DepsFixture -Deps @(New-FakePlugin)
+            $spoof = @{ 'claude-plugins-official' = @{ Location = (New-FakeMarketplaceDir); Repo = 'attacker/claude-plugins-official' } }
+            $mock = New-PluginMock -Marketplaces $spoof -OnInstall @{ 'fake-plugin@claude-plugins-official' = @{ scope = 'project'; installPath = (New-FakePluginDir) } }
+            $msg = $null
+            try { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -InstallDeps -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-Null }
+            catch { $msg = $_.Exception.Message }
+            $msg | Should -Match '^missing hard dependency'
+            $msg | Should -Match 'anthropics/claude-plugins-official'
+            $msg | Should -Match 'attacker/claude-plugins-official'
+            @($mock.Calls | Where-Object { $_.Argv[0] -eq 'claude' -and @('install', 'update') -contains $_.Argv[2] }).Count | Should -Be 0
+            Test-Path -LiteralPath "$script:target/.claude" | Should -BeFalse
+
+            # Already installed from the spoofed registration: no trust, so no hash is recorded.
+            $abs = (Resolve-Path -LiteralPath $script:target).Path
+            $present = New-PluginMock -Marketplaces $spoof -Installed @{ 'fake-plugin@claude-plugins-official' = @{ scope = 'project'; projectPath = $abs; installPath = (New-FakePluginDir) } }
+            { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -DepsManifestPath $fixture -DepsRunner $present.Runner *>&1 | Out-Null } |
+                Should -Throw -ExpectedMessage '*attacker/claude-plugins-official*'
+            Test-Path -LiteralPath "$script:target/.claude" | Should -BeFalse
+        }
+
+        It "a rollback whose uninstall fails throws, naming the plugin as still installed" {
+            $sha = 'a' * 40
+            $pin = [ordered]@{ sha = $sha; contentHash = ('sha256:' + ('0' * 64)) }
+            # Optional on purpose: a failed rollback is a hard stop whatever the severity.
+            $fixture = New-DepsFixture -Deps @(New-FakePlugin -Marketplace 'fake-mp' -Source @{ github = 'example/fake-mp' } -Pin $pin -Severity @{ code = 'optional' })
+            $mock = New-PluginMock -Marketplaces @{ 'fake-mp' = (New-FakeMarketplaceDir -Sha $sha) } -FailUninstall `
+                -OnInstall @{ 'fake-plugin@fake-mp' = @{ scope = 'project'; installPath = (New-FakePluginDir) } }
+            $msg = $null
+            try { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -InstallDeps -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-Null }
+            catch { $msg = $_.Exception.Message }
+            $msg | Should -Match 'IS STILL INSTALLED'
+            $msg | Should -Match 'the uninstall exited 1'
+            $msg.Contains('claude plugin uninstall fake-plugin@fake-mp --scope project') | Should -BeTrue
+            $msg | Should -Not -Match 'uninstalled again'
+            Test-Path -LiteralPath "$script:target/.claude" | Should -BeFalse
+        }
+
+        It "a rollback whose uninstall exits 0 but leaves the plugin listed throws, naming it as still installed" {
+            $sha = 'a' * 40
+            $pin = [ordered]@{ sha = $sha; contentHash = ('sha256:' + ('0' * 64)) }
+            $fixture = New-DepsFixture -Deps @(New-FakePlugin -Marketplace 'fake-mp' -Source @{ github = 'example/fake-mp' } -Pin $pin -Severity @{ code = 'optional' })
+            $mock = New-PluginMock -Marketplaces @{ 'fake-mp' = (New-FakeMarketplaceDir -Sha $sha) } -UninstallLeavesIt `
+                -OnInstall @{ 'fake-plugin@fake-mp' = @{ scope = 'project'; installPath = (New-FakePluginDir) } }
+            { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -InstallDeps -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-Null } |
+                Should -Throw -ExpectedMessage '*IS STILL INSTALLED*the plugin list still shows it after the uninstall*'
+            # The uninstall ran, then the list was read again to confirm it.
+            $last = @($mock.Calls | Where-Object { $_.Argv[0] -eq 'claude' })
+            (@($last[-2].Argv) -join ' ') | Should -Be 'claude plugin uninstall fake-plugin@fake-mp --scope project'
+            (@($last[-1].Argv) -join ' ') | Should -Be 'claude plugin list --json'
+        }
+
+        It "a declined rollback throws, naming the plugin as still installed" {
+            $sha = 'a' * 40
+            $pin = [ordered]@{ sha = $sha; contentHash = ('sha256:' + ('0' * 64)) }
+            $m = Get-DepsManifest -Path (New-DepsFixture -Deps @(New-FakePlugin -Marketplace 'fake-mp' -Source @{ github = 'example/fake-mp' } -Pin $pin -Severity @{ code = 'optional' }))
+            $mock = New-PluginMock -Marketplaces @{ 'fake-mp' = (New-FakeMarketplaceDir -Sha $sha) } `
+                -OnInstall @{ 'fake-plugin@fake-mp' = @{ scope = 'project'; installPath = (New-FakePluginDir) } }
+            $abs = (Resolve-Path -LiteralPath $script:target).Path
+            $msg = $null
+            try {
+                Invoke-DepsPreflight -Manifest $m -Layers @('kernel', 'code') -IsWindows $script:hostWin -InstallDeps $true -Runner $mock.Runner `
+                    -ShouldInstall { param($What, $Action) $Action -ne 'uninstall' } -PluginScope 'project' -PluginCwd $abs 3>$null 6>$null | Out-Null
+            }
+            catch { $msg = $_.Exception.Message }
+            $msg | Should -Match 'IS STILL INSTALLED'
+            $msg | Should -Match 'the uninstall was declined'
+            @($mock.Calls | Where-Object { $_.Argv[0] -eq 'claude' -and $_.Argv[2] -eq 'uninstall' }).Count | Should -Be 0
+        }
+
+        It "git has no pinned Linux install, so a Linux code layer refuses with install-by-hand guidance" {
+            $m = Get-DepsManifest -Path $script:shippedDeps
+            $gitEntry = @($m['deps'] | Where-Object { $_['name'] -eq 'git' })[0]
+            $gitEntry['install'].Contains('linux') | Should -BeFalse
+            $rec = New-DepsRecorder -Answer { param($argv) if ($argv[0] -eq 'git') { @{ ExitCode = 127 } } }
+            { Invoke-DepsPreflight -Manifest $m -Layers @('kernel', 'code') -IsWindows $false -InstallDeps $true -Runner $rec.Runner -ShouldInstall { $true } 3>$null 6>$null } |
+                Should -Throw -ExpectedMessage '*no pinned install for linux: install git 2.43.0 or later from a pinned release, then re-run*'
+            @(Get-DepsInstallCalls $rec).Count | Should -Be 0
+        }
+
         It "a plugin present but not enabled at the declared scope counts as missing" {
             $fixture = New-DepsFixture -Deps @(New-FakePlugin -Severity @{ code = 'hard' })
             $abs = (Resolve-Path -LiteralPath $script:target).Path
@@ -3220,7 +3314,8 @@ Describe "Install-Harness" {
             "$out1 $msg".Contains($secret) | Should -BeFalse
 
             $abs = (Resolve-Path -LiteralPath $script:target).Path
-            $passing = New-PluginMock -ExtraRowJson $extra -Installed @{ 'fake-plugin@claude-plugins-official' = @{ scope = 'project'; projectPath = $abs; installPath = (New-FakePluginDir) } }
+            $passing = New-PluginMock -ExtraRowJson $extra -Installed @{ 'fake-plugin@claude-plugins-official' = @{ scope = 'project'; projectPath = $abs; installPath = (New-FakePluginDir) } } `
+                -Marketplaces @{ 'claude-plugins-official' = (New-FakeMarketplaceDir) }
             $warnings = $null
             $out2 = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -DepsManifestPath $fixture -DepsRunner $passing.Runner -WarningVariable warnings *>&1 | Out-String -Width 2000
             $out2.Contains($secret) | Should -BeFalse

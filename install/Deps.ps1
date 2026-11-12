@@ -624,14 +624,43 @@ function Get-PluginMarketplaces {
     param([scriptblock]$Runner, [string]$Cwd)
     $list = Invoke-DepsJsonListing -Runner $Runner -Argv @('claude', 'plugin', 'marketplace', 'list', '--json') -Cwd $Cwd
     if ($null -eq $list) { return $null }
+    # Name to where it is registered from. Repo is the owner/repo a github marketplace was added
+    # from, or the URL of a git one. A name alone proves nothing: anyone can register a local
+    # folder as claude-plugins-official, so first-party trust is checked against Repo.
     $map = @{}
     foreach ($row in $list.Rows) {
         if ($row['name'] -isnot [string]) { continue }
         $loc = $row['installLocation']
         if (-not $loc) { $loc = $row['path'] }
-        $map[$row['name']] = [string]$loc
+        $repo = $row['repo']
+        if (-not $repo) { $repo = $row['url'] }
+        $map[$row['name']] = [pscustomobject]@{ Location = [string]$loc; Source = [string]$row['source']; Repo = [string]$repo }
     }
     return $map
+}
+
+# $null when the marketplace this first-party entry names is registered from its own repository,
+# else the reason it is not. Compared case-insensitively, since GitHub owner and repo names are.
+function Get-PluginMarketplaceIdentityProblem {
+    param($Dep, $Marketplaces)
+    $name = $Dep['marketplace']['name']
+    $expected = $script:DepsFirstPartyMarketplaces[$name]
+    if (-not $expected) { return "marketplace $name is not one of the first-party marketplaces" }
+    if ($null -eq $Marketplaces) { return "the marketplace list did not answer, so marketplace $name cannot be confirmed as first-party" }
+    if (-not $Marketplaces.Contains($name)) { return "marketplace $name is not registered here, so it cannot be confirmed as first-party" }
+    $registered = [string]$Marketplaces[$name].Repo
+    if ([string]::Equals($registered, $expected, [System.StringComparison]::OrdinalIgnoreCase)) { return $null }
+    return "SPOOF: the marketplace registered here as $name comes from '$registered', not the first-party $expected, so first-party trust does not apply and nothing was installed or recorded. Remove that registration with claude plugin marketplace remove $name, then re-run"
+}
+
+# Whether the listing shows this plugin at its declared scope (and, for project scope, in this
+# project), enabled or not. $null when there is no listing to read.
+function Test-PluginListed {
+    param($List, $Dep, [string]$Cwd)
+    if ($null -eq $List) { return $null }
+    $rows = @($List.Rows | Where-Object { $_['id'] -eq $Dep['plugin'] -and $_['scope'] -eq $Dep['scope'] })
+    if ($Dep['scope'] -eq 'project') { $rows = @($rows | Where-Object { Test-DepsSamePath ([string]$_['projectPath']) $Cwd }) }
+    return $rows.Count -gt 0
 }
 
 # The sha a registered marketplace's own marketplace.json lists for this plugin, or $null.
@@ -736,8 +765,9 @@ function Invoke-PluginDepsPreflight {
     }
     $runChange = {
         param([string[]]$Cmd)
-        $null = & $Runner $Cmd $script:DepsInstallTimeout $Cwd
+        $result = & $Runner $Cmd $script:DepsInstallTimeout $Cwd
         $cache.Clear()
+        $result
     }
     $probe = {
         param($Recorded)
@@ -761,6 +791,20 @@ function Invoke-PluginDepsPreflight {
             param([string]$Reason)
             $Problems.Add([pscustomobject]@{ Req = $req; Reason = $Reason; Text = "plugin ${id}: $Reason. $($dep['failMode'])" })
         }
+        # A spoofed first-party marketplace refuses whatever the plugin's own severity: the
+        # machine is registering someone else's code under Anthropic's name.
+        $failHard = {
+            param([string]$Reason)
+            $hardReq = [pscustomobject]@{ Name = $req.Name; Severity = 'hard'; Dep = $dep }
+            $Problems.Add([pscustomobject]@{ Req = $hardReq; Reason = $Reason; Text = "plugin ${id}: $Reason." })
+        }
+        $checkIdentity = {
+            param($Marketplaces)
+            $why = Get-PluginMarketplaceIdentityProblem -Dep $dep -Marketplaces $Marketplaces
+            if (-not $why) { return $true }
+            if ($why.StartsWith('SPOOF: ')) { & $failHard $why.Substring(7) } else { & $fail $why }
+            return $false
+        }
 
         if ($pin.Contains('unpinned')) {
             $opt = @($AllowUnpinned | Where-Object { $_ -is [System.Collections.IDictionary] -and $_['plugin'] -eq $id })
@@ -781,16 +825,17 @@ function Invoke-PluginDepsPreflight {
                 if ($r.Changed) { & $fail 'the installed copy does not match its pinned contentHash'; continue }
                 if ($pin.Contains('commit')) {
                     $mps = & $getMarketplaces
-                    $head = if ($mps) { Get-DepsGitHead -Runner $Runner -Location $mps[$mpName] -Cwd $Cwd } else { $null }
+                    $head = if ($mps -and $mps.Contains($mpName)) { Get-DepsGitHead -Runner $Runner -Location $mps[$mpName].Location -Cwd $Cwd } else { $null }
                     if ($head -ne $pin['commit']) { & $fail "its registered marketplace is not at the pinned commit $($pin['commit'])"; continue }
                 }
                 continue
             }
 
+            if ($firstParty -and -not (& $checkIdentity (& $getMarketplaces))) { continue }
             $currentSha = $null
             if ($tracksSha) {
                 $mps = & $getMarketplaces
-                if ($mps) { $currentSha = Get-PluginMarketplaceSha -Dep $dep -Location $mps[$mpName] }
+                if ($mps) { $currentSha = Get-PluginMarketplaceSha -Dep $dep -Location $mps[$mpName].Location }
                 $expectedSha = if ($rec -and $rec['sha']) { [string]$rec['sha'] } else { $pin['sha'] }
                 if (-not $currentSha) {
                     Write-Warning "plugin ${id}: its marketplace entry's sha could not be read, so a version move cannot be checked."
@@ -801,7 +846,7 @@ function Invoke-PluginDepsPreflight {
                         $cmd = [string[]]@('claude', 'plugin', 'update', $id, '--scope', $dep['scope'])
                         $display = Format-DepsArgv $cmd
                         if (& $ShouldInstall $display 'install') {
-                            & $runChange $cmd
+                            $null = & $runChange $cmd
                             $r2 = & $probe $null
                             if ($r2.Present) { $Records[$id] = New-PluginRecord -Result $r2 -Sha $currentSha; $changed = $true }
                             else { & $fail "the update did not verify ($($r2.Reason))" }
@@ -828,6 +873,10 @@ function Invoke-PluginDepsPreflight {
         $mps = & $getMarketplaces
         if ($InstallDeps -and $null -eq $mps) { & $fail "$($r.Reason), and the marketplace list did not answer"; continue }
         $known = [bool]($mps -and $mps.Contains($mpName))
+        if ($firstParty -and $known) {
+            $why = Get-PluginMarketplaceIdentityProblem -Dep $dep -Marketplaces $mps
+            if ($why -and $why.StartsWith('SPOOF: ')) { & $failHard $why.Substring(7); continue }
+        }
         $cmds = Get-PluginInstallCommands -Dep $dep -MarketplaceKnown $known
         if ($null -eq $cmds) {
             & $fail "$($r.Reason), and its directory marketplace $mpName is not registered here. Add it by hand with claude plugin marketplace add <path>, then re-run"
@@ -843,7 +892,7 @@ function Invoke-PluginDepsPreflight {
         foreach ($cmd in $cmds) {
             if ($cmd[2] -eq 'install' -and $thirdPinned) {
                 $mpsNow = & $getMarketplaces
-                $loc = if ($mpsNow) { $mpsNow[$mpName] } else { $null }
+                $loc = if ($mpsNow -and $mpsNow.Contains($mpName)) { $mpsNow[$mpName].Location } else { $null }
                 if ($pin.Contains('sha')) {
                     $listed = Get-PluginMarketplaceSha -Dep $dep -Location $loc
                     if ($listed -ne $pin['sha']) { & $fail "its marketplace lists sha $listed, not the pinned $($pin['sha']), so nothing was installed"; $stopped = $true; break }
@@ -859,7 +908,15 @@ function Invoke-PluginDepsPreflight {
                 $stopped = $true
                 break
             }
-            & $runChange $cmd
+            $ran = & $runChange $cmd
+            # A first-party marketplace that was not registered is added above from its own
+            # pinned source, so the identity check before the loop covers every case but one: an
+            # add that did not succeed, which leaves the name free for anything. Stop there.
+            if ($cmd[3] -eq 'add' -and (-not $ran -or $ran.TimedOut -or $ran.ExitCode -ne 0)) {
+                & $fail "claude plugin marketplace add did not succeed, so nothing was installed"
+                $stopped = $true
+                break
+            }
         }
         if ($stopped) { continue }
 
@@ -869,12 +926,33 @@ function Invoke-PluginDepsPreflight {
             $bad = $r2.Changed
             if (-not $bad -and $pin.Contains('commit')) {
                 $mpsNow = & $getMarketplaces
-                $bad = -not $mpsNow -or (Get-DepsGitHead -Runner $Runner -Location $mpsNow[$mpName] -Cwd $Cwd) -ne $pin['commit']
+                $bad = -not ($mpsNow -and $mpsNow.Contains($mpName)) -or (Get-DepsGitHead -Runner $Runner -Location $mpsNow[$mpName].Location -Cwd $Cwd) -ne $pin['commit']
             }
             if ($bad) {
+                # The rollback has to be proven, not assumed: an uninstall that fails, times out
+                # or is declined leaves unverified code installed, and a warning saying it was
+                # removed would be the opposite of the truth. Any doubt is a hard stop.
                 $un = [string[]]@('claude', 'plugin', 'uninstall', $id, '--scope', $dep['scope'])
                 $display = Format-DepsArgv $un
-                if (& $ShouldInstall $display 'uninstall') { & $runChange $un }
+                $why = $null
+                $listed = $true
+                if (& $ShouldInstall $display 'uninstall') {
+                    $ur = & $Runner $un $script:DepsInstallTimeout $Cwd
+                    $cache.Clear()
+                    if (-not $ur) { $why = 'the uninstall returned nothing' }
+                    elseif ($ur.TimedOut) { $why = 'the uninstall timed out' }
+                    elseif ($ur.ExitCode -ne 0) { $why = "the uninstall exited $($ur.ExitCode)" }
+                    $listed = Test-PluginListed -List (& $getList) -Dep $dep -Cwd $Cwd
+                    if ($null -eq $listed -and -not $why) { $why = 'the plugin list did not answer after the uninstall' }
+                    elseif ($listed -and -not $why) { $why = 'the plugin list still shows it after the uninstall' }
+                }
+                else { $why = 'the uninstall was declined' }
+                if ($why) {
+                    # The list showing it gone after a failed uninstall is not proof enough to say
+                    # it was removed, so that case says it may still be installed.
+                    $state = if ($listed -eq $false) { 'MAY STILL BE INSTALLED' } else { 'IS STILL INSTALLED' }
+                    throw "plugin $id did not verify against its pin and $state at $($dep['scope']) scope, as unverified third-party code: $why. Remove it now, from $Cwd, with: $display"
+                }
                 & $fail 'the installed copy did not verify against its pin, so it was uninstalled again'
             }
             continue
@@ -882,7 +960,7 @@ function Invoke-PluginDepsPreflight {
         $sha = $null
         if ($tracksSha) {
             $mpsNow = & $getMarketplaces
-            if ($mpsNow) { $sha = Get-PluginMarketplaceSha -Dep $dep -Location $mpsNow[$mpName] }
+            if ($mpsNow -and $mpsNow.Contains($mpName)) { $sha = Get-PluginMarketplaceSha -Dep $dep -Location $mpsNow[$mpName].Location }
         }
         $Records[$id] = New-PluginRecord -Result $r2 -Sha $sha
         $changed = $true

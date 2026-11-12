@@ -39,10 +39,10 @@ BeforeAll {
     function New-PluginMock {
         param([hashtable]$Installed = @{}, [switch]$AnyProject, [hashtable]$Marketplaces = @{},
             [hashtable]$OnAdd = @{}, [hashtable]$OnInstall = @{}, [string]$Head, [string]$ExtraRowJson,
-            [string[]]$Absent = @(), [string[]]$OnlyPresent)
+            [string[]]$Absent = @(), [string[]]$OnlyPresent, [switch]$FailUninstall, [switch]$UninstallLeavesIt)
         $state = @{
             Installed = $Installed; AnyProject = [bool]$AnyProject; Marketplaces = $Marketplaces
-            OnAdd = $OnAdd; OnInstall = $OnInstall; Head = $Head; Extra = $ExtraRowJson
+            OnAdd = $OnAdd; OnInstall = $OnInstall; Head = $Head; Extra = $ExtraRowJson; FailUninstall = [bool]$FailUninstall; LeavesIt = [bool]$UninstallLeavesIt
         }
         $execPath = $script:depsStubExecPath
         $only = $OnlyPresent
@@ -69,11 +69,19 @@ BeforeAll {
                 return @{ ExitCode = 0; Output = $json }
             }
             if ($line -eq 'claude plugin marketplace list --json') {
-                $rows = @(foreach ($k in @($state.Marketplaces.Keys)) { [ordered]@{ name = $k; source = 'github'; installLocation = $state.Marketplaces[$k] } })
+                # A value is a folder, or @{ Location; Repo } to register the name from another repo.
+                    $firstPartyRepos = @{ 'claude-plugins-official' = 'anthropics/claude-plugins-official'; 'anthropic-agent-skills' = 'anthropics/skills' }
+                    $rows = @(foreach ($k in @($state.Marketplaces.Keys)) {
+                            $v = $state.Marketplaces[$k]
+                            $loc = $v; $repo = $firstPartyRepos[$k]
+                            if (-not $repo) { $repo = "example/$k" }
+                            if ($v -is [System.Collections.IDictionary]) { $loc = $v['Location']; $repo = $v['Repo'] }
+                            [ordered]@{ name = $k; source = 'github'; repo = $repo; installLocation = $loc }
+                        })
                 return @{ ExitCode = 0; Output = (ConvertTo-Json -InputObject $rows -Depth 4 -Compress) }
             }
             if ($argv[0] -eq 'claude' -and $argv[2] -eq 'marketplace' -and $argv[3] -eq 'add') {
-                if ($state.OnAdd.Contains($argv[4])) { $a = $state.OnAdd[$argv[4]]; $state.Marketplaces[$a.Name] = $a.Location }
+                if ($state.OnAdd.Contains($argv[4])) { $a = $state.OnAdd[$argv[4]]; $state.Marketplaces[$a.Name] = @{ Location = $a.Location; Repo = $argv[4] } }
                 return @{ ExitCode = 0; Output = '' }
             }
             if ($argv[0] -eq 'claude' -and $argv[2] -eq 'install') {
@@ -84,7 +92,11 @@ BeforeAll {
                 }
                 return @{ ExitCode = 0; Output = '' }
             }
-            if ($argv[0] -eq 'claude' -and $argv[2] -eq 'uninstall') { $state.Installed.Remove($argv[3]); return @{ ExitCode = 0; Output = '' } }
+            if ($argv[0] -eq 'claude' -and $argv[2] -eq 'uninstall') {
+                    if ($state.FailUninstall) { return @{ ExitCode = 1; Output = 'uninstall failed' } }
+                    if ($state.LeavesIt) { return @{ ExitCode = 0; Output = '' } }
+                    $state.Installed.Remove($argv[3]); return @{ ExitCode = 0; Output = '' }
+                }
             if ($argv[0] -eq 'claude' -and $argv[2] -eq 'update') { return @{ ExitCode = 0; Output = '' } }
             if ($argv[0] -eq 'git' -and $argv[3] -eq 'rev-parse') { return @{ ExitCode = 0; Output = $state.Head } }
             return $null
@@ -386,7 +398,8 @@ Describe "Install-Account" {
                     (New-FakePlugin -Name 'fake-kernel' -Severity @{ kernel = 'optional' } -Scope 'user'),
                     (New-FakePlugin -Name 'fake-layer')) } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $fixture
             $dir = New-FakePluginDir
-            $mock = New-PluginMock -Installed @{ 'fake-kernel@claude-plugins-official' = @{ scope = 'user'; installPath = $dir } }
+            $mock = New-PluginMock -Installed @{ 'fake-kernel@claude-plugins-official' = @{ scope = 'user'; installPath = $dir } } `
+                -Marketplaces @{ 'claude-plugins-official' = (New-FakeMarketplaceDir) }
             $out = & $script:install -PayloadRoot $p -ClaudeHome $h -ClaudeJson (Join-Path $h 'claude.json') `
                 -CoreRepo $script:repoRoot -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-String -Width 500
             $lists = @($mock.Calls | Where-Object { (@($_.Argv) -join ' ') -eq 'claude plugin list --json' })
