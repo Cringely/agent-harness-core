@@ -94,7 +94,7 @@ describe("parseCliArgs(): review", () => {
     [["review", "--pr", "7", "--app-id", "1", "--key-stdin", "--expect-head", "not-a-sha"]],
     [["review", "--pr", "7", "--app-id", "1", "--key-stdin", "--expect-head", "A".repeat(40)]],
     [["review", "--pr", "7", "--app-id", "1", "--key-stdin", "--expect-head", "a".repeat(39)]],
-    // #318: a relative --policy, and --policy without --repo (critique item 5: an operator who
+    // #318: a relative --policy, and --policy without --repo (an operator who
     // forgot --repo would otherwise review this repository's pull request of the same number).
     [["review", "--pr", "7", "--app-id", "1", "--key-stdin", "--repo", "owner/example", "--policy", "policy.json"]],
     [["review", "--pr", "7", "--app-id", "1", "--key-stdin", "--policy", join(NEUTRAL_DIR, "policy.json")]],
@@ -910,7 +910,7 @@ describe("main(): the repository policy (#318)", () => {
     expect(summary.verification.reasons.join(" ")).not.toContain(CORE_POLICY.requiredChecks[0]!.name);
   });
 
-  // Review round 1: main() must hand runReview the resolved policy. With CORE_POLICY passed
+  // main() must hand runReview the resolved policy. With CORE_POLICY passed
   // instead, the pipeline's repo guard refuses this owner/example snapshot, and even without the
   // guard the verification would name CORE_POLICY's checks rather than "build".
   test("a review run passes the resolved policy, not CORE_POLICY, to runReview", async () => {

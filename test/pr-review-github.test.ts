@@ -472,7 +472,7 @@ describe("GitHubClient as a poster", () => {
     expect(() => new GitHubClient({ repo, pr, minter: countingMinter(), workflowPath: ".github/workflows/test.yml", fetchImpl: fakeGitHub().impl })).toThrow();
   });
 
-  // #318, critique item 7: the path goes into a contents-API URL fetched with the installation
+  // #318: the path goes into a contents-API URL fetched with the installation
   // token, and a dot-dot segment survives encodeURIComponent.
   test.each([
     ["missing", undefined],

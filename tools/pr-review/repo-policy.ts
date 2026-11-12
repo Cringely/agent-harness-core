@@ -39,7 +39,7 @@ export const CORE_POLICY: RepoPolicy = deepFreezePolicy({
 export const MAX_POLICY_FILE_BYTES = 64 * 1024;
 const MAX_WORKFLOW_PATH_CHARS = 200;
 const MAX_CHECK_NAME_CHARS = 100;
-// Only GitHub Actions in this version (critique item 3). verdict.ts discounts a pull request that
+// Only GitHub Actions in this version. verdict.ts discounts a pull request that
 // edits .github/workflows/ or .github/actions/, and no rule discounts an edit to another CI
 // system's config, so a check from another app could be satisfied by the pull request it vouches for.
 const ALLOWED_APP_SLUG = "github-actions";
@@ -65,7 +65,7 @@ function hasUnsafeChar(text: string): boolean {
   return false;
 }
 
-// The one workflow-path rule (critique items 7 and 8), used by the loader, GitHubClient's
+// The one workflow-path rule, used by the loader, GitHubClient's
 // constructor and LocalGitSource's. A dot-dot segment survives encodeURIComponent and URL
 // normalisation would resolve it to another API endpoint fetched with the installation token. A
 // directory path returns a JSON listing the raw fetch would read as file text. Returns null when the
@@ -180,7 +180,7 @@ function parseEntry(value: unknown, at: string, index: number): RepoPolicy {
     seen.add(pair);
     checks.push({ name: item.name as string, appSlug: item.appSlug as string });
   });
-  // Written explicitly, never left undefined (critique item 1): verdict.ts skips Pester coverage
+  // Written explicitly, never left undefined: verdict.ts skips Pester coverage
   // only on a literal false, so a file entry has to say so.
   return deepFreezePolicy({ repo: value.repo, ciWorkflowPath: value.ciWorkflowPath as string, requiredChecks: checks, pesterCoverage: false });
 }
@@ -211,7 +211,7 @@ export function parsePolicyFile(raw: string): PolicyLoad {
       if (seen.has(folded)) throw new PolicyInvalid(`${at}.repo: duplicates an earlier entry, case-insensitively`);
       seen.add(folded);
       // A file may list this repository only as an exact copy of CORE_POLICY, repo spelling
-      // included (critique item 6), so a stale or case-shifted entry cannot weaken its checks.
+      // included, so a stale or case-shifted entry cannot weaken its checks.
       if (folded === CORE_POLICY.repo.toLowerCase() && !sameAsCore(entry)) {
         throw new PolicyInvalid(`${at}: an entry for the built-in repository must match its built-in policy exactly`);
       }
@@ -240,8 +240,8 @@ function isMissing(error: unknown): boolean {
 // Path checks, then parsePolicyFile. The file holds private repository names, so it must live
 // outside every checkout: one `git add -A` in a checkout of this public repository would publish
 // it. Every ancestor of its real path is checked for a .git entry, file or directory, which also
-// covers a worktree's parent clone that the reviewer's own REPO_ROOT does not contain (critique
-// item 4). Anything that cannot be checked refuses.
+// covers a worktree's parent clone that the reviewer's own REPO_ROOT does not contain.
+// Anything that cannot be checked refuses.
 export function loadPolicyFile(path: string, fs: Partial<PolicyFsOps> = {}): PolicyLoad {
   const ops: PolicyFsOps = { ...REAL_FS, ...fs };
   if (typeof path !== "string" || !isAbsolute(path)) return { ok: false, reason: "the policy file path must be absolute" };
@@ -289,7 +289,7 @@ export function loadPolicyFile(path: string, fs: Partial<PolicyFsOps> = {}): Pol
 
 // The policy for one review, or a RefusalError. With no file only this repository resolves. An
 // invalid file refuses the run whatever repository is asked for. This repository always resolves to
-// the frozen CORE_POLICY object itself, never to a file's copy of it (critique item 2): the file
+// the frozen CORE_POLICY object itself, never to a file's copy of it: the file
 // cannot carry pesterCoverage, so its copy would review this repository without Pester coverage.
 // Lookup is exact, case included, the same as github.ts's head-repository check.
 export function resolvePolicy(

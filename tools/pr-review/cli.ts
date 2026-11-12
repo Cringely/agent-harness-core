@@ -113,7 +113,7 @@ export function parseCliArgs(argv: readonly string[], env: Record<string, string
     expectHead = values["expect-head"];
   }
 
-  // #318: flag only, no environment fallback. --policy without --repo is refused (critique item 5):
+  // #318: flag only, no environment fallback. --policy without --repo is refused:
   // an operator who meant another repository's pull request and forgot --repo would otherwise get
   // this repository's pull request of the same number reviewed, and with --post, approved.
   let policyPath: string | null = null;

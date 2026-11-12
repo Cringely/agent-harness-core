@@ -25,7 +25,7 @@ import {
 
 const REQUIRED_CHECKS = CORE_POLICY.requiredChecks;
 const REPO_ROOT = join(import.meta.dir, "..");
-// Built from the policy's own path (critique item 13), so moving CORE_POLICY to another workflow
+// Built from the policy's own path, so moving CORE_POLICY to another workflow
 // moves the job-name pin with it.
 const REAL_WORKFLOW = readFileSync(join(REPO_ROOT, ...CORE_POLICY.ciWorkflowPath.split("/")), "utf8");
 

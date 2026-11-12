@@ -78,7 +78,7 @@ export function uncoveredPowerShellFiles(changedFiles: readonly string[], workfl
   });
 }
 
-// #318 (critique item 11): a required check counts only when its name appears as a `name:` line in
+// #318: a required check counts only when its name appears as a `name:` line in
 // the configured workflow at the base commit, using the same whole-line match
 // test/pr-review-verdict.test.ts pins CORE_POLICY's names with. This checks for a `name:` line, not
 // for a job: any line that reads exactly `name: <check>` once trimmed matches, so the workflow's
@@ -170,7 +170,7 @@ export function computeVerification(input: {
   if (input.workflowText === null) {
     incomplete.push(`${input.policy?.ciWorkflowPath ?? "the CI workflow"} is absent at the base commit`);
   } else if (input.policy?.pesterCoverage !== false) {
-    // Skipped only on a literal false (critique item 1): running this check is the branch that
+    // Skipped only on a literal false: running this check is the branch that
     // withholds approval, so a missing or non-boolean value must keep it, the reverse of I4's
     // strict-true reads above. Only CORE_POLICY runs it: SHARED_MODULE_SUITES and the sibling
     // .Tests.ps1 convention describe this repository, not any other.

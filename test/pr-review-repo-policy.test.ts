@@ -165,7 +165,7 @@ describe("parsePolicyFile()", () => {
     expect(reasonOf(load).length).toBeGreaterThan(0);
   });
 
-  // Review round 1: an operator-authored key can itself be a private name, so a refusal names
+  // An operator-authored key can itself be a private name, so a refusal names
   // only where the unsupported key sits, never the key.
   test("a deferred key refuses as unsupported without echoing its name", () => {
     const reason = reasonOf(parsePolicyFile(file([entry({ livingDocs: [] })])));
@@ -189,7 +189,7 @@ describe("parsePolicyFile()", () => {
     }
   });
 
-  // Review round 1: deep nesting can overflow the stack in JSON.parse or in the key count. Any
+  // Deep nesting can overflow the stack in JSON.parse or in the key count. Any
   // error must still come back as an invalid-file reason, so --json prints the structured refusal.
   test("deeply nested arrays under an extra key refuse as invalid rather than throwing", () => {
     const depth = 200_000;
