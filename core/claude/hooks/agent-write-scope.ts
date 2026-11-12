@@ -208,9 +208,13 @@ export function inScratch(filePath: string, cwd: string, projectDir: string): bo
   return real.some((segment, i) => SCRATCH_SEGMENTS.has(segment) && !startsWith(project, real.slice(0, i + 1)));
 }
 
+/** A writeScope line anywhere in a file, key case-insensitive. Only the fallback in readWriteScope uses it. */
+const LOOSE_WRITE_SCOPE = /^[ \t]*writeScope[ \t]*:[ \t]*(\S+)[ \t]*\r?$/im;
+
 /**
  * The `writeScope` value declared in an agent definition's frontmatter, or null
- * when the file is absent, unreadable, or declares nothing. Null means this
+ * when the file is absent, unreadable, or declares nothing. When the frontmatter cannot be read
+ * with confidence, a loose scan of the whole file stands in (see the body). Null means this
  * hook has no opinion — absence of a declaration is not a reason to block.
  *
  * `agentType` is payload text and becomes a path one line down, so it is checked against the
@@ -226,7 +230,14 @@ export function readWriteScope(agentType: string, projectDir: string): string | 
   const defPath = join(projectDir, ".claude", "agents", `${agentType}.md`);
   if (!existsSync(defPath)) return null;
   try {
-    return parseWriteScope(readFileSync(defPath, "utf8"));
+    const text = readFileSync(defPath, "utf8");
+    // The strict frontmatter reading is the first choice. It returns null both for "no declaration"
+    // and for a block it cannot read with confidence (a fence followed by a no-break space, no
+    // closing fence), and the second must not lift the confinement the definition asked for. This
+    // gate decides what to confine, so it over-detects: when the strict reading finds nothing, a
+    // loose scan of the whole file for a writeScope line decides. The key is matched without regard
+    // to case, any position counts, and the value is lowercased so decide()'s exact comparison holds.
+    return parseWriteScope(text) ?? text.match(LOOSE_WRITE_SCOPE)?.[1]?.toLowerCase() ?? null;
   } catch {
     return null;
   }

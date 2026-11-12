@@ -574,6 +574,71 @@ describe("parseWriteScope() — a fence is dashes plus ASCII spaces and tabs onl
   });
 });
 
+// The confinement side must over-detect. When the strict frontmatter parser cannot read the block
+// with confidence it returns null, and treating that as "undeclared" would lift the confinement the
+// definition asked for. readWriteScope falls back to a loose scan of the whole file for a writeScope
+// line (case-insensitive key, any position) and uses that value. The strict reading stays first.
+describe("readWriteScope() — an unreadable block that declares a scope is still confined", () => {
+  const NBSP = String.fromCharCode(0xa0);
+  const ZWNBSP = String.fromCharCode(0xfeff);
+  const N = String.fromCharCode(10);
+  const looseRoot = mkdtempSync(join(tmpdir(), "write-scope-loose-"));
+  const looseAgents = join(looseRoot, ".claude", "agents");
+  mkdirSync(looseAgents, { recursive: true });
+  afterAll(() => {
+    rmSync(looseRoot, { recursive: true, force: true });
+  });
+  function def(name: string, text: string) {
+    writeFileSync(join(looseAgents, name + ".md"), text);
+  }
+  def("nbsp-open", ["---" + NBSP, "name: x", "writeScope: scratch", "---", "Body."].join(N));
+  def("nbsp-close", ["---", "name: x", "writeScope: scratch", "---" + NBSP, "Body."].join(N));
+  def("zwnbsp-close", ["---", "name: x", "writeScope: scratch", "---" + ZWNBSP, "Body."].join(N));
+  def("unclosed", ["---", "name: x", "writeScope: scratch", "Body with no closing fence."].join(N));
+  def("bom-nbsp", ZWNBSP + ["---" + NBSP, "name: x", "writeScope: scratch", "---", "Body."].join(N));
+  def("loose-key-case", ["---", "name: x", "WriteScope: Scratch", "Body, no close."].join(N));
+  def("in-body", ["Just a body, no frontmatter.", "writeScope: scratch"].join(N));
+  def("late-in-file", ["---" + NBSP, "name: x", "x".repeat(5000), "writeScope: scratch", "---"].join(N));
+  // The strict reading wins whenever it finds a declaration.
+  def("strict-first", ["---", "writeScope: repo", "---", "writeScope: scratch"].join(N));
+  def("strict-repo-then-loose-scratch", ["---", "name: x", "writeScope: repo", "---", "Body.", "writeScope: scratch"].join(N));
+  // No declaration anywhere: stays undeclared, however broken the block is.
+  def("none-clean", ["---", "name: x", "tools: Read", "---", "Body."].join(N));
+  def("none-broken", ["---" + NBSP, "name: x", "tools: Read", "Body with no close."].join(N));
+  def("none-mentions-word", ["---", "name: x", "description: about write scope handling", "---", "Body."].join(N));
+
+  test.each([
+    ["nbsp-open", "an NBSP after the opening fence"],
+    ["nbsp-close", "an NBSP after the closing fence"],
+    ["zwnbsp-close", "a U+FEFF after the closing fence"],
+    ["unclosed", "no closing fence"],
+    ["bom-nbsp", "a BOM plus an NBSP-fenced opening"],
+    ["in-body", "a declaration with no frontmatter at all"],
+    ["late-in-file", "a declaration beyond the first 4096 characters"],
+  ])("%s (%s): confined as scratch", (name) => {
+    expect(readWriteScope(name, looseRoot)).toBe("scratch");
+  });
+
+  test("the key is matched case-insensitively and the value lowercased, so the gate's exact comparison still confines", () => {
+    expect(readWriteScope("loose-key-case", looseRoot)).toBe("scratch");
+    expect(decide(readWriteScope("loose-key-case", looseRoot), "/home/runner/project/src/a.ts", CWD, CWD).action).toBe("deny");
+  });
+
+  test("the strict reading stays first", () => {
+    expect(readWriteScope("strict-first", looseRoot)).toBe("repo");
+    expect(readWriteScope("strict-repo-then-loose-scratch", looseRoot)).toBe("repo");
+  });
+
+  test.each(["none-clean", "none-broken", "none-mentions-word"])("%s: no writeScope anywhere stays undeclared", (name) => {
+    expect(readWriteScope(name, looseRoot)).toBeNull();
+  });
+
+  test("an unreadable-block definition declaring scratch is denied a write outside scratch, end to end", () => {
+    const scope = readWriteScope("nbsp-open", looseRoot);
+    expect(decide(scope, join(looseRoot, "src", "a.ts"), looseRoot, looseRoot).action).toBe("deny");
+  });
+});
+
 describe("readWriteScope() — item 38: only a filename-safe agent name resolves a definition", () => {
   test("a normal agent name still resolves its definition", () => {
     expect(readWriteScope("valid-agent", scopeProjectDir)).toBe("scratch");

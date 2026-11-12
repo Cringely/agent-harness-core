@@ -1034,7 +1034,7 @@ git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit
 
 Same task and same PR, as a second test-and-commit cycle on top of Step 5.
 
-**Trust rule** (operator ruling on #310, 2026-11-11):
+**Trust rule** (design for #310):
 - **First-party marketplaces are trusted without a commit pin.** These are `claude-plugins-official` (source `anthropics/claude-plugins-official`) and `anthropic-agent-skills` (source `anthropics/skills`). At install the installer records a content hash of the installed plugin directory. Later probes and the drift check warn when it changes.
 - **Third-party marketplaces need one of two things:** a real pin verified before the plugin is enabled, or a per-project opt-in carrying a risk sentence.
 - **A first-party plugin whose marketplace entry carries its own sha has that sha tracked too.** superpowers is the case. A sha move in the marketplace is how such a plugin updates (7.0.0 to 7.0.2, say), so a mismatch warns, naming the old and new sha so the operator can read the diff. A plain run changes nothing, and `-Audit` keeps reporting `plugin-changed`. Installing the marketplace's version and re-recording both the sha and the content hash happen only under `-InstallDeps`, the same rule as content drift. It never uninstalls or refuses.
