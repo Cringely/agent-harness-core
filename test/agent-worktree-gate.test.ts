@@ -787,6 +787,63 @@ describe("requiresIsolation() — the tools key is read as Claude Code reads it,
   });
 });
 
+// --- frontmatter fences are whole lines ----------------------------------------------------------
+//
+// A fence is a line that is three dashes and nothing else (trailing whitespace allowed). A line that
+// merely STARTS with three dashes is not a fence, and Claude Code does not close the block there.
+// If the gate closed on it, a `tools: Read` placed before the real closing fence would decide the
+// classification while Claude Code reads a different block. Any such line, or a missing close, means
+// the block cannot be read with confidence, so the type requires isolation.
+
+describe("requiresIsolation() — frontmatter fences must be whole lines", () => {
+  const fenceDir = mkdtempSync(join(tmpdir(), "worktree-gate-fence-"));
+  scratchDirs.push(fenceDir);
+  const NL = String.fromCharCode(10);
+  const CRLF = String.fromCharCode(13) + NL;
+  function def(type: string, text: string) {
+    writeFileSync(join(fenceDir, `${type}.md`), text);
+  }
+  // The honest block: a read-only grant. Its baseline must stay exempt in every spelling that is a
+  // real fence, so the refusals below are about the odd line and not about the grant.
+  const okLines = ["---", "name: ok", "tools: Read, Grep", "---", "Body."];
+  def("fence-ok", okLines.join(NL));
+  def("fence-ok-crlf", okLines.join(CRLF));
+  def("fence-ok-spaces", ["--- ", "name: ok", "tools: Read, Grep", "---  ", "Body."].join(NL));
+
+  // A read-only line sits before a dash-led line, and the real grant (Write) comes after it.
+  def("fence-four-dashes", ["---", "name: x", "tools: Read", "----", "tools: Read, Write, Bash", "---", "Body."].join(NL));
+  def("fence-dash-x", ["---", "name: x", "tools: Read", "---x", "tools: Read, Write, Bash", "---", "Body."].join(NL));
+  def("fence-dash-text", ["---", "name: x", "tools: Read", "--- not a fence", "tools: Read, Write, Bash", "---", "Body."].join(NL));
+  // Same, but the dash-led line is the last thing before the real close.
+  def("fence-dash-before-close", ["---", "name: x", "tools: Read", "----", "---", "Body."].join(NL));
+  def("fence-no-close", ["---", "name: x", "tools: Read, Grep", "Body with no closing fence."].join(NL));
+  def("fence-no-close-dash", ["---", "name: x", "tools: Read, Grep", "---x", "Body."].join(NL));
+  def("fence-bom", String.fromCharCode(0xfeff) + okLines.join(NL));
+  def("fence-open-dashes", ["----", "name: x", "tools: Read, Grep", "---", "Body."].join(NL));
+
+  test.each(["fence-ok", "fence-ok-crlf", "fence-ok-spaces"])("%s: a read-only grant between real fences is exempt", (type) => {
+    expect(requiresIsolation(type, fenceDir)).toBe(false);
+  });
+
+  test.each([
+    ["fence-four-dashes", "a ---- line inside the block"],
+    ["fence-dash-x", "a ---x line inside the block"],
+    ["fence-dash-text", "a dash-led line with text inside the block"],
+    ["fence-dash-before-close", "a ---- line just before the real close"],
+    ["fence-no-close", "no closing fence"],
+    ["fence-no-close-dash", "no closing fence and a dash-led line"],
+    ["fence-bom", "a leading byte order mark"],
+    ["fence-open-dashes", "an opening line of four dashes"],
+  ])("%s (%s): requires isolation", (type) => {
+    expect(requiresIsolation(type, fenceDir)).toBe(true);
+  });
+
+  test("a dispatch of such a type is denied end to end", () => {
+    const d = { tool_name: "Agent", tool_input: { subagent_type: "fence-dash-x", prompt: "go" } };
+    expect(decide(d, fenceDir, "/p", () => "repo").action).toBe("deny");
+  });
+});
+
 // --- spawned process: the #310 entrypoint behaviour ----------------------------------------------
 
 const GP = (cwd?: string) =>

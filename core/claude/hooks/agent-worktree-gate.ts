@@ -238,15 +238,35 @@ const ALLOW: GateDecision = { action: "allow" };
 const classificationCache = new Map<string, boolean>();
 
 /**
+ * The lines between the opening and closing frontmatter fences, or null when the block cannot be
+ * read with confidence. A fence is a whole line: three dashes and optional trailing whitespace. The
+ * first line must be one and the close is the next one, so a line that merely starts with `---`
+ * (`----`, `---x`) is not a close. Claude Code does not close there, so closing there would let
+ * lines after it decide the classification against a block Claude Code reads differently. Such a
+ * line inside the block makes the result null, as do a missing close, a missing opening fence and a
+ * leading byte order mark. Null means the type requires isolation. The fence rule matches the shared
+ * writeScope parser's (write-scope-parse.ts), which this file does not import: a static import that
+ * failed to link would exit before the entrypoint's try, and Claude Code reads that as no opinion.
+ */
+export function frontmatterLines(text: string): string[] | null {
+  const lines = text.split(/\r?\n/);
+  if (!/^---\s*$/.test(lines[0] ?? "")) return null;
+  for (let i = 1; i < lines.length; i++) {
+    if (/^---\s*$/.test(lines[i])) return lines.slice(1, i);
+    if (lines[i].startsWith("---")) return null;
+  }
+  return null;
+}
+
+/**
  * True unless the frontmatter proves the role read-only: a `tools:` field whose
  * every entry is on the read-only allowlist. Absent/empty field means all tools.
  * The key is matched case-sensitively, as Claude Code reads it, so `Tools:` or `TOOLS:` is no grant
  * at all and the role inherits every tool.
  */
 function frontmatterRequiresIsolation(text: string): boolean {
-  const fm = text.match(/^---\r?\n([\s\S]*?)\r?\n---/)?.[1];
-  if (fm === undefined) return true; // no parseable frontmatter → cannot prove read-only
-  const lines = fm.split(/\r?\n/);
+  const lines = frontmatterLines(text);
+  if (lines === null) return true; // no readable frontmatter → cannot prove read-only
   // A `memory:` field (any scope) auto-enables Read, Write, and Edit regardless
   // of what `tools:` grants, per the docs' persistent-memory section.
   // `memory: user` writes outside the checkout (~/.claude/agent-memory/), so
