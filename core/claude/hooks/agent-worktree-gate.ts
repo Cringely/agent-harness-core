@@ -10,11 +10,15 @@
 //
 // Floor: once the hook can read a subagent_type out of a well-formed payload,
 // a write-capable dispatch never proceeds against this shared, non-isolated
-// checkout unless the hook proved the type read-only or it is a built-in the
-// hook trusts as read-only (Explore, Plan). The only other way through is a
-// reasoned override the dispatcher wrote itself: an ISOLATION-OVERRIDE line
-// in the prompt, or a PROJECT_EXCEPTIONS entry. The CLOSED path below
-// derives from that floor:
+// checkout unless one of these holds:
+//   - the hook proved the type read-only, or it is a built-in the hook trusts as
+//     read-only (Explore, Plan);
+//   - neither the project root nor the session folder is a git repository, so no
+//     worktree can exist (see the git-probe paragraph below). The dispatch is allowed
+//     with a note rather than denied for something that cannot be done;
+//   - the dispatcher wrote a reasoned override itself: an ISOLATION-OVERRIDE line in
+//     the prompt, or a PROJECT_EXCEPTIONS entry.
+// The CLOSED path below derives from that floor:
 // where classification runs but can't prove the type safe, the gate denies,
 // because an unproven type is not a read-only type. The OPEN path is a
 // deliberate reliability trade against the floor, not a consequence of it,
@@ -33,12 +37,17 @@
 //   - Type has a definition file → parse its `tools:` frontmatter. Exempt only if
 //     every listed tool is on the provably-read-only allowlist; an absent/empty
 //     `tools:` field, `*`, "All tools", or any unlisted tool ⇒ requires isolation.
+//     The key is matched case-sensitively, as Claude Code reads it, so `Tools:` is no
+//     grant. A `writeScope: scratch` declaration changes nothing here: such an agent
+//     is write-capable and needs isolation like any other (a redesign of trust for
+//     scoped writers is tracked in #312).
 //   - Definition file exists but is unreadable ⇒ that TYPE requires isolation
 //     (fail-closed tier: classification ran and found nothing provably safe.
 //     The fail-open tier below is reserved for malformed stdin and our own
 //     bugs, where classification never ran at all).
 //   - No definition file → only the known built-ins are hardcoded: Explore and
-//     Plan are read-only (their published grant excludes Edit/Write/NotebookEdit);
+//     Plan are read-only (their published grant denies Write and Edit, see
+//     BUILTIN_READ_ONLY);
 //     general-purpose, fork, and an OMITTED subagent_type (the tool defaults it to
 //     general-purpose) have all tools. Any other unknown type requires isolation —
 //     an unknown role is not evidence it is read-only.
@@ -65,7 +74,8 @@
 // treats as "no opinion" — the normal permission flow proceeds. Only a
 // well-formed deny emits JSON. If `bun` itself is missing from PATH the hook
 // command fails non-zero-but-not-2, which Claude Code also treats as
-// non-blocking. No network, no git, no mutation. Input is the stdin payload alone.
+// non-blocking. No network, no git binary, no mutation. Input is the stdin payload, the environment,
+// and the few filesystem reads the git probe and the agent-definition lookup make.
 // (An unreadable agent-definition file is NOT a hook error — it resolves to
 // "requires isolation" for that type, see above.)
 //
@@ -76,19 +86,33 @@
 // `BASE-SHA: <hex>`, 7 to 40 hex digits, at the start of a prompt line (leading spaces allowed). The
 // agent compares it with its worktree HEAD before touching a file and aborts on a mismatch. The gate
 // checks only that the line is present, since the worktree does not exist yet.
-// The gate reads no git state and compares nothing. An earlier version denied only when the
-// dispatcher HEAD differed from origin's default branch and let an equal pair through, but the local
-// origin ref can be stale, so equal-HEAD was not a safe allow (operator ruling on #36, 2026-11-11).
+// The base check compares nothing. An earlier version denied only when the dispatcher HEAD differed
+// from origin's default branch and let an equal pair through, but the local origin ref can be stale,
+// so equal-HEAD was not a safe allow (operator ruling on #36, 2026-11-11).
+//
+// Git probe (#310). A worktree cannot exist outside a git repository, so denying a write dispatch
+// there with "re-dispatch isolated" asks for the impossible. When the project root is provably not
+// a repository, the gate allows the dispatch and attaches a note naming the cost and the `git init`
+// remedy. The probe reads the filesystem only and spawns no git binary: GIT_DIR or GIT_WORK_TREE in
+// the environment, or a `.git` entry (file or directory) at the path or any ancestor, means "repo".
+// The project root decides (CLAUDE_PROJECT_DIR, else two levels above this script), and a payload
+// `cwd` must agree with it. Any answer short of "not-repo" for either, "unknown" included, keeps the
+// behaviour above, so a probe that cannot answer never widens what is allowed.
+//
+// Scoped writers (#312). An agent that declares `writeScope: scratch` is classified like any other
+// write-capable type and needs isolation. agent-write-scope.ts confines its Write and Edit calls to
+// a scratch folder, but the worktree gate does not rely on that. Trusting it needs the two gates to
+// agree on the definition, the type name, the project root and the registration, and the redesign
+// is tracked in #312.
 //
 // Decision logic lives in the exported `decide()`, exercised offline by
 // test/agent-worktree-gate.test.ts without spawning a process. The stdin/stdout
 // contract itself IS spawn-tested (#78): see the
 // "spawned process" describe block at the end of that file.
 
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { isValidAgentName } from "./agent-name";
-
 /**
  * Project-specific escape hatch: subagent_type values this project has
  * decided are safe to dispatch without isolation regardless of what their
@@ -116,8 +140,11 @@ const READ_ONLY_TOOLS = new Set([
 
 /**
  * Built-in subagent types with no `.claude/agents/<type>.md` definition file.
- * Explore and Plan are read-only per their published grant ("All tools except
- * Agent, Artifact, ExitPlanMode, Edit, Write, NotebookEdit"). general-purpose
+ * Explore and Plan are read-only per the built-in subagents section of the Claude Code subagent
+ * docs (code.claude.com/docs/en/sub-agents), which gives both "read-only tools; Write and Edit are
+ * denied", and per the Agent tool's own roster ("All tools except Agent, Artifact, ExitPlanMode,
+ * Edit, Write, NotebookEdit"). No source documents a grant for any other built-in, so none is
+ * listed: an uncited grant is not proof of read-only. general-purpose
  * and fork carry all tools and deliberately have no entry here — they fall
  * through to the requires-isolation default, exactly like unknown types.
  */
@@ -149,8 +176,61 @@ export const BASE_SHA_TOKEN = "BASE-SHA:";
 const BASE_SHA_RE = /^[ \t]*BASE-SHA:[ \t]*[0-9a-f]{7,40}\b/im;
 
 export type GateDecision =
-  | { action: "allow" }
+  | { action: "allow"; note?: string }
   | { action: "deny"; reason: string };
+
+export type GitProbe = "repo" | "not-repo" | "unknown";
+
+/**
+ * Is `dir` inside a git work tree? Filesystem only, no git binary. `repo` when GIT_DIR or
+ * GIT_WORK_TREE is set, or when `dir` or an ancestor holds a `.git` entry (a directory, or the file
+ * a linked worktree uses), searched from the directory's real path so links resolve. `unknown` when
+ * `dir` is not an existing directory or a read fails for any reason but absence. `not-repo` only when the walk reaches the filesystem root (`/` or a drive
+ * root) having found nothing. Unknown fails closed in the caller: the gate behaves as it did.
+ */
+export function probeGitWorkTree(
+  dir: string,
+  env: Record<string, string | undefined> = process.env,
+): GitProbe {
+  if (env.GIT_DIR || env.GIT_WORK_TREE) return "repo";
+  try {
+    if (!statSync(dir).isDirectory()) return "unknown";
+    // Walk from the real location. A junction or symlink into a repository is that repository, and
+    // a lexical walk would climb the link's own parents and call it not-repo.
+    let p = realpathSync.native(dir);
+    for (;;) {
+      try {
+        lstatSync(join(p, ".git"));
+        return "repo";
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        // Absent here (or the parent is a file): keep climbing. Anything else, such as a denied
+        // read, means the answer is not known.
+        if (code !== "ENOENT" && code !== "ENOTDIR") return "unknown";
+      }
+      const parent = dirname(p);
+      if (parent === p) return "not-repo";
+      p = parent;
+    }
+  } catch {
+    return "unknown";
+  }
+}
+
+/** The note attached to an allow when the project root is not a git repository. */
+export function nonGitNote(projectRoot: string): string {
+  return (
+    `Worktree gate: ${projectRoot} is not a git repository, so worktree isolation is not available ` +
+    `and this dispatch runs in the shared folder. A git repository in a subfolder of it is not ` +
+    `isolated either. If this work should be versioned, run \`git init\` here and the gate will ` +
+    `isolate concurrent writers.`
+  );
+}
+
+/** The project root: CLAUDE_PROJECT_DIR when set, else two levels above this script's directory. */
+export function projectRootOf(env: Record<string, string | undefined>): string {
+  return env.CLAUDE_PROJECT_DIR || join(import.meta.dir, "..", "..");
+}
 
 const ALLOW: GateDecision = { action: "allow" };
 
@@ -158,13 +238,40 @@ const ALLOW: GateDecision = { action: "allow" };
 const classificationCache = new Map<string, boolean>();
 
 /**
+ * The lines between the opening and closing frontmatter fences, or null when the block cannot be
+ * read with confidence. A fence is a whole line: three dashes and optional trailing ASCII spaces or
+ * tabs, so a no-break space or U+FEFF after them is not a fence. The first line must be one and the
+ * close is the next one, so a line that merely starts with `---`
+ * (`----`, `---x`) is not a close. Claude Code does not close there, so closing there would let
+ * lines after it decide the classification against a block Claude Code reads differently. Such a
+ * line inside the block makes the result null, as do a missing close, a missing opening fence and a
+ * leading byte order mark. Null means the type requires isolation.
+ *
+ * This is deliberately not the shared writeScope parser's fence code (write-scope-parse.ts). The
+ * two sides need opposite failure directions. This gate decides whether a type may skip isolation,
+ * so it must under-detect: anything odd reads as no frontmatter. The write-scope gate decides what
+ * to confine, so it must over-detect: it strips a byte order mark and ignores a dash-led line. One
+ * shared function would force a single direction on both. The plain fence test is the same in both.
+ */
+export function frontmatterLines(text: string): string[] | null {
+  const lines = text.split(/\r?\n/);
+  if (!/^---[ \t]*\r?$/.test(lines[0] ?? "")) return null;
+  for (let i = 1; i < lines.length; i++) {
+    if (/^---[ \t]*\r?$/.test(lines[i])) return lines.slice(1, i);
+    if (lines[i].startsWith("---")) return null;
+  }
+  return null;
+}
+
+/**
  * True unless the frontmatter proves the role read-only: a `tools:` field whose
  * every entry is on the read-only allowlist. Absent/empty field means all tools.
+ * The key is matched case-sensitively, as Claude Code reads it, so `Tools:` or `TOOLS:` is no grant
+ * at all and the role inherits every tool.
  */
 function frontmatterRequiresIsolation(text: string): boolean {
-  const fm = text.match(/^---\r?\n([\s\S]*?)\r?\n---/)?.[1];
-  if (fm === undefined) return true; // no parseable frontmatter → cannot prove read-only
-  const lines = fm.split(/\r?\n/);
+  const lines = frontmatterLines(text);
+  if (lines === null) return true; // no readable frontmatter → cannot prove read-only
   // A `memory:` field (any scope) auto-enables Read, Write, and Edit regardless
   // of what `tools:` grants, per the docs' persistent-memory section.
   // `memory: user` writes outside the checkout (~/.claude/agent-memory/), so
@@ -173,10 +280,12 @@ function frontmatterRequiresIsolation(text: string): boolean {
   // at line start so a `memory:` substring inside a description value does
   // not false-positive.
   if (lines.some((l) => /^memory\s*:\s*\S/i.test(l))) return true;
-  const toolsLine = lines.find((l) => /^tools\s*:/i.test(l));
+  // Case-sensitive on purpose: Claude Code reads the `tools` key exactly, so `Tools:` grants nothing
+  // and the role inherits every tool. A case-insensitive match would read it as a restriction.
+  const toolsLine = lines.find((l) => /^tools\s*:/.test(l));
   if (!toolsLine) return true; // no tools: restriction = all tools
   const tokens = toolsLine
-    .replace(/^tools\s*:/i, "")
+    .replace(/^tools\s*:/, "")
     .split(",")
     .map((s) => s.trim().toLowerCase())
     .filter((s) => s !== "");
@@ -241,10 +350,15 @@ export function requiresIsolation(
 
 /**
  * Decision over the PreToolUse stdin payload. Unrecognizable input allows.
+ *
+ * `projectRoot` null or omitted means no root is known: the probe is not called and the non-git
+ * allow never fires.
  */
 export function decide(
   payload: unknown,
   agentsDir: string = DEFAULT_AGENTS_DIR,
+  projectRoot: string | null = null,
+  probe: (dir: string) => GitProbe = (dir) => probeGitWorkTree(dir),
 ): GateDecision {
   if (typeof payload !== "object" || payload === null) return ALLOW;
   const p = payload as Record<string, unknown>;
@@ -268,6 +382,15 @@ export function decide(
       : "general-purpose";
 
   if (!requiresIsolation(subagentType, agentsDir)) return ALLOW;
+
+  // Nothing to isolate into: the project root is provably not a repository, and the session cwd
+  // (when the payload names one) agrees. Allow and say so. Any other probe answer, "unknown"
+  // included, falls through to the logic below.
+  if (typeof projectRoot === "string" && projectRoot !== "" && probe(projectRoot) === "not-repo") {
+    if (typeof p.cwd !== "string" || probe(p.cwd) === "not-repo") {
+      return { action: "allow", note: nonGitNote(projectRoot) };
+    }
+  }
 
   if (typeof t.isolation === "string" && ISOLATED.has(t.isolation)) {
     if (typeof t.prompt === "string" && BASE_SHA_RE.test(t.prompt)) return ALLOW;
@@ -305,7 +428,16 @@ if (import.meta.main) {
     // Copilot CLI also runs .claude/settings.json hooks and fails closed on them (#227). Stand
     // down there, but never while CLAUDECODE is set, so a Claude Code session always runs the rest.
     if (process.env.COPILOT_CLI && !process.env.CLAUDECODE) process.exit(0);
-    const decision = decide(JSON.parse(raw));
+    const payload = JSON.parse(raw);
+    const decision = decide(payload, DEFAULT_AGENTS_DIR, projectRootOf(process.env));
+    if (decision.action === "allow" && decision.note !== undefined) {
+      console.log(
+        JSON.stringify({
+          systemMessage: decision.note,
+          hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: decision.note },
+        }),
+      );
+    }
     if (decision.action === "deny") {
       console.log(
         JSON.stringify({

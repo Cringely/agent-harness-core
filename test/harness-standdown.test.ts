@@ -118,6 +118,9 @@ const rows: Row[] = [
     hook: "agent-worktree-gate.ts",
     run(mode) {
       const dir = tempDir("standdown-wt-");
+      // A project root that is a git repository, so the gate's non-git allow does not apply and the
+      // dispatch is refused as before. The probe only looks for a `.git` entry.
+      mkdirSync(join(dir, ".git"));
       const r = spawn(bunHook(this.hook), dir, childEnv(mode, { CLAUDE_PROJECT_DIR: dir }), dispatchPayload);
       return { ...r, effect: false };
     },
