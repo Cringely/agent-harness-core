@@ -41,3 +41,11 @@ One entry per consequential choice, written when the choice is made. Roles only,
 - Flips if: nothing on Free. A writer's own harness sessions have no pin-side source and deny every merge in an enrolled repository, so writers merge in the web UI.
 - Spec: `docs/superpowers/specs/2026-11-11-portable-pr-review-design.md`, Approval enforcement.
 - Drafted by: coordinator, reversing a call made in revision 1 after a security-review finding. Decided by: coordinator.
+
+## 2026-11-11: the merge guard's enrolled list is operator-only config, and a missing source denies (#146)
+
+- Choice: the merge guard reads the list of enrolled repositories and the account it reads as only from operator-only local config (the hub's own config, or an account-level file written from it), never from the public harness repository and never from a reviewed repository. The bot user id may still come from the harness pin, because it is public. When the operator-only source is unavailable, the guard denies every recognized merge form in any repository that has a harness manifest, whatever the manifest's enrolled flag says. This amends the entry above, which allowed the enrolled list to sit at the harness pin.
+- Rejected: keeping the enrolled list at the harness pin, because the pinned checkout is the public repository and the list names private repositories. Denying only in sessions marked as the operator's at the account layer, because a writer could then switch the guard off by editing the manifest flag in any other session.
+- Flips if: harness users outside the operator report that they cannot merge through a harness session in their own repositories, in which case the deny is narrowed to manifests that carry an enrolled field.
+- Spec: `docs/superpowers/specs/2026-11-11-portable-pr-review-design.md`, Approval enforcement.
+- Drafted by: coordinator, from a security re-review finding. Decided by: coordinator.
