@@ -56,6 +56,8 @@ export function ciCoveredPesterSuites(workflowText: string): Set<string> {
 // prefix match would be a second lookup mechanism for the same one-suite case.
 const SHARED_MODULE_SUITES: ReadonlyMap<string, readonly string[]> = new Map([
   ["install/AccountShared.ps1", ["install/Export-Account.Tests.ps1", "install/Install-Account.Tests.ps1"]],
+  // #310: both installers dot-source Deps.ps1 (layer dependency preflight), and both suites drive it.
+  ["install/Deps.ps1", ["install/Install-Harness.Tests.ps1", "install/Install-Account.Tests.ps1"]],
   ["account/claude/hooks/Guard-SkillSize.ps1", ["install/Account-Hooks.Tests.ps1"]],
   ["account/claude/hooks/Lint-DocumentProse.ps1", ["install/Account-Hooks.Tests.ps1"]],
   ["account/claude/hooks/Scan-MemorySecrets.ps1", ["install/Account-Hooks.Tests.ps1"]],
