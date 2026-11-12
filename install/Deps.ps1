@@ -299,6 +299,26 @@ function Get-DepGuidance {
     return "install with: $(Format-DepsArgv $cmd)"
 }
 
+# Appends to this process's PATH every entry of the Machine and User scopes it lacks. Appends
+# only, so nothing this process already resolves changes what it resolves to.
+function Update-DepsProcessPath {
+    param([scriptblock]$ReadScopedPath)
+    $sep = [System.IO.Path]::PathSeparator
+    $current = @(([string]$env:PATH) -split [regex]::Escape([string]$sep) | Where-Object { $_ })
+    $seen = @{}
+    foreach ($d in $current) { $seen[$d.TrimEnd('\', '/').ToLowerInvariant()] = $true }
+    $added = [System.Collections.Generic.List[string]]::new()
+    foreach ($scope in 'Machine', 'User') {
+        foreach ($d in @(([string](& $ReadScopedPath $scope)) -split [regex]::Escape([string]$sep) | Where-Object { $_ })) {
+            $key = $d.TrimEnd('\', '/').ToLowerInvariant()
+            if ($seen.Contains($key)) { continue }
+            $seen[$key] = $true
+            $added.Add($d)
+        }
+    }
+    if ($added.Count -gt 0) { $env:PATH = (@($current) + @($added)) -join $sep }
+}
+
 # The real runner. Resolves argv[0] as an application, never through a shell, starts it with
 # stdin closed so a tool that waits on input cannot hang the install, reads both output streams
 # asynchronously so a full pipe cannot deadlock the wait, and kills the whole process tree when
@@ -354,10 +374,15 @@ function Invoke-DepsPreflight {
         [string]$PluginScope = '',
         [string]$PluginCwd,
         [hashtable]$PluginRecords = @{},
-        [object[]]$AllowUnpinned = @()
+        [object[]]$AllowUnpinned = @(),
+        # Test seams for the Windows PATH refresh after a winget install. ReadScopedPath gets
+        # 'Machine' or 'User' and returns that scope's PATH. ResolveGitExe returns the git.exe
+        # location Git Bash is resolved from.
+        [scriptblock]$ReadScopedPath = { param($Scope) [Environment]::GetEnvironmentVariable('Path', $Scope) },
+        [scriptblock]$ResolveGitExe = { (Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source }
     )
 
-    $gitExe = (Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+    $gitExe = & $ResolveGitExe
     $byName = @{}
     foreach ($e in @($Manifest['deps'] | Where-Object { $null -ne $_ })) { $byName[$e['name']] = $e }
     $cache = @{}
@@ -406,11 +431,25 @@ function Invoke-DepsPreflight {
                 }
                 $display = Format-DepsArgv $cmd
                 if (-not (& $ShouldInstall $display 'install')) {
-                    # A dry run is not a failure: nothing ran, so there is nothing to verify.
-                    Write-Host "WhatIf: would run $display"
-                    continue
+                    # A dry run is not a failure: nothing ran, so there is nothing to verify. A
+                    # declined prompt outside a dry run is the operator saying no, so the
+                    # dependency stays missing and is reported as such, a hard one refusing.
+                    if ($WhatIfPreference) {
+                        Write-Host "WhatIf: would run $display"
+                        continue
+                    }
+                    $prob.Text = "$($dep['name']) ($($prob.Reason)): the install was declined, so '$display' did not run. $($dep['failMode'])"
+                    break
                 }
                 $null = & $Runner $cmd $script:DepsInstallTimeout $null
+                # winget installers write PATH to the registry, which this process never sees,
+                # so the re-probe would miss the tool it just installed. Merge in the Machine and
+                # User scopes, and resolve git again, since Git Bash is found from git.exe.
+                if ($OnWindows -and $cmd[0] -eq 'winget') {
+                    Update-DepsProcessPath -ReadScopedPath $ReadScopedPath
+                    $gitExe = & $ResolveGitExe
+                    $cache.Clear()
+                }
                 $cache.Remove($step['name'])
                 if (-not (& $probe $step['name']).Present) {
                     $prob.Text = "$($dep['name']): the install did not verify. '$display' ran, and the re-probe still finds $($step['name']) absent ($((& $probe $step['name']).Reason)). $($dep['failMode'])"
@@ -611,13 +650,18 @@ function Test-DepsSamePath {
 # Runs a CLI listing through the runner and parses it in memory. $null means it did not answer:
 # a non-zero exit, a timeout, or output that is not JSON. The output itself is never returned in
 # a message, because the plugin list can carry MCP server headers.
+# Only a JSON array is an answer. Empty, whitespace and `null` output all parse to $null without
+# an error, and reading that as "nothing listed" would let a silent listing pass as proof that a
+# plugin is gone.
 function Invoke-DepsJsonListing {
     param([scriptblock]$Runner, [string[]]$Argv, [string]$Cwd)
     $r = & $Runner $Argv $script:DepsProbeTimeout $Cwd
     if (-not $r -or $r.TimedOut -or $r.ExitCode -ne 0) { return $null }
-    try { $parsed = (Get-DepsOutputText $r.Output) | ConvertFrom-Json -AsHashtable -ErrorAction Stop }
+    $text = (Get-DepsOutputText $r.Output).Trim()
+    if (-not $text.StartsWith('[')) { return $null }
+    try { $parsed = ConvertFrom-Json -InputObject $text -AsHashtable -NoEnumerate -ErrorAction Stop }
     catch { return $null }
-    return [pscustomobject]@{ Rows = @(@($parsed) | Where-Object { $_ -is [System.Collections.IDictionary] }) }
+    return [pscustomobject]@{ Rows = @($parsed | Where-Object { $_ -is [System.Collections.IDictionary] }) }
 }
 
 function Get-PluginMarketplaces {
@@ -650,7 +694,9 @@ function Get-PluginMarketplaceIdentityProblem {
     if (-not $Marketplaces.Contains($name)) { return "marketplace $name is not registered here, so it cannot be confirmed as first-party" }
     $registered = [string]$Marketplaces[$name].Repo
     if ([string]::Equals($registered, $expected, [System.StringComparison]::OrdinalIgnoreCase)) { return $null }
-    return "SPOOF: the marketplace registered here as $name comes from '$registered', not the first-party $expected, so first-party trust does not apply and nothing was installed or recorded. Remove that registration with claude plugin marketplace remove $name, then re-run"
+    # The registered value is captured CLI output and can carry a token in a URL, so it is never
+    # printed. The message names the field and what it should have been.
+    return "SPOOF: field marketplace.repo of $name does not match: expected $expected, and the registered value differs (not shown). First-party trust does not apply, and nothing was installed or recorded. Remove that registration with claude plugin marketplace remove $name, then re-run"
 }
 
 # Whether the listing shows this plugin at its declared scope (and, for project scope, in this
@@ -716,7 +762,8 @@ function Test-PluginDep {
     if (-not $path -or -not (Test-Path -LiteralPath $path -PathType Container)) { $res.Reason = 'its installPath is missing'; return $res }
     $res.InstallPath = $path
     $res.Version = [string]$row['version']
-    $res.Hash = Get-PluginContentHash -Path $path
+    try { $res.Hash = Get-PluginContentHash -Path $path }
+    catch { $res.Reason = 'its install directory could not be hashed'; return $res }
     $expected = $RecordedHash
     if ($Dep['pin'].Contains('contentHash')) { $expected = $Dep['pin']['contentHash'] }
     $res.Changed = [bool]$expected -and $res.Hash -ne $expected
@@ -846,12 +893,19 @@ function Invoke-PluginDepsPreflight {
                         $cmd = [string[]]@('claude', 'plugin', 'update', $id, '--scope', $dep['scope'])
                         $display = Format-DepsArgv $cmd
                         if (& $ShouldInstall $display 'install') {
-                            $null = & $runChange $cmd
+                            # A failed update leaves the old copy in place, so recording the new
+                            # sha would silence the move warning for a version never installed.
+                            $ran = & $runChange $cmd
+                            if (-not $ran -or $ran.TimedOut -or $ran.ExitCode -ne 0) {
+                                & $fail 'claude plugin update did not succeed, so its record was left unchanged'
+                                continue
+                            }
                             $r2 = & $probe $null
                             if ($r2.Present) { $Records[$id] = New-PluginRecord -Result $r2 -Sha $currentSha; $changed = $true }
                             else { & $fail "the update did not verify ($($r2.Reason))" }
                         }
-                        else { Write-Host "WhatIf: would run $display" }
+                        elseif ($WhatIfPreference) { Write-Host "WhatIf: would run $display" }
+                        else { & $fail 'the update was declined, so its record was left unchanged' }
                     }
                     continue
                 }
@@ -904,7 +958,8 @@ function Invoke-PluginDepsPreflight {
             }
             $display = Format-DepsArgv $cmd
             if (-not (& $ShouldInstall $display 'install')) {
-                Write-Host "WhatIf: would run $display"
+                if ($WhatIfPreference) { Write-Host "WhatIf: would run $display" }
+                else { & $fail "$($r.Reason), and '$display' was declined" }
                 $stopped = $true
                 break
             }
@@ -921,9 +976,12 @@ function Invoke-PluginDepsPreflight {
         if ($stopped) { continue }
 
         $r2 = & $probe $null
-        if (-not $r2.Present) { & $fail "the install did not verify ($($r2.Reason))"; continue }
+        # A third-party install that cannot be verified is rolled back like one that fails
+        # verification: a listing that does not answer, a disabled row or an unhashable folder
+        # leaves unverified code installed otherwise.
+        if (-not $r2.Present -and -not $thirdPinned) { & $fail "the install did not verify ($($r2.Reason))"; continue }
         if ($thirdPinned) {
-            $bad = $r2.Changed
+            $bad = (-not $r2.Present) -or $r2.Changed
             if (-not $bad -and $pin.Contains('commit')) {
                 $mpsNow = & $getMarketplaces
                 $bad = -not ($mpsNow -and $mpsNow.Contains($mpName)) -or (Get-DepsGitHead -Runner $Runner -Location $mpsNow[$mpName].Location -Cwd $Cwd) -ne $pin['commit']
@@ -953,7 +1011,8 @@ function Invoke-PluginDepsPreflight {
                     $state = if ($listed -eq $false) { 'MAY STILL BE INSTALLED' } else { 'IS STILL INSTALLED' }
                     throw "plugin $id did not verify against its pin and $state at $($dep['scope']) scope, as unverified third-party code: $why. Remove it now, from $Cwd, with: $display"
                 }
-                & $fail 'the installed copy did not verify against its pin, so it was uninstalled again'
+                if ($r2.Present) { & $fail 'the installed copy did not verify against its pin, so it was uninstalled again' }
+                else { & $fail "the installed copy could not be verified ($($r2.Reason)), so it was uninstalled again" }
             }
             continue
         }

@@ -1448,18 +1448,26 @@ function Invoke-SidecarPlan {
 # the raw ConvertFrom-Json exception used to escape.
 # `-and $rawSettings` before .Trim(): Get-Content -Raw yields $null for a zero-byte file, and a
 # method call on $null inside this try would report an empty file as a parse error, which it is not.
-$settingsPath = Join-Path $claudeDir 'settings.json'
-$settings = [pscustomobject]@{}
-$settingsParseError = $null
-if (Test-Path -LiteralPath $settingsPath -PathType Leaf) {
-    try {
-        $rawSettings = Get-Content -LiteralPath $settingsPath -Raw
-        if ($rawSettings -and $rawSettings.Trim()) { $settings = $rawSettings | ConvertFrom-Json }
+# A function because the install reads the file twice: here, and again after the dependency
+# preflight, which can run `claude plugin install --scope project` and so write this same file.
+function Read-TargetSettings {
+    param([string]$Path)
+    $read = [pscustomobject]@{ Settings = [pscustomobject]@{}; ParseError = $null }
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        try {
+            $rawSettings = Get-Content -LiteralPath $Path -Raw
+            if ($rawSettings -and $rawSettings.Trim()) { $read.Settings = $rawSettings | ConvertFrom-Json }
+        }
+        catch {
+            $read.ParseError = $_.Exception.Message
+        }
     }
-    catch {
-        $settingsParseError = $_.Exception.Message
-    }
+    return $read
 }
+$settingsPath = Join-Path $claudeDir 'settings.json'
+$settingsRead = Read-TargetSettings -Path $settingsPath
+$settings = $settingsRead.Settings
+$settingsParseError = $settingsRead.ParseError
 
 # -Accept: a standalone action, deliberately not composed with an install. Pinning a fork and
 # copying core files over the project are opposite intentions, and running an install to get a
@@ -2012,6 +2020,16 @@ $depsOutcome = Invoke-DepsPreflight -Manifest $depsManifest -Layers ([string[]](
     -AllowUnpinned @($manifest['allowUnpinnedPlugins'] | Where-Object { $_ })
 if ($depsOutcome.PluginRecordsChanged) { $sidecar['pluginHashes'] = $depsOutcome.PluginRecords }
 
+# Read settings.json again. A project-scope `claude plugin install` above writes enabledPlugins
+# into it, and merging the hooks into the copy parsed at the top would write that stale copy back
+# and drop the plugin's enablement. Still before the first write, so a file the CLI left
+# unparsable refuses here the same way the top-of-script guard does.
+$settingsRead = Read-TargetSettings -Path $settingsPath
+if ($settingsRead.ParseError) {
+    throw "Target settings.json does not parse as JSON after the dependency preflight: $settingsPath. Merging the hook registrations into it would destroy whatever it holds, so nothing was copied and the manifest was not written. Fix or move that file, then re-run. Parser reported: $($settingsRead.ParseError)"
+}
+$settings = $settingsRead.Settings
+
 # A dry run stops here. Every write below is either a built-in cmdlet that would honour -WhatIf on
 # its own or a native command (git config core.hooksPath, chmod) that would not, and stopping
 # before all of them is the only way the second kind stays dry.
@@ -2136,10 +2154,10 @@ if ($IncludeCeremonies) {
     }
 }
 
-# Settings merge. $settingsPath and $settings come from the parse at the top of the script, which
-# is also what the guard above the agents loop checked, so the shape merged here is the shape that
-# was approved before anything was copied. Nothing this run writes touches settings.json between
-# the two points.
+# Settings merge. $settings comes from the second parse, after the dependency preflight, so it
+# carries whatever a plugin install wrote. That parse and the one at the top are both checked
+# before anything is copied, and nothing this installer itself writes touches settings.json
+# between that second parse and this merge.
 if (-not $settings.PSObject.Properties['hooks']) {
     $settings | Add-Member -NotePropertyName hooks -NotePropertyValue ([pscustomobject]@{})
 }

@@ -39,10 +39,14 @@ BeforeAll {
     function New-PluginMock {
         param([hashtable]$Installed = @{}, [switch]$AnyProject, [hashtable]$Marketplaces = @{},
             [hashtable]$OnAdd = @{}, [hashtable]$OnInstall = @{}, [string]$Head, [string]$ExtraRowJson,
-            [string[]]$Absent = @(), [string[]]$OnlyPresent, [switch]$FailUninstall, [switch]$UninstallLeavesIt)
+            [string[]]$Absent = @(), [string[]]$OnlyPresent, [switch]$FailUninstall, [switch]$UninstallLeavesIt,
+            [switch]$FailUpdate, [ValidateSet('', 'UntilUninstall', 'Always')][string]$ListBrokenAfterInstall = '',
+            [switch]$ListEmptyAfterUninstall, [string]$HeadAfterInstall, [switch]$WriteSettingsOnInstall)
         $state = @{
             Installed = $Installed; AnyProject = [bool]$AnyProject; Marketplaces = $Marketplaces
             OnAdd = $OnAdd; OnInstall = $OnInstall; Head = $Head; Extra = $ExtraRowJson; FailUninstall = [bool]$FailUninstall; LeavesIt = [bool]$UninstallLeavesIt
+            FailUpdate = [bool]$FailUpdate; ListBroken = $ListBrokenAfterInstall; ListEmpty = [bool]$ListEmptyAfterUninstall
+            HeadAfter = $HeadAfterInstall; WriteSettings = [bool]$WriteSettingsOnInstall; InstallRan = $false; UninstallRan = $false; Broken = $false
         }
         $execPath = $script:depsStubExecPath
         $only = $OnlyPresent
@@ -53,6 +57,8 @@ BeforeAll {
             if ($Absent -contains $argv[0]) { return @{ ExitCode = 127; Output = '' } }
             $line = @($argv) -join ' '
             if ($line -eq 'claude plugin list --json') {
+                if ($state.Broken) { return @{ ExitCode = 1; Output = 'list failed' } }
+                if ($state.ListEmpty -and $state.UninstallRan) { return @{ ExitCode = 0; Output = '' } }
                 $rows = [System.Collections.Generic.List[object]]::new()
                 foreach ($k in @($state.Installed.Keys)) {
                     $v = $state.Installed[$k]
@@ -90,15 +96,35 @@ BeforeAll {
                     if ($row['scope'] -eq 'project') { $row['projectPath'] = $cwd }
                     $state.Installed[$argv[3]] = $row
                 }
+                $state.InstallRan = $true
+                if ($state.ListBroken) { $state.Broken = $true }
+                if ($state.WriteSettings) {
+                    $sp = Join-Path (Join-Path $cwd '.claude') 'settings.json'
+                    $null = New-Item -ItemType Directory -Path (Split-Path -Parent $sp) -Force
+                    $cur = @{}
+                    if (Test-Path -LiteralPath $sp) { $cur = Get-Content -LiteralPath $sp -Raw | ConvertFrom-Json -AsHashtable }
+                    if (-not $cur.Contains('enabledPlugins')) { $cur['enabledPlugins'] = @{} }
+                    $cur['enabledPlugins'][$argv[3]] = $true
+                    $cur | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $sp
+                }
                 return @{ ExitCode = 0; Output = '' }
             }
             if ($argv[0] -eq 'claude' -and $argv[2] -eq 'uninstall') {
+                    $state.UninstallRan = $true
+                    if ($state.ListBroken -eq 'UntilUninstall') { $state.Broken = $false }
+                    if ($state.ListEmpty) { return @{ ExitCode = 0; Output = '' } }
                     if ($state.FailUninstall) { return @{ ExitCode = 1; Output = 'uninstall failed' } }
                     if ($state.LeavesIt) { return @{ ExitCode = 0; Output = '' } }
                     $state.Installed.Remove($argv[3]); return @{ ExitCode = 0; Output = '' }
                 }
-            if ($argv[0] -eq 'claude' -and $argv[2] -eq 'update') { return @{ ExitCode = 0; Output = '' } }
-            if ($argv[0] -eq 'git' -and $argv[3] -eq 'rev-parse') { return @{ ExitCode = 0; Output = $state.Head } }
+            if ($argv[0] -eq 'claude' -and $argv[2] -eq 'update') {
+                if ($state.FailUpdate) { return @{ ExitCode = 1; Output = 'update failed' } }
+                return @{ ExitCode = 0; Output = '' }
+            }
+            if ($argv[0] -eq 'git' -and $argv[3] -eq 'rev-parse') {
+                if ($state.HeadAfter -and $state.InstallRan) { return @{ ExitCode = 0; Output = $state.HeadAfter } }
+                return @{ ExitCode = 0; Output = $state.Head }
+            }
             return $null
         }.GetNewClosure()
         $rec = New-DepsRecorder -Answer $answer
@@ -1599,7 +1625,7 @@ Describe "Install-Account" {
             # Task 10 review, finding 3: the line above re-wraps $s.hooks.PreToolUse in @() before
             # reading it, so it reads the same whether the merged event serialised as a genuine
             # one-element JSON array or a bare object (the single-element pipeline-output collapse
-            # Install-Harness.ps1:2157-2160 already names as `"hooks": {...} instead of "hooks": [...]`).
+            # Install-Harness.ps1:2175-2178 already names as `"hooks": {...} instead of "hooks": [...]`).
             # Asserted against the raw file text, which a re-parse cannot paper over.
             $raw | Should -Match '"PreToolUse":\s*\['
         }
