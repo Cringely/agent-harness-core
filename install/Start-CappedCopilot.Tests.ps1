@@ -68,7 +68,7 @@ exit ([int]$env:STUB_EXIT)
     }
 
     It "launches with the default cap and passes every other argument through in order" {
-        $user = @('-p', 'hello world', '--model=claude-sonnet-5', '-s', '--allow-all-tools')
+        $user = @('-p', 'hello world', '--model=claude-sonnet-5', '-s', '--allow-all-tools')  # model-currency: ignore
         $r = Invoke-Wrapper (@('-UsageDir', $script:usageDir) + $user)
 
         $r.Exit | Should -Be 0

@@ -56,7 +56,7 @@
     bare `--%` is dropped.
 
 .EXAMPLE
-    pwsh -NoProfile -File install/Start-CappedCopilot.ps1 -MaxAiCredits 200 --model claude-sonnet-5
+    pwsh -NoProfile -File install/Start-CappedCopilot.ps1 -MaxAiCredits 200 --model claude-sonnet-5.5
 #>
 
 $ErrorActionPreference = 'Stop'

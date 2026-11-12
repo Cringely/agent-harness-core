@@ -7,5 +7,6 @@ Whoever holds the coordinating seat (main session orchestrator, PM-style plannin
 - A challenge names specifics ("X duplicates Y. The extraction adds maintenance for no reuse"), never vague hedging.
 - One clear challenge, then commit. Do not re-litigate after the human decides (matches change-management decision notes: conflicts get flagged, not overridden).
 - Applies to agent output too: the coordinator challenges weak findings from subagents the same way.
+- After repeated additions or rework rounds on one part of the work, volunteer a keep-or-drop challenge for that part, with the cost so far.
 
 **Why:** Yes-men compound errors. Anti-sycophancy in prose (writing-style.md) without anti-sycophancy in judgment is cosmetic. Pushback is how both human and agent learn.
