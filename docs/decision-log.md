@@ -25,3 +25,19 @@ One entry per consequential choice, written when the choice is made. Roles only,
 - Flips if: the volume of cannot-vouch pull requests makes web-UI merging by the operator the bottleneck.
 - Spec: `docs/superpowers/specs/2026-11-11-portable-pr-review-design.md`, Approval enforcement.
 - Drafted by: coordinator, from a builder-check finding. Decided by: operator.
+
+## 2026-11-11: squash or merge-commit merges only in enrolled repositories (#146)
+
+- Choice: enrolled repositories merge pull requests by squash or by merge commit, never by rebase, and the merge guard denies `--rebase`. The deployer's chain of custody then reads exactly one first-parent commit per pull request and can check each against the approved head.
+- Rejected: allowing rebase merges and teaching the deployer to group a pull request's rebased commits and check only the last against the head, because it adds grouping logic to the one check outside a writer's reach.
+- Flips if: an enrolled repository needs rebase merges.
+- Spec: `docs/superpowers/specs/2026-11-11-portable-pr-review-design.md`, Approval enforcement and Coordinator calls.
+- Drafted by: coordinator. Decided by: coordinator, as a logged reversible default the operator may overturn.
+
+## 2026-11-11: the App bot's user id comes from the harness pin, never the reviewed repository (#146)
+
+- Choice: the merge guard and the deployer take the App bot's user id from the harness checkout at the pinned SHA or from the hub's own config, never from any file in the reviewed repository. The repository manifest may carry an enrolled flag, and the guard denies when that flag and the pin-side enrolled list disagree.
+- Rejected: reading the bot user id and the read account from the committed repository manifest, protected by the cannot-vouch floor. A repository file is writer-controlled, and on Free a writer can push straight to the default branch, so a manifest-sourced id would let a writer point the gate at an account they control.
+- Flips if: nothing on Free. A writer's own harness sessions have no pin-side source and deny every merge in an enrolled repository, so writers merge in the web UI.
+- Spec: `docs/superpowers/specs/2026-11-11-portable-pr-review-design.md`, Approval enforcement.
+- Drafted by: coordinator, reversing a call made in revision 1 after a security-review finding. Decided by: coordinator.
