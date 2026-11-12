@@ -679,6 +679,9 @@ function Get-PluginMarketplaces {
     # Name to where it is registered from. Repo is the owner/repo a github marketplace was added
     # from, or the URL of a git one. A name alone proves nothing: anyone can register a local
     # folder as claude-plugins-official, so first-party trust is checked against Repo.
+    # Every row is kept: a name listed twice (a user registration beside a project one, say) must
+    # not let the second row hide the first from the identity check. Location, Source and Repo are
+    # the first row's, and Repos carries every row's.
     $map = @{}
     foreach ($row in $list.Rows) {
         if ($row['name'] -isnot [string]) { continue }
@@ -686,7 +689,13 @@ function Get-PluginMarketplaces {
         if (-not $loc) { $loc = $row['path'] }
         $repo = $row['repo']
         if (-not $repo) { $repo = $row['url'] }
-        $map[$row['name']] = [pscustomobject]@{ Location = [string]$loc; Source = [string]$row['source']; Repo = [string]$repo }
+        if ($map.Contains($row['name'])) {
+            $map[$row['name']].Repos.Add([string]$repo)
+            continue
+        }
+        $repos = [System.Collections.Generic.List[string]]::new()
+        $repos.Add([string]$repo)
+        $map[$row['name']] = [pscustomobject]@{ Location = [string]$loc; Source = [string]$row['source']; Repo = [string]$repo; Repos = $repos }
     }
     return $map
 }
@@ -700,10 +709,13 @@ function Get-PluginMarketplaceIdentityProblem {
     if (-not $expected) { return "marketplace $name is not one of the first-party marketplaces" }
     if ($null -eq $Marketplaces) { return "the marketplace list did not answer, so marketplace $name cannot be confirmed as first-party" }
     if (-not $Marketplaces.Contains($name)) { return "marketplace $name is not registered here, so it cannot be confirmed as first-party" }
-    $registered = [string]$Marketplaces[$name].Repo
-    if ([string]::Equals($registered, $expected, [System.StringComparison]::OrdinalIgnoreCase)) { return $null }
-    # The registered value is captured CLI output and can carry a token in a URL, so it is never
-    # printed. The message names the field and what it should have been.
+    # The registered values are captured CLI output and can carry a token in a URL, so they are
+    # never printed. The message names the field and what it should have been.
+    $repos = @($Marketplaces[$name].Repos)
+    if ($repos.Count -gt 1) {
+        return "SPOOF: field marketplace.repo of $name cannot be confirmed: expected $expected, and the name is registered $($repos.Count) times (values not shown). First-party trust does not apply, and nothing was installed or recorded. Remove the extra registrations with claude plugin marketplace remove $name, add it back once from $expected, then re-run"
+    }
+    if ([string]::Equals($repos[0], $expected, [System.StringComparison]::OrdinalIgnoreCase)) { return $null }
     return "SPOOF: field marketplace.repo of $name does not match: expected $expected, and the registered value differs (not shown). First-party trust does not apply, and nothing was installed or recorded. Remove that registration with claude plugin marketplace remove $name, then re-run"
 }
 

@@ -81,11 +81,13 @@ Describe "Install-Harness" {
                     # A value is a folder, or @{ Location; Repo } to register the name from another repo.
                     $firstPartyRepos = @{ 'claude-plugins-official' = 'anthropics/claude-plugins-official'; 'anthropic-agent-skills' = 'anthropics/skills' }
                     $rows = @(foreach ($k in @($state.Marketplaces.Keys)) {
-                            $v = $state.Marketplaces[$k]
-                            $loc = $v; $repo = $firstPartyRepos[$k]
-                            if (-not $repo) { $repo = "example/$k" }
-                            if ($v -is [System.Collections.IDictionary]) { $loc = $v['Location']; $repo = $v['Repo'] }
-                            [ordered]@{ name = $k; source = 'github'; repo = $repo; installLocation = $loc }
+                            # A list value lists the name once per element, in order.
+                            foreach ($v in @($state.Marketplaces[$k])) {
+                                $loc = $v; $repo = $firstPartyRepos[$k]
+                                if (-not $repo) { $repo = "example/$k" }
+                                if ($v -is [System.Collections.IDictionary]) { $loc = $v['Location']; $repo = $v['Repo'] }
+                                [ordered]@{ name = $k; source = 'github'; repo = $repo; installLocation = $loc }
+                            }
                         })
                     return @{ ExitCode = 0; Output = (ConvertTo-Json -InputObject $rows -Depth 4 -Compress) }
                 }
@@ -139,7 +141,9 @@ Describe "Install-Harness" {
 
         # The shipped deps.json's plugins, all installed and enabled where it declares them, with
         # every first-party sha and the one directory commit as the marketplaces would list them.
-        $script:depsStubPluginDir = Join-Path $script:depsStubRoot 'plugin'
+        # Each plugin folder sits alone in a version-style parent, as Claude Code's cache lays them
+        # out, so the audit's newer-sibling check sees no unrelated folders beside it.
+        $script:depsStubPluginDir = Join-Path $script:depsStubRoot 'cache/stub-plugin/1.0.0'
         New-Item -ItemType Directory -Path $script:depsStubPluginDir -Force | Out-Null
         Set-Content -LiteralPath (Join-Path $script:depsStubPluginDir 'plugin.json') -Value '{}'
         $script:depsStubMarketplaceDir = Join-Path $script:depsStubRoot 'marketplace'
@@ -182,7 +186,7 @@ Describe "Install-Harness" {
 
         # A plugin install directory with a little content, so its hash means something.
         function New-FakePluginDir {
-            $d = Join-Path $script:depsStubRoot ("plugin-" + [guid]::NewGuid())
+            $d = Join-Path $script:depsStubRoot ("cache/" + [guid]::NewGuid() + '/1.0.0')
             New-Item -ItemType Directory -Path (Join-Path $d 'skills/one') -Force | Out-Null
             Set-Content -LiteralPath (Join-Path $d 'skills/one/SKILL.md') -Value 'a skill'
             Set-Content -LiteralPath (Join-Path $d 'plugin.json') -Value '{"name":"fake-plugin"}'
@@ -3435,6 +3439,61 @@ Describe "Install-Harness" {
                 }
                 finally { Remove-Item -Recurse -Force $target -ErrorAction SilentlyContinue }
             }
+        }
+
+
+        It "a first-party marketplace name listed twice refuses, in either order, and echoes no registered value" {
+            $good = @{ Location = (New-FakeMarketplaceDir); Repo = 'anthropics/claude-plugins-official' }
+            $token = "TOKEN-$([guid]::NewGuid())"
+            $foreign = @{ Location = (New-FakeMarketplaceDir); Repo = "https://oauth2:$token@git.example.invalid/claude-plugins-official.git" }
+            $fixture = New-DepsFixture -Deps @(New-FakePlugin)
+            foreach ($order in @(@($good, $foreign), @($foreign, $good))) {
+                $mock = New-PluginMock -Marketplaces @{ 'claude-plugins-official' = $order } `
+                    -OnInstall @{ 'fake-plugin@claude-plugins-official' = @{ scope = 'project'; installPath = (New-FakePluginDir) } }
+                $msg = $null
+                $out = $null
+                try { $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -InstallDeps -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-String -Width 2000 }
+                catch { $msg = $_.Exception.Message }
+                $msg | Should -Match '^missing hard dependency'
+                $msg | Should -Match 'field marketplace\.repo of claude-plugins-official cannot be confirmed: expected anthropics/claude-plugins-official, and the name is registered 2 times'
+                "$msg $out".Contains($token) | Should -BeFalse
+                @($mock.Calls | Where-Object { $_.Argv[0] -eq 'claude' -and $_.Argv[2] -eq 'install' }).Count | Should -Be 0
+                Test-Path -LiteralPath "$script:target/.claude" | Should -BeFalse
+            }
+        }
+
+        It "-Audit reports plugin-unverified when a newer copy sits beside the recorded one" {
+            $fixture = New-DepsFixture -Deps @(New-FakePlugin)
+            $dir = New-FakePluginDir
+            $abs = (Resolve-Path -LiteralPath $script:target).Path
+            $mock = New-PluginMock -Installed @{ 'fake-plugin@claude-plugins-official' = @{ scope = 'project'; projectPath = $abs; installPath = $dir } } `
+                -Marketplaces @{ 'claude-plugins-official' = (New-FakeMarketplaceDir) }
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-Null
+            (Get-Item -LiteralPath $dir).LastWriteTimeUtc = [DateTime]::UtcNow.AddHours(-2)
+            $sibling = Join-Path (Split-Path -Parent $dir) '1.0.1'
+            New-Item -ItemType Directory -Path $sibling | Out-Null
+            (Get-Item -LiteralPath $sibling).LastWriteTimeUtc = [DateTime]::UtcNow.AddHours(-1)
+            $quiet = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit -Quiet *>&1 | Out-String
+            $quiet | Should -Match "plugin-unverified`tplugin:fake-plugin@claude-plugins-official"
+            $quiet | Should -Not -Match 'plugin-changed'
+            $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit *>&1 | Out-String -Width 2000
+            $audit | Should -Match 'plugin-unverified = a newer copy exists than the recorded one'
+        }
+
+        It "-Audit stays silent when the only copy beside the recorded one is older" {
+            $fixture = New-DepsFixture -Deps @(New-FakePlugin)
+            $dir = New-FakePluginDir
+            $abs = (Resolve-Path -LiteralPath $script:target).Path
+            $mock = New-PluginMock -Installed @{ 'fake-plugin@claude-plugins-official' = @{ scope = 'project'; projectPath = $abs; installPath = $dir } } `
+                -Marketplaces @{ 'claude-plugins-official' = (New-FakeMarketplaceDir) }
+            & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-Null
+            $sibling = Join-Path (Split-Path -Parent $dir) '0.9.0'
+            New-Item -ItemType Directory -Path $sibling | Out-Null
+            (Get-Item -LiteralPath $sibling).LastWriteTimeUtc = [DateTime]::UtcNow.AddHours(-2)
+            (Get-Item -LiteralPath $dir).LastWriteTimeUtc = [DateTime]::UtcNow.AddHours(-1)
+            $quiet = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit -Quiet *>&1 | Out-String
+            $quiet | Should -Not -Match 'plugin-unverified'
+            $quiet | Should -Not -Match 'plugin-changed'
         }
 
         It "a rollback whose uninstall fails throws, naming the plugin as still installed" {

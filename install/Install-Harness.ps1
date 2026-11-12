@@ -1785,6 +1785,24 @@ if ($Audit) {
             }
             if ($nowHash -ne $pluginRec['hash']) {
                 $results.Add([pscustomobject]@{ File = "plugin:$pluginId"; Status = 'plugin-changed' })
+                continue
+            }
+            # The recorded folder matching proves nothing about the active copy once Claude Code
+            # has installed a newer one beside it, as an update into a new version folder does.
+            # Without the CLI the only evidence is the parent folder: a sibling newer than the
+            # recorded one is reported, and a parent that cannot be listed is reported too, since
+            # silence would vouch for a plugin nobody looked at.
+            $unverified = $false
+            try {
+                $recItem = Get-Item -LiteralPath $recPath -ErrorAction Stop
+                $parentDir = Split-Path -Parent $recItem.FullName
+                $siblings = @(Get-ChildItem -LiteralPath $parentDir -Directory -Force -ErrorAction Stop |
+                        Where-Object { $_.FullName -ne $recItem.FullName })
+                if (@($siblings | Where-Object { $_.LastWriteTimeUtc -gt $recItem.LastWriteTimeUtc }).Count -gt 0) { $unverified = $true }
+            }
+            catch { $unverified = $true }
+            if ($unverified) {
+                $results.Add([pscustomobject]@{ File = "plugin:$pluginId"; Status = 'plugin-unverified' })
             }
         }
     }
@@ -1827,7 +1845,7 @@ if ($Audit) {
         # recovery for one and the pin-drop for the other rather than sending both to the
         # installer. (CONTRIBUTING.md's drift-detection gate: every class the audit reports needs
         # a standing response, and the classes that must never be auto-repaired are named as such.)
-        Write-Host "$($attention.Count) file(s) need attention. project-modified/untracked-differs = candidates to promote into core; core-updated/not-installed = re-run installer to pull down; overlay-changed = re-review the fork, then re-pin with -Accept; missing = re-run the installer if the row is a tracked file, but a missing pinned overlay exists only in the project's own history, so restore it from there or drop the pin with -Unaccept; orphaned (already removed/unmodified/modified) = -Prune the key to drop the stale manifest record -- the file, if any is still there, is left on disk for you to delete by hand or -Accept to pin as an overlay. installed (layer not selected) = delete the file by hand, and the next install drops its record. settings-missing/settings-stale = re-run the installer, which rewrites .claude/rules/harness/project-settings.md from the manifest. settings-modified = the installer keeps that file because it was edited by hand or never written by the installer, so move the change into the manifest with the setting's flag, then delete the file and re-run. manifest-invalid = fix the layers or settings value the error names. plugin-changed = re-run the installer with -InstallDeps to re-record after reviewing the change."
+        Write-Host "$($attention.Count) file(s) need attention. project-modified/untracked-differs = candidates to promote into core; core-updated/not-installed = re-run installer to pull down; overlay-changed = re-review the fork, then re-pin with -Accept; missing = re-run the installer if the row is a tracked file, but a missing pinned overlay exists only in the project's own history, so restore it from there or drop the pin with -Unaccept; orphaned (already removed/unmodified/modified) = -Prune the key to drop the stale manifest record -- the file, if any is still there, is left on disk for you to delete by hand or -Accept to pin as an overlay. installed (layer not selected) = delete the file by hand, and the next install drops its record. settings-missing/settings-stale = re-run the installer, which rewrites .claude/rules/harness/project-settings.md from the manifest. settings-modified = the installer keeps that file because it was edited by hand or never written by the installer, so move the change into the manifest with the setting's flag, then delete the file and re-run. manifest-invalid = fix the layers or settings value the error names. plugin-changed = re-run the installer with -InstallDeps to re-record after reviewing the change. plugin-unverified = a newer copy exists than the recorded one, or its folder could not be listed, so the recorded hash may not be the active plugin's. Re-run the installer so it re-reads the plugin listing."
     }
 
     # Stack drift: report-only, same as the file audit above — never writes the manifest or

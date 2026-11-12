@@ -78,11 +78,13 @@ BeforeAll {
                 # A value is a folder, or @{ Location; Repo } to register the name from another repo.
                     $firstPartyRepos = @{ 'claude-plugins-official' = 'anthropics/claude-plugins-official'; 'anthropic-agent-skills' = 'anthropics/skills' }
                     $rows = @(foreach ($k in @($state.Marketplaces.Keys)) {
-                            $v = $state.Marketplaces[$k]
-                            $loc = $v; $repo = $firstPartyRepos[$k]
-                            if (-not $repo) { $repo = "example/$k" }
-                            if ($v -is [System.Collections.IDictionary]) { $loc = $v['Location']; $repo = $v['Repo'] }
-                            [ordered]@{ name = $k; source = 'github'; repo = $repo; installLocation = $loc }
+                            # A list value lists the name once per element, in order.
+                            foreach ($v in @($state.Marketplaces[$k])) {
+                                $loc = $v; $repo = $firstPartyRepos[$k]
+                                if (-not $repo) { $repo = "example/$k" }
+                                if ($v -is [System.Collections.IDictionary]) { $loc = $v['Location']; $repo = $v['Repo'] }
+                                [ordered]@{ name = $k; source = 'github'; repo = $repo; installLocation = $loc }
+                            }
                         })
                 return @{ ExitCode = 0; Output = (ConvertTo-Json -InputObject $rows -Depth 4 -Compress) }
             }
@@ -134,7 +136,9 @@ BeforeAll {
 
     # The shipped deps.json's plugins, all installed and enabled where it declares them, with
     # every first-party sha and the one directory commit as the marketplaces would list them.
-    $script:depsStubPluginDir = Join-Path $script:depsStubRoot 'plugin'
+    # Each plugin folder sits alone in a version-style parent, as Claude Code's cache lays them
+    # out, so the audit's newer-sibling check sees no unrelated folders beside it.
+    $script:depsStubPluginDir = Join-Path $script:depsStubRoot 'cache/stub-plugin/1.0.0'
     New-Item -ItemType Directory -Path $script:depsStubPluginDir -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $script:depsStubPluginDir 'plugin.json') -Value '{}'
     $script:depsStubMarketplaceDir = Join-Path $script:depsStubRoot 'marketplace'
@@ -177,7 +181,7 @@ BeforeAll {
 
     # A plugin install directory with a little content, so its hash means something.
     function New-FakePluginDir {
-        $d = Join-Path $script:depsStubRoot ("plugin-" + [guid]::NewGuid())
+        $d = Join-Path $script:depsStubRoot ("cache/" + [guid]::NewGuid() + '/1.0.0')
         New-Item -ItemType Directory -Path (Join-Path $d 'skills/one') -Force | Out-Null
         Set-Content -LiteralPath (Join-Path $d 'skills/one/SKILL.md') -Value 'a skill'
         Set-Content -LiteralPath (Join-Path $d 'plugin.json') -Value '{"name":"fake-plugin"}'
@@ -1641,7 +1645,7 @@ Describe "Install-Account" {
             # Task 10 review, finding 3: the line above re-wraps $s.hooks.PreToolUse in @() before
             # reading it, so it reads the same whether the merged event serialised as a genuine
             # one-element JSON array or a bare object (the single-element pipeline-output collapse
-            # Install-Harness.ps1:2175-2178 already names as `"hooks": {...} instead of "hooks": [...]`).
+            # Install-Harness.ps1:2193-2196 already names as `"hooks": {...} instead of "hooks": [...]`).
             # Asserted against the raw file text, which a re-parse cannot paper over.
             $raw | Should -Match '"PreToolUse":\s*\['
         }

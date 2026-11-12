@@ -289,6 +289,9 @@ printed.
 `plugin-changed` means a project-scope plugin's install directory no longer hashes to what the
 sidecar recorded. `-Audit` hashes the recorded directory itself and never calls the Claude Code CLI.
 Review the change, then re-run the installer with `-InstallDeps` to record it again.
+`plugin-unverified` means a newer copy sits beside the recorded install directory, as an update into
+a new version folder leaves one, or the folder holding it could not be listed. The recorded hash may
+then not be the active plugin's. Re-run the installer, which reads the plugin listing again.
 
 This is the mechanical half of the findings flow in CONTRIBUTING.md.
 Run it periodically per project (SpaceMolt wires it into a `core_harvest` ceremony, see that
