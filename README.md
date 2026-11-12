@@ -462,12 +462,16 @@ retire list, `install/account-retired.json`, is how that removal reaches a recei
 { "schemaVersion": 1, "retired": [ { "path": "rules/old.md", "reason": "Moved into the code layer." } ] }
 ```
 
-Each path sits under `rules/`, `agents/`, `skills/` or `hooks/`. The installer validates every
-entry before it renames anything, and a path that is absolute, drive-qualified, written with
-backslashes, climbs with `..`, or resolves outside the account home through a link is refused with
-nothing renamed. It then renames the receiver's copy to `<path>.retired-<UTC stamp>` and never
-deletes it, so a local edit survives. Claude Code loads only `*.md` from `rules/`, so the renamed
-file stops loading. A rename never overwrites an earlier one, and `-WhatIf` renames nothing. A list
+Each path names a file under `rules/`, `agents/`, `skills/` or `hooks/`, and a skill is retired by
+listing its `SKILL.md`. The installer validates every entry before it renames anything. A path that
+is absolute, drive-qualified, written with backslashes, or climbs with `..` is refused with nothing
+renamed. So is a path with a link out of the account home anywhere on the way to the item, and so is
+a path that is a directory on the receiver or a link to one, since a renamed directory keeps
+loading. A listed path that is itself a link to a file is different: the link is renamed and its
+target is never touched. The installer renames the receiver's copy to `<path>.retired-<UTC stamp>`
+and never deletes it, so a local edit survives. Claude Code loads only `*.md` from `rules/`, so the
+renamed file stops loading. A rename never overwrites an earlier one, because a name collision
+stops the run, and `-WhatIf` renames nothing. A list
 that cannot be read or parsed stops the install, and so does a payload that still carries a listed
 path. The rename runs after the dependency preflight and before the first copy.
 

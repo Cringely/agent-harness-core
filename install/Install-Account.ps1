@@ -304,9 +304,13 @@ if (-not $SkipPreflight) {
 # four trees below, with no empty, '.' or '..' segment, no segment ending in a dot, and no
 # Windows device name. That excludes by construction: '..' traversal, an absolute or UNC path
 # (leading or doubled slash), a drive letter or stream suffix (':'), and every backslash variant.
+# The anchor is \z, not $, because $ also matches just before a trailing line feed.
 # The containing directory is then resolved through reparse points and must still sit inside
 # <home>/<first segment>, so a rules/ that is a junction or symlink out of the home is refused
-# with nothing renamed. A list that cannot be read or parsed throws, because skipping it would
+# with nothing renamed. A listed path that is itself a directory, or a link to one, is refused
+# too: Claude Code finds a skill as any skills/*/SKILL.md and reads rules/ recursively, so a
+# renamed directory keeps loading while the run reports it retired. Retirement covers files, and
+# a skill is retired by listing its SKILL.md. A list that cannot be read or parsed throws, because skipping it would
 # make the retire step fail open. A payload that still ships a retired path is refused: the
 # list and the layer contradict each other, and one of them is wrong.
 $script:RetireTrees = @('rules', 'agents', 'skills', 'hooks')
@@ -347,7 +351,7 @@ function Invoke-AccountRetirement {
             throw "${label}: '$path' needs a one-line reason."
         }
         $segments = $path -split '/'
-        $bad = ($path -cnotmatch '^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$') -or
+        $bad = ($path -cnotmatch '^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+\z') -or
             ($script:RetireTrees -cnotcontains $segments[0]) -or
             (@($segments | Where-Object { $_ -eq '.' -or $_ -eq '..' -or $_.EndsWith('.') -or $_ -match '^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\.|$)' }).Count -gt 0)
         if ($bad) {
@@ -360,6 +364,10 @@ function Invoke-AccountRetirement {
         if (-not ($parentReal.Equals($treeReal, $cmp) -or $parentReal.StartsWith("$treeReal$sep", $cmp))) {
             throw "${label}: '$path' resolves to '$parentReal', outside '$treeReal'. Nothing was renamed."
         }
+        $present = Get-Item -LiteralPath (Join-Path $parentReal $segments[-1]) -Force -ErrorAction SilentlyContinue
+        if ($present -and $present.PSIsContainer) {
+            throw "${label}: '$path' is a directory on this receiver. Retirement covers files only, so list the files inside it (a skill by its SKILL.md)."
+        }
         if (Test-Path -LiteralPath (Join-Path $PayloadRoot $path)) {
             throw "${label}: the payload still carries '$path'. Remove it from the payload or from the list; nothing was renamed or copied."
         }
@@ -370,13 +378,9 @@ function Invoke-AccountRetirement {
     $stamp = (Get-Date -AsUTC).ToString('yyyyMMddTHHmmssZ')
     foreach ($item in $plan) {
         if (-not (Get-Item -LiteralPath $item.Source -Force -ErrorAction SilentlyContinue)) { continue }
-        # Never overwrite: take the first name no file or directory holds.
+        # No -Force below: Move-Item onto an existing file throws, so a name collision stops the
+        # run instead of replacing an earlier retired copy. Only files get here (see above).
         $newName = "$(Split-Path -Leaf $item.Source).retired-$stamp"
-        $n = 1
-        while (Get-Item -LiteralPath (Join-Path (Split-Path -Parent $item.Source) $newName) -Force -ErrorAction SilentlyContinue) {
-            $n++
-            $newName = "$(Split-Path -Leaf $item.Source).retired-$stamp-$n"
-        }
         if (-not $script:accountCmdlet.ShouldProcess($item.Source, "Retire (rename to $newName)")) { continue }
         Move-Item -LiteralPath $item.Source -Destination (Join-Path (Split-Path -Parent $item.Source) $newName) -Confirm:$false
         Write-Host "Retired $($item.Path) (now $newName): $($item.Reason)"
