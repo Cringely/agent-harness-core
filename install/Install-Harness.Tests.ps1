@@ -14,6 +14,22 @@ Describe "Install-Harness" {
         $script:depsStubExecPath = Join-Path $script:depsStubRoot 'git/mingw64/libexec/git-core'
         $script:depsPresentBanner = 'GNU bash, version 99.9.9(1)-release ccstatusline@99.9.9'
 
+        # SHA256 of a file's bytes with CRLF folded to LF, the form the installer records. A file
+        # holding a NUL byte is hashed as it is, matching the installer's binary rule.
+        function Get-LfHash {
+            param([string]$Path)
+            $bytes = [System.IO.File]::ReadAllBytes($Path)
+            $keep = [System.Collections.Generic.List[byte]]::new()
+            if ([System.Array]::IndexOf($bytes, [byte]0) -ge 0) { $keep.AddRange($bytes) }
+            else {
+                for ($i = 0; $i -lt $bytes.Length; $i++) {
+                    if ($bytes[$i] -eq 13 -and ($i + 1) -lt $bytes.Length -and $bytes[$i + 1] -eq 10) { continue }
+                    $keep.Add($bytes[$i])
+                }
+            }
+            [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($keep.ToArray()))
+        }
+
         # A runner that records (argv, timeout, cwd) and answers through -Answer, which gets
         # (argv, cwd) and returns a hashtable of ExitCode/Output/TimedOut, or $null for "present".
         function New-DepsRecorder {
@@ -705,8 +721,100 @@ Describe "Install-Harness" {
         & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
         $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
         $m['files']['agents/task-reviewer.md'] | Should -Not -BeNullOrEmpty
-        $src = (Get-FileHash "$PSScriptRoot/../core/claude/agents/task-reviewer.md" -Algorithm SHA256).Hash
+        $src = Get-LfHash -Path "$PSScriptRoot/../core/claude/agents/task-reviewer.md"
         $m['files']['agents/task-reviewer.md'] | Should -Be $src
+    }
+
+    It "reads an installed copy as in-sync and unchanged whichever line ending it carries" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $dst = "$script:target/.claude/agents/task-reviewer.md"
+        $lf = ([System.IO.File]::ReadAllText($dst) -replace "`r`n", "`n")
+        foreach ($variant in @($lf, ($lf -replace "`n", "`r`n"))) {
+            [System.IO.File]::WriteAllBytes($dst, [System.Text.UTF8Encoding]::new($false).GetBytes($variant))
+            $audit = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+            $audit | Should -Match 'agents/task-reviewer\.md\s+in-sync'
+            $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target *>&1 | Out-String -Width 500
+            $out | Should -Match 'agents/task-reviewer\.md\s+unchanged'
+            $out | Should -Not -Match "Skipping 'agents/task-reviewer\.md'"
+        }
+    }
+
+    It "reads an LF copy as unchanged when the manifest recorded the CRLF raw hash of the same content" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $dst = "$script:target/.claude/agents/task-reviewer.md"
+        $lf = ([System.IO.File]::ReadAllText($dst) -replace "`r`n", "`n")
+        $enc = [System.Text.UTF8Encoding]::new($false)
+        $crlfBytes = $enc.GetBytes(($lf -replace "`n", "`r`n"))
+        $rawCrlf = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($crlfBytes))
+        [System.IO.File]::WriteAllBytes($dst, $enc.GetBytes($lf))
+        $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+        $m['files']['agents/task-reviewer.md'] = $rawCrlf
+        $m | ConvertTo-Json -Depth 20 | Set-Content "$script:target/.claude/.harness-manifest.json"
+        $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target *>&1 | Out-String -Width 500
+        $out | Should -Match 'agents/task-reviewer\.md\s+unchanged'
+        $out | Should -Not -Match "Skipping 'agents/task-reviewer\.md'"
+        $after = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+        $after['files']['agents/task-reviewer.md'] | Should -Be (Get-LfHash -Path $dst)
+    }
+
+    It "still reports a real content change as modified, with an LF or CRLF edit" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $dst = "$script:target/.claude/agents/task-reviewer.md"
+        $lf = ([System.IO.File]::ReadAllText($dst) -replace "`r`n", "`n")
+        foreach ($variant in @(($lf + "local edit`n"), (($lf + "local edit`n") -replace "`n", "`r`n"))) {
+            [System.IO.File]::WriteAllBytes($dst, [System.Text.UTF8Encoding]::new($false).GetBytes($variant))
+            $audit = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+            $audit | Should -Match 'agents/task-reviewer\.md\s+project-modified'
+            $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target *>&1 | Out-String -Width 500
+            $out | Should -Match 'agents/task-reviewer\.md\s+skipped-modified'
+        }
+    }
+
+    It "treats a legacy raw-hash manifest record as unmodified, updates the file, and re-records the normalised hash" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $dst = "$script:target/.claude/agents/task-reviewer.md"
+        # An older install: CRLF content that differs from core, recorded under its raw hash.
+        $old = [System.Text.UTF8Encoding]::new($false).GetBytes("OLD CORE VERSION`r`nsecond line`r`n")
+        [System.IO.File]::WriteAllBytes($dst, $old)
+        $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+        $m['files']['agents/task-reviewer.md'] = (Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash
+        $m | ConvertTo-Json -Depth 20 | Set-Content "$script:target/.claude/.harness-manifest.json"
+        (Get-LfHash -Path $dst) | Should -Not -Be $m['files']['agents/task-reviewer.md']
+
+        $audit = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $audit | Should -Match 'agents/task-reviewer\.md\s+core-updated'
+        $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target *>&1 | Out-String -Width 500
+        $out | Should -Match 'agents/task-reviewer\.md\s+updated'
+        $after = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+        $after['files']['agents/task-reviewer.md'] | Should -Be (Get-LfHash -Path $dst)
+    }
+
+    It "pins a text overlay by its LF hash and a binary overlay by its raw hash" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $textOverlay = "$script:target/.claude/agents/crlf-overlay.md"
+        $binOverlay = "$script:target/.claude/agents/bin-overlay.md"
+        [System.IO.File]::WriteAllBytes($textOverlay, [byte[]](65, 13, 10, 66, 13, 10))
+        [System.IO.File]::WriteAllBytes($binOverlay, [byte[]](65, 0, 13, 10, 66, 13, 10))
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Accept 'agents/crlf-overlay.md' | Out-Null
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Accept 'agents/bin-overlay.md' | Out-Null
+        $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+        $lfExpected = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([byte[]](65, 10, 66, 10)))
+        $m['accepted']['agents/crlf-overlay.md'] | Should -Be $lfExpected
+        $m['accepted']['agents/bin-overlay.md'] | Should -Be (Get-FileHash -LiteralPath $binOverlay -Algorithm SHA256).Hash
+    }
+
+    It "keeps a legacy raw-hash pin on a CRLF overlay as accepted in the audit and on re-install" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $overlay = "$script:target/.claude/agents/task-reviewer.md"
+        [System.IO.File]::WriteAllBytes($overlay, [byte[]](65, 13, 10, 66, 13, 10))
+        $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+        $m['files'].Remove('agents/task-reviewer.md')
+        $m['accepted']['agents/task-reviewer.md'] = (Get-FileHash -LiteralPath $overlay -Algorithm SHA256).Hash
+        $m | ConvertTo-Json -Depth 20 | Set-Content "$script:target/.claude/.harness-manifest.json"
+        $audit = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $audit | Should -Match 'agents/task-reviewer\.md\s+overlay \(accepted\)'
+        $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target *>&1 | Out-String -Width 500
+        $out | Should -Match 'agents/task-reviewer\.md\s+skipped-pinned'
     }
 
     It "records an empty stackDetected.plugins array in the sidecar when the plugin cache dir is missing, without throwing" {
@@ -1809,7 +1917,7 @@ Describe "Install-Harness" {
         $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
         $secondPin = $m['accepted']['agents/project-only.md']
         $secondPin | Should -Not -Be $firstPin
-        $secondPin | Should -Be (Get-FileHash -LiteralPath $overlay -Algorithm SHA256).Hash
+        $secondPin | Should -Be (Get-LfHash -Path $overlay)
         $audit = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
         $audit | Should -Match 'agents/project-only\.md\s+overlay \(accepted\)'
     }
@@ -2162,7 +2270,7 @@ Describe "Install-Harness" {
         # dropped this one from `files`, so -Accept now takes it without a hand-edited manifest.
         & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Accept 'agents/retired-agent.md' | Out-Null
         $pinned = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
-        $pinned['accepted']['agents/retired-agent.md'] | Should -Be (Get-FileHash -LiteralPath $orphanPath -Algorithm SHA256).Hash
+        $pinned['accepted']['agents/retired-agent.md'] | Should -Be (Get-LfHash -Path $orphanPath)
     }
 
     It "-Prune drops a stale manifest record when the orphaned file is already gone from disk" {

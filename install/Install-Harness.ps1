@@ -336,9 +336,42 @@ $ceremonyKeys = @($ceremonyAgentNames | ForEach-Object { "agents/$_" }) +
 # that could name a different set after one of them is edited.
 $gitHookNames = @('pre-commit', 'pre-push', 'commit-msg')
 
+# Manifest hashes are taken over LF text. A Windows checkout with core.autocrlf turns a file that
+# is LF in the index into CRLF on disk, and a project that commits the same content as LF would
+# otherwise read as modified with no content difference. Text is decided by the absence of a NUL
+# byte, and a binary file is hashed as it is. Only a CRLF pair is rewritten, so a lone CR stays.
+function Get-NormalizedBytes {
+    param([byte[]]$Bytes)
+    if ([System.Array]::IndexOf($Bytes, [byte]0) -ge 0) { return , $Bytes }
+    $out = [System.Collections.Generic.List[byte]]::new($Bytes.Length)
+    for ($i = 0; $i -lt $Bytes.Length; $i++) {
+        if ($Bytes[$i] -eq 13 -and ($i + 1) -lt $Bytes.Length -and $Bytes[$i + 1] -eq 10) { continue }
+        $out.Add($Bytes[$i])
+    }
+    return , $out.ToArray()
+}
+
 function Get-FileHashHex {
     param([string]$Path)
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $norm = Get-NormalizedBytes -Bytes $bytes
+    [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($norm))
+}
+
+# The hash a manifest written before line-ending normalisation recorded: raw bytes. Recorded
+# values are still compared against it, so an existing manifest does not report every CRLF file
+# as modified. A fresh write always records the normalised value.
+function Get-RawFileHashHex {
+    param([string]$Path)
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+}
+
+# True when $Recorded is this file's normalised hash or its legacy raw hash.
+function Test-RecordedHashMatch {
+    param([string]$Path, [string]$Recorded)
+    if (-not $Recorded) { return $false }
+    if ((Get-FileHashHex -Path $Path) -eq $Recorded) { return $true }
+    return ((Get-RawFileHashHex -Path $Path) -eq $Recorded)
 }
 
 # One resolver for -Accept and -Unaccept rather than the obvious copy of the block into the second
@@ -1745,8 +1778,7 @@ if ($Audit) {
                 continue
             }
             $pinnedHash = $acceptedMap[$key]
-            $dstHash = Get-FileHashHex -Path $dstPath
-            $status = if ($dstHash -eq $pinnedHash) { 'overlay (accepted)' } else { 'overlay (changed)' }
+            $status = if (Test-RecordedHashMatch -Path $dstPath -Recorded $pinnedHash) { 'overlay (accepted)' } else { 'overlay (changed)' }
             $results.Add([pscustomobject]@{ File = $key; Status = $status })
             continue
         }
@@ -1762,9 +1794,8 @@ if ($Audit) {
                 $results.Add([pscustomobject]@{ File = $key; Status = 'orphaned (already removed)' })
                 continue
             }
-            $dstHash = Get-FileHashHex -Path $dstPath
             $recHash = $manifest['files'][$key]
-            $status = if ($dstHash -eq $recHash) { 'orphaned (unmodified)' } else { 'orphaned (modified)' }
+            $status = if (Test-RecordedHashMatch -Path $dstPath -Recorded $recHash) { 'orphaned (unmodified)' } else { 'orphaned (modified)' }
             $results.Add([pscustomobject]@{ File = $key; Status = $status })
             continue
         }
@@ -1809,8 +1840,8 @@ if ($Audit) {
 
         $recHash = $manifest['files'][$key]
         $status = if ($dstHash -eq $srcHash) { 'in-sync' }
-        elseif ($dstHash -eq $recHash) { 'core-updated' }
-        elseif ($srcHash -eq $recHash) { 'project-modified' }
+        elseif (Test-RecordedHashMatch -Path $dstPath -Recorded $recHash) { 'core-updated' }
+        elseif (Test-RecordedHashMatch -Path $srcPath -Recorded $recHash) { 'project-modified' }
         else { 'conflict' }
         $results.Add([pscustomobject]@{ File = $key; Status = $status })
     }
@@ -2061,7 +2092,16 @@ function Install-ManagedFile {
         return
     }
 
-    if ($recordedHash -and $currentHash -eq $recordedHash) {
+    # Identical to core under line-ending normalisation: nothing to copy and nothing modified,
+    # whatever the recorded value is. A manifest written before normalisation holds a raw hash,
+    # which this rewrites in its normalised form.
+    if ($recordedHash -and $currentHash -eq $sourceHash) {
+        $script:manifest['files'][$ManifestKey] = $sourceHash
+        $script:results.Add([pscustomobject]@{ File = $ManifestKey; Action = 'unchanged' })
+        return
+    }
+
+    if ($recordedHash -and (Test-RecordedHashMatch -Path $DestPath -Recorded $recordedHash)) {
         if ($currentHash -ne $sourceHash) {
             Copy-Item -LiteralPath $SourcePath -Destination $DestPath -Force
             $script:manifest['files'][$ManifestKey] = $sourceHash
@@ -2086,7 +2126,7 @@ function Install-ManagedFile {
     # file skipped after a prior install is.
     $acceptedHash = $script:manifest['accepted'][$ManifestKey]
 
-    if ($acceptedHash -and $acceptedHash -eq $currentHash) {
+    if ($acceptedHash -and (Test-RecordedHashMatch -Path $DestPath -Recorded $acceptedHash)) {
         # Already pinned, and still at the hash it was pinned at. The operator settled this file
         # once; core's version is deliberately not copied over it and there is nothing to act on,
         # which is why this is the one branch on the normal stream rather than a warning.

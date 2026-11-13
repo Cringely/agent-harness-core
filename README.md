@@ -224,7 +224,11 @@ each installed path to the SHA256 it had at install time, which is what makes a 
 detectable. `accepted` maps a path to the hash of the project's own fork, pinned deliberately, and
 says the divergence is the intended state. `coreCommit` is the third field, recording which core
 commit the layer was installed from. A manifest written before this shape existed, a flat
-path-to-hash map, is migrated on the next run with every hash preserved under `files`. The
+path-to-hash map, is migrated on the next run with every hash preserved under `files`. Hashes
+are taken over text with CRLF folded to LF, so a checkout with `core.autocrlf` and a project that
+commits the same content as LF read as the same file. A file holding a NUL byte is hashed as it is.
+A hash recorded as raw bytes by an earlier install still matches, and a re-install replaces it
+with the normalised form for each file it installs or finds identical to core. The
 current shape adds `schemaVersion` (3), `layers` and `settings`, described with the install flags
 above, without dropping any of those fields. Every write sorts each map's keys, so a re-install that
 changes nothing leaves the committed file byte-identical. Lists keep their order. A `layers` or
