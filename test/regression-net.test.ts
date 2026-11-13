@@ -95,6 +95,25 @@ describe("sourceDeclaresTest", () => {
     expect(sourceDeclaresTest("test(`does the thing`, () => {})", "does the thing")).toBe(true);
   });
 
+  // The title is the whole first argument. A literal that only starts an expression names some other
+  // test, so a pin on its first operand must not resolve.
+  test.each([
+    `test("does the thing" + " v2", () => {})`,
+    `test("does the thing".concat(x), () => {})`,
+    "test(`does the thing` + x, () => {})",
+    `test("does the thing" ? 1 : 2, () => {})`,
+    `test("does the thing")`,
+    `it("does the thing" + "x", () => {})`,
+  ])("a title literal that is not the whole first argument does not resolve: %s", (source) => {
+    expect(sourceDeclaresTest(source, "does the thing")).toBe(false);
+  });
+
+  test("a title followed by whitespace, a line break or a comment before the comma still resolves", () => {
+    expect(sourceDeclaresTest(`test("does the thing"   , () => {})`, "does the thing")).toBe(true);
+    expect(sourceDeclaresTest(`test("does the thing"\n  , () => {})`, "does the thing")).toBe(true);
+    expect(sourceDeclaresTest(`test("does the thing" /* c */, () => {})`, "does the thing")).toBe(true);
+  });
+
   test("finds a name on the line after the open paren", () => {
     expect(sourceDeclaresTest(`test(\n  "does the thing",\n () => {})`, "does the thing")).toBe(true);
   });

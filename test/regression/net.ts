@@ -164,8 +164,9 @@ function calleeBefore(masked: string, open: number): string {
 }
 
 /** True when `source` declares a test whose title is exactly `name` through a plain, unmodified
- * test()/it() call, and through no other form. The title must be the first argument, written as a
- * string literal in code. A match inside a comment, a string or template literal, or a regex does
+ * test()/it() call, and through no other form. The title must be the whole first argument: one
+ * string literal in code followed directly by the comma, so `"name" + x` or `"name".concat(x)` does
+ * not declare "name". A match inside a comment, a string or template literal, or a regex does
  * not count, and neither does a method named test (`re.test("x")`). If the same title also appears
  * behind any modifier (`test.failing`, `.skip`, `.todo`, `.if`, `.skipIf`, `.todoIf`, `.only`,
  * `.each`, or any other `test.x` / `it.x` form), the pin is refused even when a plain declaration
@@ -185,7 +186,11 @@ export function sourceDeclaresTest(source: string, name: string): boolean {
     if (open < 0 || masked[open] !== "(") continue;
     const callee = calleeBefore(masked, open);
     if (/^(?:test|it)\./.test(callee)) return false;
-    if (callee === "test" || callee === "it") plain = true;
+    if (callee !== "test" && callee !== "it") continue;
+    // The literal must be the whole first argument: only whitespace may sit between it and the comma.
+    let after = end;
+    while (after < masked.length && /\s/.test(masked[after])) after++;
+    if (masked[after] === ",") plain = true;
   }
   return plain;
 }
