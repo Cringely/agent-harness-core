@@ -590,6 +590,34 @@ Describe "Account hooks" {
             }
         }
 
+        # .claude.json is UTF-8 without a BOM. Windows PowerShell 5.1 decodes a BOM-less file as
+        # the ANSI code page unless told otherwise, which turns each multi-byte character in a
+        # project path into two or three, so the slug computed from the key no longer matches the
+        # one Claude Code gave the memory directory and the project stays on its slug folder.
+        # The non-ASCII characters are built from code points so this file stays ASCII.
+        It "resolves a project whose path holds non-ASCII characters, under every available shell" {
+            foreach ($root in $script:hookRoots) {
+                foreach ($shell in $script:shells) {
+                    $sandbox = New-HookSandbox
+                    try {
+                        $vault = Join-Path $sandbox 'vault'
+                        $leafName = 'caf' + [char]0xE9 + '-app'
+                        $proj = Join-Path (Join-Path $sandbox ('w' + [char]0xF6 + 'rk')) $leafName
+                        Set-ProjectConfig -SandboxHome $sandbox -Paths @($proj)
+                        $slug = Get-TestSlug $proj
+                        $r = Invoke-SyncWrite -HookRoot $root -SandboxHome $sandbox -Vault $vault `
+                            -RelPath "projects/$slug/memory/MEMORY.md" -Shell $shell
+                        $r.ExitCode | Should -Be 0
+                        Test-Path -LiteralPath (Join-Path (Join-Path (Join-Path $vault $leafName) 'Memory') 'MEMORY.md') |
+                            Should -BeTrue -Because "$root under $shell must read .claude.json as UTF-8 and resolve the leaf"
+                        Test-Path -LiteralPath (Join-Path $vault $slug) |
+                            Should -BeFalse -Because "$root under $shell must not leave the project on its slug folder"
+                    }
+                    finally { Remove-Item -Recurse -Force $sandbox -ErrorAction SilentlyContinue }
+                }
+            }
+        }
+
         # Claude Code records no projects entry for most agent worktrees, so the base repo can
         # be known only through a worktree key. Both are covered: the base key alone, and the
         # worktree key alone.

@@ -43,10 +43,11 @@ else {
 # too: mapping it onto the home slug would put two projects' MEMORY.md in one folder. A leaf
 # that is not a plain folder name ('..', a drive root) is dropped and that project keeps its
 # slug, so no write ever leaves the vault. Two checkouts that share a leaf share a folder,
-# which is accepted.
+# which is accepted. The file is read as UTF-8 explicitly: it has no BOM, and Windows PowerShell
+# 5.1 would otherwise decode it with the ANSI code page and misspell any non-ASCII path.
 function Get-VaultFolderMap {
     $map = @{}
-    $cfg = Get-Content -Raw -LiteralPath (Join-Path $HOME '.claude.json') | ConvertFrom-Json
+    $cfg = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $HOME '.claude.json') | ConvertFrom-Json
     foreach ($key in @($cfg.projects.PSObject.Properties.Name | Where-Object { $_ })) {
         $path = $key.TrimEnd('\', '/') -replace '/', '\'
         if ($path -match '^(.+)\\\.claude\\worktrees\\[^\\]+$') { $path = $Matches[1] }
