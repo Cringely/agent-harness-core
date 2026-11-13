@@ -527,6 +527,236 @@ Describe "Account hooks" {
         }
     }
 
+    # The vault folder for a project is the leaf of its checkout path, so one project checked
+    # out at different paths on different machines lands in one folder. The hook reads the
+    # paths this machine knows from the projects map in $HOME/.claude.json, which is the only
+    # place a slug can be turned back into a path: the slug itself is lossy, since a hyphen in
+    # it may have been a separator or a hyphen in a directory name.
+    Context "vault folders named by project leaf" {
+        BeforeAll {
+            function Get-TestSlug([string]$Path) { $Path.TrimEnd('\', '/') -creplace '[^A-Za-z0-9]', '-' }
+
+            # Keys are written with forward slashes, the way Claude Code records them.
+            function Set-ProjectConfig {
+                param([string]$SandboxHome, [string[]]$Paths)
+                $projects = [ordered]@{}
+                foreach ($p in $Paths) { $projects[($p -replace '\\', '/')] = @{ allowedTools = @() } }
+                @{ projects = $projects } | ConvertTo-Json -Depth 5 |
+                    Set-Content -LiteralPath (Join-Path $SandboxHome '.claude.json')
+            }
+
+            function Invoke-SyncWrite {
+                param([string]$HookRoot, [string]$SandboxHome, [string]$Vault, [string]$RelPath,
+                    [ValidateSet('pwsh', 'powershell')][string]$Shell = 'pwsh')
+                $src = Join-Path (Join-Path $SandboxHome '.claude') $RelPath
+                New-Item -ItemType Directory -Path (Split-Path $src -Parent) -Force | Out-Null
+                'note' | Set-Content -LiteralPath $src
+                $json = @{ tool_input = @{ file_path = ($src -replace '\\', '/') } } |
+                    ConvertTo-Json -Depth 5 -Compress
+                return Invoke-HookWithHome `
+                    -HookPath (Join-Path $HookRoot 'Sync-MemoryToObsidian.ps1') `
+                    -SandboxHome $SandboxHome -StdinJson $json `
+                    -Env @{ CLAUDE_OBSIDIAN_VAULT = $Vault } -Shell $Shell
+            }
+
+            function Set-VaultFile([string]$Path, [string]$Text, [datetime]$WhenUtc) {
+                New-Item -ItemType Directory -Path (Split-Path $Path -Parent) -Force | Out-Null
+                $Text | Set-Content -LiteralPath $Path
+                (Get-Item -LiteralPath $Path).LastWriteTimeUtc = $WhenUtc
+            }
+
+            $script:shells = @('pwsh') + @(if (Get-Command powershell -ErrorAction SilentlyContinue) { 'powershell' })
+        }
+
+        It "names a memory folder after the project's leaf, under every available shell" {
+            foreach ($root in $script:hookRoots) {
+                foreach ($shell in $script:shells) {
+                    $sandbox = New-HookSandbox
+                    try {
+                        $vault = Join-Path $sandbox 'vault'
+                        $proj = Join-Path (Join-Path $sandbox 'work') 'demo-repo'
+                        Set-ProjectConfig -SandboxHome $sandbox -Paths @($proj)
+                        $slug = Get-TestSlug $proj
+                        $r = Invoke-SyncWrite -HookRoot $root -SandboxHome $sandbox -Vault $vault `
+                            -RelPath "projects/$slug/memory/MEMORY.md" -Shell $shell
+                        $r.ExitCode | Should -Be 0
+                        Test-Path -LiteralPath (Join-Path (Join-Path (Join-Path $vault 'demo-repo') 'Memory') 'MEMORY.md') |
+                            Should -BeTrue -Because "$root under $shell must key memory on the leaf"
+                        Test-Path -LiteralPath (Join-Path $vault $slug) |
+                            Should -BeFalse -Because "$root under $shell must not mint a slug folder for a project it can resolve"
+                    }
+                    finally { Remove-Item -Recurse -Force $sandbox -ErrorAction SilentlyContinue }
+                }
+            }
+        }
+
+        # Claude Code records no projects entry for most agent worktrees, so the base repo can
+        # be known only through a worktree key. Both are covered: the base key alone, and the
+        # worktree key alone.
+        It "names a worktree memory folder after the base project's leaf" {
+            foreach ($root in $script:hookRoots) {
+                foreach ($known in 'base', 'worktree') {
+                    $sandbox = New-HookSandbox
+                    try {
+                        $vault = Join-Path $sandbox 'vault'
+                        $proj = Join-Path (Join-Path $sandbox 'work') 'demo-repo'
+                        $wt = Join-Path (Join-Path (Join-Path $proj '.claude') 'worktrees') 'wt1'
+                        Set-ProjectConfig -SandboxHome $sandbox -Paths @(if ($known -eq 'base') { $proj } else { $wt })
+                        $wtSlug = Get-TestSlug $wt
+                        $r = Invoke-SyncWrite -HookRoot $root -SandboxHome $sandbox -Vault $vault `
+                            -RelPath "projects/$wtSlug/memory/MEMORY.md"
+                        $r.ExitCode | Should -Be 0
+                        $landed = Join-Path (Join-Path (Join-Path (Join-Path (Join-Path $vault 'demo-repo') 'Worktrees') 'wt1') 'Memory') 'MEMORY.md'
+                        Test-Path -LiteralPath $landed |
+                            Should -BeTrue -Because "$root must resolve the base leaf when only the $known path is known"
+                    }
+                    finally { Remove-Item -Recurse -Force $sandbox -ErrorAction SilentlyContinue }
+                }
+            }
+        }
+
+        It "merges an existing slug folder into the leaf folder once, newer file winning" {
+            foreach ($root in $script:hookRoots) {
+                foreach ($shell in $script:shells) {
+                    $sandbox = New-HookSandbox
+                    try {
+                        $vault = Join-Path $sandbox 'vault'
+                        $proj = Join-Path (Join-Path $sandbox 'work') 'demo-repo'
+                        Set-ProjectConfig -SandboxHome $sandbox -Paths @($proj)
+                        $slug = Get-TestSlug $proj
+                        $old = Join-Path $vault $slug
+                        $leaf = Join-Path $vault 'demo-repo'
+                        $t0 = [datetime]::new(2026, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)
+                        $t1 = $t0.AddDays(1)
+                        Set-VaultFile (Join-Path (Join-Path $old 'Memory') 'only-old.md') 'moved' $t0
+                        Set-VaultFile (Join-Path (Join-Path (Join-Path (Join-Path $old 'Worktrees') 'w') 'Memory') 'n.md') 'wt' $t0
+                        Set-VaultFile (Join-Path (Join-Path $old 'Memory') 'leaf-newer.md') 'stale' $t0
+                        Set-VaultFile (Join-Path (Join-Path $leaf 'Memory') 'leaf-newer.md') 'fresh' $t1
+                        Set-VaultFile (Join-Path (Join-Path $old 'Memory') 'slug-newer.md') 'from-slug' $t1
+                        Set-VaultFile (Join-Path (Join-Path $leaf 'Memory') 'slug-newer.md') 'from-leaf' $t0
+                        Set-VaultFile (Join-Path (Join-Path $leaf 'Plans') 'p.md') 'plan' $t0
+                        $foreign = Join-Path (Join-Path (Join-Path $vault 'X--elsewhere-demo-repo') 'Memory') 'a.md'
+                        Set-VaultFile $foreign 'other machine' $t0
+
+                        foreach ($pass in 1, 2) {
+                            $r = Invoke-SyncWrite -HookRoot $root -SandboxHome $sandbox -Vault $vault `
+                                -RelPath "projects/$slug/memory/MEMORY.md" -Shell $shell
+                            $r.ExitCode | Should -Be 0 -Because "$root under $shell pass $pass must exit cleanly"
+                            Test-Path -LiteralPath $old | Should -BeFalse -Because "$root pass $pass must leave no slug folder behind"
+                            (Get-Content -Raw -LiteralPath (Join-Path (Join-Path $leaf 'Memory') 'only-old.md')).Trim() | Should -Be 'moved'
+                            (Get-Content -Raw -LiteralPath (Join-Path (Join-Path (Join-Path (Join-Path $leaf 'Worktrees') 'w') 'Memory') 'n.md')).Trim() | Should -Be 'wt'
+                            (Get-Content -Raw -LiteralPath (Join-Path (Join-Path $leaf 'Memory') 'leaf-newer.md')).Trim() |
+                                Should -Be 'fresh' -Because "$root must keep the newer copy already in the leaf folder"
+                            (Get-Content -Raw -LiteralPath (Join-Path (Join-Path $leaf 'Memory') 'slug-newer.md')).Trim() |
+                                Should -Be 'from-slug' -Because "$root must let a newer slug copy replace an older leaf copy"
+                            Test-Path -LiteralPath (Join-Path (Join-Path $leaf 'Plans') 'p.md') | Should -BeTrue
+                            Test-Path -LiteralPath $foreign |
+                                Should -BeTrue -Because "$root must leave a slug folder it cannot resolve on this machine alone"
+                        }
+                    }
+                    finally { Remove-Item -Recurse -Force $sandbox -ErrorAction SilentlyContinue }
+                }
+            }
+        }
+
+        # A file in the leaf folder where the merge needs a directory makes that one move fail.
+        # The file that could not move must stay in the slug folder, not go down with it.
+        It "keeps a file whose move fails in the slug folder" {
+            foreach ($root in $script:hookRoots) {
+                $sandbox = New-HookSandbox
+                try {
+                    $vault = Join-Path $sandbox 'vault'
+                    $proj = Join-Path (Join-Path $sandbox 'work') 'demo-repo'
+                    Set-ProjectConfig -SandboxHome $sandbox -Paths @($proj)
+                    $slug = Get-TestSlug $proj
+                    $t0 = [datetime]::new(2026, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)
+                    $stuck = Join-Path (Join-Path (Join-Path (Join-Path (Join-Path $vault $slug) 'Worktrees') 'w') 'Memory') 'n.md'
+                    Set-VaultFile $stuck 'wt' $t0
+                    Set-VaultFile (Join-Path (Join-Path $vault 'demo-repo') 'Worktrees') 'a file, not a folder' $t0
+                    $r = Invoke-SyncWrite -HookRoot $root -SandboxHome $sandbox -Vault $vault `
+                        -RelPath "projects/$slug/memory/MEMORY.md"
+                    $r.ExitCode | Should -Be 0
+                    Test-Path -LiteralPath $stuck |
+                        Should -BeTrue -Because "$root must not delete a slug folder that still holds an unmoved file"
+                }
+                finally { Remove-Item -Recurse -Force $sandbox -ErrorAction SilentlyContinue }
+            }
+        }
+
+        # The plans branch sends the .claude repo to the home slug, and the home project's own
+        # leaf is the account username, so both stay on the home slug.
+        It "keeps the home project and the .claude project on the home slug" {
+            foreach ($root in $script:hookRoots) {
+                $sandbox = New-HookSandbox
+                try {
+                    $vault = Join-Path $sandbox 'vault'
+                    $dotClaude = Join-Path $sandbox '.claude'
+                    Set-ProjectConfig -SandboxHome $sandbox -Paths @($sandbox, $dotClaude)
+                    $homeSlug = Get-TestSlug $sandbox
+                    # A folder mapped onto itself would be merged into itself, and every file
+                    # in it would count as already present and be deleted.
+                    $keep = Join-Path (Join-Path (Join-Path $vault $homeSlug) 'Memory') 'keep.md'
+                    Set-VaultFile $keep 'kept' ([datetime]::UtcNow)
+                    foreach ($p in $sandbox, $dotClaude) {
+                        $r = Invoke-SyncWrite -HookRoot $root -SandboxHome $sandbox -Vault $vault `
+                            -RelPath "projects/$(Get-TestSlug $p)/memory/MEMORY.md"
+                        $r.ExitCode | Should -Be 0
+                    }
+                    Test-Path -LiteralPath (Join-Path (Join-Path (Join-Path $vault $homeSlug) 'Memory') 'MEMORY.md') |
+                        Should -BeTrue -Because "$root must keep home memory on the home slug"
+                    Test-Path -LiteralPath $keep |
+                        Should -BeTrue -Because "$root must never merge the home folder into itself"
+                    @(Get-ChildItem -LiteralPath $vault -Directory).Name | Should -Be @($homeSlug) `
+                        -Because "$root must not mint a username folder or a .claude folder"
+                }
+                finally { Remove-Item -Recurse -Force $sandbox -ErrorAction SilentlyContinue }
+            }
+        }
+
+        # A projects key ending in '..' would make the leaf a step out of the vault, and a drive
+        # root would make it 'Z:'. The hook treats such a leaf as unresolvable and keeps the slug.
+        It "refuses a leaf that is not a plain folder name" {
+            foreach ($root in $script:hookRoots) {
+                $sandbox = New-HookSandbox
+                try {
+                    $vault = Join-Path $sandbox 'vault'
+                    $proj = Join-Path (Join-Path $sandbox 'work') '..'
+                    Set-ProjectConfig -SandboxHome $sandbox -Paths @($proj, 'Z:/')
+                    foreach ($slug in (Get-TestSlug $proj), (Get-TestSlug 'Z:/')) {
+                        $r = Invoke-SyncWrite -HookRoot $root -SandboxHome $sandbox -Vault $vault `
+                            -RelPath "projects/$slug/memory/MEMORY.md"
+                        $r.ExitCode | Should -Be 0
+                        Test-Path -LiteralPath (Join-Path (Join-Path (Join-Path $vault $slug) 'Memory') 'MEMORY.md') |
+                            Should -BeTrue -Because "$root must fall back to the slug folder for $slug"
+                    }
+                    Test-Path -LiteralPath (Join-Path $sandbox 'Memory') |
+                        Should -BeFalse -Because "$root must never write outside the vault"
+                }
+                finally { Remove-Item -Recurse -Force $sandbox -ErrorAction SilentlyContinue }
+            }
+        }
+
+        # Without this a council write would re-create the slug folder the merge just removed.
+        It "routes a council transcript under a resolvable slug to the leaf folder" {
+            foreach ($root in $script:hookRoots) {
+                $sandbox = New-HookSandbox
+                try {
+                    $vault = Join-Path $sandbox 'vault'
+                    $proj = Join-Path (Join-Path $sandbox 'work') 'demo-repo'
+                    Set-ProjectConfig -SandboxHome $sandbox -Paths @($proj)
+                    $slug = Get-TestSlug $proj
+                    $r = Invoke-SyncWrite -HookRoot $root -SandboxHome $sandbox -Vault $vault `
+                        -RelPath "council-transcripts/$slug/round-1.md"
+                    $r.ExitCode | Should -Be 0
+                    Test-Path -LiteralPath (Join-Path (Join-Path (Join-Path $vault 'demo-repo') 'Council') 'round-1.md') |
+                        Should -BeTrue -Because "$root must key council on the leaf"
+                    Test-Path -LiteralPath (Join-Path $vault $slug) | Should -BeFalse
+                }
+                finally { Remove-Item -Recurse -Force $sandbox -ErrorAction SilentlyContinue }
+            }
+        }
+    }
+
     # Drives the hook's own call-site assignment (`$config = Get-ValeConfigPath`) alongside the
     # function body, not the function in isolation: a test that only lifts the function passes
     # even when the call site is reverted to the original defective form, since nothing then

@@ -2,7 +2,11 @@
 # Called by PostToolUse hook; receives JSON on stdin.
 # Structure: Claude Code/<project>/Memory/ for standard projects,
 #            Claude Code/<project>/Worktrees/<name>/Memory/ for worktrees,
-#            Claude Code/<project>/Council/ for council transcripts.
+#            Claude Code/<project>/Council/ for council transcripts,
+#            Claude Code/<project>/{Plans,Specs}/ for superpowers plans and specs.
+# <project> is the leaf of the project's checkout path, so one project checked out at
+# different paths on different machines syncs into one folder. A project whose path this
+# machine cannot resolve keeps its Claude Code slug.
 
 $ErrorActionPreference = 'SilentlyContinue'
 
@@ -31,6 +35,50 @@ else {
     Join-Path (Join-Path (Join-Path $HOME 'Documents') 'Obsidian Vault') 'Claude Code'
 }
 
+# Vault folder names for this machine's projects, keyed by Claude Code slug. A slug cannot be
+# turned back into a path on its own, because a '-' in it may have been a separator or part of
+# a directory name, so the paths come from the projects map in $HOME/.claude.json. A worktree
+# path stands for the repo it sits in. The home project and any .claude repo keep the home
+# slug, as the plans branch below already does, so no folder is named after the account's
+# username. A leaf that is not a plain folder name ('..', a drive root) is dropped and that
+# project keeps its slug, so no write ever leaves the vault. Two checkouts that share a leaf
+# share a folder, which is accepted.
+function Get-VaultFolderMap {
+    $map = @{}
+    $cfg = Get-Content -Raw -LiteralPath (Join-Path $HOME '.claude.json') | ConvertFrom-Json
+    foreach ($key in @($cfg.projects.PSObject.Properties.Name | Where-Object { $_ })) {
+        $path = $key.TrimEnd('\', '/') -replace '/', '\'
+        if ($path -match '^(.+)\\\.claude\\worktrees\\[^\\]+$') { $path = $Matches[1] }
+        $slug = $path -creplace '[^A-Za-z0-9]', '-'
+        $leaf = ($path -split '\\')[-1]
+        if ($slug -eq $homeSlug -or $leaf -eq '.claude') { $leaf = $homeSlug }
+        if ($leaf -notmatch '^[^\\/:]+$' -or $leaf -match '^\.+$' -or $leaf -eq $slug) { continue }
+        $map[$slug] = $leaf
+    }
+    return $map
+}
+
+# Moves one vault folder's files into another. Where both hold a file, the newer copy stays.
+# The source folder is deleted only once no file is left in it, so a move that fails leaves
+# its file in place for the next run to retry. Running it again after a full merge is a no-op,
+# because the source folder is gone.
+function Merge-VaultFolder([string]$From, [string]$To) {
+    $root = (Get-Item -LiteralPath $From -Force).FullName.TrimEnd('\', '/')
+    foreach ($src in @(Get-ChildItem -LiteralPath $root -Recurse -File -Force)) {
+        $dst = Join-Path $To $src.FullName.Substring($root.Length + 1)
+        $have = Get-Item -LiteralPath $dst -Force
+        if ($have -and $have.LastWriteTimeUtc -ge $src.LastWriteTimeUtc) {
+            Remove-Item -LiteralPath $src.FullName -Force
+            continue
+        }
+        New-Item -Path (Split-Path $dst -Parent) -ItemType Directory -Force | Out-Null
+        Move-Item -LiteralPath $src.FullName -Destination $dst -Force
+    }
+    if (@(Get-ChildItem -LiteralPath $root -Recurse -File -Force).Count -eq 0) {
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
 # --- Council transcripts ---
 $councilRoot = ((Join-Path $claudeHome 'council-transcripts') -replace '/', '\') + '\'
 if ($np.StartsWith($councilRoot)) {
@@ -39,6 +87,9 @@ if ($np.StartsWith($councilRoot)) {
     if ($sep -gt 0) {
         $proj = $rel.Substring(0, $sep)
         $file = $rel.Substring($sep + 1)
+        # Keyed like memory, so a council write never re-creates a merged slug folder.
+        $folderOf = Get-VaultFolderMap
+        if ($folderOf.ContainsKey($proj)) { $proj = $folderOf[$proj] }
         $dest = Join-Path (Join-Path $vaultBase $proj) 'Council'
         New-Item -Path $dest -ItemType Directory -Force | Out-Null
         Copy-Item $f -Destination (Join-Path $dest $file) -Force
@@ -81,9 +132,24 @@ if ($parts.Count -ne 2) { exit 0 }
 $proj = $parts[0]
 $file = $parts[1]
 
+# One-time merge of folders named by slug before the vault was keyed on the leaf. Each machine
+# can resolve only its own slugs, so a folder synced in from another machine waits for that
+# machine's hook to merge it.
+$folderOf = Get-VaultFolderMap
+foreach ($slug in @($folderOf.Keys)) {
+    $old = Join-Path $vaultBase $slug
+    if (Test-Path -LiteralPath $old -PathType Container) {
+        Merge-VaultFolder $old (Join-Path $vaultBase $folderOf[$slug])
+    }
+}
+
 if ($proj -match '^(.+?)--claude-worktrees-(.+)$') {
-    $dest = Join-Path (Join-Path (Join-Path (Join-Path $vaultBase $Matches[1]) 'Worktrees') $Matches[2]) 'Memory'
+    $base = $Matches[1]
+    $wt = $Matches[2]
+    if ($folderOf.ContainsKey($base)) { $base = $folderOf[$base] }
+    $dest = Join-Path (Join-Path (Join-Path (Join-Path $vaultBase $base) 'Worktrees') $wt) 'Memory'
 } else {
+    if ($folderOf.ContainsKey($proj)) { $proj = $folderOf[$proj] }
     $dest = Join-Path (Join-Path $vaultBase $proj) 'Memory'
 }
 

@@ -144,7 +144,7 @@ When a newer fact contradicts an older one, the newer note wins. Set `superseded
 
 Two hooks run automatically and do not need to be invoked manually:
 
-`Sync-MemoryToObsidian.ps1` (PostToolUse) copies `~/.claude/projects/<project>/memory/*` to `Obsidian Vault/Claude Code/<project>/Memory/` after every Write or Edit. This gives portability and graph view via the vault. Never write files directly into the vault tree. The hook is the only write path.
+`Sync-MemoryToObsidian.ps1` (PostToolUse) copies `~/.claude/projects/<project>/memory/*` to `Obsidian Vault/Claude Code/<leaf>/Memory/` after every Write or Edit. `<leaf>` is the last folder of the project's checkout path, looked up in `~/.claude.json`, so one project checked out at different paths on different machines syncs into one folder, the same one its plans and specs use. The home project keeps its slug, and so does a project whose path the hook cannot find. A vault folder named by slug from before this scheme is merged into its leaf folder the first time the hook resolves that slug, keeping the newer copy of any file both hold. This gives portability and graph view via the vault. Never write files directly into the vault tree. The hook is the only write path.
 
 `Scan-MemorySecrets.ps1` (PreToolUse) runs before any memory write and flags secrets, tokens, and real org/employer identifiers that shouldn't be committed.
 
