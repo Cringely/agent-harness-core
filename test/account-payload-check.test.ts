@@ -15,7 +15,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { basename, delimiter, join } from "node:path";
 import { posixSh, posixShDir } from "./posix-sh";
 
 const CHECK_SRC = join(import.meta.dir, "..", "install", "check-account-payload.sh");
@@ -185,6 +185,33 @@ describe("account payload check — refusals", () => {
     expect(r.stderr.toString()).toContain("account/claude/rules/c.md");
   }, TIMEOUT_MS);
 
+  // Mode and object type are part of the payload. Both cases keep the blob
+  // identical to the export's, so only the index mode tells them apart.
+  test("staged mode-only change (executable bit): refused, path named", () => {
+    const f = setup();
+    git(["update-index", "--chmod=+x", "account/claude/rules/a.md"], f.repo);
+    const staged = git(["ls-files", "--stage", "account/claude/rules/a.md"], f.repo).stdout.toString();
+    expect(staged.startsWith("100755 ")).toBe(true);
+
+    const r = runCheck(f);
+    expect(r.exitCode).toBe(1);
+    const err = r.stderr.toString();
+    expect(err).toContain("account/claude/rules/a.md");
+    expect(err).not.toContain("account/claude/rules/b.md");
+  }, TIMEOUT_MS);
+
+  test("staged file turned into a symlink with the same bytes: refused, path named", () => {
+    const f = setup();
+    const blob = indexBlob(f, "account/claude/rules/a.md");
+    git(["update-index", "--cacheinfo", `120000,${blob},account/claude/rules/a.md`], f.repo);
+    const staged = git(["ls-files", "--stage", "account/claude/rules/a.md"], f.repo).stdout.toString();
+    expect(staged.startsWith("120000 ")).toBe(true);
+
+    const r = runCheck(f);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr.toString()).toContain("account/claude/rules/a.md");
+  }, TIMEOUT_MS);
+
   test("export fails: refused, exporter output not repeated", () => {
     const f = setup();
     writeAt(f.home, "FAIL", "");
@@ -334,6 +361,8 @@ describe("account payload check — the exporter beside the check script", () =>
     const r = runCheck(f);
     expect(r.exitCode).toBe(1);
     expect(r.stderr.toString()).toContain("Export-Account.ps1");
+    // The refusal names the exporter, not the absolute directory it is missing from.
+    expect(r.stderr.toString()).not.toContain(basename(join(f.repo, "..")));
     expect(exportRan(f)).toBe(false);
   }, TIMEOUT_MS);
 

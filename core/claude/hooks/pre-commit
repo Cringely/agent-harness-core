@@ -357,17 +357,17 @@ fi
 # Opt-in per clone, through the local git config harness.preCommitChain, the
 # same opt-in shape as harness.personalTermsFile. Its value is the file name of
 # a POSIX sh script in this hook's own directory, and the script runs with `sh`
-# after every gate above has passed. A non-zero exit refuses the commit. This
-# repository chains check-account-payload.sh this way on the workstation that
-# exports the account layer.
+# after every gate above has passed. A non-zero exit refuses the commit. A clone
+# adds a check of its own this way without editing its installed copy of this
+# file.
 #
 # THE SCRIPT COMES FROM THE HOOK DIRECTORY, NEVER THE WORK TREE
 # A path into the work tree would run whatever the checked-out branch carries,
 # in the committer's shell, on every commit. The hook directory is the
 # installed copy git runs this file from, so a script there carries the same
-# trust as this hook and no branch can change it. A value holding a slash or a
-# backslash is a path, not a file name, and refuses, so it cannot reach back
-# into a checkout.
+# trust as this hook. Here that directory is gitignored installer output, which
+# a checkout or merge does not write. A slash or a backslash in the value is a
+# path, not a file name, and refuses, so it cannot reach back into a checkout.
 #
 # A chain point, not an edit to a project's installed copy of this file. An
 # edited installed hook reads as project-modified drift in the installer's
@@ -390,12 +390,12 @@ case $chain_rc in
     fi
     case "$chain_name" in
       */* | *\\*)
-        echo "pre-commit: refused. git config harness.preCommitChain is '$chain_name', a path. It must be the file name of a script in the hook directory ($hook_dir), so a checked-out branch cannot supply it." >&2
+        echo "pre-commit: refused. git config harness.preCommitChain is '$chain_name', a path. It must be the file name of a script in the hook directory, not a path into a checkout." >&2
         exit 1
         ;;
     esac
     if [ ! -f "$hook_dir/$chain_name" ]; then
-      echo "pre-commit: refused. git config harness.preCommitChain names '$chain_name', which is not in the hook directory ($hook_dir). Install it there, or unset the key to opt this clone out." >&2
+      echo "pre-commit: refused. git config harness.preCommitChain names '$chain_name', which is not in the hook directory. Install it there, or unset the key to opt this clone out." >&2
       exit 1
     fi
     sh "$hook_dir/$chain_name" || exit 1

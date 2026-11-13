@@ -6,11 +6,11 @@
 # IT RUNS FROM AN INSTALLED COPY, NEVER FROM THE WORK TREE
 # The chain point only runs a script that sits in the hook directory, which in
 # this repository is the main checkout's gitignored .claude/hooks/, shared by
-# every worktree through core.hooksPath. This script in turn runs the exporter
-# that sits beside it, never the one in the work tree, so no checked-out branch
-# can put code into the committer's shell. Install the copy from the main
-# checkout at a commit you have reviewed, and copy again after any of the four
-# files changes:
+# every worktree through core.hooksPath. That directory is installer output,
+# and git does not write ignored paths on a checkout or merge. This script in
+# turn runs the exporter that sits beside it, never the one in the work tree.
+# Install the copy from the main checkout at a commit you have reviewed, and
+# copy again after any of the four files changes:
 #
 #   cp install/check-account-payload.sh install/Export-Account.ps1 \
 #      install/AccountShared.ps1 install/Restore-ClaudeProject.ps1 .claude/hooks/
@@ -26,6 +26,8 @@
 # directory and refuses the commit if a staged account/claude path differs
 # from what the export wrote there. A staged deletion of a path the export
 # still writes refuses, and so does a staged path the export does not write.
+# Content and mode both count: an entry whose index mode (100644, 100755 or
+# 120000) differs from the export's refuses, even when the blob is identical.
 #
 # Only staged paths are compared, not the whole payload. Drift elsewhere (the
 # account source has moved on since the last export) is not this commit's to
@@ -103,7 +105,7 @@ top=$(git rev-parse --show-toplevel) ||
 cd "$top" || refuse "The account payload check could not enter the top of the work tree."
 
 [ -f "$exporter" ] ||
-  refuse "This commit stages account/claude paths, and there is no Export-Account.ps1 beside the check script, so they cannot be compared with a fresh export. Copy $exporter_src, install/AccountShared.ps1 and install/Restore-ClaudeProject.ps1 into $script_dir from a reviewed checkout."
+  refuse "This commit stages account/claude paths, and there is no Export-Account.ps1 beside the check script, so they cannot be compared with a fresh export. Copy $exporter_src, install/AccountShared.ps1 and install/Restore-ClaudeProject.ps1 from a reviewed checkout into the directory this script runs from (.claude/hooks/ in the documented install)."
 
 # The main checkout, passed to the exporter as -CoreRepo. Its own default
 # derives it from the exporter's location, which is the installed copy here.
@@ -147,15 +149,24 @@ export_rc=$?
 # exported: "<mode> <blob> <stage>\t<path>". staged (diff --raw):
 # ":<old mode> <new mode> <old blob> <new blob> <status>\t<path>", where an
 # all-zero new blob means the path is deleted in the index. A path missing from
-# either side compares as an empty id.
+# either side compares as an empty id and an empty mode. The index mode is
+# compared as well as the blob, because a mode-only change (the executable bit,
+# a file turned symlink with the same bytes) leaves the blob id unchanged.
 mismatched=$(awk -F '\t' '
-  FILENAME == ARGV[1] { split($1, m, " "); exported[$2] = m[2]; next }
+  FILENAME == ARGV[1] {
+    split($1, m, " ")
+    exported[$2] = m[2]
+    exported_mode[$2] = m[1]
+    next
+  }
   {
     split($1, m, " ")
     s = m[4]
-    if (s ~ /^0+$/) s = ""
+    sm = m[2]
+    if (s ~ /^0+$/) { s = ""; sm = "" }
     e = ($2 in exported) ? exported[$2] : ""
-    if (s != e) print $2
+    em = ($2 in exported) ? exported_mode[$2] : ""
+    if (s != e || sm != em) print $2
   }
 ' "$work/exported" "$work/staged") || refuse "The account payload check could not compare the export with the staged paths."
 
