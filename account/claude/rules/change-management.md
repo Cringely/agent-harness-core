@@ -165,3 +165,13 @@ Scripts that are not permanently deployed cron jobs or part of the stack must be
 - Scripts that live in the repo permanently (cron jobs, monitoring scripts) must also read credentials from the secrets directory, not hardcode them
 
 The test: before any `git add`, ask whether the file will run indefinitely as part of infrastructure. If yes, audit it for hardcoded secrets. If no, gitignore or delete it first.
+
+## Session Close Housekeeping
+
+At session close, for each agent worktree under `.claude/worktrees/`, remove it only when all of these hold:
+
+- It is on a branch and not locked: `git worktree list --porcelain` shows a `branch` line for it and no `detached` or `locked` line.
+- `git -C <worktree> status --porcelain --ignored` prints nothing. Without `--ignored`, gitignored files such as agent reports would be deleted with the folder.
+- `git log <worktree-branch> --not --exclude=<worktree-branch> --branches --remotes --tags --oneline` exits 0 and prints nothing, which means no commit on it is unreachable from another ref.
+
+When any check errors or cannot be run, keep the worktree. Report how many were removed and how many were kept, and why. A folder that is not a git repository has no worktrees, so this step does nothing there.
