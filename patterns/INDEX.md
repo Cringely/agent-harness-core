@@ -1,7 +1,8 @@
 # Pattern Index
 
-Each doc below explains one design decision behind the roles, hooks, and templates in `core/`,
-independent of any one codebase or language.
+Most docs below explain one design decision behind the roles, hooks, and templates in `core/`,
+independent of any one codebase or language. A deployment pattern instead describes a way to build and
+deploy a project, and names the stack its examples assume.
 
 | Doc | Problem it solves |
 |---|---|
@@ -24,3 +25,4 @@ independent of any one codebase or language.
 | [`chained-state-change-gate.md`](chained-state-change-gate.md) | An agent runs `gh pr merge` downstream of a pipe or a chaining operator in one shell call, the step that should have stopped it exits nonzero, something in between swallows that exit code, and the merge goes through on red behind a transcript that reads as clean. |
 | [`vendored-prose-exemption.md`](vendored-prose-exemption.md) | A write-triggered prose linter flags text a project copied in verbatim to cite rather than maintain, and the fix a finding invites, editing the prose, leaves the file reading well while it quietly stops matching upstream, with nothing comparing the two. |
 | [`narrative-fact-check-stage.md`](narrative-fact-check-stage.md) | An agent-written status, summary or reconciliation pass adds specific, plausible claims that are false, every mechanical gate on the change is green because a cap measures length and a suite measures behavior, and nothing between the pass and the merge reads a sentence for whether the thing it describes happened. |
+| [`container-image-project.md`](container-image-project.md) | A small self-hosted app's route from a merged commit to a running container grows into either a hand-built image nobody can trace or a private deployment platform that costs more than the app. |
