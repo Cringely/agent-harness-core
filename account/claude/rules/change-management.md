@@ -172,6 +172,6 @@ At session close, for each agent worktree under `.claude/worktrees/`, remove it 
 
 - It is on a branch and not locked: `git worktree list --porcelain` shows a `branch` line for it and no `detached` or `locked` line.
 - `git -C <worktree> status --porcelain --ignored` prints nothing. Without `--ignored`, gitignored files such as agent reports would be deleted with the folder.
-- `git log <worktree-branch> --not --exclude=<worktree-branch> --branches --remotes --tags --oneline` exits 0 and prints nothing, which means no commit on it is unreachable from another ref.
+- `git log <worktree-branch> --not --exclude=<worktree-branch> --branches --remotes --tags --oneline` exits 0 and prints nothing, which means no commit on it is unreachable from another ref. `<worktree-branch>` is the short name, with `refs/heads/` stripped from the porcelain `branch` line. Given the full ref, `--exclude` matches nothing under `--branches`, the branch hides its own commits, and the check passes on a branch holding unpushed work.
 
 When any check errors or cannot be run, keep the worktree. Report how many were removed and how many were kept, and why. A folder that is not a git repository has no worktrees, so this step does nothing there.
