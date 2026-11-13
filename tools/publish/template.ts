@@ -20,7 +20,14 @@ const HEADING_RE = /^(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$/;
 const FENCE_RE = /^ {0,3}(`{3,}|~{3,})/;
 
 function stripComments(text: string): string {
-  return text.replace(/<!--[\s\S]*?-->/g, "");
+  // Repeat until nothing changes: one pass over "<!<!---->--" would leave a fresh "<!--" behind.
+  let previous: string;
+  let current = text;
+  do {
+    previous = current;
+    current = current.replace(/<!--[\s\S]*?-->/g, "");
+  } while (current !== previous);
+  return current;
 }
 
 function stripFrontMatter(text: string): string {
