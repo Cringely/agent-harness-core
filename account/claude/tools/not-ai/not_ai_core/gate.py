@@ -57,6 +57,16 @@ FENCE_RE = re.compile(r"^ {0,3}(```+|~~~+)")
 ATX_HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?:\s|$)")
 LIST_MARKER_RE = re.compile(r"^(?:\s*)(?:[-*+]|\d+[.)])\s+(?P<content>\S.*)$")
 TABLE_ROW_RE = re.compile(r"^\s*\|")
+# A blockquote line: up to 3 spaces of indent, then ">". Quoted prose is another
+# author's rhythm, so it is excluded like fenced code (issue #123, operator ruling
+# 2026-11-11). Lines after a quote line that carry no marker are CommonMark lazy
+# continuations and belong to the quote until a blank line or a block that cannot
+# continue a paragraph (heading, fence, list item).
+BLOCKQUOTE_RE = re.compile(r"^ {0,3}>")
+# A thematic break (`---`, `***`, `___`, spaced or not) is a block that cannot continue a
+# paragraph, so it ends the open paragraph and any quote the way a heading does, and is
+# dropped rather than kept as prose.
+THEMATIC_BREAK_RE = re.compile(r"^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$")
 TABLE_SEPARATOR_RE = re.compile(r"^[\s|:-]+$")
 
 # 's is ambiguous between a contraction ("it's" = it is) and a possessive
@@ -173,7 +183,8 @@ def _prose_blocks(text: str) -> tuple[list[str], bool]:
     """Partition markdown into paragraph- and list-item-sized units of prose.
 
     Excludes fenced code (program text, not prose), ATX (`#`-style) headings,
-    and GFM tables. Headings are dropped entirely rather than kept as their
+    blockquotes with their lazy continuation lines (quoted text is not the
+    document's own rhythm), and GFM tables. Headings are dropped entirely rather than kept as their
     own one-line "sentence": a heading is a label with no subject-verb rhythm
     to measure, and counting it as a sentence would still misrepresent the
     prose-rhythm stats this module reports, just in the opposite direction
@@ -213,6 +224,7 @@ def _prose_blocks(text: str) -> tuple[list[str], bool]:
     fence_char = ""
     fence_length = 0
     fence_lines: list[str] = []
+    in_quote = False
 
     def flush() -> None:
         nonlocal content_col
@@ -251,6 +263,7 @@ def _prose_blocks(text: str) -> tuple[list[str], bool]:
             continue
         if fence_match:
             flush()
+            in_quote = False
             in_fence = True
             fence_char = fence_match.group(1)[0]
             fence_length = len(fence_match.group(1))
@@ -261,13 +274,39 @@ def _prose_blocks(text: str) -> tuple[list[str], bool]:
         stripped = line.strip()
         if not stripped:
             flush()
+            in_quote = False
             index += 1
             continue
 
         if ATX_HEADING_RE.match(line):
             flush()
+            in_quote = False
             index += 1
             continue
+
+        # A thematic break is a block of its own: it ends the open paragraph and any
+        # quote, and the rule line itself is not prose, so it is never counted.
+        if THEMATIC_BREAK_RE.match(line):
+            flush()
+            in_quote = False
+            index += 1
+            continue
+
+        # A quote line opens a quote that runs to the next blank line. It does not flush
+        # an open paragraph above it: the quote line is simply left out of that paragraph.
+        # Inside the quote, a marker-less line is a lazy continuation and is dropped
+        # too, unless it opens a list item, which cannot continue a paragraph and so
+        # ends the quote.
+        if BLOCKQUOTE_RE.match(line):
+            in_quote = True
+            index += 1
+            continue
+        if in_quote:
+            if LIST_MARKER_RE.match(line):
+                in_quote = False
+            else:
+                index += 1
+                continue
 
         # GFM does not require a table's header row to start with "|" --
         # "Name | Role" over "--- | ---" is a legal table with no leading
@@ -354,13 +393,16 @@ def sentences(text: str) -> tuple[list[str], bool]:
 
 
 def _bold_label_lines(text: str) -> Iterable[str]:
-    """Yield raw lines outside fenced code and ATX headings, one at a time.
+    """Yield raw lines outside fenced code, ATX headings and blockquotes, one at a time.
 
     `_prose_blocks` joins paragraph lines into a single string with newlines
     collapsed to spaces, which is right for sentence rhythm but wrong here:
     counting the own-line and run-in bold-label forms separately depends on
     exactly the line boundary `_prose_blocks` throws away, so this walks the
-    same fence/heading exclusions on its own rather than reusing that output.
+    same fence/heading/blockquote exclusions on its own rather than reusing
+    that output. A blockquote and its lazy continuation lines are skipped the
+    way `_prose_blocks` skips them, so a bold label inside quoted text is not
+    counted as the document's own.
 
     The fence walk mirrors `_prose_blocks` in the two places that matter here
     too. A fence only closes on a marker using the same character AND at
@@ -374,6 +416,7 @@ def _bold_label_lines(text: str) -> Iterable[str]:
     fence_char = ""
     fence_length = 0
     fence_lines: list[str] = []
+    in_quote = False
     for line in text.splitlines():
         fence_match = FENCE_RE.match(line)
         if in_fence:
@@ -388,13 +431,27 @@ def _bold_label_lines(text: str) -> Iterable[str]:
                 fence_lines.append(line)
             continue
         if fence_match:
+            in_quote = False
             in_fence = True
             fence_char = fence_match.group(1)[0]
             fence_length = len(fence_match.group(1))
             fence_lines = []
             continue
-        if ATX_HEADING_RE.match(line):
+        if (
+            not line.strip()
+            or ATX_HEADING_RE.match(line)
+            or THEMATIC_BREAK_RE.match(line)
+        ):
+            in_quote = False
             continue
+        if BLOCKQUOTE_RE.match(line):
+            in_quote = True
+            continue
+        if in_quote:
+            if LIST_MARKER_RE.match(line):
+                in_quote = False
+            else:
+                continue
         yield line
     if in_fence and fence_lines:
         yield from _bold_label_lines("\n".join(fence_lines))
@@ -403,9 +460,9 @@ def _bold_label_lines(text: str) -> Iterable[str]:
 def _count_bold_labels(text: str) -> tuple[int, int]:
     """Count `**Label**` markers anchored at a line's start, split by form.
 
-    Returns (own_line, run_in). A list marker or blockquote prefix is
-    stripped before matching, so a labelled list item counts the same as a
-    bare paragraph line. A trailing colon with nothing else after it still
+    Returns (own_line, run_in). A list marker is stripped before matching, so
+    a labelled list item counts the same as a bare paragraph line. A ">" left
+    after the marker (a quote nested in a list item) is stripped too. A trailing colon with nothing else after it still
     reads as own-line: "**Corpora**:" on its own line is the same label the
     unpunctuated form is, not a run-in with an empty body.
     """

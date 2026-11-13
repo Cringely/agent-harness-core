@@ -28,7 +28,7 @@ string verbatim. Never invent abbreviations. `subagent-prompting.md` carries the
 briefs.
 
 Commit messages split. Subject and bullets compressed. Rationale required by
-`change-management.md` (why the change was needed, what was rejected, trade-offs) stays normal
+`.claude/rules/harness/change-management-code.md` in a code project (why the change was needed, what was rejected, trade-offs) stays normal
 prose. Compression costs clarity in reasoning.
 
 Auto-clarity overrides compression everywhere: security warnings, destructive-action

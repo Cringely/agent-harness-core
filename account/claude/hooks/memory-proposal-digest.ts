@@ -4,8 +4,12 @@
 // to run a memory Lint pass. Plain stdout lands as session-start context, the
 // same mechanism as harness-core-reminder.sh.
 //
+// It also lists accepted decision notes whose metadata.valid_until has passed, so a ruling
+// that was accepted with a review date gets revisited instead of lapsing unseen.
+//
 // Behavioral contract:
-//   - Silent when there is nothing to say. Zero proposals, zero output.
+//   - Silent when there is nothing to say. Zero proposals and zero lapsed accepted notes,
+//     zero output.
 //   - Never breaks session start. Every failure path exits 0 quietly.
 //   - Read-only. It flags a lapsed proposal; changing status is the operator's call.
 //   - No dependencies (there is no package.json here) and no YAML library.
@@ -27,6 +31,7 @@ const DAY_MS = 86400000;
 
 interface Proposal {
   project: string;
+  status: string; // "proposed", or "accepted" (only ever kept once lapsed)
   slug: string;
   description: string;
   confidence: string;
@@ -122,17 +127,23 @@ function collect(projectsDir: string, now: Date): Proposal[] {
         const fm = parseFrontmatter(readFileSync(join(memDir, file), "utf8"));
         if (!fm) continue;
         if (fm["metadata.type"] !== "decision") continue;
-        if (fm["metadata.status"] !== "proposed") continue;
+        const status = fm["metadata.status"];
+        if (status !== "proposed" && status !== "accepted") continue;
         const validUntil = fm["metadata.valid_until"] ?? "";
         const expiry = validUntil ? expiryUtc(validUntil) : null;
+        const daysLeft = expiry === null ? null : Math.round((expiry - today) / DAY_MS);
+        // An accepted note is a live ruling. It surfaces only once its review date has
+        // passed, with the same lapse boundary as a proposal (valid_until == today is live).
+        if (status === "accepted" && (daysLeft === null || daysLeft >= 0)) continue;
         found.push({
           project,
+          status,
           slug: file.replace(/\.md$/i, ""),
           description: fm["description"] || fm["name"] || "(no description)",
           confidence: fm["metadata.confidence"] || "",
           validUntil,
           expiry,
-          daysLeft: expiry === null ? null : Math.round((expiry - today) / DAY_MS),
+          daysLeft,
         });
       } catch { /* one bad note never costs the whole digest */ }
     }
@@ -158,17 +169,9 @@ function tagOf(p: Proposal): string {
   return `${p.daysLeft}d left`;
 }
 
-function render(proposals: Proposal[]): string {
-  if (proposals.length === 0) return "";
-  const lapsed = proposals.filter((p) => p.daysLeft !== null && p.daysLeft < 0).length;
+function renderEntries(entries: Proposal[], noun: string): string[] {
   const lines: string[] = [];
-  lines.push(
-    `${proposals.length} memory decision note${proposals.length === 1 ? " is" : "s are"} ` +
-      `still at status: proposed` +
-      (lapsed ? ` (${lapsed} past valid_until)` : ``) +
-      `. Nobody has ruled on these.`,
-  );
-  for (const p of proposals.slice(0, MAX_SHOWN)) {
+  for (const p of entries.slice(0, MAX_SHOWN)) {
     const conf = p.confidence ? `, confidence ${p.confidence}` : ``;
     lines.push(`  [${tagOf(p)}] ${p.project}/${p.slug}${conf}`);
     const d = p.description.length > DESC_MAX
@@ -176,13 +179,42 @@ function render(proposals: Proposal[]): string {
       : p.description;
     lines.push(`      ${d}`);
   }
-  if (proposals.length > MAX_SHOWN) {
-    lines.push(`  …and ${proposals.length - MAX_SHOWN} more proposed notes not shown.`);
+  if (entries.length > MAX_SHOWN) {
+    lines.push(`  …and ${entries.length - MAX_SHOWN} more ${noun} notes not shown.`);
   }
-  lines.push(
-    `Notes live at ~/.claude/projects/<project>/memory/<slug>.md. Ask the operator to accept, ` +
-      `reject, or defer (extend metadata.valid_until); never set status: accepted yourself.`,
-  );
+  return lines;
+}
+
+function render(notes: Proposal[]): string {
+  const proposals = notes.filter((p) => p.status === "proposed");
+  const accepted = notes.filter((p) => p.status === "accepted");
+  if (proposals.length === 0 && accepted.length === 0) return "";
+  const lines: string[] = [];
+  if (proposals.length > 0) {
+    const lapsed = proposals.filter((p) => p.daysLeft !== null && p.daysLeft < 0).length;
+    lines.push(
+      `${proposals.length} memory decision note${proposals.length === 1 ? " is" : "s are"} ` +
+        `still at status: proposed` +
+        (lapsed ? ` (${lapsed} past valid_until)` : ``) +
+        `. Nobody has ruled on these.`,
+    );
+    lines.push(...renderEntries(proposals, "proposed"));
+    lines.push(
+      `Notes live at ~/.claude/projects/<project>/memory/<slug>.md. Ask the operator to accept, ` +
+        `reject, or defer (extend metadata.valid_until); never set status: accepted yourself.`,
+    );
+  }
+  if (accepted.length > 0) {
+    lines.push(
+      `${accepted.length} accepted memory decision note${accepted.length === 1 ? " is" : "s are"} ` +
+        `past valid_until. Each is due for a revisit.`,
+    );
+    lines.push(...renderEntries(accepted, "accepted"));
+    lines.push(
+      `Ask the operator to keep, revise, or retire each one (a kept ruling gets a later ` +
+        `metadata.valid_until); never change its status yourself.`,
+    );
+  }
   return lines.join("\n");
 }
 
@@ -249,7 +281,21 @@ function selftest(): void {
     );
     writeFileSync(
       join(projB, "accepted.md"),
-      note(`name: accepted\ndescription: Already ruled on\nmetadata:\n  type: decision\n  status: accepted\n  valid_until: 2026-07-01`),
+      note(`name: accepted\ndescription: Accepted, review date passed\nmetadata:\n  type: decision\n  status: accepted\n  valid_until: 2026-07-01`),
+    );
+    // Accepted notes that must stay out: inside valid_until, valid_until == today (the same
+    // boundary as proposals), and no usable date at all.
+    writeFileSync(
+      join(projB, "accepted-live.md"),
+      note(`name: accepted-live\ndescription: Accepted, review date ahead\nmetadata:\n  type: decision\n  status: accepted\n  valid_until: 2026-12-31`),
+    );
+    writeFileSync(
+      join(projB, "accepted-today.md"),
+      note(`name: accepted-today\ndescription: Accepted, reviewed at end of today\nmetadata:\n  type: decision\n  status: accepted\n  valid_until: 2026-08-11`),
+    );
+    writeFileSync(
+      join(projB, "accepted-undated.md"),
+      note(`name: accepted-undated\ndescription: Accepted, no review date\nmetadata:\n  type: decision\n  status: accepted`),
     );
     writeFileSync(
       join(projB, "not-a-decision.md"),
@@ -261,21 +307,22 @@ function selftest(): void {
 
     assert.deepEqual(
       got.map((p) => p.slug),
-      ["expired-one", "lapses-today", "live-day", "live-month", "bad-date"],
-      "filter + sort: lapsed first, then soonest live, undated last",
+      ["accepted", "expired-one", "lapses-today", "live-day", "live-month", "bad-date"],
+      "filter + sort: lapsed first, then soonest live, undated last; only a lapsed accepted note is kept",
     );
-    assert.equal(got[0].daysLeft, -41, "2026-07-01 lapsed 41 days before 2026-08-11");
-    assert.equal(got[1].daysLeft, 0, "valid_until == today is 0 days left, not lapsed");
-    assert.equal(got[2].daysLeft, 20, "2026-08-31 is 20 days out");
-    assert.equal(got[3].daysLeft, 50, "2026-09 means 2026-09-30, 50 days out");
-    assert.equal(got[4].daysLeft, null, "unparseable valid_until is not a date");
+    assert.equal(got[0].status, "accepted");
+    assert.equal(got[1].daysLeft, -41, "2026-07-01 lapsed 41 days before 2026-08-11");
+    assert.equal(got[2].daysLeft, 0, "valid_until == today is 0 days left, not lapsed");
+    assert.equal(got[3].daysLeft, 20, "2026-08-31 is 20 days out");
+    assert.equal(got[4].daysLeft, 50, "2026-09 means 2026-09-30, 50 days out");
+    assert.equal(got[5].daysLeft, null, "unparseable valid_until is not a date");
     assert.equal(
-      got[0].description,
+      got[1].description,
       "Lapsed proposal, quoted description",
       "CRLF + quoted description parses clean",
     );
-    assert.ok(!/[\r"]/.test(got[0].description), "no stray CR or quote survives");
-    assert.equal(got[0].confidence, "high");
+    assert.ok(!/[\r"]/.test(got[1].description), "no stray CR or quote survives");
+    assert.equal(got[1].confidence, "high");
 
     const out = render(got);
     assert.ok(
@@ -286,9 +333,27 @@ function selftest(): void {
     assert.ok(out.includes("[LAPSED 2026-07-01]") && out.includes("[20d left]"));
     assert.ok(out.includes("[lapses today] P--alpha/lapses-today"), "valid_until == today renders live");
     assert.ok(!out.includes("LAPSED 2026-08-11"), "a note lapsing today never renders as LAPSED");
-    // "/accepted", not "accepted": the closing guidance line says the word.
-    assert.ok(!out.includes("/accepted") && !out.includes("not-a-decision"), "excluded notes stay out");
+    assert.ok(!out.includes("not-a-decision"), "a non-decision note stays out");
+    assert.ok(
+      out.includes("1 accepted memory decision note is past valid_until."),
+      "lapsed accepted notes get their own header",
+    );
+    assert.ok(out.includes("[LAPSED 2026-07-01] P--beta/accepted"), "the lapsed accepted note renders");
+    assert.ok(
+      out.indexOf("P--beta/accepted") > out.indexOf("never set status: accepted yourself."),
+      "accepted section follows the proposals section",
+    );
+    for (const live of ["accepted-live", "accepted-today", "accepted-undated"]) {
+      assert.ok(!out.includes(live), `${live} is a live ruling and stays out`);
+    }
     assert.ok(out.split("\n").length < 30, "digest stays under 30 lines");
+
+    // An accepted note alone is enough to print, and without one the section never appears.
+    const onlyAccepted = render(got.filter((p) => p.status === "accepted"));
+    assert.ok(onlyAccepted.startsWith("1 accepted memory decision note is past valid_until."), onlyAccepted);
+    assert.ok(!onlyAccepted.includes("still at status: proposed"), "no proposals header without proposals");
+    const noAccepted = render(got.filter((p) => p.status === "proposed"));
+    assert.ok(!noAccepted.includes("accepted memory decision note"), "no accepted section without a lapsed note");
 
     assert.equal(render(collect(empty, now)), "", "empty tree renders nothing");
     assert.equal(render(collect(join(root, "nope-does-not-exist"), now)), "", "missing tree renders nothing");
@@ -314,7 +379,7 @@ function selftest(): void {
     assert.ok(!descLine.includes(longDesc), "the full over-long description never renders");
     assert.equal(descLine.trim().length, DESC_MAX, "ellipsized description is exactly DESC_MAX");
 
-    console.log("PASS memory-proposal-digest: 5 of 8 notes matched, sort/expiry/boundary/CRLF/silence/truncation OK");
+    console.log("PASS memory-proposal-digest: 6 of 11 notes matched (5 proposed, 1 lapsed accepted), sort/expiry/boundary/CRLF/silence/truncation OK");
   } finally {
     try { rmSync(root, { recursive: true, force: true }); } catch {}
     try { rmSync(empty, { recursive: true, force: true }); } catch {}

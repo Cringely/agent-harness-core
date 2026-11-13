@@ -79,7 +79,7 @@ clean answer that no observation contradicts.
   is decoration: discard it rather than running it longer, because no further observation separates two
   hypotheses that predict the same observation. Skipping this check fails silently, since the rig then
   returns a clean reading that agrees with whichever answer you already held.
-- **Name what produces the behaviour and check whether you can open it.** `fix-quality.md` patches the
+- **Name what produces the behaviour and check whether you can open it.** The code layer's `fix-quality.md` patches the
   producer rather than the consumer, and the same choice applies to where evidence gets gathered. Where the
   producer is nameable and readable, a rig buys one instance of what reading it settles for every case.
   Reading `Container.Add` and `Container.Drop` out of the shipped assembly took about four tool calls,

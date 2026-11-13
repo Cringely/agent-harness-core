@@ -565,3 +565,206 @@ describe("not-ai gate — issue #122, contrastive negation and bold run-in label
     },
   );
 });
+
+describe("not-ai gate — blockquotes are excluded from sentence rhythm", () => {
+  // Operator ruling on issue #123 (2026-11-11): quoted prose is someone else's rhythm, so a
+  // blockquote is dropped from segmentation the way fenced code is. A blockquote line is up
+  // to 3 spaces of indent and then ">", and its lazy continuation lines (non-blank lines with
+  // no marker, up to the next blank line) belong to the quote too.
+
+  test.skipIf(!PYTHON)("a blockquote contributes no sentences", () => {
+    // Before the fix the quoted lines joined into a paragraph of their own and split into
+    // sentences, so this document read 4 sentences instead of the 2 real ones.
+    const { json } = runGate(
+      "blockquote.md",
+      [
+        "First real sentence stands here for the document today.",
+        "",
+        "> Quoted sentence one is long enough to count if it leaked in. Quoted sentence two",
+        "> follows right behind it in the same quote block here.",
+        "",
+        "Second real sentence closes the document out for today.",
+        "",
+      ].join("\n"),
+    );
+    expect(json.counts.sentences).toBe(2);
+  });
+
+  test.skipIf(!PYTHON)("a blockquote marker with up to 3 spaces of indent still starts a quote", () => {
+    const { json } = runGate(
+      "blockquote-indent.md",
+      [
+        "First real sentence stands here for the document today.",
+        "",
+        "   > Indented quote sentence that must not be counted as prose here.",
+        "",
+        "Second real sentence closes the document out for today.",
+        "",
+      ].join("\n"),
+    );
+    expect(json.counts.sentences).toBe(2);
+  });
+
+  test.skipIf(!PYTHON)("lazy continuation lines stay inside the quote until a blank line", () => {
+    // The second line carries no ">" but CommonMark reads it as part of the quote.
+    // Before the fix its two sentences counted: 3 sentences instead of the 1 real one.
+    const { json } = runGate(
+      "blockquote-lazy.md",
+      [
+        "> Quoted opening line of a block quote that keeps going for a while",
+        "lazy line carrying the quote on without any marker at all. More lazy text sits here too.",
+        "",
+        "Real sentence after the blank line ends the document today.",
+        "",
+      ].join("\n"),
+    );
+    expect(json.counts.sentences).toBe(1);
+  });
+
+  test.skipIf(!PYTHON)("a quote line directly under a paragraph is left out of that paragraph", () => {
+    // No blank line between the paragraph and the quote. If the quote line leaked into the
+    // paragraph, SENTENCE_RE would split it at "Quoted one is here. Quoted two follows." and
+    // the document would read 4 sentences instead of the 2 real ones.
+    const { json } = runGate(
+      "blockquote-interrupt.md",
+      [
+        "Real sentence before the quote sits in a paragraph of its own here.",
+        "> Quoted one is here and long enough to count. Quoted two follows right behind it.",
+        "",
+        "Real sentence after the quote ends the document out for today.",
+        "",
+      ].join("\n"),
+    );
+    expect(json.counts.sentences).toBe(2);
+  });
+
+  test.skipIf(!PYTHON)("a thematic break under a quote ends the paragraph above the quote", () => {
+    // Paragraph, quote, rule, paragraph with no blank lines. Before the fix the rule was kept
+    // as prose and never flushed, so "...here. --- Closing..." merged into one block that
+    // SENTENCE_RE cannot split before "-", reading 1 sentence instead of 2.
+    const { json } = runGate(
+      "blockquote-break-merge.md",
+      [
+        "Intro sentence stands here for the document today.",
+        "> Quoted line that opens a block quote right here in the document.",
+        "---",
+        "Closing sentence stands here for the document today.",
+        "",
+      ].join("\n"),
+    );
+    expect(json.counts.sentences).toBe(2);
+  });
+
+  test.skipIf(!PYTHON)("a thematic break between paragraphs is not counted and splits them", () => {
+    // No quote at all. The rule ends the paragraph above it and is dropped, so the two
+    // sentences are not glued through "---".
+    const { json } = runGate(
+      "thematic-break-plain.md",
+      [
+        "Intro sentence stands here for the document today.",
+        "---",
+        "closing words follow here without any capital letter or period",
+        "",
+      ].join("\n"),
+    );
+    expect(json.counts.sentences).toBe(2);
+  });
+
+  test.skipIf(!PYTHON)("a list item or heading ends the quote and its text still counts", () => {
+    // Only a plain paragraph line is a lazy continuation. A list item (and likewise a heading
+    // or a fence) starts a new block, so the prose in it is the document's own.
+    const { json } = runGate(
+      "blockquote-then-list.md",
+      [
+        "> Quoted line that opens a block quote right here in the document.",
+        "- List item right after the quote is real prose that must be counted.",
+        "",
+        "> Second quote opens here and is quoted text only in this document.",
+        "# Heading ends the quote",
+        "Real paragraph after the heading counts as prose in this document.",
+        "",
+      ].join("\n"),
+    );
+    expect(json.counts.sentences).toBe(2);
+  });
+
+  test.skipIf(!PYTHON)("a fence directly under a quote ends the quote and the prose after it counts", () => {
+    // No blank line anywhere. The fence opens a new block, so the sentence after the closing
+    // fence is the document's own prose, not a lazy continuation of the quote above.
+    const { json } = runGate(
+      "blockquote-then-fence.md",
+      [
+        "> Quoted line that opens a block quote right here in the document.",
+        "```",
+        "code inside the fence is program text and never counts.",
+        "```",
+        "Real sentence after the closing fence is prose that must be counted today.",
+        "",
+      ].join("\n"),
+    );
+    expect(json.counts.sentences).toBe(1);
+  });
+
+  test.skipIf(!PYTHON)("a thematic break directly under a quote ends the quote", () => {
+    const { json } = runGate(
+      "blockquote-then-break.md",
+      [
+        "> Quoted line that opens a block quote right here in the document.",
+        "---",
+        "Real sentence after the thematic break is prose that must be counted today.",
+        "",
+      ].join("\n"),
+    );
+    expect(json.counts.sentences).toBe(1);
+  });
+
+  test.skipIf(!PYTHON)("a fence or thematic break under a quote ends it for bold labels too", () => {
+    const { json } = runGate(
+      "blockquote-then-fence-label.md",
+      [
+        "> Quoted line that opens a block quote right here in the document.",
+        "```",
+        "code",
+        "```",
+        "**Real label:** run-in label right after the fence is counted as usual.",
+        "",
+        "> Second quote opens here and is quoted text only in this document.",
+        "***",
+        "**Second label:** run-in label right after the break is counted as well.",
+        "",
+      ].join("\n"),
+    );
+    expect(json.counts.bold_label_run_in).toBe(2);
+  });
+
+  test.skipIf(!PYTHON)("a greater-than sign that does not start the line is ordinary prose", () => {
+    const { json } = runGate(
+      "greater-than.md",
+      [
+        "The measured value a > b holds for every run in this sample today.",
+        "",
+        "Another sentence about the same sample follows here for the reader.",
+        "",
+      ].join("\n"),
+    );
+    expect(json.counts.sentences).toBe(2);
+  });
+
+  test.skipIf(!PYTHON)("a bold label inside a blockquote is not counted", () => {
+    // _count_bold_labels walks raw lines through _bold_label_lines, which has to apply the
+    // same blockquote exclusion or the quoted label is counted though its sentence is not.
+    const { json } = runGate(
+      "blockquote-bold-label.md",
+      [
+        "> **Quoted label:** run-in label inside a quote that must not be counted.",
+        "> **Quoted own line**",
+        "**Lazy label:** lazy line after the quote that opens with bold, also quoted.",
+        "",
+        "**Real label:** run-in label outside any quote is counted as usual here.",
+        "",
+      ].join("\n"),
+    );
+    expect(json.counts.bold_label_run_in).toBe(1);
+    expect(json.counts.bold_label_own_line).toBe(0);
+  });
+});

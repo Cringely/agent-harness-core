@@ -15,7 +15,9 @@
 #   - A probe that cannot answer (not on PATH, non-zero exit, timeout, no version in its output)
 #     is absent. That is the fail-closed reading: an unanswered probe never counts as present.
 #   - Install commands are argv arrays built from validated fields, never strings, and only from
-#     winget, apt and npm, each pinned to an exact version. No download-and-execute form exists.
+#     winget, apt and npm, each pinned to an exact version, except one named exception: an apt spec
+#     may carry `unpinned` (a reason sentence) instead of `version`, used for git on Linux (#310).
+#     No download-and-execute form exists.
 
 $script:DepsLayerNames = @('kernel', 'code', 'documents', 'physical')
 $script:DepsProbeTimeout = 10
@@ -134,15 +136,29 @@ function Get-DepsManifest {
                 $spec = $inst[$plat]
                 if ($spec -isnot [System.Collections.IDictionary]) { throw "deps manifest: '$n' install.$plat must be an object." }
                 $allowed = if ($plat -eq 'windows') { @('winget') } elseif ($plat -eq 'linux') { @('apt', 'npm') } else { throw "deps manifest: '$n' install names unknown platform '$plat'." }
-                $sources = @($spec.Keys | Where-Object { $_ -ne 'version' })
-                if ($sources.Count -ne 1 -or $allowed -notcontains $sources[0]) {
+                # `unpinned` is the one named exception to the exact-version rule (#310): an apt
+                # install with a one-sentence reason in place of `version`. Everything else needs a pin.
+                $isUnpinned = $spec.Contains('unpinned')
+                $sources = @($spec.Keys | Where-Object { $_ -ne 'version' -and $_ -ne 'unpinned' })
+                if ($isUnpinned) {
+                    if ($plat -ne 'linux' -or $sources.Count -ne 1 -or $sources[0] -ne 'apt') {
+                        throw "deps manifest: '$n' install.$plat unpinned is allowed only on an apt install."
+                    }
+                    if ($spec.Contains('version')) {
+                        throw "deps manifest: '$n' install.$plat names both version and unpinned. Choose one."
+                    }
+                    if ($spec['unpinned'] -isnot [string] -or -not $spec['unpinned'].Trim()) {
+                        throw "deps manifest: '$n' install.$plat unpinned needs a non-empty reason sentence."
+                    }
+                }
+                elseif ($sources.Count -ne 1 -or $allowed -notcontains $sources[0]) {
                     throw "deps manifest: '$n' install.$plat must name exactly one of $($allowed -join ', ') and a version."
                 }
                 $src = $sources[0]
                 if ($spec[$src] -isnot [string] -or $spec[$src] -cnotmatch $script:DepsNameGrammar[$src]) {
                     throw "deps manifest: '$n' install.$plat $src package '$($spec[$src])' is malformed."
                 }
-                if (-not (Test-DepsVersionString -Source $src -Version $spec['version'])) {
+                if (-not $isUnpinned -and -not (Test-DepsVersionString -Source $src -Version $spec['version'])) {
                     throw "deps manifest: '$n' install.$plat version '$($spec['version'])' is not an exact $src version. A range or a tag is not a pin."
                 }
             }
@@ -263,7 +279,9 @@ function Get-DepInstallCommand {
                 '--silent', '--accept-package-agreements', '--accept-source-agreements'))
     }
     if ($spec.Contains('apt')) {
-        return , ([string[]]@('sudo', 'apt-get', 'install', '-y', "$($spec['apt'])=$v"))
+        # An unpinned spec (git on Linux, #310) installs whatever the archive currently carries.
+        $target = if ($spec.Contains('unpinned')) { [string]$spec['apt'] } else { "$($spec['apt'])=$v" }
+        return , ([string[]]@('sudo', 'apt-get', 'install', '-y', $target))
     }
     if ($spec.Contains('npm')) {
         # npm checks the tarball against the registry's integrity hash on install.
@@ -805,6 +823,24 @@ function Get-PluginInstallCommands {
     return , $cmds.ToArray()
 }
 
+# A record can detect a changed copy with a non-empty string hash alone: the preflight hashes the
+# path the plugin listing gives and compares it with this value.
+function Test-PluginRecordHasHash {
+    param($Record)
+    if ($Record -isnot [System.Collections.IDictionary] -or -not $Record.Contains('hash')) { return $false }
+    $v = $Record['hash']
+    return ($v -is [string]) -and -not [string]::IsNullOrWhiteSpace($v)
+}
+
+# -Audit has no CLI listing, so it also needs the recorded installPath to find the folder to
+# hash. A record is fully well formed only with both, each a non-empty string.
+function Test-PluginRecordWellFormed {
+    param($Record)
+    if (-not (Test-PluginRecordHasHash $Record)) { return $false }
+    $v = if ($Record.Contains('installPath')) { $Record['installPath'] } else { $null }
+    return ($v -is [string]) -and -not [string]::IsNullOrWhiteSpace($v)
+}
+
 function New-PluginRecord {
     param($Result, [string]$Sha)
     $rec = [ordered]@{ hash = $Result.Hash; installPath = $Result.InstallPath; version = $Result.Version }
@@ -882,8 +918,16 @@ function Invoke-PluginDepsPreflight {
             Write-Warning "plugin $id is unpinned third-party code, allowed by this project's manifest. Recorded risk: $($opt[0]['risk'])"
         }
 
+        # A record with no usable hash cannot vouch for the installed copy, so it counts as no
+        # record and the first-seen path below re-records it. Reading it as "unchanged" would
+        # switch drift detection off. A record with a hash but no installPath still detects a
+        # change, so it stays a record: only an unchanged copy gets its installPath filled in.
         $rec = $null
-        if ($Records.Contains($id) -and $Records[$id] -is [System.Collections.IDictionary]) { $rec = $Records[$id] }
+        $recBroken = $false
+        if ($Records.Contains($id)) {
+            if (Test-PluginRecordHasHash $Records[$id]) { $rec = $Records[$id] } else { $recBroken = $true }
+        }
+        $recNoPath = $rec -and -not (Test-PluginRecordWellFormed $rec)
         $recHash = if ($rec) { [string]$rec['hash'] } else { $null }
         $r = & $probe $recHash
 
@@ -931,6 +975,7 @@ function Invoke-PluginDepsPreflight {
                 }
             }
             if (-not $rec) {
+                if ($recBroken) { Write-Warning "plugin ${id}: its recorded entry has no usable hash, so it could not vouch for the installed copy. Recording the current copy; review it if you did not expect this." }
                 $Records[$id] = New-PluginRecord -Result $r -Sha $currentSha
                 $changed = $true
                 continue
@@ -938,6 +983,13 @@ function Invoke-PluginDepsPreflight {
             if ($r.Changed) {
                 Write-Warning "plugin $id changed since recorded: $($r.InstallPath) now hashes to $($r.Hash), recorded $recHash. Review the change, then re-run with -InstallDeps to re-record it."
                 if ($InstallDeps) { $Records[$id] = New-PluginRecord -Result $r -Sha $currentSha; $changed = $true }
+            }
+            elseif ($recNoPath) {
+                # The copy still matches the recorded hash, so recording where it lives loses nothing.
+                Write-Warning "plugin ${id}: its recorded entry had no installPath. The installed copy matches the recorded hash, so its install path is recorded now."
+                $keepSha = if ($currentSha) { $currentSha } elseif ($rec['sha']) { [string]$rec['sha'] } else { $null }
+                $Records[$id] = New-PluginRecord -Result $r -Sha $keepSha
+                $changed = $true
             }
             continue
         }

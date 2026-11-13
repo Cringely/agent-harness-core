@@ -63,6 +63,8 @@ pwsh -NoProfile -File {{CORE_REPO}}/install/Install-Account.ps1
 Do not hand-edit `account/claude/` in the repo. It is generated, and the next export overwrites
 it. Fix the source under `~/.claude/` and export again.
 
+Code-layer rules are not authored here. `fix-quality.md` and `change-management-code.md` live in `core/claude/rules/` in the core repo and are edited there, and `Install-Harness.ps1` copies them into each code project's `.claude/rules/harness/`. A project picks up a rule change when it is reinstalled. The kernel keeps `bounded-review.md`, split out of `fix-quality.md`, and the rest of `change-management.md`.
+
 ## Findings flow (both channels)
 
 1. Capture findings as memory notes during work (cheap, always).
