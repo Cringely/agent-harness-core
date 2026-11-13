@@ -108,6 +108,67 @@ describe("sourceDeclaresTest", () => {
     },
   );
 
+  // The plain declaration must be the only form of that title. A pin that also appears behind a
+  // modifier is refused, because bun reports a `.failing` test as passing when its body throws and
+  // the report pairs cases by title, so the plain twin would vouch for the modified one.
+  test.each(["failing", "skip", "todo", "only", "skipIf(!x)", "if(x)", "todoIf(x)", "each([1])"])(
+    "a plain declaration is refused when the same title also appears behind .%s",
+    (modifier) => {
+      const source = `test("does the thing", () => {})
+test.${modifier}("does the thing", () => {})`;
+      expect(sourceDeclaresTest(source, "does the thing")).toBe(false);
+    },
+  );
+
+  test("a modifier chain with nested parentheses or a line break still counts as a modifier", () => {
+    const plain = `test("does the thing", () => {});`;
+    for (const modified of [
+      `test.skipIf(!existsSync(join(a, b)))("does the thing", () => {})`,
+      `test.each([[1, 2]])("does the thing", () => {})`,
+      `test.skipIf(x)
+("does the thing", () => {})`,
+      `test
+  .failing("does the thing", () => {})`,
+      `it.todo("does the thing")`,
+      `test.concurrent("does the thing", () => {})`,
+    ]) {
+      expect(sourceDeclaresTest(`${plain}
+${modified}`, "does the thing")).toBe(false);
+    }
+  });
+
+  test("a bracket inside a string in a modifier's arguments does not hide the modifier", () => {
+    const plain = `test("does the thing", () => {});`;
+    expect(sourceDeclaresTest(`${plain}
+test.skipIf(x === ")")("does the thing", () => {})`, "does the thing")).toBe(false);
+    expect(sourceDeclaresTest(`${plain}
+test.skipIf(x === "(")("does the thing", () => {})`, "does the thing")).toBe(false);
+  });
+
+  test("a test() call inside a string or template literal is not a declared test", () => {
+    expect(sourceDeclaresTest(`const s = 'test("does the thing", () => {})'`, "does the thing")).toBe(false);
+    expect(sourceDeclaresTest("const s = `it('does the thing', () => {})`", "does the thing")).toBe(false);
+  });
+
+  test("a string fixture does not stand in for a pin whose only running declaration is .failing", () => {
+    const source = `const s = 'test("does the thing", () => {})'; test.failing("does the thing", () => {})`;
+    expect(sourceDeclaresTest(source, "does the thing")).toBe(false);
+  });
+
+  test("a modifier inside a string or comment, or on another title, does not refuse a plain declaration", () => {
+    expect(sourceDeclaresTest(`const s = 'test.failing("does the thing")'; test("does the thing", () => {})`, "does the thing")).toBe(true);
+    expect(sourceDeclaresTest(`// test.skip("does the thing")
+test("does the thing", () => {})`, "does the thing")).toBe(true);
+    expect(sourceDeclaresTest(`test.skip("other", () => {}); test("does the thing", () => {})`, "does the thing")).toBe(true);
+  });
+
+  test("only a bare test() or it() call declares: a method named test does not", () => {
+    expect(sourceDeclaresTest(`/re/.test("does the thing")`, "does the thing")).toBe(false);
+    expect(sourceDeclaresTest(`suite.test("does the thing", () => {})`, "does the thing")).toBe(false);
+    expect(sourceDeclaresTest(`expect(x)
+test("does the thing", () => {})`, "does the thing")).toBe(true);
+  });
+
   test("a name that only appears in a comment or an assertion is not a declared test", () => {
     expect(sourceDeclaresTest(`// "does the thing"`, "does the thing")).toBe(false);
     expect(sourceDeclaresTest(`expect(x).toBe("does the thing")`, "does the thing")).toBe(false);

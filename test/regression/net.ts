@@ -85,11 +85,15 @@ function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** `source` with every line and block comment blanked, so a commented-out test() call is not
- * seen. Strings, template literals and regex literals are skipped whole, so a `//` inside a URL
- * string does not start a comment. */
-export function stripComments(source: string): string {
+/** The scan behind `stripComments` and `sourceDeclaresTest`. `code` is `source` with every line and
+ * block comment blanked. `masked` is `code` with each string, template and regex literal blanked to
+ * spaces of the same length, so a bracket or a call inside a literal is invisible and positions line
+ * up with `code`. `literals` holds the range of each literal in `code`. Strings, template literals and
+ * regex literals are skipped whole, so a `//` inside a URL string does not start a comment. */
+function scanSource(source: string): { code: string; masked: string; literals: { start: number; end: number }[] } {
   let out = "";
+  let masked = "";
+  const literals: { start: number; end: number }[] = [];
   let i = 0;
   let lastCode = "";
   while (i < source.length) {
@@ -101,30 +105,89 @@ export function stripComments(source: string): string {
       const end = source.indexOf("*/", i + 2);
       i = end === -1 ? source.length : end + 2;
       out += " ";
+      masked += " ";
     } else if (c === '"' || c === "'" || c === "`" || (c === "/" && /^[(,=:[!&|?{};]?$/.test(lastCode))) {
       let j = i + 1;
       while (j < source.length && source[j] !== c) j += source[j] === "\\" ? 2 : 1;
-      out += source.slice(i, j + 1);
+      const literal = source.slice(i, j + 1);
+      literals.push({ start: out.length, end: out.length + literal.length });
+      out += literal;
+      masked += " ".repeat(literal.length);
       i = j + 1;
       lastCode = c;
     } else {
       out += c;
+      masked += c;
       i++;
       if (!/\s/.test(c)) lastCode = c;
     }
   }
-  return out;
+  return { code: out, masked, literals };
 }
 
-/** True when `source` declares a test whose title is exactly `name`: a bare test()/it() call, in
- * code rather than a comment, whose first argument is that string literal. Any modifier is refused
- * (skip, todo, if, failing, only), because each can make a pinned test pass or run without
- * checking anything, and a pin that cannot be read as plain is not trusted. A name in a comment
- * or inside an assertion does not count, and neither does a longer title that merely begins
- * with it. */
+/** `source` with every line and block comment blanked, so a commented-out test() call is not seen. */
+export function stripComments(source: string): string {
+  return scanSource(source).code;
+}
+
+/** The callee text of the call whose opening parenthesis sits at `open` in `masked`: the identifier
+ * and dot chain before it, with any bracketed groups (`.skipIf(x)`, `.each([..])`) folded in and all
+ * whitespace removed. `test` for `test(`, `test.skipIf(x)` for `test.skipIf(x)(`. */
+function calleeBefore(masked: string, open: number): string {
+  let k = open - 1;
+  while (k >= 0) {
+    const c = masked[k];
+    if (/[\w$.]/.test(c)) {
+      k--;
+    } else if (c === ")" || c === "]") {
+      let depth = 0;
+      let m = k;
+      for (; m >= 0; m--) {
+        if (masked[m] === ")" || masked[m] === "]") depth++;
+        else if (masked[m] === "(" || masked[m] === "[") depth--;
+        if (depth === 0) break;
+      }
+      if (m < 0) break;
+      k = m - 1;
+    } else if (/\s/.test(c)) {
+      // A break inside a chain (`.skipIf(x)\n(`, `test\n.failing(`) stays in the callee. A break
+      // before a fresh statement does not, so `expect(x)\ntest(` is not read as one expression.
+      let p = k;
+      while (p >= 0 && /\s/.test(masked[p])) p--;
+      let q = k + 1;
+      while (q < masked.length && /\s/.test(masked[q])) q++;
+      if (p >= 0 && (masked[q] === "." || masked[q] === "(") && /[\w$)\]]/.test(masked[p])) k = p;
+      else break;
+    } else break;
+  }
+  return masked.slice(k + 1, open).replace(/\s+/g, "");
+}
+
+/** True when `source` declares a test whose title is exactly `name` through a plain, unmodified
+ * test()/it() call, and through no other form. The title must be the first argument, written as a
+ * string literal in code. A match inside a comment, a string or template literal, or a regex does
+ * not count, and neither does a method named test (`re.test("x")`). If the same title also appears
+ * behind any modifier (`test.failing`, `.skip`, `.todo`, `.if`, `.skipIf`, `.todoIf`, `.only`,
+ * `.each`, or any other `test.x` / `it.x` form), the pin is refused even when a plain declaration
+ * exists: bun reports a `.failing` test as passing when its body throws, and the report pairs cases
+ * by title, so the plain twin would vouch for a test that checks nothing. A longer title that merely
+ * begins with the name does not count. Both the run path and the static check call this. */
 export function sourceDeclaresTest(source: string, name: string): boolean {
-  const call = new RegExp("\\b(?:test|it)\\(\\s*([\"'`])" + escapeRegex(name) + "\\1");
-  return call.test(stripComments(source));
+  const { code, masked, literals } = scanSource(source);
+  let plain = false;
+  for (const { start, end } of literals) {
+    const raw = code.slice(start, end);
+    const quote = raw[0];
+    if ((quote !== '"' && quote !== "'" && quote !== "`") || raw.length < 2 || raw[raw.length - 1] !== quote) continue;
+    if (raw.slice(1, -1) !== name) continue;
+    let open = start - 1;
+    while (open >= 0 && /\s/.test(masked[open])) open--;
+    if (open < 0 || masked[open] !== "(") continue;
+    const callee = calleeBefore(masked, open);
+    if (/^(?:test|it)\./.test(callee)) return false;
+    if (callee === "test" || callee === "it") plain = true;
+  }
+  return plain;
 }
 
 /** The `bun test -t` regex selecting exactly these titles. Bun matches it against the describe
