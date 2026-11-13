@@ -20,7 +20,7 @@ Do not connect by raw IP without a config entry. The entry carries the host's us
 
 ## SSH Binary
 
-Always use the Windows OpenSSH binary: `C:/Windows/System32/OpenSSH/ssh.exe`. Git Bash's bundled `ssh` does not work with the named pipe SSH agent (`//./pipe/openssh-ssh-agent`) and will fail key auth silently. In Bash tool calls, invoke SSH as `/c/Windows/System32/OpenSSH/ssh.exe` (or use the full Windows path).
+On Windows, always use the Windows OpenSSH binary: `C:/Windows/System32/OpenSSH/ssh.exe`. Git Bash's bundled `ssh` does not work with the named pipe SSH agent (`//./pipe/openssh-ssh-agent`) and will fail key auth silently. In Bash tool calls, invoke SSH as `/c/Windows/System32/OpenSSH/ssh.exe` (or use the full Windows path). On other platforms, use the system `ssh`. The named pipe problem does not exist there.
 
 ## SSH Config Location
 
