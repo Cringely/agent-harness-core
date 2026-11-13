@@ -17,7 +17,8 @@
 // flagged in the source.
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const HOOK = join(import.meta.dir, "..", "account", "claude", "hooks", "memory-proposal-digest.ts");
@@ -28,6 +29,54 @@ describe("memory-proposal-digest --selftest", () => {
     expect(proc.stderr.toString()).toBe("");
     expect(proc.stdout.toString()).toContain("PASS memory-proposal-digest");
     expect(proc.exitCode).toBe(0);
+  });
+});
+
+// Process-level coverage of the accepted-note digest: the hook is spawned against a fixture
+// tree with the real clock, so the dates are chosen far enough out that "past" and "ahead"
+// cannot flip while the suite runs.
+describe("memory-proposal-digest — accepted notes past valid_until", () => {
+  function digestFor(notes: Record<string, string>): { stdout: string; status: number } {
+    const root = mkdtempSync(join(tmpdir(), "mpd-accepted-"));
+    try {
+      const memDir = join(root, "P--fixture", "memory");
+      mkdirSync(memDir, { recursive: true });
+      for (const [slug, fm] of Object.entries(notes)) {
+        writeFileSync(join(memDir, `${slug}.md`), `---\nname: ${slug}\ndescription: ${slug} desc\nmetadata:\n  type: decision\n${fm}\n---\nbody\n`);
+      }
+      const proc = Bun.spawnSync({ cmd: [process.execPath, HOOK, "--root", root], stdout: "pipe", stderr: "pipe" });
+      return { stdout: proc.stdout.toString(), status: proc.exitCode ?? -1 };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  test("an accepted note whose valid_until has passed is listed", () => {
+    const r = digestFor({ "old-ruling": "  status: accepted\n  valid_until: 2020-01-01" });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("1 accepted memory decision note is past valid_until.");
+    expect(r.stdout).toContain("[LAPSED 2020-01-01] P--fixture/old-ruling");
+    expect(r.stdout).not.toContain("still at status: proposed");
+  });
+
+  test("an accepted note still inside valid_until is not listed, and nothing is printed", () => {
+    const r = digestFor({ "live-ruling": "  status: accepted\n  valid_until: 2999-12-31" });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe("");
+  });
+
+  test("an accepted note with no usable date is not listed", () => {
+    const r = digestFor({ undated: "  status: accepted", garbled: "  status: accepted\n  valid_until: someday" });
+    expect(r.stdout).toBe("");
+  });
+
+  test("a lapsed accepted note and a proposal render as two sections", () => {
+    const r = digestFor({
+      "old-ruling": "  status: accepted\n  valid_until: 2020-01-01",
+      pending: "  status: proposed\n  valid_until: 2999-12-31",
+    });
+    expect(r.stdout).toContain("1 memory decision note is still at status: proposed.");
+    expect(r.stdout).toContain("1 accepted memory decision note is past valid_until.");
   });
 });
 
