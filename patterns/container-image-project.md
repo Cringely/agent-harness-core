@@ -12,8 +12,14 @@ This pattern sits between them. CI builds one image and pushes it to a private r
 runs an ordinary compose stack that pulls it, and a person updates a host by editing two values.
 
 It comes from one project so far, a web app with a worker, which built a custom deployer first and
-then removed it. The examples assume GitHub Actions, GHCR and Traefik. Other CI services, registries
-and reverse proxies have equivalents for each setting named here.
+then removed it. This repository asks for two occurrences across projects before a pattern is added,
+and this one was added after one because the operator asked for it directly. The examples assume
+GitHub Actions, GHCR, Traefik and SQLite. Other CI services, registries, reverse proxies and
+databases have equivalents for each setting named here.
+
+Vendor behaviour changes on the vendor's release cycle, and this doc does not. The sections below
+keep to each rule and its reason. The vendor facts those rules lean on are collected under
+[Verify before use](#verify-before-use), with the month they were recorded.
 
 One caveat covers the Secrets section. The rule was decided in the source project after its first
 release, and the code that reads secrets this way was not yet merged there when this was written. So
@@ -53,17 +59,17 @@ collaborator with write access who deliberately works against the system.
 
 Optional hardening, added when the cost is worth it:
 
-- in-build tests with no network, which needs a recent engine and tests that tolerate it
+- in-build tests with no network, which needs engine support and tests that tolerate it
 - a test pinning each compose service's exact key set, which taxes every compose edit
 - signature verification of vendor downloads, where the vendor signs
-- an egress allowlist proxy, which becomes required once a role handles untrusted content while
-  holding a credential
+- an egress allowlist proxy for a role that needs the outside, which becomes required once a role
+  handles untrusted content while holding a credential
 
 ## Image design
 
 An image whose inputs float cannot be rebuilt or traced to a commit, and then every incident starts
 with guessing what is running. These rules fix the inputs and make the build refuse to produce an
-image the tests reject.
+image when a test that runs inside it fails.
 
 Build one image for every role. The role is the container command: `web`, `worker`, `migrate`,
 `health <role>`. That gives one build, one test run and one digest to pin. Roles differ by command,
@@ -79,14 +85,17 @@ uid, networks and mounts.
   stage. The shipped image then has no curl, so healthchecks call the app binary.
 - Install dependencies from a frozen lockfile with install scripts disabled.
 - Put a test stage inside the build. It runs the suite and writes a marker file, and the final stage
-  copies that marker, so a failing test cannot produce an image. The publish workflow does not wait
-  on the check workflow, which makes this stage the gate.
+  copies that marker, so a test that fails inside the build cannot produce an image. The publish
+  workflow does not wait on the check workflow, which makes this stage the only gate on the push. It
+  gates the tests it can run and no others. The next section says which tests those are.
 - Bake in no secrets and no private data. Write `.dockerignore` as an allowlist: `*` first, then one
-  re-include per build input.
+  re-include per build input. The config files the policy tests parse are build inputs too, or the
+  test stage cannot read them.
 - Run as a non-root user over root-owned code, so a compromised process cannot rewrite itself.
 - Turn off implicit env-file loading if the runtime has it.
-- Set `init: true`, so the app is not PID 1 and a stop signal ends it promptly. Handle SIGTERM in the
-  app as well, so it closes the database and finishes in-flight work before it exits.
+- Handle SIGTERM in the app, so it closes the database and finishes in-flight work before it exits.
+  Keeping the app from running as PID 1 is the stack's job, through `init: true` in the compose
+  anchor, because an image cannot set that key.
 - Carry only `org.opencontainers.image.*` labels. CI checks this allowlist after the push.
 
 State what is not pinned. OS packages float behind the pinned base's signing keys, and CA
@@ -112,12 +121,12 @@ The publish workflow holds the only write credential, and its shape follows from
   name committed. Registry names are lowercase, so the script lower-cases the owner and checks it
   against a lowercase name pattern before use. Without that, an owner with one capital letter fails
   every push.
-- Concurrency never cancels a running build. The CI service can still drop a pending run, so a
-  merge that lands mid-build may get no tag. Dispatch main again.
+- Concurrency never cancels a running build. A CI service may still drop a queued run when a newer
+  one arrives, so a merge that lands mid-build may get no tag. Dispatch main again.
 - Tags are `:<12-hex sha>`, `:sha-<full sha>` and `:main`.
 
-After the push, read the digest back from the registry. The default builder can report the config
-digest, which a pull by digest cannot resolve.
+After the push, read the digest back from the registry and not from the builder's output. A builder
+can report a digest that a pull by digest cannot resolve.
 
 ```sh
 digest=$(docker buildx imagetools inspect "$IMAGE:$SHORT" --format '{{json .Manifest}}' | jq -r '.digest // ""')
@@ -142,15 +151,24 @@ checks, then moves `:main` with a registry retag such as `docker buildx imagetoo
 failed check never moves it. The source project has not adopted that order. Until a project does,
 its staging must hold only fabricated data.
 
+The build gate covers the tests that run inside the build and nothing else. A test that reads the
+git index skips there, because the build context carries no index, and only the check workflow runs
+it. The publish workflow does not wait on that workflow. So a main commit that fails such a test
+still publishes, moves `:main` and prints a tag and digest for production to pin.
+
+The stronger way to close that gap adds a read-only job to the publish workflow that runs the suite
+on the checkout, and the push job lists it under `needs:`. The cheaper way makes "the check workflow
+passed for this commit" a step of every production update, which protects production and leaves
+staging exposed. The source project has adopted neither.
+
 ## The compose stack
 
 Hardening set one key at a time gets missed on the service added six months later. One anchor
 carries the defaults for every service, and policy tests check what each service ends up with.
 
 The image reference carries the tag and an optional digest in one expression. With a digest set,
-Docker resolves by the digest alone and ignores the tag. That is observed behaviour. The Docker and
-Compose documentation present tag and digest as alternatives and do not describe the combined form,
-so pull by the combined reference during the first live run.
+the engine resolved by the digest alone and ignored the tag. That was observed and is not documented
+behaviour, so pull by the combined reference during the first live run.
 
 ```yaml
 x-hardening: &hardening
@@ -177,18 +195,23 @@ A YAML merge key is shallow. A service that sets its own `labels`, `tmpfs`, `sec
 entries. Otherwise one label added for monitoring drops `traefik.enable: "false"` from that service
 with no error.
 
-- Uids are per role. Services that share the data directory share one uid, and egress proxies get
-  another.
+- Uids are per role. Services that share the data directory share one uid, and an egress proxy,
+  where the stack has one, gets another.
+- `init: true` in the anchor keeps the app from running as PID 1, so a stop signal ends it promptly.
 - Each service sets `mem_limit`, `cpus` and `pids_limit`.
 - Healthchecks run `health <role>` from the app binary. The worker writes a heartbeat row, so a
   process that is alive but wedged shows unhealthy.
 - Every host-specific value is `${KEY:?set KEY in .env}`, so compose never substitutes an empty
-  string. A committed example file documents each key.
+  string, with one deliberate exception. The image tag defaults to `main` and the digest to empty,
+  which lets staging run with neither set. Production's migrate step refuses to run when either is
+  missing (see Environments). A committed example file documents each key.
 - The web network is external and created with `--internal`. Only the reverse proxy and the web
   service join it. Nothing publishes a port, mounts the Docker socket, uses the host network or runs
   privileged.
-- Other networks are `internal: true`. A role that needs the outside goes through an allowlist proxy
-  container, which is the only member of an egress bridge.
+- Other networks are `internal: true`, so a role on them has no route out. A role that needs the
+  outside gets one of two routes, chosen in the security posture. With the egress hardening it goes
+  through an allowlist proxy container, which is the only member of an egress bridge. Without it the
+  role joins a bridge network of its own, and nothing limits where it connects.
 - A network with a static address sets a `subnet` and a smaller `ip_range`, and every static address
   sits inside the subnet but outside the `ip_range`. An address inside the range can be handed to
   another container first.
@@ -196,14 +219,14 @@ with no error.
   else. A container also carries its image's labels and the proxy's Docker provider reads them, so a
   routing label inherited from a base image could add a route that skips the auth middleware.
 - When the app trusts identity headers and has no authentication of its own, the middleware must
-  overwrite every identity header the app reads, or a client can name its own user. In Traefik's
-  forward auth, `authResponseHeaders` replaces only the headers it lists, so it must list each one.
-  `authResponseHeadersRegex` strips matching client headers first.
+  overwrite every identity header the app reads, or a client can name its own user. Find out which
+  headers the proxy's auth middleware replaces and which it passes through from the client, because
+  a header it does not replace reaches the app as the client sent it.
 
-The egress proxy accepts CONNECT on port 443 only and refuses IP literals. It checks the host against
-its allowlist before any DNS lookup, refuses private addresses and connects to the exact address it
-checked. It listens on its static internal address and refuses a wildcard bind at startup, because
-it also joins the egress bridge, which the host can reach.
+Where the stack has an egress proxy, it accepts CONNECT on port 443 only and refuses IP literals. It
+checks the host against its allowlist before any DNS lookup, refuses private addresses and connects
+to the exact address it checked. It listens on its static internal address and refuses a wildcard
+bind at startup, because it also joins the egress bridge, which the host can reach.
 
 ## Secrets
 
@@ -212,10 +235,11 @@ default `/run/secrets/<name>`. A plain `NAME` variable holding the value is refu
 an error that tells the operator to unset it. Errors name the variable and the path, never the value.
 `.env` holds no secrets.
 
-Outside swarm mode, compose bind-mounts a file secret with its host owner and mode, and ignores any
-uid or mode written in the compose file. Set them on the host, with the directory at 0750 and each
-file at 0640, owned by root with the reading role's group. When the readers are known, grant the
-group and not the world. Mount each secret into the one service that reads it.
+Set each secret file's owner and mode on the host, with the directory at 0750 and each file at
+0640, owned by root with the reading role's group. A bind-mounted file secret arrives with its host
+owner and mode, and Compose outside swarm mode ignored any uid or mode written in the compose file.
+When the readers are known, grant the group and not the world. Mount each secret into the one
+service that reads it.
 
 ## Data and migrations
 
@@ -257,7 +281,8 @@ stops instead of starting fresh and looking healthy.
 
 To update production, take the tag and digest from the publish run's summary for the merge commit,
 set both in `.env`, then run `docker compose pull` and `docker compose up -d`. Never take them from
-`docker pull` output, which reports whatever the tag points at now.
+`docker pull` output, which reports whatever the tag points at now. Unless the publish workflow runs
+the suite on the checkout itself, first confirm that the check workflow passed for that commit.
 
 Rollback is the previous pair and the same two commands. A restore is needed only when the newer
 release damaged the data or the older release cannot run on the newer schema. The backup to restore
@@ -279,9 +304,9 @@ First install, in order:
 3. Create the stack directory with the compose file and `.env`.
 4. Create the secrets directory and files with the host owner and mode.
 5. Log in to the registry as the user that runs compose, with a token that only reads packages and
-   has an expiry. GHCR accepts only a classic token here, and its `read:packages` scope covers every
-   package the account can read. Without a credential helper the token sits in the Docker config
-   file, so keep that file at mode 0600.
+   has an expiry. Find out how narrowly the registry scopes a pull token, because a read scope can
+   cover more packages than this one. Without a credential helper the token sits in the Docker
+   config file, so keep that file at mode 0600.
 6. Settle the off-host backup.
 7. Run `docker compose config -q`, then pull, then `up -d`.
 8. Run the probes. On production, run them while the SSO application for the host does not exist
@@ -299,8 +324,8 @@ The probes, repeated after any change to the stack file or the reverse proxy:
   and expects its own identity back. The source project does not run that one.
 - a label dump showing only allowlisted labels on the image and only the stack's own routing labels
   on containers
-- egress probes from each role's network namespace, after a control probe that must get out through
-  the proxy
+- where the stack has an egress proxy, egress probes from each role's network namespace, after a
+  control probe that must get out through the proxy
 
 ## Policy tests over the config files
 
@@ -317,8 +342,33 @@ first:
 - every `FROM` naming a pin arg or an earlier stage, and `*` as the first `.dockerignore` rule
 - a reader in code for every compose secret
 
-A test that reads the git index has to skip visibly inside the image build, where git is absent, so
-CI also runs the suite on the checkout.
+A test that reads the git index has to skip visibly inside the image build, where the build context
+carries no index, so the check workflow also runs the suite on the checkout. Those tests sit outside
+the build gate, and the CI section above says how to bring them under it.
+
+## Verify before use
+
+Each item is vendor behaviour the rules above lean on, as the source project recorded it in November
+2026. Nothing re-checks these when the doc is installed, so confirm each one against the vendor's
+current documentation or a live run before relying on it.
+
+- Docker Engine. An image reference carrying both a tag and a digest was pulled by the digest alone,
+  and the tag was ignored. The Docker and Compose documentation presented tag and digest as
+  alternatives and did not describe the combined form.
+- Docker's default builder. The digest it reported after a push could be the config digest. The
+  manifest digest, read from the registry, is the one a pull resolves.
+- Docker Engine. With no `# syntax=` line, the built-in frontend decided which Dockerfile features
+  worked, and `RUN --network=none` needed Engine 23 or later with BuildKit.
+- Compose. Outside swarm mode a file secret was bind-mounted with its host owner and mode, and a uid
+  or mode set on it in the compose file was ignored.
+- Compose. On `up`, a one-shot migrate service ran before the services that depend on it were
+  replaced.
+- GitHub Actions. A concurrency group that never cancels a running job still dropped a pending run
+  when a newer one queued.
+- GHCR. A pull from a host needed a classic personal access token, and its `read:packages` scope
+  covered every package the account could read.
+- Traefik forward auth. `authResponseHeaders` replaced only the headers it listed, so each identity
+  header had to be listed there. `authResponseHeadersRegex` stripped matching client headers first.
 
 ## Lessons learned
 
@@ -339,6 +389,8 @@ CI also runs the suite on the checkout.
 - [ ] Publish workflow on main only, scoped permissions, SHA-pinned actions, lower-cased owner
 - [ ] Digest read from the registry, four checks passed before the summary
 - [ ] `:main` moved only after the checks, or staging limited to fabricated data
+- [ ] Checkout suite required by the push job, or the check workflow confirmed before each
+      production pin
 - [ ] Hardening anchor, limits, healthchecks and per-role uids on every service
 - [ ] Internal networks, no published ports, routing labels on web only
 - [ ] Secrets as files with host-set owner and mode, plain variables refused
@@ -347,6 +399,7 @@ CI also runs the suite on the checkout.
 - [ ] Stack kept out of host-wide pull-and-up scripts, or the backup keep count sized for them
 - [ ] Runbook with install order, update, rollback, restore and probes
 - [ ] Policy tests for the workflow, the compose file and the cross-file checks
+- [ ] Each item under Verify before use confirmed for the versions in use
 - [ ] First live run: the tag and digest reference pulls, the stack starts, the probes pass
 
 ## Related
