@@ -61,6 +61,47 @@ describe("scanText()", () => {
   test("labels hits by field", () => {
     expect(scanText([{ label: "title", text: "fixture-host fix" }, { label: "body", text: "clean" }], DECL)).toEqual(["title: machine hostname"]);
   });
+
+  // identity.ts canonicalises before it matches, so a name split by an invisible character is
+  // caught on the raw text alone. Pinned here because scanText relies on it.
+  test("reports a declared name split by a zero-width or word-joiner character", () => {
+    expect(scanBody(`Reported by Fix${String.fromCharCode(0x200b)}ture Person.`)).toEqual(["body: declared name #1"]);
+    expect(scanBody(`Reported by Fixture Per${String.fromCharCode(0x2060)}son.`)).toEqual(["body: declared name #1"]);
+  });
+});
+
+describe("scanText(): text that did not decode as UTF-8", () => {
+  const CONTROL = "control or undecodable character";
+  // A UTF-16LE file, as Windows PowerShell 5.1 writes with > and Out-File, read as UTF-8: the BOM
+  // becomes two replacement characters and every ASCII letter is followed by a NUL.
+  const utf16Read = (text: string) => Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, "utf16le")]).toString("utf8");
+
+  test("refuses a UTF-16 body, which would hide an attribution line and a closing keyword", () => {
+    const body = utf16Read("Fix.\n\nCo-Authored-By: Someone <someone@example.test>\nCloses #4\n");
+    expect(scanBody(body)).toContain(`body: ${CONTROL}`);
+  });
+
+  test("refuses a UTF-16 body without a BOM", () => {
+    expect(scanBody(Buffer.from("Fixes #4", "utf16le").toString("utf8"))).toEqual([`body: ${CONTROL}`]);
+  });
+
+  test("refuses a lone replacement character, the mark of bytes that were not UTF-8", () => {
+    expect(scanBody(`caf${String.fromCharCode(0xfffd)}`)).toEqual([`body: ${CONTROL}`]);
+  });
+
+  test("refuses C0 and C1 controls other than tab, line feed and carriage return", () => {
+    for (const code of [0x00, 0x01, 0x0b, 0x0c, 0x1b, 0x7f, 0x85, 0x9f]) {
+      expect(scanBody(`a${String.fromCharCode(code)}b`)).toEqual([`body: ${CONTROL}`]);
+    }
+  });
+
+  test("passes tab, line feed and carriage return", () => {
+    expect(scanBody(`a${String.fromCharCode(9)}b${String.fromCharCode(13, 10)}c${String.fromCharCode(10)}`)).toEqual([]);
+  });
+
+  test("checks the title too", () => {
+    expect(scanText([{ label: "title", text: `fix${String.fromCharCode(0)}` }], DECL)).toEqual([`title: ${CONTROL}`]);
+  });
 });
 
 describe("findClosingRefs()", () => {

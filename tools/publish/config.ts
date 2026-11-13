@@ -1,6 +1,7 @@
 // Local configuration for tools/publish (#274), read from ~/.claude-publish/config.json. It names,
 // per repository owner, the git and gh identity every command uses, and, per repository, the
-// command that prints the reviewer App's private key, the App's ID and the reviewer checkout. None
+// command that prints the reviewer App's private key, the App's ID, the reviewer checkout and the
+// personal-term list review-merge hands to premerge before every merge. None
 // of those may be committed, so there is no default: a missing file, a missing entry or a malformed
 // field is a refusal. Messages name the field, never its value, because a value here is an
 // identity, a secret reference or a machine path.
@@ -28,6 +29,7 @@ export interface ReviewerConfig {
   keyCommand: string[];
   keyCommandEnv: Record<string, string>;
   checkout: string;
+  termsFile: string;
 }
 
 export interface PublishConfig {
@@ -92,8 +94,8 @@ export function parsePublishConfig(raw: string): PublishConfig {
     if (!isRecord(parsed.reviewers)) throw new PublishRefusal("the publish config's reviewers must be an object");
     for (const [repo, entry] of Object.entries(parsed.reviewers)) {
       if (parseRepo(repo) === null) throw new PublishRefusal("a reviewers key in the publish config is not owner/name");
-      if (!isRecord(entry) || !onlyKeys(entry, ["appId", "keyCommand", "keyCommandEnv", "checkout"])) {
-        throw new PublishRefusal("a reviewer entry may hold only appId, keyCommand, keyCommandEnv and checkout");
+      if (!isRecord(entry) || !onlyKeys(entry, ["appId", "keyCommand", "keyCommandEnv", "checkout", "termsFile"])) {
+        throw new PublishRefusal("a reviewer entry may hold only appId, keyCommand, keyCommandEnv, checkout and termsFile");
       }
       if (typeof entry.appId !== "string" || !/^[0-9]{1,12}$/.test(entry.appId)) {
         throw new PublishRefusal("a reviewer entry's appId is missing or not numeric");
@@ -119,11 +121,15 @@ export function parsePublishConfig(raw: string): PublishConfig {
       if (typeof entry.checkout !== "string" || !isAbsolute(entry.checkout)) {
         throw new PublishRefusal("a reviewer entry's checkout must be an absolute path");
       }
+      if (typeof entry.termsFile !== "string" || !isAbsolute(entry.termsFile)) {
+        throw new PublishRefusal("a reviewer entry's termsFile must be an absolute path to the personal-term list premerge reads");
+      }
       reviewers[repo.toLowerCase()] = {
         appId: entry.appId,
         keyCommand: [...(entry.keyCommand as string[])],
         keyCommandEnv,
         checkout: entry.checkout,
+        termsFile: entry.termsFile,
       };
     }
   }

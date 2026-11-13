@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { cwdHasAutoloadFile, stripControlChars } from "../pr-review/cli";
 import { loadIdentity, type IdentityLoad } from "../pr-review/identity";
+import { CORE_POLICY } from "../pr-review/repo-policy";
 import { toolState } from "../pr-review/tool-state";
 import { parseRepo } from "../pr-review/types";
 import { loadPublishConfig, WORK_DIR, type PublishConfig } from "./config";
@@ -277,6 +278,9 @@ export async function main(argv: readonly string[], deps: CliDeps): Promise<numb
               env: deps.env,
               workDir: deps.workDir,
               toolRoot: deps.toolRoot,
+              // Not a CliDeps field: the repository the merge rule's own code must come from is
+              // fixed, never something a caller supplies.
+              toolRepo: CORE_POLICY.repo,
               bunPath: deps.bunPath,
               exists: deps.exists,
               toolState: deps.toolState,

@@ -6,19 +6,21 @@ import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { parsePublishConfig } from "../tools/publish/config";
 import { PublishError, PublishRefusal } from "../tools/publish/errors";
-import type { PipedResult } from "../tools/publish/exec";
+import type { PipedResult, RunResult } from "../tools/publish/exec";
 import { remoteMatches, reviewMerge, type ReviewMergeArgs, type ReviewMergeContext } from "../tools/publish/review-merge";
 import { BASE_HEAD, FakeRunner, HEAD, on, REPO, type Responder } from "./publish-fakes";
 
 const CHECKOUT = process.platform === "win32" ? "C:/fixture/reviewer-checkout" : "/fixture/reviewer-checkout";
 const WORK = process.platform === "win32" ? "C:/fixture/work" : "/fixture/work";
 const TOOL_ROOT = process.platform === "win32" ? "C:/fixture/tool-checkout" : "/fixture/tool-checkout";
+const TERMS = process.platform === "win32" ? "C:/fixture/terms.json" : "/fixture/terms.json";
 const CONFIG = parsePublishConfig(
   JSON.stringify({
     owners: { "fixture-owner": { gitName: "fixture-owner", gitEmail: "fixture-owner@users.noreply.example.test", ghUser: "fixture-owner" } },
-    reviewers: { [REPO]: { appId: "1", keyCommand: ["fixture-key-cmd"], keyCommandEnv: { FIXTURE_FLAG: "false" }, checkout: CHECKOUT } },
+    reviewers: { [REPO]: { appId: "1", keyCommand: ["fixture-key-cmd"], keyCommandEnv: { FIXTURE_FLAG: "false" }, checkout: CHECKOUT, termsFile: TERMS } },
   }),
 );
+const PREMERGE_CLI = join(CHECKOUT, "tools", "pr-review", "cli.ts");
 const ARGS: ReviewMergeArgs = { repo: REPO, pr: 9, closes: [], allowAdmin: false, adminReasonFile: null, method: "merge", checksTimeoutMin: 30 };
 const REASON_PATH = process.platform === "win32" ? "C:/fixture/reason.md" : "/fixture/reason.md";
 const ADMIN_ARGS: ReviewMergeArgs = { ...ARGS, allowAdmin: true, adminReasonFile: REASON_PATH };
@@ -47,7 +49,17 @@ const APPROVE_OUTPUT = JSON.stringify({
   severities: [],
   refusal: null,
   posted: { id: 1, htmlUrl: `https://github.com/${REPO}/pull/9#pullrequestreview-1` },
+  verification: { state: "passed", reasons: [] },
 });
+const CI_EDIT_COMMENT_OUTPUT = JSON.stringify({
+  ...JSON.parse(APPROVE_OUTPUT),
+  event: "COMMENT",
+  severities: ["naming"],
+  verification: { state: "incomplete", reasons: ["the pull request edits CI definitions, so its own checks cannot vouch for it: .github/workflows/test.yml"] },
+});
+const PREMERGE_OK = `premerge #9  head=${HEAD}\n  checks: ok (1 total, 1 pass, 0 skipping, 0 other)\nPREMERGE OK  #9  head=${HEAD}\n`;
+const isPremerge = (argv: readonly string[]) => argv[0] === "/fixture/bun" && argv[4] === "premerge";
+const premergeSays = (result: Partial<RunResult>): Responder => (argv) => (isPremerge(argv) ? result : undefined);
 const reviewerSays = (stdout: string, code = 0, producerCode = 0): PipedResult => ({
   producerCode,
   producerSpawnError: false,
@@ -79,6 +91,7 @@ function scenario(opts: { views?: object[]; commits?: string[]; extra?: Responde
     on(["gh", "api", "--paginate"], { stdout: commits.map((m) => JSON.stringify(m)).join("\n") + "\n" }),
     on(["gh", "pr", "checks"], { code: 0 }),
     views(...(opts.views ?? [VIEW])),
+    premergeSays({ stdout: PREMERGE_OK }),
     on(["gh", "pr", "merge"], {}),
     on(["gh", "pr", "view", "9", `--repo=${REPO}`, "--json=state,mergeCommit"], {
       stdout: JSON.stringify({ state: opts.merged ?? "MERGED", mergeCommit: { oid: MERGE_SHA } }),
@@ -97,6 +110,7 @@ function ctx(runner: FakeRunner, overrides: Partial<ReviewMergeContext> = {}): R
     env: { PATH: "x", GH_TOKEN: "inherited" },
     workDir: WORK,
     toolRoot: TOOL_ROOT,
+    toolRepo: REPO,
     bunPath: "/fixture/bun",
     exists: () => true,
     toolState: () => ({ revision: BASE_HEAD, dirty: false }),
@@ -183,16 +197,63 @@ describe("review-merge: merges", () => {
   });
 
   test("uses the administrator bypass for a COMMENT with --allow-admin, posting the reason first", async () => {
-    const output = JSON.stringify({ ...JSON.parse(APPROVE_OUTPUT), event: "COMMENT", severities: ["naming"] });
     const runner = withReviewer(
       scenario({ views: [VIEW, VIEW, { ...VIEW, mergeStateStatus: "BLOCKED" }], extra: [on(["gh", "pr", "comment"], {})] }),
-      reviewerSays(output),
+      reviewerSays(CI_EDIT_COMMENT_OUTPUT),
     );
     expect(await reviewMerge(ctx(runner), ADMIN_ARGS)).toContain("administrator bypass");
     const published = runner.publishing();
     expect(published.map((argv) => argv[2])).toEqual(["comment", "merge"]);
     expect(published[1]).toContain("--admin");
     expect(runner.calls.find((call) => call.argv[2] === "comment")!.options.stdin).toBe(REASON);
+  });
+
+  test("runs premerge on the reviewed head, under the configured account, before it merges", async () => {
+    const runner = withReviewer(scenario({ views: [{ ...VIEW, body: `${VIEW.body}\nCloses #12\nCloses #3\n` }] }), reviewerSays(APPROVE_OUTPUT));
+    await reviewMerge(ctx(runner), { ...ARGS, closes: [12, 3] });
+    const at = runner.calls.findIndex((call) => isPremerge(call.argv));
+    expect(at).toBeGreaterThan(-1);
+    const premerge = runner.calls[at]!;
+    expect(premerge.argv).toEqual([
+      "/fixture/bun",
+      "--cwd",
+      WORK,
+      PREMERGE_CLI,
+      "premerge",
+      "--pr",
+      "9",
+      "--repo",
+      REPO,
+      "--closes",
+      "3,12",
+      "--terms",
+      TERMS,
+      "--identity",
+      "fixture-owner <fixture-owner@users.noreply.example.test>",
+      "--expect-head",
+      HEAD,
+    ]);
+    expect(premerge.options.cwd).toBe(WORK);
+    expect(premerge.options.env?.GH_TOKEN).toBe("fake-token");
+    expect(at).toBeLessThan(runner.calls.findIndex((call) => call.argv[2] === "merge"));
+  });
+
+  test("passes --closes none to premerge when nothing is declared", async () => {
+    const runner = withReviewer(scenario(), reviewerSays(APPROVE_OUTPUT));
+    await reviewMerge(ctx(runner), ARGS);
+    const argv = runner.calls.find((call) => isPremerge(call.argv))!.argv;
+    expect(argv[argv.indexOf("--closes") + 1]).toBe("none");
+  });
+
+  test("runs premerge before it posts an administrator-bypass reason", async () => {
+    const runner = withReviewer(
+      scenario({ views: [VIEW, VIEW, { ...VIEW, mergeStateStatus: "BLOCKED" }], extra: [on(["gh", "pr", "comment"], {})] }),
+      reviewerSays(APPROVE_OUTPUT),
+    );
+    await reviewMerge(ctx(runner), ADMIN_ARGS);
+    const premerge = runner.calls.findIndex((call) => isPremerge(call.argv));
+    expect(premerge).toBeGreaterThan(-1);
+    expect(premerge).toBeLessThan(runner.calls.findIndex((call) => call.argv[2] === "comment"));
   });
 
   test("posts no reason when --allow-admin was given but a plain merge sufficed", async () => {
@@ -220,6 +281,21 @@ describe("review-merge: refuses before the reviewer runs", () => {
       "own checkout has uncommitted changes",
       false,
     );
+    expect(runner.calls.some((call) => call.argv[1] === "pr")).toBe(false);
+  });
+
+  // A fork's default branch head is not reviewed code, so the checkout has to be a clone of the
+  // repository this tool's merge rule comes from, not just any GitHub repository.
+  test("this tool's own checkout cloned from another repository", async () => {
+    // The fork's own default branch head is the checkout's revision, so only the origin differs.
+    const runner = scenario({
+      extra: [
+        (argv) => (gitSub(argv)[0] === "remote" && argv.includes(TOOL_ROOT) ? { stdout: `https://github.com/${REPO}-fork.git\n` } : undefined),
+        on(["gh", "api", `repos/${REPO}-fork`, "--jq", ".default_branch"], { stdout: "main\n" }),
+        on(["gh", "api", `repos/${REPO}-fork/branches/main`], { stdout: `${BASE_HEAD}\n` }),
+      ],
+    });
+    await refusal(reviewMerge(ctx(runner), ARGS), runner, "own checkout's origin is not", false);
     expect(runner.calls.some((call) => call.argv[1] === "pr")).toBe(false);
   });
 
@@ -343,9 +419,72 @@ describe("review-merge: refuses after the reviewer runs", () => {
   });
 
   test("a COMMENT without --allow-admin", async () => {
-    const output = JSON.stringify({ ...JSON.parse(APPROVE_OUTPUT), event: "COMMENT" });
-    const runner = withReviewer(scenario(), reviewerSays(output));
+    const runner = withReviewer(scenario(), reviewerSays(CI_EDIT_COMMENT_OUTPUT));
     await refusal(reviewMerge(ctx(runner), ARGS), runner, "Only --allow-admin", true);
+  });
+
+  test("a COMMENT for a required check that never ran, even with --allow-admin", async () => {
+    const output = JSON.stringify({
+      ...JSON.parse(CI_EDIT_COMMENT_OUTPUT),
+      verification: { state: "incomplete", reasons: ['required check "secret scan (Gitleaks)" has no run on the head commit'] },
+    });
+    const runner = withReviewer(scenario({ extra: [on(["gh", "pr", "comment"], {})] }), reviewerSays(output));
+    await refusal(reviewMerge(ctx(runner), ADMIN_ARGS), runner, "does not cover", true);
+    expect(runner.calls.some((call) => isPremerge(call.argv))).toBe(false);
+  });
+
+  test("premerge blocked", async () => {
+    const runner = withReviewer(
+      scenario({ extra: [premergeSays({ code: 2, stdout: `  commit identity: FAIL (1 commit(s))\nPREMERGE BLOCKED  #9\n` })] }),
+      reviewerSays(APPROVE_OUTPUT),
+    );
+    await refusal(reviewMerge(ctx(runner), ARGS), runner, "premerge", true);
+  });
+
+  test("premerge blocked before an administrator-bypass reason is posted", async () => {
+    const runner = withReviewer(
+      scenario({
+        views: [VIEW, VIEW, { ...VIEW, mergeStateStatus: "BLOCKED" }],
+        extra: [premergeSays({ code: 2, stdout: `PREMERGE BLOCKED  #9\n` }), on(["gh", "pr", "comment"], {})],
+      }),
+      reviewerSays(APPROVE_OUTPUT),
+    );
+    await refusal(reviewMerge(ctx(runner), ADMIN_ARGS), runner, "premerge", true);
+  });
+
+  test("premerge exiting 0 without its OK line", async () => {
+    const runner = withReviewer(scenario({ extra: [premergeSays({ code: 0, stdout: "" })] }), reviewerSays(APPROVE_OUTPUT));
+    await refusal(reviewMerge(ctx(runner), ARGS), runner, "premerge", true);
+  });
+
+  test("premerge passing on another head", async () => {
+    const other = "c".repeat(40);
+    const runner = withReviewer(scenario({ extra: [premergeSays({ code: 0, stdout: `PREMERGE OK  #9  head=${other}\n` })] }), reviewerSays(APPROVE_OUTPUT));
+    await refusal(reviewMerge(ctx(runner), ARGS), runner, "premerge", true);
+  });
+
+  test("premerge passing for another pull request", async () => {
+    const runner = withReviewer(scenario({ extra: [premergeSays({ code: 0, stdout: `PREMERGE OK  #19  head=${HEAD}\n` })] }), reviewerSays(APPROVE_OUTPUT));
+    await refusal(reviewMerge(ctx(runner), ARGS), runner, "premerge", true);
+  });
+
+  test("premerge exiting non-zero, even beside an OK line", async () => {
+    const runner = withReviewer(scenario({ extra: [premergeSays({ code: 1, stdout: `PREMERGE OK  #9  head=${HEAD}\n` })] }), reviewerSays(APPROVE_OUTPUT));
+    await refusal(reviewMerge(ctx(runner), ARGS), runner, "premerge did not pass", true);
+  });
+
+  test("premerge that could not start", async () => {
+    const runner = withReviewer(scenario({ extra: [premergeSays({ spawnError: true, code: null })] }), reviewerSays(APPROVE_OUTPUT));
+    await refusal(reviewMerge(ctx(runner), ARGS), runner, "could not start premerge", true);
+  });
+
+  // Killed at its timeout, whatever it printed and whatever code the runner reports.
+  test("premerge that timed out", async () => {
+    const runner = withReviewer(
+      scenario({ extra: [premergeSays({ timedOut: true, code: 0, stdout: `PREMERGE OK  #9  head=${HEAD}\n` })] }),
+      reviewerSays(APPROVE_OUTPUT),
+    );
+    await refusal(reviewMerge(ctx(runner), ARGS), runner, "did not finish in time", true);
   });
 
   test("a head that moved after the review", async () => {

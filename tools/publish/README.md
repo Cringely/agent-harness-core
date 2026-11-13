@@ -26,7 +26,8 @@ Local configuration lives in `~/.claude-publish/config.json`, outside every repo
       "appId": "<numeric App ID>",
       "keyCommand": ["pwsh", "-NoProfile", "-File", "<absolute path>/read-reviewer-key.ps1"],
       "keyCommandEnv": { "OP_BIOMETRIC_UNLOCK_ENABLED": "false" },
-      "checkout": "<absolute path to a dedicated clone>"
+      "checkout": "<absolute path to a dedicated clone>",
+      "termsFile": "<absolute path to the personal-term list, outside every checkout>"
     }
   }
 }
@@ -35,6 +36,8 @@ Local configuration lives in `~/.claude-publish/config.json`, outside every repo
 Every field is validated and a missing one refuses. Values are never printed, because a value here is an identity, a secret reference or a machine path. Each owner entry names the git author and the gh account every command for that owner uses. The tool refuses when none is configured, and it never falls back to the active gh account or to git's own configuration.
 
 The reviewer checkout's origin must be the repository. The tool fetches it, detaches it at the default branch head, and refuses when it is dirty.
+
+`termsFile` is the personal-term list `premerge` reads (`tools/pr-review/README.md`, "Premerge hygiene check"), usually the file the local git config `harness.personalTermsFile` names. `review-merge` runs `premerge` before every merge, so a reviewer entry without it refuses.
 
 `review-merge` serves only agent-harness-core for now. `tools/pr-review/cli.ts` reviews any other repository only with `--policy` (#318), and a reviewer entry here has no field to name that policy file, so a reviewer configured for another repository refuses there and nothing merges.
 
@@ -78,7 +81,7 @@ A `review-merge` refusal that follows its `review:` line means the App's review 
 
 1. The body file reads and is not empty.
 2. The config names an identity for the repository's owner.
-3. The identity scan loads, with a declared name and the claude CLI's account email. Title, body and head branch carry no identifying string, session link or attribution line.
+3. The identity scan loads, with a declared name and the claude CLI's account email. Title, body and head branch carry no identifying string, session link or attribution line, and no replacement character or control character other than tab, line feed and carriage return. A body file is read as UTF-8, so a UTF-16 file (what Windows PowerShell 5.1 writes with `>` and `Out-File`) is refused rather than scanned as text no pattern matches. Save bodies as UTF-8.
 4. The closing keywords equal `--closes`, and an issue declares none. A pull request's title counts with its body, because a `--merge` merge commit carries the title and a keyword in any commit message reaching the default branch closes its issue.
 5. gh is present and holds the configured account's token.
 6. Closing keywords appear only on a pull request into the default branch.
@@ -89,7 +92,7 @@ A `review-merge` refusal that follows its `review:` line means the App's review 
 
 `review-merge` waits for CI, runs the App reviewer, and merges only on what the merge rule allows. Its steps, in the order of the header of `tools/publish/review-merge.ts`:
 
-1. The config names an owner identity. This tool's own checkout is clean and at its origin's default branch head, the bar the reviewer checkout meets in step 6, because the code that holds the token and makes the merge decision must be reviewed code too.
+1. The config names an owner identity. This tool's own checkout is clean, cloned from agent-harness-core (a fork's origin refuses, since a fork's default branch is not reviewed code), and at its default branch head, the bar the reviewer checkout meets in step 6, because the code that holds the token and makes the merge decision must be reviewed code too.
 2. The config names a reviewer for the repository. With `--allow-admin`, the reason file reads and passes the same text gates as a body. The reviewer checkout holds `tools/pr-review/cli.ts`.
 3. The pull request is open, not a draft, from this repository, and into the default branch. Its head is pinned here as the head to review.
 4. Closing keywords in the title, the body and every commit message equal `--closes`. This runs early so a mismatch costs no model run.
@@ -97,12 +100,15 @@ A `review-merge` refusal that follows its `review:` line means the App's review 
 6. The reviewer checkout is fetched, detached at the default branch's current head, and must then be clean and at exactly that commit.
 7. The reviewer runs from the work directory, outside every checkout, with the key piped from the configured key command, `--expect-head` pinned, `--post` and `--json`.
 8. The pull request is read again, waiting out an `UNKNOWN` merge state, and the closing-keyword audit repeats. Then the merge rule rules.
-9. For an administrator-bypass merge, the reason is posted as a pull request comment first. Then `gh pr merge` runs with `--match-head-commit`, and the merge is confirmed.
+9. `premerge` runs from the reviewer checkout on the pinned head, with `--closes`, the owner identity and the configured `termsFile`, and must print `PREMERGE OK` for this pull request and head. It checks what the diff does not carry: closing references GitHub links outside the text, every commit's author and committer, and personal terms in commit messages, title and body. Its channel lines are logged. CONTRIBUTING.md requires it for a bypass merge, and it runs before every merge here.
+10. For an administrator-bypass merge, the reason is posted as a pull request comment first. Then `gh pr merge` runs with `--match-head-commit`, and the merge is confirmed.
 
-The merge rule, from the header of `tools/publish/merge-decision.ts`, is a pure function of the reviewer's `--json` output and the pull request's state. No prose is parsed. A pull request merges in one of two cases and no other:
+The merge rule, from the header of `tools/publish/merge-decision.ts`, is a pure function of the reviewer's `--json` output and the pull request's state. No model prose is parsed. A pull request merges in one of two cases and no other:
 
-- The App approved and the merge state is `CLEAN`. That is a plain merge.
-- The App approved but the merge is `BLOCKED` (an owned path needs a code-owner review the operator cannot give), or the App could only `COMMENT` (it cannot vouch for CI edits). That is the administrator bypass, and only when `--allow-admin` was passed, the reviewer actually ran, no finding sits at or above the severity floor, and the event is not `REQUEST_CHANGES`.
+- The App approved, its verification passed, and the merge state is `CLEAN`. That is a plain merge.
+- The App approved but the merge is `BLOCKED` (an owned path needs a code-owner review the operator cannot give), or the App could only `COMMENT` because CI cannot vouch for the change by design. That is the administrator bypass, and only when `--allow-admin` was passed, the reviewer actually ran, no finding sits at or above the severity floor, and the event is not `REQUEST_CHANGES`.
+
+A `COMMENT` reaches the bypass only when its verification state is `incomplete` and every reason is one `CANNOT_VOUCH_PREFIXES` lists: an edit to CI definitions, an edit to the secret scan configuration, a `.ps1` file whose suite CI does not run, or a changed-file listing the reviewer could not read whole. The same event also covers a required check with no run on the head, one still pending and one the workflow does not declare. `gh` lists only checks that registered, so this tool cannot see a missing one itself, and any reason outside the list refuses.
 
 Both also require the review to have been posted, every check to have succeeded, and the head to be the one reviewed. A severity the tool does not know counts as at or above the floor.
 

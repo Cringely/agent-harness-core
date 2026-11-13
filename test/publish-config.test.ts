@@ -15,7 +15,13 @@ import {
 import { PublishRefusal } from "../tools/publish/errors";
 
 const OWNER = { gitName: "fixture-owner", gitEmail: "fixture-owner@users.noreply.example.test", ghUser: "fixture-owner" };
-const REVIEWER = { appId: "1", keyCommand: ["fixture-key-cmd", "--print"], keyCommandEnv: { FIXTURE_FLAG: "false" }, checkout: join(tmpdir(), "fixture-checkout") };
+const REVIEWER = {
+  appId: "1",
+  keyCommand: ["fixture-key-cmd", "--print"],
+  keyCommandEnv: { FIXTURE_FLAG: "false" },
+  checkout: join(tmpdir(), "fixture-checkout"),
+  termsFile: join(tmpdir(), "fixture-terms.json"),
+};
 
 function config(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({ owners: { "fixture-owner": OWNER }, reviewers: { "fixture-owner/fixture-repo": REVIEWER }, ...overrides });
@@ -104,6 +110,13 @@ describe("parsePublishConfig()", () => {
 
   test("refuses a relative checkout path", () => {
     expect(refusal(config({ reviewers: { "fixture-owner/fixture-repo": { ...REVIEWER, checkout: "relative/dir" } } }))).toContain("checkout");
+  });
+
+  // review-merge runs premerge before every merge, and premerge needs the personal-term list.
+  test("refuses a reviewer entry with no termsFile, or a relative one", () => {
+    const { termsFile: _omitted, ...withoutTerms } = REVIEWER;
+    expect(refusal(config({ reviewers: { "fixture-owner/fixture-repo": withoutTerms } }))).toContain("termsFile");
+    expect(refusal(config({ reviewers: { "fixture-owner/fixture-repo": { ...REVIEWER, termsFile: "terms.json" } } }))).toContain("termsFile");
   });
 
   test("refuses a reviewers key that is not owner/name", () => {

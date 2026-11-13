@@ -1,9 +1,11 @@
 // review-merge (#274): wait for CI, run the App reviewer from a clean default-branch checkout,
 // and merge only on what merge-decision.ts allows. In order:
 //
-//   1. config names an owner identity for the repository. This tool's own checkout is clean and at
-//      its origin's default branch head, the bar the reviewer checkout meets in step 6, because the
-//      code that holds the token and makes the merge decision must be reviewed code too
+//   1. config names an owner identity for the repository. This tool's own checkout is clean, cloned
+//      from the repository this tool comes from (cli.ts passes CORE_POLICY.repo), and at that
+//      repository's default branch head, the bar the reviewer checkout meets in step 6, because the
+//      code that holds the token and makes the merge decision must be reviewed code too. A fork's
+//      default branch head is not reviewed code, so any other origin refuses
 //   2. config names a reviewer for the repository. With --allow-admin, the reason file reads and
 //      passes the same text gates as a body. The reviewer checkout holds tools/pr-review/cli.ts
 //   3. the pull request is open, not a draft, from this repository, and into the default branch.
@@ -18,7 +20,13 @@
 //      the configured key command, --expect-head pinned, --post and --json
 //   8. the pull request is read again (waiting out an UNKNOWN merge state), the closing-keyword
 //      audit repeats, and decideMerge rules
-//   9. for an administrator-bypass merge, the reason is posted as a pull request comment first
+//   9. premerge (tools/pr-review/premerge.ts) runs from the reviewer checkout on the pinned head,
+//      with --closes, the configured term list and the owner identity, and must print its OK line
+//      for this pull request and head. It checks what the diff does not carry: closing references
+//      GitHub links outside the text (an issue linked from the sidebar still closes on merge),
+//      every commit's author and committer, and personal terms in commit messages, title and body.
+//      CONTRIBUTING.md requires it for a bypass merge, and it runs before every merge here
+//  10. for an administrator-bypass merge, the reason is posted as a pull request comment first
 //      (CONTRIBUTING.md has every bypass say why). Then gh pr merge with --match-head-commit, and
 //      the merge is confirmed
 //
@@ -39,6 +47,7 @@ import { assertClean, loadBody } from "./publish";
 import { compareClosing, findClosingRefs } from "./scan";
 
 export const REVIEWER_TIMEOUT_MS = 45 * 60_000;
+export const PREMERGE_TIMEOUT_MS = 10 * 60_000;
 const MERGE_STATE_POLLS = 12;
 const MERGE_STATE_POLL_MS = 10_000;
 
@@ -61,6 +70,8 @@ export interface ReviewMergeContext {
   workDir: string;
   // The checkout this tool runs from. cli.ts passes the repository root above tools/publish.
   toolRoot: string;
+  // The repository that checkout must be cloned from, as owner/name. cli.ts passes CORE_POLICY.repo.
+  toolRepo: string;
   bunPath: string;
   exists: (path: string) => boolean;
   toolState: (root: string) => { revision: string; dirty: boolean };
@@ -153,7 +164,8 @@ function prepareReviewerCheckout(ctx: ReviewMergeContext, gh: Gh, owner: OwnerId
 
 // The tool's own checkout is often an operator's working clone, on another branch or carrying
 // edits. An edited or stale merge-decision.ts there would decide merges, so that checkout must be
-// clean and at its origin's default branch head before anything else runs.
+// clean, cloned from ctx.toolRepo, and at that repository's default branch head before anything
+// else runs. A fork's default branch passes none of the review this tool's own code goes through.
 function assertToolCurrent(ctx: ReviewMergeContext, gh: Gh, owner: OwnerIdentity): void {
   let state: { revision: string; dirty: boolean };
   try {
@@ -165,9 +177,10 @@ function assertToolCurrent(ctx: ReviewMergeContext, gh: Gh, owner: OwnerIdentity
     throw new PublishRefusal("this tool's own checkout has uncommitted changes. Run review-merge from a clean checkout of the default branch");
   }
   const origin = git(ctx, owner, gh.token, ctx.toolRoot, ["remote", "get-url", "origin"]);
-  const toolRepo = origin.code === 0 ? remoteRepo(origin.stdout) : null;
-  if (toolRepo === null) throw new PublishRefusal("this tool's own checkout has no GitHub origin");
-  if (state.revision !== gh.branchHead(toolRepo, gh.defaultBranch(toolRepo))) {
+  if (origin.code !== 0 || !remoteMatches(origin.stdout, ctx.toolRepo)) {
+    throw new PublishRefusal("this tool's own checkout's origin is not the repository this tool comes from. Run review-merge from a clone of it");
+  }
+  if (state.revision !== gh.branchHead(ctx.toolRepo, gh.defaultBranch(ctx.toolRepo))) {
     throw new PublishRefusal("this tool's own checkout is not at its default branch's current head. Update it and run again");
   }
 }
@@ -202,6 +215,43 @@ async function runReviewer(ctx: ReviewMergeContext, reviewer: ReviewerConfig, cl
     throw new PublishError("the reviewer exited with an error. A review may already have been posted, so check the pull request before running again");
   }
   return parseReviewOutput(run.consumer.stdout);
+}
+
+// Runs premerge from the reviewer checkout, which prepareReviewerCheckout left clean at the default
+// branch head, so the hygiene check is reviewed code too. Its output names channels and counts
+// only (premerge.ts), so it is safe to log. Anything but exit 0 with the OK line for exactly this
+// pull request and head refuses.
+function runPremerge(ctx: ReviewMergeContext, gh: Gh, owner: OwnerIdentity, reviewer: ReviewerConfig, cli: string, args: ReviewMergeArgs, head: string): void {
+  const closes = args.closes.length === 0 ? "none" : [...args.closes].sort((a, b) => a - b).join(",");
+  const result = ctx.runner.run(
+    [
+      ctx.bunPath,
+      "--cwd",
+      ctx.workDir,
+      cli,
+      "premerge",
+      "--pr",
+      String(args.pr),
+      "--repo",
+      args.repo,
+      "--closes",
+      closes,
+      "--terms",
+      reviewer.termsFile,
+      "--identity",
+      `${owner.gitName} <${owner.gitEmail}>`,
+      "--expect-head",
+      head,
+    ],
+    { cwd: ctx.workDir, env: childEnv(ctx.env, { GH_TOKEN: gh.token, GH_PROMPT_DISABLED: "1" }), timeoutMs: PREMERGE_TIMEOUT_MS },
+  );
+  if (result.spawnError) throw new PublishRefusal("bun could not start premerge. Nothing was merged");
+  if (result.timedOut) throw new PublishRefusal("premerge did not finish in time. Nothing was merged");
+  const lines = result.stdout.split("\n").map((line) => line.trim());
+  for (const line of lines) if (line !== "") ctx.log(stripControlChars(line));
+  if (result.code !== 0 || !lines.includes(`PREMERGE OK  #${args.pr}  head=${head}`)) {
+    throw new PublishRefusal("premerge did not pass on the reviewed head (its channel lines are above). Nothing was merged");
+  }
 }
 
 function settledView(ctx: ReviewMergeContext, gh: Gh, repo: string, pr: number): PrState {
@@ -265,6 +315,7 @@ export async function reviewMerge(ctx: ReviewMergeContext, args: ReviewMergeArgs
   });
   if (decision.action === "refuse") throw new PublishRefusal(`not merged: ${decision.reason}`);
 
+  runPremerge(ctx, gh, owner, reviewer, cli, args, head);
   if (decision.admin) {
     if (adminReason === null) throw new PublishRefusal("an administrator-bypass merge needs a reason");
     gh.commentPr(args.repo, args.pr, adminReason);
