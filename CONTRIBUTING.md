@@ -56,3 +56,7 @@ Not every file in that directory is a gate. Some hooks only print, count, or inj
     Docs: README updated: <what changed>
 
 The README line is mandatory on every pull request. CONTRIBUTING.md and `tools/pr-review/README.md` are held to the same check but carry no line of their own: the reviewer reads them against the diff directly. A filled-in example, not the placeholder: `Docs: README still accurate: checked the CI section against this change, which adds a Pester suite CI already runs under an existing job, no new job or count`.
+
+## Account payload commits
+
+Changes to `account/claude/` are made under `~/.claude/` on the exporting workstation and reach this repo only through `pwsh -NoProfile -File install/Export-Account.ps1`. Stage what the export wrote, nothing else under that path. On that workstation, opt the clone into the commit-time check once with `git config --local harness.preCommitChain install/check-account-payload.sh`. It refuses a commit whose staged `account/claude/` paths differ from a fresh export, and it refuses a commit staging those paths on a machine that has no `~/.claude` source or no `pwsh` to export from. A refusal means the source and the staged payload disagree: fix the source and re-export, never edit the payload to match. The README's "The payload check at commit" section has the details.

@@ -62,7 +62,9 @@
 # and the token-pattern secret scan (#232) below are real gates: each can and
 # does `exit 1`, and the secret scan also refuses when its grep cannot run.
 # See their own comment blocks for what each covers and why both live ahead
-# of Vale rather than after it.
+# of Vale rather than after it. A clone can also chain one script of its own
+# after both, through git config harness.preCommitChain (#75), and that
+# script's refusal refuses the commit too.
 
 set -u
 
@@ -350,6 +352,49 @@ $identity_staged
 EOF
   secret_refuse "Staged content"
 fi
+
+# --- per-clone chained check (#75) ----------------------------------------
+# Opt-in per clone, through the local git config harness.preCommitChain, the
+# same opt-in shape as harness.personalTermsFile. Its value is a POSIX sh
+# script, named by a path relative to the top of the work tree (git runs every
+# hook from there), and it runs with `sh` after every gate above has passed. A
+# non-zero exit refuses the commit. This repository chains
+# install/check-account-payload.sh this way on the workstation that exports
+# the account layer.
+#
+# A chain point, not an edit to a project's installed copy of this file. An
+# edited installed hook reads as project-modified drift in the installer's
+# audit. Pinning it as an accepted overlay instead would freeze every gate
+# above at the pinned version, because the installer stops updating a file
+# once it is pinned.
+#
+# --local only. A global value would run a repository-relative path in every
+# repository on the machine.
+#
+# A configured script missing from this tree prints a notice and passes: git
+# config is shared by every worktree of a clone, and a branch cut before the
+# script existed would otherwise refuse every commit. A config read that fails,
+# and a key set but empty, refuse, as harness.personalTermsFile does.
+chain_script=$(git config --local --get harness.preCommitChain 2>/dev/null)
+chain_rc=$?
+case $chain_rc in
+  0)
+    if [ -z "$chain_script" ]; then
+      echo "pre-commit: refused. git config harness.preCommitChain is set but empty. Point it at a script, or unset it to opt this clone out." >&2
+      exit 1
+    fi
+    if [ -f "$chain_script" ]; then
+      sh "$chain_script" || exit 1
+    else
+      echo "pre-commit: git config harness.preCommitChain names '$chain_script', which is not in this tree. Chained check skipped." >&2
+    fi
+    ;;
+  1) ;;
+  *)
+    echo "pre-commit: refused. Could not read git config harness.preCommitChain (git config exited $chain_rc)." >&2
+    exit 1
+    ;;
+esac
 
 # core.quotePath=false: its default (true) makes git emit non-ASCII paths as
 # a quoted C-style literal ("file_\303\251.md"), which `mkdir -p`/`git show`
