@@ -10,7 +10,7 @@ When a session starts real work in a dev project whose `.claude/` lacks the core
 pwsh {{CORE_REPO}}/install/Install-Harness.ps1 -Target <project-root>
 ```
 
-Add `-IncludeCeremonies` only for projects running standup/wave ceremonies. Prereqs: pwsh 7, bun on PATH (worktree gate no-ops silently without it), Git Bash for shell hooks. After install, suggest filling guardrails.md's project section and `{{PROJECT}}` placeholders. Don't run the installer unasked. Offer it.
+Add `-IncludeCeremonies` only for projects running standup/wave ceremonies. Prereqs: pwsh 7, bun on PATH (worktree gate no-ops silently without it), Git Bash for shell hooks (Windows only). After install, suggest filling guardrails.md's project section and `{{PROJECT}}` placeholders. Don't run the installer unasked. Offer it.
 
 ## After install, use what's there
 
