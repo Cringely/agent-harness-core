@@ -400,6 +400,50 @@ function Resolve-LayerPath {
 # -Prune: both need the identical answer to "does core still ship this key", and two copies of
 # that scan are two chances for one to drift from the other and call a still-shipped ceremony
 # file orphaned.
+# Claude Code ignores an unrecognized agent frontmatter key without reporting it, so a typo such as
+# `reasoning_effort` for `effort` runs the def at inherited session settings indefinitely. The
+# allowlist is core/claude/agent-frontmatter-keys.json, the same file test/agent-frontmatter-keys.test.ts
+# reads. Returns the allowed key names, or $null when the file is missing, unparsable or lists no
+# keys: the caller reports that as its own row, because an empty allowlist read as "nothing is
+# allowed" flags every def and one read as "no check" vouches for all of them.
+function Get-AgentFrontmatterAllowlist {
+    $keysPath = Join-Path $coreDir 'agent-frontmatter-keys.json'
+    try {
+        $keysDoc = Get-Content -LiteralPath $keysPath -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+    }
+    catch { return $null }
+    if ($keysDoc -isnot [System.Collections.IDictionary]) { return $null }
+    $allowed = [System.Collections.Generic.List[string]]::new()
+    foreach ($group in 'platformKeys', 'extensionKeys') {
+        $members = $keysDoc[$group]
+        if ($members -isnot [System.Collections.IEnumerable] -or $members -is [string]) { return $null }
+        foreach ($k in $members) {
+            if ($k -isnot [string] -or [string]::IsNullOrWhiteSpace($k)) { return $null }
+            $allowed.Add($k)
+        }
+    }
+    if ($allowed.Count -eq 0) { return $null }
+    return , $allowed.ToArray()
+}
+
+# Top-level frontmatter key names of one agent definition, in file order. Same extraction as
+# test/agent-frontmatter-keys.test.ts: a leading `---` block, keys matched at column 0 so an
+# indented continuation or a `key:` inside a description value is never read as a key. Both
+# patterns tolerate CRLF, since a Windows checkout may hold it. Returns $null when the file has
+# no frontmatter block.
+function Get-AgentFrontmatterKeys {
+    param([string]$Path)
+    $text = Get-Content -LiteralPath $Path -Raw
+    $block = [regex]::Match($text, '^---\r?\n([\s\S]*?)\r?\n---')
+    if (-not $block.Success) { return $null }
+    $keys = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in ($block.Groups[1].Value -split '\r?\n')) {
+        $m = [regex]::Match($line, '^([a-zA-Z0-9_-]+)\s*:')
+        if ($m.Success) { $keys.Add($m.Groups[1].Value) }
+    }
+    return , $keys.ToArray()
+}
+
 function Get-CoreFilesMap {
     # Get-ChildItem on a MISSING directory throws under this script's Stop preference, which is
     # already fail-closed. A directory that EXISTS but lists zero files does not throw, and this
@@ -1833,6 +1877,33 @@ if ($Audit) {
         }
     }
 
+    # Unknown agent frontmatter keys: warn-only. Covers every agent def on disk in the project,
+    # shipped or the project's own, since a typo in either runs silently. A def with no frontmatter
+    # block is not this check's finding. The key allowlist is a shipped data file, and when it
+    # cannot be read the check says so rather than passing every def or flagging every key.
+    # `effort` on a haiku def is deliberately not a finding: it is on the allowlist and its value
+    # is never judged.
+    $agentsDstAudit = Join-Path $claudeDir 'agents'
+    if (Test-Path -LiteralPath $agentsDstAudit -PathType Container) {
+        $agentDefsOnDisk = @(Get-ChildItem -LiteralPath $agentsDstAudit -Filter '*.md' -File | Sort-Object Name)
+        if ($agentDefsOnDisk.Count -gt 0) {
+            $allowedAgentKeys = Get-AgentFrontmatterAllowlist
+            if ($null -eq $allowedAgentKeys) {
+                $results.Add([pscustomobject]@{ File = 'core/claude/agent-frontmatter-keys.json'; Status = 'agent-keys-unchecked' })
+            }
+            else {
+                foreach ($agentDef in $agentDefsOnDisk) {
+                    $defKeys = Get-AgentFrontmatterKeys -Path $agentDef.FullName
+                    if ($null -eq $defKeys) { continue }
+                    $unknownKeys = @($defKeys | Where-Object { $allowedAgentKeys -cnotcontains $_ } | Select-Object -Unique)
+                    if ($unknownKeys.Count -gt 0) {
+                        $results.Add([pscustomobject]@{ File = "agents/$($agentDef.Name)"; Status = "unknown-key ($($unknownKeys -join ', '))" })
+                    }
+                }
+            }
+        }
+    }
+
     if (-not $Quiet) { $results | Format-Table -AutoSize | Out-String | Write-Host }
 
     # 'overlay (accepted)' is silent by design: the pin exists precisely so a deliberate fork
@@ -1871,7 +1942,7 @@ if ($Audit) {
         # recovery for one and the pin-drop for the other rather than sending both to the
         # installer. (CONTRIBUTING.md's drift-detection gate: every class the audit reports needs
         # a standing response, and the classes that must never be auto-repaired are named as such.)
-        Write-Host "$($attention.Count) file(s) need attention. project-modified/untracked-differs = candidates to promote into core; core-updated/not-installed = re-run installer to pull down; overlay-changed = re-review the fork, then re-pin with -Accept; missing = re-run the installer if the row is a tracked file, but a missing pinned overlay exists only in the project's own history, so restore it from there or drop the pin with -Unaccept; orphaned (already removed/unmodified/modified) = -Prune the key to drop the stale manifest record -- the file, if any is still there, is left on disk for you to delete by hand or -Accept to pin as an overlay. installed (layer not selected) = delete the file by hand, and the next install drops its record. settings-missing/settings-stale = re-run the installer, which rewrites .claude/rules/harness/project-settings.md from the manifest. settings-modified = the installer keeps that file because it was edited by hand or never written by the installer, so move the change into the manifest with the setting's flag, then delete the file and re-run. manifest-invalid = fix the layers or settings value the error names. plugin-changed = re-run the installer with -InstallDeps to re-record after reviewing the change. plugin-unverified = a newer copy exists than the recorded one, or its folder could not be listed or hashed, or the record lacks a usable hash or installPath, so the recorded hash may not be the active plugin's. Re-run the installer so it re-reads the plugin listing."
+        Write-Host "$($attention.Count) file(s) need attention. project-modified/untracked-differs = candidates to promote into core; core-updated/not-installed = re-run installer to pull down; overlay-changed = re-review the fork, then re-pin with -Accept; missing = re-run the installer if the row is a tracked file, but a missing pinned overlay exists only in the project's own history, so restore it from there or drop the pin with -Unaccept; orphaned (already removed/unmodified/modified) = -Prune the key to drop the stale manifest record -- the file, if any is still there, is left on disk for you to delete by hand or -Accept to pin as an overlay. installed (layer not selected) = delete the file by hand, and the next install drops its record. settings-missing/settings-stale = re-run the installer, which rewrites .claude/rules/harness/project-settings.md from the manifest. settings-modified = the installer keeps that file because it was edited by hand or never written by the installer, so move the change into the manifest with the setting's flag, then delete the file and re-run. manifest-invalid = fix the layers or settings value the error names. unknown-key = the agent definition declares a frontmatter key Claude Code does not recognise, which it ignores silently, so fix the spelling the row names (the accepted keys are in core/claude/agent-frontmatter-keys.json). agent-keys-unchecked = that file is missing or unreadable in the core checkout, so the check did not run. plugin-changed = re-run the installer with -InstallDeps to re-record after reviewing the change. plugin-unverified = a newer copy exists than the recorded one, or its folder could not be listed or hashed, or the record lacks a usable hash or installPath, so the recorded hash may not be the active plugin's. Re-run the installer so it re-reads the plugin listing."
     }
 
     # Stack drift: report-only, same as the file audit above — never writes the manifest or

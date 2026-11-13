@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "source": "https://code.claude.com/docs/en/sub-agents (section: Supported frontmatter fields)",
+  "retrieved": "2026-11-13",
+  "note": "Claude Code ignores an unrecognized agent frontmatter key without an error, so a typo such as reasoning_effort for effort runs the def at inherited session settings. Two readers use this file: install/Install-Harness.ps1 -Audit and test/agent-frontmatter-keys.test.ts. Keys are case-sensitive.",
+  "platformKeys": [
+    "name",
+    "description",
+    "tools",
+    "disallowedTools",
+    "model",
+    "permissionMode",
+    "maxTurns",
+    "autoCompactWindow",
+    "skills",
+    "mcpServers",
+    "hooks",
+    "memory",
+    "background",
+    "omitClaudeMd",
+    "effort",
+    "isolation",
+    "color",
+    "initialPrompt",
+    "experimental"
+  ],
+  "extensionKeys": [
+    "writeScope"
+  ],
+  "extensionNote": "writeScope is core's own key, not a platform key. core/claude/hooks/agent-write-scope.ts reads it to confine a subagent's writes to a scratch folder."
+}

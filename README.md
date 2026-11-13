@@ -16,6 +16,7 @@ The rule that keeps these from drifting into a mess: core is upstream. Projects 
 | `core/claude/hooks/` | Worktree gate, write-scope gate, model-tier gate, session guardrails, drift check, wave-close handoff, prose-lint-on-write. `core/claude/templates/settings.hooks.json` is the list of Claude Code hooks that actually gets wired. This row goes stale, that file does not. The three git hooks in the same directory, `pre-commit`, `pre-push` and `commit-msg`, are wired a second way, through `core.hooksPath` (see Install) |
 | `core/claude/templates/` | `guardrails.template.md`, a settings fragment, a scratch `.gitignore` and `manifest-local.gitignore`, installed as `.claude/.gitignore` to keep the per-machine sidecar out of a commit, and `project-settings.template.md`, rendered into `.claude/rules/harness/project-settings.md`, all of which the installer applies on every run, a ceremony ledger template it applies only under `-IncludeCeremonies`, plus three reference templates it leaves in core: agent-def authoring, the reviewer-lockout protocol, and the untrusted-content boundary block |
 | `core/claude/rules/` | Layer rule files and layers.json, which assigns each file to the code, documents or physical layer and defines the project settings. The installer copies the layers a project records into its .claude/rules/harness/ |
+| `core/claude/agent-frontmatter-keys.json` | Every frontmatter key Claude Code accepts in an agent definition, plus core's own `writeScope`, with the docs page it was checked against. `-Audit` and `test/agent-frontmatter-keys.test.ts` both read it. It is never copied into a project |
 | `core/claude/deps.json` | The dependencies the kernel and each layer rely on, tools and Claude Code plugins, each with its severity per layer, a probe, and a pinned install where one exists (git on Linux is installed unpinned). Both installers read it on every run (see Install) |
 | `patterns/` | The design docs behind the above, listed in [`patterns/INDEX.md`](patterns/INDEX.md) |
 | `install/` | The installer that copies core into a project's `.claude/`. The `Export-Account.ps1` and `Install-Account.ps1` pair that carries the account layer between machines (see below), with `AccountShared.ps1`, the library both dot-source for the payload tables they have to agree on. `Deps.ps1`, the dependency preflight both installers dot-source. `Restore-ClaudeProject.ps1` for moving a project, its session history and the `~/.claude` global layer to another machine. `Start-CappedCopilot.ps1`, which launches Copilot CLI with a per-session credit cap. And the Pester suites beside them |
@@ -317,6 +318,17 @@ Re-run the installer, which reads the plugin listing again and records the curre
 cases stay put. A broken record for a pinned third-party plugin is never rewritten, so delete that
 entry from the sidecar by hand. A broken record for a first-party plugin that follows its marketplace
 sha needs `-InstallDeps` when the marketplace sha differs from the manifest pin.
+
+`unknown-key (name, ...)` means an agent definition under `.claude/agents/`, shipped or written by the
+project, declares a frontmatter key that Claude Code does not recognise. Claude Code ignores such a
+key without an error, so a misspelling like `reasoning_effort` for `effort` silently runs the agent
+at inherited session settings. The row is warn-only: it counts as needing attention, writes nothing
+and refuses nothing. Fix the spelling the row names. The accepted keys are listed in
+`core/claude/agent-frontmatter-keys.json`, which also holds core's own `writeScope`. Keys are matched
+case-sensitively and only at the left margin of the frontmatter block, so nested `hooks` entries and
+a colon inside a description are not read as keys. An `effort` value is never judged, so `effort` on a
+haiku definition is not a finding. `agent-keys-unchecked` means that file is missing or unreadable in
+the core checkout, so the check did not run and no definition was vouched for.
 
 This is the mechanical half of the findings flow in CONTRIBUTING.md.
 Run it periodically per project (SpaceMolt wires it into a `core_harvest` ceremony, see that
