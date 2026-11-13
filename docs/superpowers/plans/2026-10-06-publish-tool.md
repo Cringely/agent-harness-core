@@ -1,5 +1,7 @@
 # Publish Tool Implementation Plan
 
+> **Superseded by the code in the repository.** The files under `tools/publish/`, `test/publish-*` and `core/claude/` are authoritative, and they have moved on from the code blocks and expected hashes below. Do not extract or re-run those blocks: they would overwrite the shipped tool with an older one.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Route every issue, pull request and review-then-merge an agent publishes through one committed Bun tool whose gates fail closed, plus a skill and a permission rule that make it the only route (issue #274).
