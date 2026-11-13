@@ -98,7 +98,7 @@ When the same class of failure appears more than once across sessions, promote i
 **How to promote:**
 1. Identify the general rule behind the specific fix
 2. Write it as a testable, actionable constraint (not "be careful with X")
-3. Add it to the most relevant rules file (change-management.md for process, security.md for security, fix-quality.md for code and fix patterns)
+3. Add it to the most relevant rules file (change-management.md for process, security.md for security, the code layer's fix-quality.md for code and fix patterns)
 4. Remove or shorten the original MEMORY.md entry to a pointer
 
 **Examples of promotable patterns from past work:**

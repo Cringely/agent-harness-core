@@ -76,7 +76,7 @@ finding.
 ## Severity
 
 Every finding carries exactly one severity. Three sit at or above the floor that
-`account/claude/rules/fix-quality.md` sets under "Work has to be able to end", and any one of them
+`account/claude/rules/bounded-review.md` sets under "Work has to be able to end", and any one of them
 withholds approval:
 
 - `correctness`: the change does not do what it claims, breaks behaviour that worked, or ships a
