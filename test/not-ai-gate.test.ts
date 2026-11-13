@@ -606,8 +606,8 @@ describe("not-ai gate — blockquotes are excluded from sentence rhythm", () => 
   });
 
   test.skipIf(!PYTHON)("lazy continuation lines stay inside the quote until a blank line", () => {
-    // The second and third lines carry no ">" but CommonMark reads them as part of the quote.
-    // Before the fix both counted: 3 sentences instead of the 1 real one.
+    // The second line carries no ">" but CommonMark reads it as part of the quote.
+    // Before the fix its two sentences counted: 3 sentences instead of the 1 real one.
     const { json } = runGate(
       "blockquote-lazy.md",
       [
@@ -621,12 +621,15 @@ describe("not-ai gate — blockquotes are excluded from sentence rhythm", () => 
     expect(json.counts.sentences).toBe(1);
   });
 
-  test.skipIf(!PYTHON)("a blockquote interrupts the paragraph above it without a blank line", () => {
+  test.skipIf(!PYTHON)("a quote line directly under a paragraph is left out of that paragraph", () => {
+    // No blank line between the paragraph and the quote. If the quote line leaked into the
+    // paragraph, SENTENCE_RE would split it at "Quoted one is here. Quoted two follows." and
+    // the document would read 4 sentences instead of the 2 real ones.
     const { json } = runGate(
       "blockquote-interrupt.md",
       [
         "Real sentence before the quote sits in a paragraph of its own here.",
-        "> Quoted sentence that follows directly with no blank line between them.",
+        "> Quoted one is here and long enough to count. Quoted two follows right behind it.",
         "",
         "Real sentence after the quote ends the document out for today.",
         "",
@@ -635,7 +638,39 @@ describe("not-ai gate — blockquotes are excluded from sentence rhythm", () => 
     expect(json.counts.sentences).toBe(2);
   });
 
-  test.skipIf(!PYTHON)("a list item, heading or fence ends the quote and its text still counts", () => {
+  test.skipIf(!PYTHON)("a thematic break under a quote ends the paragraph above the quote", () => {
+    // Paragraph, quote, rule, paragraph with no blank lines. Before the fix the rule was kept
+    // as prose and never flushed, so "...here. --- Closing..." merged into one block that
+    // SENTENCE_RE cannot split before "-", reading 1 sentence instead of 2.
+    const { json } = runGate(
+      "blockquote-break-merge.md",
+      [
+        "Intro sentence stands here for the document today.",
+        "> Quoted line that opens a block quote right here in the document.",
+        "---",
+        "Closing sentence stands here for the document today.",
+        "",
+      ].join("\n"),
+    );
+    expect(json.counts.sentences).toBe(2);
+  });
+
+  test.skipIf(!PYTHON)("a thematic break between paragraphs is not counted and splits them", () => {
+    // No quote at all. The rule ends the paragraph above it and is dropped, so the two
+    // sentences are not glued through "---".
+    const { json } = runGate(
+      "thematic-break-plain.md",
+      [
+        "Intro sentence stands here for the document today.",
+        "---",
+        "closing words follow here without any capital letter or period",
+        "",
+      ].join("\n"),
+    );
+    expect(json.counts.sentences).toBe(2);
+  });
+
+  test.skipIf(!PYTHON)("a list item or heading ends the quote and its text still counts", () => {
     // Only a plain paragraph line is a lazy continuation. A list item (and likewise a heading
     // or a fence) starts a new block, so the prose in it is the document's own.
     const { json } = runGate(

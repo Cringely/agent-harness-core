@@ -64,7 +64,8 @@ TABLE_ROW_RE = re.compile(r"^\s*\|")
 # continue a paragraph (heading, fence, list item).
 BLOCKQUOTE_RE = re.compile(r"^ {0,3}>")
 # A thematic break (`---`, `***`, `___`, spaced or not) is a block that cannot continue a
-# paragraph, so it ends a quote the way a heading does.
+# paragraph, so it ends the open paragraph and any quote the way a heading does, and is
+# dropped rather than kept as prose.
 THEMATIC_BREAK_RE = re.compile(r"^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$")
 TABLE_SEPARATOR_RE = re.compile(r"^[\s|:-]+$")
 
@@ -283,13 +284,19 @@ def _prose_blocks(text: str) -> tuple[list[str], bool]:
             index += 1
             continue
 
-        if in_quote and THEMATIC_BREAK_RE.match(line):
+        # A thematic break is a block of its own: it ends the open paragraph and any
+        # quote, and the rule line itself is not prose, so it is never counted.
+        if THEMATIC_BREAK_RE.match(line):
+            flush()
             in_quote = False
+            index += 1
+            continue
 
-        # A quote line opens a quote that runs to the next blank line (an open
-        # paragraph above it is untouched and flushes as usual). Inside it,
-        # a marker-less line is a lazy continuation and is dropped too, unless it
-        # opens a list item, which cannot continue a paragraph and so ends the quote.
+        # A quote line opens a quote that runs to the next blank line. It does not flush
+        # an open paragraph above it: the quote line is simply left out of that paragraph.
+        # Inside the quote, a marker-less line is a lazy continuation and is dropped
+        # too, unless it opens a list item, which cannot continue a paragraph and so
+        # ends the quote.
         if BLOCKQUOTE_RE.match(line):
             in_quote = True
             index += 1
@@ -430,9 +437,11 @@ def _bold_label_lines(text: str) -> Iterable[str]:
             fence_length = len(fence_match.group(1))
             fence_lines = []
             continue
-        if in_quote and THEMATIC_BREAK_RE.match(line):
-            in_quote = False
-        if not line.strip() or ATX_HEADING_RE.match(line):
+        if (
+            not line.strip()
+            or ATX_HEADING_RE.match(line)
+            or THEMATIC_BREAK_RE.match(line)
+        ):
             in_quote = False
             continue
         if BLOCKQUOTE_RE.match(line):
