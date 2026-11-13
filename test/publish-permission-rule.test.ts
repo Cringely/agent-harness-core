@@ -10,17 +10,30 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const ROOT = join(import.meta.dir, "..");
+// The mid-pattern rules catch a flag placed between the group and the subcommand, as in
+// gh pr --repo x merge 5. Per the permission docs a trailing " *" matches the bare command only when
+// it is the rule's one wildcard, so a form with nothing after the subcommand is not matched. The
+// list is a tripwire, not a boundary. gh api writes, the edit and comment subcommands and shell
+// wrappers still pass it.
 const RULES = [
   "Bash(gh pr create *)",
   "Bash(gh issue create *)",
   "Bash(gh pr merge *)",
+  "Bash(gh pr * create *)",
+  "Bash(gh issue * create *)",
+  "Bash(gh pr * merge *)",
+  "Bash(gh alias set *)",
   "PowerShell(gh pr create *)",
   "PowerShell(gh issue create *)",
   "PowerShell(gh pr merge *)",
+  "PowerShell(gh pr * create *)",
+  "PowerShell(gh issue * create *)",
+  "PowerShell(gh pr * merge *)",
+  "PowerShell(gh alias set *)",
 ];
 
 describe("publish distribution through the project installer", () => {
-  test("the deny fragment holds exactly the raw gh pr create, gh issue create and gh pr merge rules in both shells", () => {
+  test("the deny fragment holds exactly the raw gh pr create, gh issue create, gh pr merge and gh alias set rules, flag-first forms included, in both shells", () => {
     const fragment = JSON.parse(readFileSync(join(ROOT, "core", "claude", "templates", "settings.permissions.json"), "utf8")) as {
       permissions?: { deny?: unknown };
     };

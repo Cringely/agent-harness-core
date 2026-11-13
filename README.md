@@ -553,9 +553,10 @@ manual run before the PR can merge again.
 Merges go through `tools/publish/cli.ts review-merge`, which waits for CI, runs the App reviewer
 and merges only on what its merge rule allows, posting the bypass rationale itself when it uses the
 administrator bypass. The project installer denies raw `gh pr merge` in the Bash and PowerShell tools
-of each project it installs into, which makes the tool the default route. It does not change the point above: the deny rule is
-policy, not enforcement, because `gh -R x pr merge`, `gh api` and `sh -c` are not matched, and an
-agent shell that can mint the operator's token can still run `gh pr merge --admin`.
+of each project it installs into, which makes the tool the default route. It does not change the point above: the deny list is
+a tripwire against the common direct forms, not enforcement. `gh api` writes, the edit and comment
+subcommands and shell wrappers such as `bash -c` are not matched, and an agent shell that can mint
+the operator's token can still run `gh pr merge --admin` by one of those routes.
 [`tools/publish/README.md`](tools/publish/README.md) has the commands and the merge rule.
 CONTRIBUTING.md carries the flow, and says when the administrator bypass is used instead.
 

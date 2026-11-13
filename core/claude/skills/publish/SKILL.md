@@ -5,7 +5,7 @@ description: Use before filing a GitHub issue, opening or editing a pull request
 
 # Publish
 
-Every issue, pull request and merge goes through `tools/publish/cli.ts` in agent-harness-core. The installer from agent-harness-core merges permission rules into this project's `.claude/settings.json` that deny raw `gh pr create`, `gh issue create` and `gh pr merge`. Do not route around them with `gh api`, a flag placed before the subcommand, `sh -c` or a script. The rules are a policy line rather than a sandbox, and crossing them breaks the policy even where the shell lets the command through.
+Every issue, pull request and merge goes through `tools/publish/cli.ts` in agent-harness-core. The installer from agent-harness-core merges permission rules into this project's `.claude/settings.json` that deny raw `gh pr create`, `gh issue create`, `gh pr merge` and `gh alias set`, including the forms with a flag such as `--repo` between the group and the subcommand. Those rules are a tripwire against the common direct forms, not a boundary. Known routes still get past them: `gh api` writes, the edit and comment subcommands (`gh pr edit`, `gh pr comment`, `gh pr review`, `gh issue edit`, `gh issue comment`), and shell wrappers such as `bash -c`, `pwsh -c` and `env`. Taking any of those routes breaks the policy even when the shell lets the command through. What actually enforces the route is the publish tool's own refusals and the repository's merge rules, the App review and the CI ruleset.
 
 ## Running it
 

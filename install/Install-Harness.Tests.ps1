@@ -321,13 +321,19 @@ Describe "Install-Harness" {
         & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
         $s = Get-Content "$script:target/.claude/settings.json" -Raw | ConvertFrom-Json
         $fragment = (Get-Content "$PSScriptRoot/../core/claude/templates/settings.permissions.json" -Raw | ConvertFrom-Json).permissions.deny
-        @($fragment).Count | Should -Be 6
+        @($fragment).Count | Should -Be 14
         $deny = @($s.permissions.deny)
         $deny[0] | Should -Be 'Bash(rm -rf *)'
         foreach ($rule in $fragment) { $deny | Should -Contain $rule }
         $deny | Should -Contain 'Bash(gh pr merge *)'
         $deny | Should -Contain 'PowerShell(gh issue create *)'
-        $deny.Count | Should -Be 7
+        # The flag-first forms (gh pr --repo x merge 5) and gh alias set, named literally so the
+        # loop above cannot pass by reading a fragment that lost them. A tripwire, not a boundary.
+        foreach ($rule in @(
+                'Bash(gh pr * create *)', 'Bash(gh issue * create *)', 'Bash(gh pr * merge *)', 'Bash(gh alias set *)',
+                'PowerShell(gh pr * create *)', 'PowerShell(gh issue * create *)', 'PowerShell(gh pr * merge *)', 'PowerShell(gh alias set *)'
+            )) { $deny | Should -Contain $rule }
+        $deny.Count | Should -Be 15
         @($s.permissions.allow) | Should -Be @('Bash(ls:*)')
     }
 
@@ -336,7 +342,7 @@ Describe "Install-Harness" {
         & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
         $raw = Get-Content "$script:target/.claude/settings.json" -Raw
         $deny = @(($raw | ConvertFrom-Json).permissions.deny)
-        $deny.Count | Should -Be 6
+        $deny.Count | Should -Be 14
         $raw | Should -Match '"deny":\s*\['
     }
 
