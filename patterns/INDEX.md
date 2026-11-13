@@ -1,8 +1,8 @@
 # Pattern Index
 
-Each doc below explains one design decision behind the roles, hooks, and templates in `core/`,
-independent of any one codebase or language, or one deployment pattern, which names the stack its
-examples assume.
+Most docs below explain one design decision behind the roles, hooks, and templates in `core/`,
+independent of any one codebase or language. A deployment pattern instead describes a way to build and
+deploy a project, and names the stack its examples assume.
 
 | Doc | Problem it solves |
 |---|---|

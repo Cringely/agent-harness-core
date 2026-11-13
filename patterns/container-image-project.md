@@ -204,7 +204,10 @@ with no error.
 - Every host-specific value is `${KEY:?set KEY in .env}`, so compose never substitutes an empty
   string, with one deliberate exception. The image tag defaults to `main` and the digest to empty,
   which lets staging run with neither set. Production's migrate step refuses to run when either is
-  missing (see Environments). A committed example file documents each key.
+  missing (see Environments). The image reference cannot show that, because the default has already
+  filled the tag in. So the migrate service also gets the raw values in its environment, as
+  `APP_TAG: ${APP_TAG:-}` and `APP_DIGEST: ${APP_DIGEST:-}`, and the check reads those. A committed
+  example file documents each key.
 - The web network is external and created with `--internal`. Only the reverse proxy and the web
   service join it. Nothing publishes a port, mounts the Docker socket, uses the host network or runs
   privileged.
@@ -341,6 +344,8 @@ first:
 - env example keys against compose interpolations, and runbook commands against the entrypoint
 - every `FROM` naming a pin arg or an earlier stage, and `*` as the first `.dockerignore` rule
 - a reader in code for every compose secret
+- the migrate service's environment passing `APP_TAG` and `APP_DIGEST` with empty defaults, since
+  the missing-pin check depends on seeing an unset value as empty
 
 A test that reads the git index has to skip visibly inside the image build, where the build context
 carries no index, so the check workflow also runs the suite on the checkout. Those tests sit outside
@@ -349,8 +354,8 @@ the build gate, and the CI section above says how to bring them under it.
 ## Verify before use
 
 Each item is vendor behaviour the rules above lean on, as the source project recorded it in November
-2026. Nothing re-checks these when the doc is installed, so confirm each one against the vendor's
-current documentation or a live run before relying on it.
+2026. Nothing re-checks these when a project adopts the pattern, so confirm each one against the
+vendor's current documentation or a live run before relying on it.
 
 - Docker Engine. An image reference carrying both a tag and a digest was pulled by the digest alone,
   and the tag was ignored. The Docker and Compose documentation presented tag and digest as

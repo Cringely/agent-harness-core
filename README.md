@@ -1,6 +1,6 @@
 # Agent Harness Core
 
-This is a process layer and pattern documentation, extracted from the SpaceMolt harness. It defines process-role agent definitions, session hooks, and design patterns for running AI coding agents on a project. This repo contains no code library, only the docs and ceremony layer that explain how and why the agent coordination works. `patterns/` also holds deployment patterns, which come from other projects and are not about agent coordination.
+This is a process layer and pattern documentation, extracted from the SpaceMolt harness. It defines process-role agent definitions, session hooks, and design patterns for running AI coding agents on a project. This repo contains no code library. Most of it is the docs and ceremony layer that explain how and why the agent coordination works. `patterns/` also holds deployment patterns, which describe how a project is built and deployed and are not about agent coordination.
 
 ## Layering model
 
