@@ -10,9 +10,12 @@
 // verification is what CI reported for the exact head commit, discounted wherever CI cannot vouch.
 //
 // #318: which checks are required, and which workflow is read at the base commit, come from the
-// reviewed repository's own RepoPolicy (repo-policy.ts), never from this repository's.
+// reviewed repository's own RepoPolicy (repo-policy.ts), never from this repository's. #349 lets a
+// check read its own workflow, exempts the code-scanning app's check from having one, and lets a
+// repository add cannot-vouch paths.
 
 import {
+  CODE_SCANNING_APP_SLUG,
   LOAD_BEARING_SET,
   SEVERITY_SET,
   type CheckRun,
@@ -78,21 +81,64 @@ export function uncoveredPowerShellFiles(changedFiles: readonly string[], workfl
   });
 }
 
-// #318: a required check counts only when its name appears as a `name:` line in
-// the configured workflow at the base commit, using the same whole-line match
-// test/pr-review-verdict.test.ts pins CORE_POLICY's names with. This checks for a `name:` line, not
-// for a job: any line that reads exactly `name: <check>` once trimmed matches, so the workflow's
-// own top-level name, or a step whose `name:` sits on a line after its dash, matches too. Without it, a green run with the right name from some other workflow satisfies a
-// check whose own workflow never ran, for example one a path filter skipped. A name the workflow
-// builds from an expression, or quotes, does not match, and that reads incomplete.
-export function workflowDeclaresName(workflowText: string, name: string): boolean {
-  return workflowText.split(/\r?\n/).some((line) => line.trim() === `name: ${name}`);
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// The check name each job in a workflow reports under, counted, or null when the text is not a
+// workflow this can read: not YAML, no `jobs` mapping, a job that is not a mapping, or a `name:`
+// that is not a non-empty string. GitHub names a job's check after its `name:` value, or after the
+// job id when the job has no `name:` key (#349). A matrix job or a reusable-workflow call reports
+// under a longer name than either, so it matches no required check and reads incomplete.
+function workflowJobNames(workflowText: string): Map<string, number> | null {
+  let parsed: unknown;
+  try {
+    parsed = Bun.YAML.parse(workflowText);
+  } catch {
+    return null;
+  }
+  if (!isPlainObject(parsed) || !isPlainObject(parsed.jobs)) return null;
+  const counts = new Map<string, number>();
+  for (const [id, job] of Object.entries(parsed.jobs)) {
+    if (!isPlainObject(job)) return null;
+    let name = id;
+    if (Object.prototype.hasOwnProperty.call(job, "name")) {
+      if (typeof job.name !== "string" || job.name.length === 0) return null;
+      name = job.name;
+    }
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  return counts;
+}
+
+export type JobMatch = "declared" | "undeclared" | "ambiguous" | "unreadable";
+
+// #318, #349: a required check counts only when exactly one job of its workflow at the base commit
+// reports under its name. Without that, a green run with the right name from some other workflow
+// satisfies a check whose own workflow never ran, for example one a path filter skipped. The
+// workflow's top-level `name:` and a step's `name:` are not jobs and never match. Two jobs reporting
+// under one name read ambiguous, since a run of either would satisfy the check.
+export function workflowJobMatch(workflowText: string, name: string): JobMatch {
+  const counts = workflowJobNames(workflowText);
+  if (counts === null) return "unreadable";
+  const count = counts.get(name) ?? 0;
+  if (count === 0) return "undeclared";
+  return count === 1 ? "declared" : "ambiguous";
+}
+
+// #349: a path in cannotVouchAdd ending in "/" is a directory prefix, any other an exact path.
+// Compared case-insensitively, which can only withhold more.
+function cannotVouchMatches(path: string, entry: string): boolean {
+  const folded = path.toLowerCase();
+  const rule = entry.toLowerCase();
+  return rule.endsWith("/") ? folded.startsWith(rule) : folded === rule;
 }
 
 export function computeVerification(input: {
   checkRuns: readonly CheckRun[];
   changedFiles: readonly string[];
   workflowText: string | null;
+  extraWorkflowTexts?: Readonly<Record<string, string | null>>;
   changedFilesComplete: boolean;
   policy: RepoPolicy;
 }): Verification {
@@ -104,12 +150,67 @@ export function computeVerification(input: {
   const requiredChecks = Array.isArray(input.policy?.requiredChecks) ? input.policy.requiredChecks : [];
   if (requiredChecks.length === 0) incomplete.push("no required checks are configured for this repository");
 
+  // #349: every workflow this review read, by path. Only own keys of extraWorkflowTexts count, so
+  // a path missing from it reads as never read rather than as anything inherited.
+  const ciPath = input.policy?.ciWorkflowPath;
+  const extra = input.extraWorkflowTexts;
+  const textAt = (path: string | undefined): string | null | undefined => {
+    if (path === undefined) return undefined;
+    if (path === ciPath) return input.workflowText;
+    if (typeof extra !== "object" || extra === null || !Object.prototype.hasOwnProperty.call(extra, path)) return undefined;
+    const text = extra[path];
+    return typeof text === "string" || text === null ? text : undefined;
+  };
+  // The job names of every workflow read, by path. One that cannot be read is reported once here,
+  // whether or not a check names it, since a job hidden in it could make another check ambiguous.
+  const jobNamesAt = new Map<string, Map<string, number> | null>();
+  const readPaths = [ciPath, ...(typeof extra === "object" && extra !== null ? Object.keys(extra) : [])];
+  for (const path of readPaths) {
+    if (path === undefined || jobNamesAt.has(path)) continue;
+    const text = textAt(path);
+    if (typeof text !== "string") continue;
+    const names = workflowJobNames(text);
+    jobNamesAt.set(path, names);
+    if (names === null) incomplete.push(`${path} at the base commit cannot be read as a workflow with jobs`);
+  }
+  const absentExtra = new Set<string>();
+
   // Every run sharing a required check's name and app counts (I5), not just the first one the API
   // happens to return: a re-run or a reopened PR can leave more than one run on the same head SHA,
   // and picking one arbitrarily lets a failing run hide behind a passing one, or the reverse.
   for (const required of requiredChecks) {
-    if (input.workflowText !== null && !workflowDeclaresName(input.workflowText, required.name)) {
-      incomplete.push(`required check "${required.name}" does not appear as a name: line in the CI workflow at the base commit`);
+    if (required.appSlug === CODE_SCANNING_APP_SLUG) {
+      // No workflow to match: verified by name and app on the head commit alone. One that names a
+      // workflow came from a hand-built policy the loader would have refused.
+      if (required.workflowPath !== undefined) {
+        incomplete.push(`required check "${required.name}" is a code-scanning check that names a workflow, which this reviewer cannot verify`);
+      }
+    } else {
+      const path = required.workflowPath ?? ciPath;
+      const text = textAt(path);
+      if (text === undefined) {
+        incomplete.push(`required check "${required.name}": ${path ?? "its workflow"} was not read at the base commit`);
+      } else if (text === null) {
+        // The ciWorkflowPath case is reported once below, as it was before #349.
+        if (path !== ciPath && path !== undefined) absentExtra.add(path);
+      } else {
+        // path is defined here: textAt returns a string only for a defined path.
+        const own = jobNamesAt.get(path!);
+        // null was reported once above, as unreadable.
+        if (own === undefined) {
+          incomplete.push(`required check "${required.name}": ${path} was not read at the base commit`);
+        } else if (own !== null) {
+          // A second job under the same name in any other workflow this review read is as
+          // ambiguous as one in the same file: a run of either would satisfy the check.
+          let total = 0;
+          for (const names of jobNamesAt.values()) total += names?.get(required.name) ?? 0;
+          if ((own.get(required.name) ?? 0) === 0) {
+            incomplete.push(`required check "${required.name}" matches no job in ${path} at the base commit`);
+          } else if (total > 1) {
+            incomplete.push(`required check "${required.name}" matches more than one job in the workflows read at the base commit`);
+          }
+        }
+      }
     }
     const runs = input.checkRuns.filter((r) => r.name === required.name && r.appSlug === required.appSlug);
     if (runs.length === 0) {
@@ -167,6 +268,22 @@ export function computeVerification(input: {
     incomplete.push(`the pull request edits the secret scan configuration, so its own scan cannot vouch for it: ${scannerEdits.join(", ")}`);
   }
 
+  // #349: the reviewed repository's own additions to the paths above. They can only add, and a value
+  // that is not a list (a hand-built policy) withholds rather than being skipped.
+  const added: unknown = input.policy?.cannotVouchAdd;
+  if (added !== undefined) {
+    if (!Array.isArray(added) || !added.every((entry) => typeof entry === "string" && entry.length > 0)) {
+      incomplete.push("the repository's cannotVouchAdd list is malformed, so no edit can be cleared against it");
+    } else {
+      const policyEdits = input.changedFiles.filter((path) => added.some((entry: string) => cannotVouchMatches(path, entry)));
+      if (policyEdits.length > 0) {
+        incomplete.push(`the pull request edits what this repository's policy lists as paths its own checks cannot vouch for: ${policyEdits.join(", ")}`);
+      }
+    }
+  }
+
+  for (const path of absentExtra) incomplete.push(`${path} is absent at the base commit`);
+
   if (input.workflowText === null) {
     incomplete.push(`${input.policy?.ciWorkflowPath ?? "the CI workflow"} is absent at the base commit`);
   } else if (input.policy?.pesterCoverage !== false) {
@@ -184,7 +301,7 @@ export function computeVerification(input: {
 }
 
 // Tasks 8 and 11 both build a PrSnapshot and need its verification; this is the one place that
-// draws the four computeVerification fields out of it, so the two call sites cannot drift the way
+// draws the computeVerification fields out of it (four, and extraWorkflowTexts since #349), so the two call sites cannot drift the way
 // the plan's own duplicates (named in types.ts) already had not. The policy comes from the caller,
 // never from the snapshot, which a PrSource fills in.
 export function verificationOf(snapshot: PrSnapshot, policy: RepoPolicy): Verification {
@@ -192,6 +309,7 @@ export function verificationOf(snapshot: PrSnapshot, policy: RepoPolicy): Verifi
     checkRuns: snapshot.checkRuns,
     changedFiles: snapshot.changedFiles,
     workflowText: snapshot.workflowText,
+    extraWorkflowTexts: snapshot.extraWorkflowTexts,
     changedFilesComplete: snapshot.changedFilesComplete,
     policy,
   });
