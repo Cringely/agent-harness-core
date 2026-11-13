@@ -412,7 +412,7 @@ function runPremerge(parsed: Extract<CliCommand, { command: "premerge" }>, io: C
     }
     throw error;
   }
-  const results = evaluatePremerge(facts, { closes: parsed.closes, identity: parsed.identity, expectHead: parsed.expectHead }, terms.terms);
+  const results = evaluatePremerge(facts, { repo: parsed.repo, closes: parsed.closes, identity: parsed.identity, expectHead: parsed.expectHead }, terms.terms);
   console.log(formatPremerge(parsed.pr, facts.headSha, results));
   return results.every((r) => r.ok) ? 0 : 2;
 }

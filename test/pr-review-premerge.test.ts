@@ -23,6 +23,8 @@ import {
 const HEAD = "a".repeat(40);
 const OTHER = "b".repeat(40);
 const TERMS = ["placeholder-project", "Example Person"];
+const REPO = "owner/repo";
+const refs = (...numbers: number[]) => numbers.map((number) => ({ repo: REPO, number }));
 const ID = { name: "fixture-handle", email: "fixture-handle@users.noreply.github.com" };
 
 const ROOT = mkdtempSync(join(tmpdir(), "pr-review-premerge-"));
@@ -54,7 +56,7 @@ function facts(overrides: Partial<PremergeFacts> = {}): PremergeFacts {
     headSha: HEAD,
     title: "feat: add the widget",
     body: "Adds the widget.\n\nCloses #7",
-    closingIssues: [7],
+    closingIssues: refs(7),
     checks: [{ bucket: "pass" }, { bucket: "pass" }, { bucket: "skipping" }],
     commits: [commit()],
     commitCount: 1,
@@ -62,7 +64,7 @@ function facts(overrides: Partial<PremergeFacts> = {}): PremergeFacts {
   };
 }
 
-const EXPECT: PremergeExpect = { closes: [7], identity: ID, expectHead: null };
+const EXPECT: PremergeExpect = { repo: REPO, closes: [7], identity: ID, expectHead: null };
 
 function failed(results: ReturnType<typeof evaluatePremerge>): string[] {
   return results.filter((r) => !r.ok).map((r) => r.channel);
@@ -114,7 +116,7 @@ describe("evaluatePremerge(): checks", () => {
 
 describe("evaluatePremerge(): closing references", () => {
   test("an extra closing reference fails", () => {
-    expect(failed(evaluatePremerge(facts({ closingIssues: [7, 8] }), EXPECT, TERMS))).toEqual(["closing references"]);
+    expect(failed(evaluatePremerge(facts({ closingIssues: refs(7, 8) }), EXPECT, TERMS))).toEqual(["closing references"]);
   });
 
   test("a missing closing reference fails", () => {
@@ -126,8 +128,28 @@ describe("evaluatePremerge(): closing references", () => {
     expect(failed(evaluatePremerge(f, { ...EXPECT, closes: [] }, TERMS))).toEqual([]);
   });
 
+  test("a reference to another repository's issue fails, though its number matches", () => {
+    const f = facts({ closingIssues: [{ repo: "other/repo", number: 7 }] });
+    expect(failed(evaluatePremerge(f, EXPECT, TERMS))).toEqual(["closing references"]);
+  });
+
+  test("a same-numbered issue in another repository beside this one's fails instead of collapsing", () => {
+    const f = facts({ closingIssues: [...refs(7), { repo: "other/repo", number: 7 }] });
+    expect(failed(evaluatePremerge(f, EXPECT, TERMS))).toEqual(["closing references"]);
+  });
+
+  test("a reference to another repository fails even when none are expected", () => {
+    const f = facts({ closingIssues: [{ repo: "other/repo", number: 7 }] });
+    expect(failed(evaluatePremerge(f, { ...EXPECT, closes: [] }, TERMS))).toEqual(["closing references"]);
+  });
+
+  test("the repository compares case-insensitively", () => {
+    const f = facts({ closingIssues: [{ repo: "Owner/Repo", number: 7 }] });
+    expect(failed(evaluatePremerge(f, EXPECT, TERMS))).toEqual([]);
+  });
+
   test("order does not matter", () => {
-    expect(failed(evaluatePremerge(facts({ closingIssues: [9, 7] }), { ...EXPECT, closes: [7, 9] }, TERMS))).toEqual([]);
+    expect(failed(evaluatePremerge(facts({ closingIssues: refs(9, 7) }), { ...EXPECT, closes: [7, 9] }, TERMS))).toEqual([]);
   });
 });
 
@@ -325,7 +347,7 @@ describe("loadTerms()", () => {
 });
 
 describe("ghPremergeSource()", () => {
-  const view = { state: "OPEN", headRefOid: HEAD, title: "t", body: "b", closingIssuesReferences: [{ number: 7 }] };
+  const view = { state: "OPEN", headRefOid: HEAD, title: "t", body: "b", closingIssuesReferences: [{ number: 7, repository: { name: "repo", owner: { login: "owner" } } }] };
   const checks = [{ name: "test", bucket: "pass" }];
   const restCommit = (sha: string) => ({
     sha,
@@ -354,10 +376,21 @@ describe("ghPremergeSource()", () => {
     const f = ghPremergeSource(DEFAULT_REPO, 12, fakeGh()).read();
     expect(f.state).toBe("OPEN");
     expect(f.headSha).toBe(HEAD);
-    expect(f.closingIssues).toEqual([7]);
+    expect(f.closingIssues).toEqual(refs(7));
     expect(f.checks).toEqual([{ bucket: "pass" }]);
     expect(f.commits.map((c) => c.sha)).toEqual([OTHER, HEAD]);
     expect(f.commitCount).toBe(2);
+  });
+
+  test("carries each closing reference's repository", () => {
+    const other = { number: 7, repository: { name: "elsewhere", owner: { login: "someone" } } };
+    const f = ghPremergeSource(DEFAULT_REPO, 12, fakeGh({ view: { exitCode: 0, stdout: JSON.stringify({ ...view, closingIssuesReferences: [other] }) } })).read();
+    expect(f.closingIssues).toEqual([{ repo: "someone/elsewhere", number: 7 }]);
+  });
+
+  test("throws PremergeReadError on a closing reference without its repository", () => {
+    const bare = { ...view, closingIssuesReferences: [{ number: 7 }] };
+    expect(() => ghPremergeSource(DEFAULT_REPO, 12, fakeGh({ view: { exitCode: 0, stdout: JSON.stringify(bare) } })).read()).toThrow(PremergeReadError);
   });
 
   test("names the repository on every call", () => {

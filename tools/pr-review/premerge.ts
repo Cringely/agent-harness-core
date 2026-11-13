@@ -27,7 +27,9 @@ export interface PremergeFacts {
   headSha: string;
   title: string;
   body: string;
-  closingIssues: number[];
+  // Each reference carries its repository as owner/name: a number alone cannot tell this
+  // repository's issue from another repository's.
+  closingIssues: { repo: string; number: number }[];
   checks: { bucket: string }[];
   commits: PremergeCommit[];
   // How many commits GitHub says the pull request has, read separately from the list itself, so a
@@ -47,6 +49,8 @@ export class PremergeReadError extends Error {
 }
 
 export interface PremergeExpect {
+  // The repository under review, as owner/name. A closing reference to any other repository fails.
+  repo: string;
   closes: readonly number[];
   identity: { name: string; email: string };
   expectHead: string | null;
@@ -138,10 +142,13 @@ export function evaluatePremerge(facts: PremergeFacts, expect: PremergeExpect, t
   else if (other > 0) results.push(fail(CHANNELS.checks, `not every check is green (${counts})`));
   else results.push(pass(CHANNELS.checks, counts));
 
-  const found = [...new Set(facts.closingIssues)].sort((a, b) => a - b);
+  const sameRepo = (repo: string) => repo.toLowerCase() === expect.repo.toLowerCase();
+  const foreign = facts.closingIssues.filter((ref) => !sameRepo(ref.repo)).length;
+  const found = [...new Set(facts.closingIssues.filter((ref) => sameRepo(ref.repo)).map((ref) => ref.number))].sort((a, b) => a - b);
   const want = [...new Set(expect.closes)].sort((a, b) => a - b);
   const list = (ns: number[]) => (ns.length === 0 ? "none" : ns.map((n) => `#${n}`).join(","));
-  if (found.join(",") !== want.join(",")) results.push(fail(CHANNELS.closing, `found ${list(found)}, expected exactly ${list(want)}`));
+  if (foreign > 0) results.push(fail(CHANNELS.closing, `${foreign} closing reference(s) point outside this repository`));
+  else if (found.join(",") !== want.join(",")) results.push(fail(CHANNELS.closing, `found ${list(found)}, expected exactly ${list(want)}`));
   else results.push(pass(CHANNELS.closing, list(found)));
 
   const commits = facts.commits;
@@ -295,9 +302,12 @@ export function ghPremergeSource(repo: string, pr: number, gh: GhRunner = realGh
         "the pull request",
       );
       const closingIssues = arr(view.closingIssuesReferences, "the closing references").map((ref) => {
-        const num = obj(ref, "the closing references").number;
+        const r = obj(ref, "the closing references");
+        const num = r.number;
         if (typeof num !== "number" || !Number.isSafeInteger(num)) throw new PremergeReadError("could not read the closing references (unexpected shape)");
-        return num;
+        const repository = obj(r.repository, "the closing references");
+        const owner = str(obj(repository.owner, "the closing references").login, "the closing references");
+        return { repo: `${owner}/${str(repository.name, "the closing references")}`, number: num };
       });
 
       // gh pr checks exits 1 when a check failed and 8 when one is pending, and still prints the
