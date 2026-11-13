@@ -1,0 +1,300 @@
+[
+  {
+    "id": "identity-git-replace",
+    "defect": "a `git replace` ref pointing a pushed commit at a clean stand-in laundered the real commit past the pre-push scan",
+    "fixedBy": "5cad0a3",
+    "tests": [
+      {
+        "file": "test/identity-gate.test.ts",
+        "name": "bypass 1 — a `git replace` pointing at a clean stand-in does not launder the real commit"
+      }
+    ]
+  },
+  {
+    "id": "identity-force-push-unfetched-tip",
+    "defect": "a force push over a remote tip this clone never fetched made every range check silently scan nothing",
+    "fixedBy": "5cad0a3",
+    "tests": [
+      {
+        "file": "test/identity-gate.test.ts",
+        "name": "bypass 2 — a force push whose remote tip this clone never fetched is still scanned, not skipped"
+      }
+    ]
+  },
+  {
+    "id": "identity-stray-tracking-ref",
+    "defect": "a stray tracking ref under an unrelated remote name emptied the new-branch scan",
+    "fixedBy": "5cad0a3",
+    "tests": [
+      {
+        "file": "test/identity-gate.test.ts",
+        "name": "bypass 3 — a stray tracking ref under an unrelated remote name does not empty the new-branch scan"
+      }
+    ]
+  },
+  {
+    "id": "identity-leading-nul",
+    "defect": "a leading NUL byte made git treat a text file as binary and hid identifying content from the content scan, at commit and at push",
+    "fixedBy": "5cad0a3",
+    "tests": [
+      {
+        "file": "test/identity-gate.test.ts",
+        "name": "bypass 4 — a leading NUL byte does not hide identifying content from pre-commit"
+      },
+      {
+        "file": "test/identity-gate.test.ts",
+        "name": "a leading NUL byte in the pushed range does not hide identifying content"
+      }
+    ]
+  },
+  {
+    "id": "identity-diff-attribute",
+    "defect": "a -diff attribute, tracked or in the untracked info/attributes file, hid a file's content from the scan",
+    "fixedBy": "5cad0a3",
+    "tests": [
+      {
+        "file": "test/identity-gate.test.ts",
+        "name": "bypass 5 — a `.gitattributes` entry marking the path `-diff` does not hide its content"
+      },
+      {
+        "file": "test/identity-gate.test.ts",
+        "name": "bypass 5 — an UNTRACKED .git/info/attributes marking the path `-diff` does not hide its content"
+      }
+    ]
+  },
+  {
+    "id": "identity-big-file-threshold",
+    "defect": "a shrunk core.bigFileThreshold made git treat a file as binary and hid its content from the scan",
+    "fixedBy": "5cad0a3",
+    "tests": [
+      {
+        "file": "test/identity-gate.test.ts",
+        "name": "bypass 6 — a shrunk core.bigFileThreshold does not hide content"
+      }
+    ]
+  },
+  {
+    "id": "identity-typechange",
+    "defect": "a typechange (symlink to regular file) escaped the scan's --diff-filter, at commit and at push",
+    "fixedBy": "5cad0a3",
+    "tests": [
+      {
+        "file": "test/identity-gate.test.ts",
+        "name": "bypass 7 — a typechange (symlink -> regular file) is not exempt from --diff-filter"
+      },
+      {
+        "file": "test/identity-gate.test.ts",
+        "name": "a typechange already committed locally (--no-verify) is still caught at push"
+      }
+    ]
+  },
+  {
+    "id": "identity-bracket-filename",
+    "defect": "a bracket in one staged filename made the binary check answer for a different file",
+    "fixedBy": "5cad0a3",
+    "tests": [
+      {
+        "file": "test/identity-gate.test.ts",
+        "name": "bypass 11 — a bracket in one staged filename does not make the binary check answer for a different file"
+      }
+    ]
+  },
+  {
+    "id": "identity-empty-identity-file",
+    "defect": "an identity file declaring no names and no emails built a pattern from the environment alone, passed its own canary and allowed a staged name",
+    "fixedBy": "cbd822a",
+    "tests": [
+      {
+        "file": "test/identity-gate.test.ts",
+        "name": "gate exits non-zero when the identity file parses but declares no names and no emails"
+      }
+    ]
+  },
+  {
+    "id": "identity-canary-after-parse",
+    "defect": "the matcher canary ran after the parse it protects, so a broken grep made a populated file parse as empty and the gate blamed the file",
+    "fixedBy": "cbd822a",
+    "tests": [
+      {
+        "file": "test/identity-gate.test.ts",
+        "name": "positive control: a broken matcher makes the gate fail rather than silently pass"
+      }
+    ]
+  },
+  {
+    "id": "identity-no-names-key",
+    "defect": "an identity file with no names key was accepted when emails were declared (#91)",
+    "fixedBy": "aacb48a",
+    "tests": [
+      {
+        "file": "test/identity-gate.test.ts",
+        "name": "gate refuses an identity file with no names key, even when emails are declared"
+      }
+    ]
+  },
+  {
+    "id": "identity-utf16-file",
+    "defect": "a UTF-16 identity file was read as UTF-8 and loaded with a broken arm, so the declared name was never matched (#91)",
+    "fixedBy": "406711c",
+    "tests": [
+      {
+        "file": "test/identity-gate.test.ts",
+        "name": "a UTF-16LE file with a BOM and an ASCII-only name is refused"
+      }
+    ]
+  },
+  {
+    "id": "identity-invalid-utf8-file",
+    "defect": "a Latin-1 identity file declaring a non-ASCII name loaded, so the same name staged as UTF-8 slipped through (#206)",
+    "fixedBy": "0b1acf4",
+    "tests": [
+      {
+        "file": "test/identity-gate.test.ts",
+        "name": "a Latin-1 file declaring a non-ASCII name is refused, so the name cannot slip through staged as UTF-8"
+      }
+    ]
+  },
+  {
+    "id": "identity-escape-sed-crash",
+    "defect": "a crashed escape sed left its partial output in identity_escaped and the gate built a pattern from it (#172)",
+    "fixedBy": "0e835e7",
+    "tests": [
+      {
+        "file": "test/identity-gate.test.ts",
+        "name": "a crashed escape sed leaves identity_escaped empty, not sed's partial output"
+      }
+    ]
+  },
+  {
+    "id": "pre-commit-unscannable-path",
+    "defect": "a staged path git quotes could not be read by the content channels and was passed as clean",
+    "fixedBy": "7b0ef41",
+    "tests": [
+      {
+        "file": "test/pre-commit.test.ts",
+        "name": "token under a name git quotes: refused as unscannable, value not printed"
+      }
+    ]
+  },
+  {
+    "id": "doc-steward-bash-grant",
+    "defect": "the doc-steward agent held Bash and treated pre-edit script output as evidence (#86)",
+    "fixedBy": "6676801",
+    "tests": [
+      {
+        "file": "test/doc-steward-tools.test.ts",
+        "name": "tools line exists and omits Bash"
+      }
+    ]
+  },
+  {
+    "id": "pr-review-linux-pester-required",
+    "defect": "the Linux Pester job was missing from the required checks, so a PR could merge without it (#152)",
+    "fixedBy": "e57f59b",
+    "tests": [
+      {
+        "file": "test/pr-review-verdict.test.ts",
+        "name": "the Linux Pester job is a required check, and a missing run of it is incomplete"
+      }
+    ]
+  },
+  {
+    "id": "pr-review-cancelled-sibling-run",
+    "defect": "a cancelled sibling run beside a success hid a failed run, or blocked a pass (#148)",
+    "fixedBy": "c8d393d",
+    "tests": [
+      {
+        "file": "test/pr-review-verdict.test.ts",
+        "name": "conclusions [failure, cancelled] alongside a success: failed, not passed"
+      }
+    ]
+  },
+  {
+    "id": "pr-review-whole-file-cap",
+    "defect": "a per-file cap below installer size dropped real files from the review as omitted (#156)",
+    "fixedBy": "7246ee1",
+    "tests": [
+      {
+        "file": "test/pr-review-local-source.test.ts",
+        "name": "keeps an installer-sized file of 90 KB whole"
+      }
+    ]
+  },
+  {
+    "id": "write-scope-scratch-ancestor",
+    "defect": "a project checked out under a scratch-named directory put every file in write scope",
+    "fixedBy": "837ac21",
+    "tests": [
+      {
+        "file": "test/agent-write-scope.test.ts",
+        "name": "a file inside a project that sits under a scratch directory is not scratch"
+      }
+    ]
+  },
+  {
+    "id": "worktree-gate-tools-key-case",
+    "defect": "the worktree gate matched the agent tools key case-insensitively where Claude Code reads it case-sensitively, so a cased line hid or replaced the real grant",
+    "fixedBy": "eed7a7d",
+    "tests": [
+      {
+        "file": "test/agent-worktree-gate.test.ts",
+        "name": "a cased line does not hide or replace the lowercase grant"
+      }
+    ]
+  },
+  {
+    "id": "model-currency-dotted-version",
+    "defect": "a dotted model version pin was truncated at the dot and read as the wrong version",
+    "fixedBy": "0990c11",
+    "tests": [
+      {
+        "file": "test/model-currency.test.ts",
+        "name": "finds a dotted pin whole, not truncated at the dot"
+      }
+    ]
+  },
+  {
+    "id": "pr-review-builtin-plugin-relaunch",
+    "defect": "the reviewer accepted a run with CLI built-in plugins learned only at init instead of relaunching without them",
+    "fixedBy": "66b340e",
+    "tests": [
+      {
+        "file": "test/pr-review-runner.test.ts",
+        "name": "built-ins on attempt 1, then clean on attempt 2, is accepted from attempt 2"
+      }
+    ]
+  },
+  {
+    "id": "packs-identity-string-in-payload",
+    "defect": "the pack generator wrote a payload containing identifying strings with no gate",
+    "fixedBy": "cdece42",
+    "tests": [
+      {
+        "file": "test/pack-generator.test.ts",
+        "name": "an identifying string in a member file refuses in write and --check, names the class, and prints no value"
+      }
+    ]
+  },
+  {
+    "id": "pr-review-parent-checkout-cwd",
+    "defect": "the reviewer CLI could run from a directory whose bunfig.toml bun would autoload, executing repository code with the App key (#120)",
+    "fixedBy": "b108603",
+    "tests": [
+      {
+        "file": "test/pr-review-cli.test.ts",
+        "name": "a directory holding bunfig.toml is unsafe"
+      }
+    ]
+  },
+  {
+    "id": "security-controls-unbackticked-path",
+    "defect": "a register row whose path cell lacked backticks was silently left unchecked (#173)",
+    "fixedBy": "65f91e1",
+    "tests": [
+      {
+        "file": "test/security-controls.test.ts",
+        "name": "a path written without backticks is malformed, not silently unchecked"
+      }
+    ]
+  }
+]

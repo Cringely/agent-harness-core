@@ -1,0 +1,7 @@
+{
+  "name": "agent-harness-core",
+  "private": true,
+  "scripts": {
+    "regression": "bun test/regression/run.ts"
+  }
+}
