@@ -319,17 +319,26 @@ cases stay put. A broken record for a pinned third-party plugin is never rewritt
 entry from the sidecar by hand. A broken record for a first-party plugin that follows its marketplace
 sha needs `-InstallDeps` when the marketplace sha differs from the manifest pin.
 
-`unknown-key (name, ...)` means an agent definition under `.claude/agents/`, shipped or written by the
-project, declares a frontmatter key that Claude Code does not recognise. Claude Code ignores such a
-key without an error, so a misspelling like `reasoning_effort` for `effort` silently runs the agent
-at inherited session settings. The row is warn-only: it counts as needing attention, writes nothing
-and refuses nothing. Fix the spelling the row names. The accepted keys are listed in
-`core/claude/agent-frontmatter-keys.json`, which also holds core's own `writeScope`. Keys are matched
-case-sensitively and only at the left margin of the frontmatter block, so nested `hooks` entries and
-a colon inside a description are not read as keys. An `effort` value is never judged, so `effort` on a
-haiku definition is not a finding. `agent-keys-unchecked` means that file is missing or unreadable in
-the core checkout, so the check did not run and no definition was vouched for. `agent-keys-unreadable` names one definition that could not be read, so its keys were not
-checked. The audit carries on with the other definitions. A zero-byte definition has no frontmatter and is not a finding.
+`unknown-key (name, ...)` means a top-level agent definition in `.claude/agents/`, shipped or written
+by the project, declares a frontmatter key that Claude Code does not recognise. Claude Code ignores
+such a key without an error, so a misspelling like `reasoning_effort` for `effort` silently runs the
+agent at inherited session settings. The row is warn-only: it counts as needing attention, writes
+nothing and refuses nothing. Fix the spelling the row names. The accepted keys are the ones the
+Claude Code sub-agents docs list, plus core's own `writeScope`, in
+`core/claude/agent-frontmatter-keys.json`. Keys are matched case-sensitively and only at the left
+margin of the frontmatter block, so nested `hooks` entries and a colon inside a description are not
+read as keys. A key written in quotes is read by its unquoted name. An `effort` value is never
+judged, so `effort` on a haiku definition is not a finding.
+
+Three more rows say the check did not cover a definition, so a clean audit is never read as a pass
+for it. `agent-keys-unparsed` means a frontmatter line is not a key, a `#` comment, a blank line or an
+indented or `- ` continuation of the key above it, or the opening `---` has no closing `---` line.
+Fix that line or the markers and re-run `-Audit`. `agent-keys-unreadable` names one definition that
+could not be read, for example because another process holds it open. Make it readable and re-run
+`-Audit`. The audit carries on with the other definitions. `agent-keys-unchecked` means the allowlist
+file is missing, unparsable or empty in the core checkout, so no definition was vouched for. Restore
+`core/claude/agent-frontmatter-keys.json` or update the core checkout, then re-run `-Audit`. A
+definition that is empty or does not open with `---` has no frontmatter and is not a finding.
 
 This is the mechanical half of the findings flow in CONTRIBUTING.md.
 Run it periodically per project (SpaceMolt wires it into a `core_harvest` ceremony, see that

@@ -572,6 +572,64 @@ Describe "Install-Harness" {
         $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
         $out | Should -Match 'agents/typo[.]md\s+unknown-key [(]reasoning_effort[)]'
         $out | Should -Not -Match 'Value cannot be null'
+        $out | Should -Not -Match 'agents/empty[.]md'
+    }
+
+    # A frontmatter line the extractor cannot place is a def whose keys were never checked, so it
+    # gets a row rather than a pass. Each shape below passed silently before.
+    It "audit reports a quoted misspelled key as unknown-key" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        Set-Content -LiteralPath "$script:target/.claude/agents/q.md" -Value "---`nname: q`ndescription: x`n'reasoning_effort': low`n---`nbody"
+        Set-Content -LiteralPath "$script:target/.claude/agents/dq.md" -Value "---`nname: dq`ndescription: x`n`"reasoning_effort`": low`n---`nbody"
+        $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $out | Should -Match 'agents/q[.]md\s+unknown-key [(]reasoning_effort[)]'
+        $out | Should -Match 'agents/dq[.]md\s+unknown-key [(]reasoning_effort[)]'
+    }
+
+    It "audit reports agent-keys-unparsed for a frontmatter line that is not a key, comment, blank or continuation" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $shapes = @{
+            'space' = "reasoning effort: low"
+            'dot'   = "reasoning.effort: low"
+            'stray' = "just some text"
+            'orphanindent' = "  indented: before any key"
+            'orphanitem'   = "- Read"
+        }
+        foreach ($name in $shapes.Keys) {
+            $body = if ($name -like 'orphan*') { "---`n$($shapes[$name])`nname: $name`n---`nbody" } else { "---`nname: $name`n$($shapes[$name])`ndescription: x`n---`nbody" }
+            Set-Content -LiteralPath "$script:target/.claude/agents/shape-$name.md" -Value $body
+        }
+        $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        foreach ($name in $shapes.Keys) {
+            $out | Should -Match "agents/shape-$name[.]md\s+agent-keys-unparsed"
+        }
+        $out | Should -Not -Match 'All managed files in sync with core[.]'
+        $out | Should -Match 'agent-keys-unparsed = the definition has a frontmatter line the check cannot place'
+        $quiet = @(& "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit -Quiet *>&1 | Out-String -Width 500)
+        ($quiet -join "`n") | Should -Match 'agent-keys-unparsed\s+agents/shape-stray[.]md'
+    }
+
+    It "audit reports agent-keys-unparsed when the frontmatter block cannot be located" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        Set-Content -LiteralPath "$script:target/.claude/agents/trail.md" -NoNewline -Value "---  `nname: trail`nreasoning_effort: low`n---`nbody"
+        Set-Content -LiteralPath "$script:target/.claude/agents/open.md" -NoNewline -Value "---`nname: open`nreasoning_effort: low`nbody with no closing marker"
+        Set-Content -LiteralPath "$script:target/.claude/agents/emptyblock.md" -NoNewline -Value "---`n---`nbody"
+        $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $out | Should -Match 'agents/trail[.]md\s+agent-keys-unparsed'
+        $out | Should -Match 'agents/open[.]md\s+agent-keys-unparsed'
+        $out | Should -Match 'agents/emptyblock[.]md\s+agent-keys-unparsed'
+    }
+
+    It "audit does not flag comments, blank lines, sequence items or continuations, and ignores a def with no frontmatter" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $body = @(
+            '---', '# a comment', 'name: mine', '', 'description: >', '  folded text', '  more text',
+            'tools:', '- Read', '- Grep', 'model: haiku', '---', 'body') -join "`n"
+        Set-Content -LiteralPath "$script:target/.claude/agents/mine.md" -Value $body
+        Set-Content -LiteralPath "$script:target/.claude/agents/plain.md" -Value "just a markdown file`nwith no frontmatter"
+        $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $out | Should -Not -Match 'agents/mine[.]md'
+        $out | Should -Not -Match 'agents/plain[.]md'
     }
 
     It "audit reports agent-keys-unreadable for a def that cannot be read, and keeps auditing" {
@@ -586,6 +644,7 @@ Describe "Install-Harness" {
         }
         finally { $fs.Dispose() }
         $out | Should -Match 'agents/locked[.]md\s+agent-keys-unreadable'
+        $out | Should -Match 'agent-keys-unreadable = the definition could not be read'
         $out | Should -Match 'agents/typo[.]md\s+unknown-key [(]reasoning_effort[)]'
     }
 
@@ -594,6 +653,7 @@ Describe "Install-Harness" {
         $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
         $out | Should -Not -Match 'unknown-key\s*[(]'
         $out | Should -Not -Match 'agent-keys-unchecked'
+        $out | Should -Not -Match 'agent-keys-unparsed'
     }
 
     It "audit says the key check did not run when the shipped allowlist file is missing, rather than passing every def" {
@@ -609,6 +669,7 @@ Describe "Install-Harness" {
             Remove-Item -LiteralPath "$fake/core/claude/agent-frontmatter-keys.json"
             $out = & "$fake/install/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
             $out | Should -Match 'agent-frontmatter-keys[.]json\s+agent-keys-unchecked'
+            $out | Should -Match 'agent-keys-unchecked = that file is missing, unparsable or empty.*restore core/claude/agent-frontmatter-keys[.]json'
             $out | Should -Not -Match 'All managed files in sync with core[.]'
         }
         finally { Remove-Item -Recurse -Force -LiteralPath $fake -ErrorAction SilentlyContinue }
