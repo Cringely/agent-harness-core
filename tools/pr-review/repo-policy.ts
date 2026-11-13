@@ -116,7 +116,7 @@ function appSlugProblem(value: unknown): string | null {
 }
 
 // #349: one cannotVouchAdd item. A trailing "/" makes it a directory prefix. Otherwise it names one
-// file. Same character rules as a workflow path, with no directory restriction.
+// path and everything under it. Same character rules as a workflow path, with no directory restriction.
 function cannotVouchProblem(value: unknown): string | null {
   if (typeof value !== "string") return "must be a string";
   if (value.length === 0) return "must not be empty";

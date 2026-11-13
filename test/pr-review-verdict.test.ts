@@ -785,6 +785,19 @@ describe("job matching, per-check workflows, code-scanning checks and cannotVouc
       expect(run(ADDED, CI_TEXT, undefined, undefined, [path]).state).toBe("passed");
     });
 
+    test.each([["src/scheduler"], ["src/scheduler/token.ts"], ["SRC/Scheduler/deep/x.ts"]])(
+      "a slash-less item covers the path itself and everything under it: %s is incomplete",
+      (path) => {
+        const policy = policyWith([{ name: "build", appSlug: "github-actions" }], { cannotVouchAdd: ["src/scheduler"] });
+        expect(run(policy, CI_TEXT, undefined, undefined, [path]).state).toBe("incomplete");
+      },
+    );
+
+    test.each([["src/scheduler2/x.ts"], ["src/scheduler.ts"]])("a slash-less item does not cover sibling %s", (path) => {
+      const policy = policyWith([{ name: "build", appSlug: "github-actions" }], { cannotVouchAdd: ["src/scheduler"] });
+      expect(run(policy, CI_TEXT, undefined, undefined, [path]).state).toBe("passed");
+    });
+
     test("a hand-built cannotVouchAdd that is not an array: incomplete", () => {
       const policy = { ...ADDED, cannotVouchAdd: "scripts/" } as unknown as RepoPolicy;
       expect(run(policy, CI_TEXT).state).toBe("incomplete");

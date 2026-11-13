@@ -126,12 +126,15 @@ export function workflowJobMatch(workflowText: string, name: string): JobMatch {
   return count === 1 ? "declared" : "ambiguous";
 }
 
-// #349: a path in cannotVouchAdd ending in "/" is a directory prefix, any other an exact path.
+// #349: a path in cannotVouchAdd ending in "/" is a directory prefix. Any other item matches that
+// exact path and everything under it, since the loader cannot tell a slash-less directory from a
+// file and reading it as a file would silently withhold nothing for the directory's contents.
 // Compared case-insensitively, which can only withhold more.
 function cannotVouchMatches(path: string, entry: string): boolean {
   const folded = path.toLowerCase();
   const rule = entry.toLowerCase();
-  return rule.endsWith("/") ? folded.startsWith(rule) : folded === rule;
+  if (rule.endsWith("/")) return folded.startsWith(rule);
+  return folded === rule || folded.startsWith(`${rule}/`);
 }
 
 export function computeVerification(input: {
