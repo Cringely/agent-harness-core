@@ -9,25 +9,47 @@
 // this file is what makes that claim true now.
 
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
+  BASE_SHA_TOKEN,
   decide,
+  type GitProbe,
+  nonGitNote,
   OVERRIDE_TOKEN,
+  probeGitWorkTree,
   PROJECT_EXCEPTIONS,
+  projectRootOf,
   requiresIsolation,
 } from "../core/claude/hooks/agent-worktree-gate";
 
-const HOOK = join(import.meta.dir, "..", "core", "claude", "hooks", "agent-worktree-gate.ts");
+const REPO_ROOT = join(import.meta.dir, "..");
+const HOOKS_SRC = join(REPO_ROOT, "core", "claude", "hooks");
+const HOOK = join(HOOKS_SRC, "agent-worktree-gate.ts");
 
-/** Runs the hook as a real process with `stdinText` on stdin. Never goes through a shell. */
-function runHook(stdinText: string) {
+/**
+ * Runs a hook as a real process with `stdinText` on stdin. Never goes through a shell. The project
+ * root defaults to this repository so the git probe answers "repo" whatever the caller's shell
+ * exported, and GIT_DIR / GIT_WORK_TREE are dropped so a git hook running this suite cannot turn a
+ * non-git temp dir into a repo. `env` entries override, and an undefined value removes the key.
+ */
+function runHook(stdinText: string, env: Record<string, string | undefined> = {}, hook: string = HOOK) {
+  const merged: Record<string, string | undefined> = {
+    ...process.env,
+    CLAUDE_PROJECT_DIR: REPO_ROOT,
+    GIT_DIR: undefined,
+    GIT_WORK_TREE: undefined,
+    ...env,
+  };
+  const clean: Record<string, string> = {};
+  for (const [k, v] of Object.entries(merged)) if (v !== undefined) clean[k] = v;
   const proc = Bun.spawnSync({
-    cmd: [process.execPath, HOOK],
+    cmd: [process.execPath, hook],
     stdin: new TextEncoder().encode(stdinText),
     stdout: "pipe",
     stderr: "pipe",
+    env: clean,
   });
   return { exitCode: proc.exitCode, stdout: proc.stdout.toString(), stderr: proc.stderr.toString() };
 }
@@ -224,6 +246,55 @@ describe("decide() — read-only type: always allowed", () => {
   });
 });
 
+const SHA = "b".repeat(40);
+
+describe("decide() — every isolated write dispatch needs a base sha (#36)", () => {
+  const dispatch = (prompt: string | undefined, isolation = "worktree") => ({
+    tool_name: "Agent",
+    tool_input: { subagent_type: "writer", isolation, prompt },
+  });
+
+  test("worktree dispatch, no base sha: denied and names the token", () => {
+    const v = decide(dispatch("do a thing"), agentsDir);
+    expect(v.action).toBe("deny");
+    if (v.action === "deny") expect(v.reason).toContain(BASE_SHA_TOKEN);
+  });
+
+  test("worktree dispatch, base sha line present: allowed", () => {
+    expect(decide(dispatch(`intro\nBASE-SHA: ${SHA}\nbody`), agentsDir)).toEqual({ action: "allow" });
+  });
+
+  test("a missing prompt is the same as no base sha line", () => {
+    expect(decide(dispatch(undefined), agentsDir).action).toBe("deny");
+  });
+
+  test("a mid-sentence mention of the token does not count", () => {
+    expect(decide(dispatch("put a BASE-SHA: abcdef1 somewhere"), agentsDir).action).toBe("deny");
+  });
+
+  test("a non-hex value does not count", () => {
+    expect(decide(dispatch("BASE-SHA: not-a-sha"), agentsDir).action).toBe("deny");
+  });
+
+  test("a leading-space line and a 7-digit sha count", () => {
+    expect(decide(dispatch("  BASE-SHA: abcdef1"), agentsDir).action).toBe("allow");
+  });
+
+  test("remote isolation needs the line too", () => {
+    expect(decide(dispatch("x", "remote"), agentsDir).action).toBe("deny");
+    expect(decide(dispatch(`BASE-SHA: ${SHA}`, "remote"), agentsDir).action).toBe("allow");
+  });
+
+  test("a read-only type is never asked for a base sha", () => {
+    expect(
+      decide(
+        { tool_name: "Agent", tool_input: { subagent_type: "reader", isolation: "worktree", prompt: "x" } },
+        agentsDir,
+      ).action,
+    ).toBe("allow");
+  });
+});
+
 describe("decide() — write-capable type: isolation or override required", () => {
   test("no isolation, no override: denied", () => {
     const verdict = decide({ tool_name: "Agent", tool_input: { subagent_type: "writer" } }, agentsDir);
@@ -236,7 +307,10 @@ describe("decide() — write-capable type: isolation or override required", () =
 
   test.each(["worktree", "remote"])("isolation: %s allows", (isolation) => {
     expect(
-      decide({ tool_name: "Agent", tool_input: { subagent_type: "writer", isolation } }, agentsDir),
+      decide(
+        { tool_name: "Agent", tool_input: { subagent_type: "writer", isolation, prompt: `BASE-SHA: ${SHA}` } },
+        agentsDir,
+      ),
     ).toEqual({ action: "allow" });
   });
 
@@ -281,7 +355,10 @@ describe("decide() — memory: field end to end", () => {
   test("isolation: worktree still clears a memory: def", () => {
     expect(
       decide(
-        { tool_name: "Agent", tool_input: { subagent_type: "memory-project", isolation: "worktree" } },
+        {
+          tool_name: "Agent",
+          tool_input: { subagent_type: "memory-project", isolation: "worktree", prompt: `BASE-SHA: ${SHA}` },
+        },
         agentsDir,
       ),
     ).toEqual({ action: "allow" });
@@ -383,7 +460,23 @@ describe("spawned process — the deny path is observable", () => {
     expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain(OVERRIDE_TOKEN);
   });
 
-  test("the same dispatch with isolation: worktree: exit 0, silent (no opinion)", () => {
+  test("an isolated dispatch with a base sha line: exit 0, silent (no opinion)", () => {
+    const result = runHook(
+      JSON.stringify({
+        tool_name: "Agent",
+        tool_input: {
+          subagent_type: "general-purpose",
+          prompt: `BASE-SHA: ${"a".repeat(40)}\ndo a thing`,
+          isolation: "worktree",
+        },
+      }),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("");
+  });
+
+  test("an isolated dispatch with no base sha line: exit 0, deny JSON naming the token", () => {
     const result = runHook(
       JSON.stringify({
         tool_name: "Agent",
@@ -391,8 +484,9 @@ describe("spawned process — the deny path is observable", () => {
       }),
     );
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toBe("");
-    expect(result.stderr).toBe("");
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain(BASE_SHA_TOKEN);
   });
 
   test("a built-in read-only type (explore): exit 0, silent, no isolation required", () => {
@@ -418,5 +512,390 @@ describe("spawned process — the fail-open path stays open and says why", () =>
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe("");
     expect(result.stderr).toBe("");
+  });
+});
+
+// --- #310: the gate checks its own preconditions -----------------------------------------------
+//
+// Outside a git repository a worktree cannot exist, so a deny that says "re-dispatch isolated"
+// sends the dispatcher to an impossible fix. The gate asks the filesystem (no git binary) and, when
+// the project root is provably not a repository, lets the dispatch through with a note. Every
+// answer short of "not-repo" keeps today's behaviour.
+
+/** True when a `.git` entry exists at `dir` or any ancestor, so a temp dir there is not a clean non-repo. */
+function hasGitAncestor(dir: string): boolean {
+  let p = resolve(dir);
+  for (;;) {
+    if (existsSync(join(p, ".git"))) return true;
+    if (dirname(p) === p) return false;
+    p = dirname(p);
+  }
+}
+const TMP_UNDER_GIT = hasGitAncestor(tmpdir());
+
+const scratchDirs: string[] = [];
+function tmpRoot(prefix: string): string {
+  const d = mkdtempSync(join(tmpdir(), prefix));
+  scratchDirs.push(d);
+  return d;
+}
+function gitTmpRoot(prefix: string): string {
+  const d = tmpRoot(prefix);
+  mkdirSync(join(d, ".git"));
+  return d;
+}
+afterAll(() => {
+  for (const d of scratchDirs) rmSync(d, { recursive: true, force: true });
+});
+
+describe("probeGitWorkTree() — filesystem only, no git binary", () => {
+  test("a dir holding a .git directory is a repo, and so is a subfolder of it", () => {
+    const root = gitTmpRoot("wg-probe-dir-");
+    mkdirSync(join(root, "a", "b"), { recursive: true });
+    expect(probeGitWorkTree(root, {})).toBe("repo");
+    expect(probeGitWorkTree(join(root, "a", "b"), {})).toBe("repo");
+  });
+
+  test("a .git FILE (the linked-worktree shape) is a repo", () => {
+    const root = tmpRoot("wg-probe-file-");
+    writeFileSync(join(root, ".git"), "gitdir: /elsewhere/.git/worktrees/x\n");
+    expect(probeGitWorkTree(root, {})).toBe("repo");
+  });
+
+  // A junction (Windows) or symlink into a repository is that repository: git answers true there.
+  // A lexical walk from the link's own spelling climbs the link's parents instead and says not-repo.
+  test("a link into a repo reads as a repo, not as the folder the link sits in", () => {
+    const repo = gitTmpRoot("wg-probe-target-");
+    mkdirSync(join(repo, "sub"));
+    const holder = tmpRoot("wg-probe-holder-");
+    const link = join(holder, "linked");
+    symlinkSync(join(repo, "sub"), link, "junction");
+    expect(probeGitWorkTree(link, {})).toBe("repo");
+  });
+
+  test("a dangling link is unknown", () => {
+    const holder = tmpRoot("wg-probe-dangling-");
+    const link = join(holder, "dangling");
+    symlinkSync(join(holder, "gone"), link, "junction");
+    expect(probeGitWorkTree(link, {})).toBe("unknown");
+  });
+
+  test("a path that does not exist is unknown", () => {
+    expect(probeGitWorkTree(join(tmpdir(), "wg-probe-no-such-dir-xyz"), {})).toBe("unknown");
+  });
+
+  test("a path that is a file, not a directory, is unknown", () => {
+    const root = tmpRoot("wg-probe-notdir-");
+    const f = join(root, "plain.txt");
+    writeFileSync(f, "x");
+    expect(probeGitWorkTree(f, {})).toBe("unknown");
+  });
+
+  test.each([["GIT_DIR"], ["GIT_WORK_TREE"]])("%s set makes any dir a repo", (key) => {
+    const root = tmpRoot("wg-probe-env-");
+    expect(probeGitWorkTree(root, { [key]: "/x" })).toBe("repo");
+  });
+
+  test("an empty GIT_DIR does not count", () => {
+    expect(probeGitWorkTree(join(tmpdir(), "wg-probe-no-such-dir-xyz"), { GIT_DIR: "" })).toBe("unknown");
+  });
+
+  test.skipIf(TMP_UNDER_GIT)("a fresh temp dir with no .git in any ancestor is not-repo", () => {
+    const root = tmpRoot("wg-probe-none-");
+    expect(probeGitWorkTree(root, {})).toBe("not-repo");
+  });
+});
+
+describe("projectRootOf() and nonGitNote()", () => {
+  test("CLAUDE_PROJECT_DIR wins", () => {
+    expect(projectRootOf({ CLAUDE_PROJECT_DIR: "/some/proj" })).toBe("/some/proj");
+  });
+
+  test("without it the root is two levels above the hooks dir", () => {
+    expect(projectRootOf({})).toBe(join(HOOKS_SRC, "..", ".."));
+    expect(projectRootOf({ CLAUDE_PROJECT_DIR: "" })).toBe(join(HOOKS_SRC, "..", ".."));
+  });
+
+  test("the note names the root and the git init remedy", () => {
+    const note = nonGitNote("/p");
+    expect(note).toContain("/p is not a git repository");
+    expect(note).toContain("`git init`");
+    expect(note).toBe(
+      "Worktree gate: /p is not a git repository, so worktree isolation is not available and this " +
+        "dispatch runs in the shared folder. A git repository in a subfolder of it is not isolated " +
+        "either. If this work should be versioned, run `git init` here and the gate will isolate " +
+        "concurrent writers.",
+    );
+  });
+});
+
+/** A probe that answers from a table and records every directory it was asked about. */
+function stubProbe(table: Record<string, GitProbe>) {
+  const calls: string[] = [];
+  const probe = (dir: string): GitProbe => {
+    calls.push(dir);
+    return table[dir] ?? "unknown";
+  };
+  return { calls, probe };
+}
+
+const writerDispatch = (extra: Record<string, unknown> = {}, tool: Record<string, unknown> = {}) => ({
+  tool_name: "Agent",
+  tool_input: { subagent_type: "writer", prompt: "do a thing", ...tool },
+  ...extra,
+});
+
+describe("decide() — a project root that is not a git repository (#310)", () => {
+  test("root not-repo and no payload cwd: allow with the note", () => {
+    const { probe } = stubProbe({ "/p": "not-repo" });
+    const v = decide(writerDispatch(), agentsDir, "/p", probe);
+    expect(v).toEqual({ action: "allow", note: nonGitNote("/p") });
+    if (v.action === "allow") {
+      expect(v.note).toContain("is not a git repository");
+      expect(v.note).toContain("git init");
+    }
+  });
+
+  test("root not-repo and payload cwd also not-repo: allow with the note", () => {
+    const { probe } = stubProbe({ "/p": "not-repo", "/p/sub": "not-repo" });
+    expect(decide(writerDispatch({ cwd: "/p/sub" }), agentsDir, "/p", probe)).toEqual({
+      action: "allow",
+      note: nonGitNote("/p"),
+    });
+  });
+
+  test("root not-repo but payload cwd is a repo: deny", () => {
+    const { probe } = stubProbe({ "/p": "not-repo", "/p/nested": "repo" });
+    expect(decide(writerDispatch({ cwd: "/p/nested" }), agentsDir, "/p", probe).action).toBe("deny");
+  });
+
+  test("root a repo but payload cwd not-repo: deny", () => {
+    const { probe } = stubProbe({ "/p": "repo", "/elsewhere": "not-repo" });
+    expect(decide(writerDispatch({ cwd: "/elsewhere" }), agentsDir, "/p", probe).action).toBe("deny");
+  });
+
+  test("root not-repo but payload cwd unknown: deny", () => {
+    const { probe } = stubProbe({ "/p": "not-repo" });
+    expect(decide(writerDispatch({ cwd: "/gone" }), agentsDir, "/p", probe).action).toBe("deny");
+  });
+
+  test("root unknown: deny", () => {
+    const { probe } = stubProbe({ "/p": "unknown" });
+    expect(decide(writerDispatch(), agentsDir, "/p", probe).action).toBe("deny");
+  });
+
+  test("root a repo: today's logic, deny without isolation and an override", () => {
+    const { probe } = stubProbe({ "/p": "repo" });
+    expect(decide(writerDispatch(), agentsDir, "/p", probe).action).toBe("deny");
+  });
+
+  test("projectRoot null: deny, and the probe is never called", () => {
+    const { calls, probe } = stubProbe({ "/p": "not-repo" });
+    expect(decide(writerDispatch(), agentsDir, null, probe).action).toBe("deny");
+    expect(calls).toEqual([]);
+  });
+
+  test("projectRoot omitted behaves like null", () => {
+    expect(decide(writerDispatch(), agentsDir).action).toBe("deny");
+  });
+
+  test("a read-only type outside git: plain allow, no note, probe not called", () => {
+    const { calls, probe } = stubProbe({ "/p": "not-repo" });
+    const v = decide({ tool_name: "Agent", tool_input: { subagent_type: "reader" } }, agentsDir, "/p", probe);
+    expect(v).toEqual({ action: "allow" });
+    expect("note" in v).toBe(false);
+    expect(calls).toEqual([]);
+  });
+
+  // The non-git allow replaces the isolation demand only where isolation is impossible. In a repo
+  // an isolated write dispatch still has to name its base.
+  test("in a repo an isolated write dispatch with no base sha is still denied", () => {
+    const { probe } = stubProbe({ "/p": "repo" });
+    const v = decide(writerDispatch({}, { isolation: "worktree" }), agentsDir, "/p", probe);
+    expect(v.action).toBe("deny");
+    if (v.action === "deny") expect(v.reason).toContain(BASE_SHA_TOKEN);
+  });
+});
+
+// --- scoped writers are classified like any other write-capable type (#312 tracks trust) ------------
+
+const scopedDir = mkdtempSync(join(tmpdir(), "worktree-gate-scoped-"));
+scratchDirs.push(scopedDir);
+function writeScopedDef(type: string, lines: string[]) {
+  writeFileSync(join(scopedDir, `${type}.md`), ["---", `name: ${type}`, ...lines, "---", "", "Body."].join("\n"));
+}
+const SCOPED_TOOLS = "tools: Read, Grep, Glob, WebFetch, WebSearch, Write, SendMessage";
+writeScopedDef("scoped", [SCOPED_TOOLS, "writeScope: scratch"]);
+writeScopedDef("scoped-edit", ["tools: Read, Edit, Write", "writeScope: scratch"]);
+writeScopedDef("scoped-readonly", ["tools: Read, Grep", "writeScope: scratch"]);
+writeScopedDef("web-fetch", ["tools: Write"]);
+// Claude Code reads the frontmatter key `tools` case-sensitively. A differently cased key is not a
+// grant, so the definition inherits every tool, a shell included.
+writeScopedDef("scoped-key-title", ["Tools: Read, Write", "writeScope: scratch"]);
+writeScopedDef("scoped-key-upper", ["TOOLS: Read, Write", "writeScope: scratch"]);
+writeScopedDef("readonly-key-title", ["Tools: Read, Grep"]);
+writeScopedDef("readonly-key-upper", ["TOOLS: Read, Grep"]);
+// The real grant is the lowercase line, and it is read-only. A cased line before it is not a grant.
+writeScopedDef("key-both", ["Tools: Read, Write, Bash", "tools: Read, Grep"]);
+
+describe("requiresIsolation() — a writeScope: scratch agent is write-capable and needs isolation", () => {
+  test.each(["scoped", "scoped-edit"])("%s: Write or Edit in the grant requires isolation", (type) => {
+    expect(requiresIsolation(type, scopedDir)).toBe(true);
+  });
+
+  test("a scoped writer dispatched without isolation is denied, in a git project", () => {
+    const d = { tool_name: "Agent", tool_input: { subagent_type: "scoped", prompt: "go" } };
+    expect(decide(d, scopedDir, "/p", () => "repo").action).toBe("deny");
+    expect(decide(d, scopedDir).action).toBe("deny");
+  });
+
+  test("a scoped writer with a read-only grant stays exempt, as any read-only role is", () => {
+    expect(requiresIsolation("scoped-readonly", scopedDir)).toBe(false);
+  });
+
+  // No source documents a grant for a built-in named web-fetch, so it is an unknown type.
+  test("web-fetch with no def file is an unknown type and requires isolation", () => {
+    expect(requiresIsolation("web-fetch", join(scopedDir, "no-such-dir"))).toBe(true);
+  });
+
+  test("a web-fetch.md def granting Write requires isolation", () => {
+    expect(requiresIsolation("web-fetch", scopedDir)).toBe(true);
+  });
+});
+
+describe("requiresIsolation() — the tools key is read as Claude Code reads it, case-sensitively", () => {
+  test.each([
+    ["scoped-key-title", "Tools:"],
+    ["scoped-key-upper", "TOOLS:"],
+  ])("a def whose grant key is %s (%s) inherits every tool, so it requires isolation", (type) => {
+    expect(requiresIsolation(type, scopedDir)).toBe(true);
+  });
+
+  test.each([["readonly-key-title"], ["readonly-key-upper"]])(
+    "%s: a read-only list under a differently cased key is not a grant, so it requires isolation",
+    (type) => {
+      expect(requiresIsolation(type, scopedDir)).toBe(true);
+    },
+  );
+
+  test("the lowercase key keeps working for a read-only role", () => {
+    expect(requiresIsolation("scoped-readonly", scopedDir)).toBe(false);
+  });
+
+  test("a cased line does not hide or replace the lowercase grant", () => {
+    expect(requiresIsolation("key-both", scopedDir)).toBe(false);
+  });
+});
+
+// --- frontmatter fences are whole lines ----------------------------------------------------------
+//
+// A fence is a line that is three dashes and nothing else (trailing whitespace allowed). A line that
+// merely STARTS with three dashes is not a fence, and Claude Code does not close the block there.
+// If the gate closed on it, a `tools: Read` placed before the real closing fence would decide the
+// classification while Claude Code reads a different block. Any such line, or a missing close, means
+// the block cannot be read with confidence, so the type requires isolation.
+
+describe("requiresIsolation() — frontmatter fences must be whole lines", () => {
+  const fenceDir = mkdtempSync(join(tmpdir(), "worktree-gate-fence-"));
+  scratchDirs.push(fenceDir);
+  const NL = String.fromCharCode(10);
+  const CRLF = String.fromCharCode(13) + NL;
+  function def(type: string, text: string) {
+    writeFileSync(join(fenceDir, `${type}.md`), text);
+  }
+  // The honest block: a read-only grant. Its baseline must stay exempt in every spelling that is a
+  // real fence, so the refusals below are about the odd line and not about the grant.
+  const okLines = ["---", "name: ok", "tools: Read, Grep", "---", "Body."];
+  def("fence-ok", okLines.join(NL));
+  def("fence-ok-crlf", okLines.join(CRLF));
+  def("fence-ok-spaces", ["--- ", "name: ok", "tools: Read, Grep", "---  ", "Body."].join(NL));
+
+  // A read-only line sits before a dash-led line, and the real grant (Write) comes after it.
+  def("fence-four-dashes", ["---", "name: x", "tools: Read", "----", "tools: Read, Write, Bash", "---", "Body."].join(NL));
+  def("fence-dash-x", ["---", "name: x", "tools: Read", "---x", "tools: Read, Write, Bash", "---", "Body."].join(NL));
+  def("fence-dash-text", ["---", "name: x", "tools: Read", "--- not a fence", "tools: Read, Write, Bash", "---", "Body."].join(NL));
+  // Same, but the dash-led line is the last thing before the real close.
+  def("fence-dash-before-close", ["---", "name: x", "tools: Read", "----", "---", "Body."].join(NL));
+  def("fence-no-close", ["---", "name: x", "tools: Read, Grep", "Body with no closing fence."].join(NL));
+  def("fence-no-close-dash", ["---", "name: x", "tools: Read, Grep", "---x", "Body."].join(NL));
+  def("fence-bom", String.fromCharCode(0xfeff) + okLines.join(NL));
+  def("fence-open-dashes", ["----", "name: x", "tools: Read, Grep", "---", "Body."].join(NL));
+  // JS \s matches Unicode whitespace, but a fence is ASCII spaces and tabs only. A no-break space or
+  // a zero-width no-break space (U+FEFF) after the dashes is not a fence, so Claude Code would not
+  // open or close there.
+  const NBSP = String.fromCharCode(0xa0);
+  const ZWNBSP = String.fromCharCode(0xfeff);
+  def("fence-ok-tab", ["---\t", "name: ok", "tools: Read, Grep", "--- \t ", "Body."].join(NL));
+  def("fence-open-nbsp", ["---" + NBSP, "name: x", "tools: Read, Grep", "---", "Body."].join(NL));
+  def("fence-open-zwnbsp", ["---" + ZWNBSP, "name: x", "tools: Read, Grep", "---", "Body."].join(NL));
+  def("fence-close-nbsp", ["---", "name: x", "tools: Read, Grep", "---" + NBSP, "Body."].join(NL));
+  def("fence-close-zwnbsp", ["---", "name: x", "tools: Read, Grep", "---" + ZWNBSP, "Body."].join(NL));
+  // A real close after the odd line does not rescue the block.
+  def("fence-close-nbsp-then-real", ["---", "name: x", "tools: Read, Grep", "---" + NBSP, "---", "Body."].join(NL));
+
+  test.each(["fence-ok", "fence-ok-crlf", "fence-ok-spaces", "fence-ok-tab"])("%s: a read-only grant between real fences is exempt", (type) => {
+    expect(requiresIsolation(type, fenceDir)).toBe(false);
+  });
+
+  test.each([
+    ["fence-four-dashes", "a ---- line inside the block"],
+    ["fence-dash-x", "a ---x line inside the block"],
+    ["fence-dash-text", "a dash-led line with text inside the block"],
+    ["fence-dash-before-close", "a ---- line just before the real close"],
+    ["fence-no-close", "no closing fence"],
+    ["fence-no-close-dash", "no closing fence and a dash-led line"],
+    ["fence-bom", "a leading byte order mark"],
+    ["fence-open-dashes", "an opening line of four dashes"],
+    ["fence-open-nbsp", "a no-break space after the opening fence"],
+    ["fence-open-zwnbsp", "a U+FEFF after the opening fence"],
+    ["fence-close-nbsp", "a no-break space after the closing fence"],
+    ["fence-close-zwnbsp", "a U+FEFF after the closing fence"],
+    ["fence-close-nbsp-then-real", "a no-break-space fence line before the real close"],
+  ])("%s (%s): requires isolation", (type) => {
+    expect(requiresIsolation(type, fenceDir)).toBe(true);
+  });
+
+  test("a dispatch of such a type is denied end to end", () => {
+    const d = { tool_name: "Agent", tool_input: { subagent_type: "fence-dash-x", prompt: "go" } };
+    expect(decide(d, fenceDir, "/p", () => "repo").action).toBe("deny");
+  });
+});
+
+// --- spawned process: the #310 entrypoint behaviour ----------------------------------------------
+
+const GP = (cwd?: string) =>
+  JSON.stringify({
+    tool_name: "Agent",
+    tool_input: { subagent_type: "general-purpose", prompt: "do a thing" },
+    ...(cwd === undefined ? {} : { cwd }),
+  });
+
+describe("spawned process — project root and git probe (#310)", () => {
+  test("project root a repo, payload cwd a non-git dir: deny JSON", () => {
+    const repo = gitTmpRoot("wg-spawn-repo-");
+    const plain = tmpRoot("wg-spawn-plain-");
+    const result = runHook(GP(plain), { CLAUDE_PROJECT_DIR: repo });
+    expect(result.exitCode).toBe(0);
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+  });
+
+  test.skipIf(TMP_UNDER_GIT)("project root not a git repo: allow with systemMessage and additionalContext, no permissionDecision", () => {
+    const plain = tmpRoot("wg-spawn-nongit-");
+    const result = runHook(GP(), { CLAUDE_PROJECT_DIR: plain });
+    expect(result.exitCode).toBe(0);
+    const parsed = JSON.parse(result.stdout);
+    const note = nonGitNote(plain);
+    expect(parsed.systemMessage).toBe(note);
+    expect(parsed.hookSpecificOutput.hookEventName).toBe("PreToolUse");
+    expect(parsed.hookSpecificOutput.additionalContext).toBe(note);
+    expect("permissionDecision" in parsed.hookSpecificOutput).toBe(false);
+    expect(result.stderr).toBe("");
+  });
+
+  test.skipIf(TMP_UNDER_GIT)("GIT_DIR in the environment makes the same non-git root a repo: deny", () => {
+    const plain = tmpRoot("wg-spawn-gitdir-");
+    const result = runHook(GP(), { CLAUDE_PROJECT_DIR: plain, GIT_DIR: join(plain, "x") });
+    expect(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
   });
 });

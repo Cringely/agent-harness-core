@@ -5,16 +5,17 @@
 // it mints lives in the caller's memory for one run and is never written to disk.
 //
 // Permissions. Every run reads the App's configured permissions with the JWT and refuses to continue
-// if the App holds anything outside #120's three, so an App widened later in the GitHub UI stops the
-// tool rather than silently lending it the new reach. The token request names the two permissions
-// the tool uses, and the granted set is checked again. The minted token is also checked against the
-// one repository it was requested for: GitHub docs describe an installation token as narrowed by
-// `repositories`, and this tool refuses one that comes back describing more than that. Check runs,
-// issues, issue comments and pull request files on this public repository are read under GitHub's
+// if the App holds anything outside the allowlist below, so an App widened later in the GitHub UI
+// stops the tool rather than silently lending it the new reach. The token request names the three
+// permissions the tool uses, and the granted set is checked again. The minted token is also checked
+// against the one repository it was requested for: GitHub docs describe an installation token as
+// narrowed by `repositories`, and this tool refuses one that comes back describing more than that.
+// Issues, issue comments and pull request files on a public repository are read under GitHub's
 // documented allowance ("can be used without authentication or the aforementioned permissions if
-// only public resources are requested"), so no checks or issues permission is requested. A 403 from
-// one of those endpoints in the live smoke test is the evidence that would add one, and it gets
-// recorded first.
+// only public resources are requested"), so no issues permission is requested. Check runs are the
+// exception (#314): on a private repository the check-runs listing returns 403 "Resource not
+// accessible by integration" without checks: read, so the App holds it and every token requests it,
+// at read only.
 //
 // Every fetch in this file carries either the App JWT or the request that mints the installation
 // token, so every one of them passes `redirect: "error"`: whether Bun strips the Authorization
@@ -37,15 +38,17 @@ export const APP_PERMISSION_ALLOWLIST: Readonly<Record<string, "read" | "write">
   pull_requests: "write",
   contents: "write",
   metadata: "read",
+  checks: "read",
 };
 
 export const TOKEN_PERMISSION_ALLOWLIST: Readonly<Record<string, "read" | "write">> = {
   pull_requests: "write",
   contents: "read",
   metadata: "read",
+  checks: "read",
 };
 
-export const TOKEN_PERMISSIONS = { pull_requests: "write", contents: "read" } as const;
+export const TOKEN_PERMISSIONS = { pull_requests: "write", contents: "read", checks: "read" } as const;
 
 export function githubHeaders(authorization: string): Record<string, string> {
   return {

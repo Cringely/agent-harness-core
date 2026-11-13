@@ -73,6 +73,5 @@ the way `agent-worktree-gate.ts` denies an unisolated write dispatch today. That
 written somewhere the coordinator's dispatch calls actually populate (a rejection event, at
 minimum: artifact ID, rejected author, timestamp), which means it needs either a reviewer role
 that writes the record on REVISE, or a hook on the dispatch call that can infer authorship from
-the transcript the way `review-gate.ts` already infers dispatch-vs-inline from the same source for
-its own unreviewed-edit check. Neither exists yet; this section names the shape of the fix, not
+the transcript. Neither exists yet; this section names the shape of the fix, not
 code that runs today.

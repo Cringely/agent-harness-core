@@ -59,6 +59,21 @@ describe("loadIdentity()", () => {
     expect(result.ok && result.declared && result.decl.names).toEqual(["Fixture Person"]);
   });
 
+  // Issue #91, operator ruling 2026-11-11: absent names refuses, explicit empty names passes.
+  test("no names key: refused, even with emails declared", () => {
+    expect(load(home(JSON.stringify({ emails: ["fixture@example.test"] }))).ok).toBe(false);
+  });
+
+  test("explicit empty names with emails declared: accepted", () => {
+    const result = load(home(JSON.stringify({ names: [], emails: ["fixture@example.test"] })));
+    expect(result.ok && result.declared).toBe(true);
+  });
+
+  test("populated names with no emails key: accepted", () => {
+    const result = load(home(JSON.stringify({ names: ["Fixture Person"] })));
+    expect(result.ok && result.declared).toBe(true);
+  });
+
   test.each([
     ["not JSON", "{names:"],
     ["a JSON array", "[]"],
@@ -194,19 +209,19 @@ describe("loadIdentity()", () => {
   // pass every one of them.
   describe("accountEmail is never derived from the identity file's own declared emails", () => {
     test("identity file declares an email, no account state at all: false", () => {
-      const result = load(home(JSON.stringify({ emails: ["fixture@example.test"] })));
+      const result = load(home(JSON.stringify({ names: [], emails: ["fixture@example.test"] })));
       expect(result.ok && result.accountEmail).toBe(false);
     });
 
     test("same file, account state present but its emailAddress is not a string: false", () => {
       const result = load(
-        home(JSON.stringify({ emails: ["fixture@example.test"] }), JSON.stringify({ oauthAccount: { emailAddress: 7 } })),
+        home(JSON.stringify({ names: [], emails: ["fixture@example.test"] }), JSON.stringify({ oauthAccount: { emailAddress: 7 } })),
       );
       expect(result.ok && result.accountEmail).toBe(false);
     });
 
     test("same file, valid account state: true", () => {
-      const result = load(home(JSON.stringify({ emails: ["fixture@example.test"] }), ACCOUNT_STATE));
+      const result = load(home(JSON.stringify({ names: [], emails: ["fixture@example.test"] }), ACCOUNT_STATE));
       expect(result.ok && result.accountEmail).toBe(true);
     });
   });

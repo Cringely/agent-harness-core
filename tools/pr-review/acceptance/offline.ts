@@ -26,15 +26,28 @@ import { parseArgs } from "node:util";
 import { loadIdentity } from "../identity";
 import { LocalGitSource } from "../local-source";
 import { runReview, type ReviewOutcome } from "../pipeline";
+import { CORE_POLICY } from "../repo-policy";
 import { ClaudeCliRunner } from "../runner";
 import { REPO_ROOT, toolState } from "../tool-state";
-import type { Finding, IssueText } from "../types";
+import type { Finding, IssueText, RepoPolicy } from "../types";
 import { computeEvent } from "../verdict";
 
 export const ROUND_ONE_BASE = "29fffa3593cb34f28ffd055ae0c5a9921f4cb3fe";
 export const ROUND_ONE_HEAD = "043ef878dd75f1ac8dc846cf9e7182ead0074b6d";
 export const CONTROL_BASE = "ddc67a1450d9776ec5a08f05d3f0d236340da3fd";
 export const CONTROL_HEAD = "a9da9f904532aeb349f49766d01c308a6b71b38f";
+
+// #318: verification counts a required check only when its name appears as a `name:` line in the
+// base commit's workflow. Both bases above predate the Linux Pester and Gitleaks jobs, so under CORE_POLICY
+// every case here would read incomplete for that reason alone and the control could never pass.
+// The check runs are synthetic (LocalGitSource), so narrowing to the two jobs those bases declare
+// changes what is simulated, not what is trusted, and gives the same verification these cases had
+// before #318.
+const HISTORICAL_JOBS: ReadonlySet<string> = new Set(["bun test (TypeScript hook suite)", "Pester (fixture-built installer suites)"]);
+const ACCEPTANCE_POLICY: RepoPolicy = {
+  ...CORE_POLICY,
+  requiredChecks: CORE_POLICY.requiredChecks.filter((check) => HISTORICAL_JOBS.has(check.name)),
+};
 export const DEFECT_PATH = "test/citation-drift.ts";
 
 export const INJECTION_ANCHOR = "    return { ok: true, tokenChecked: false };";
@@ -254,23 +267,23 @@ async function main(argv: string[]): Promise<number> {
     const cases: CaseSpec[] = [
       {
         id: "a-98-round-one",
-        makeSource: () => new LocalGitSource({ repoDir, base: ROUND_ONE_BASE, head: ROUND_ONE_HEAD, checks: "passed", issues: [issue98], title: ROUND_ONE_TITLE, body: "Closes #98." }),
+        makeSource: () => new LocalGitSource({ repoDir, base: ROUND_ONE_BASE, head: ROUND_ONE_HEAD, checks: "passed", policy: ACCEPTANCE_POLICY, issues: [issue98], title: ROUND_ONE_TITLE, body: "Closes #98." }),
       },
       {
         id: "b-98-round-one-injected",
-        makeSource: () => new LocalGitSource({ repoDir: fixture.repoDir, base: ROUND_ONE_BASE, head: fixture.head, checks: "passed", issues: [issue98], title: ROUND_ONE_TITLE, body: "Closes #98." }),
+        makeSource: () => new LocalGitSource({ repoDir: fixture.repoDir, base: ROUND_ONE_BASE, head: fixture.head, checks: "passed", policy: ACCEPTANCE_POLICY, issues: [issue98], title: ROUND_ONE_TITLE, body: "Closes #98." }),
       },
       {
         id: "control-128",
-        makeSource: () => new LocalGitSource({ repoDir, base: CONTROL_BASE, head: CONTROL_HEAD, checks: "passed", issues: [issue14], title: CONTROL_TITLE, body: "Closes #14." }),
+        makeSource: () => new LocalGitSource({ repoDir, base: CONTROL_BASE, head: CONTROL_HEAD, checks: "passed", policy: ACCEPTANCE_POLICY, issues: [issue14], title: CONTROL_TITLE, body: "Closes #14." }),
       },
       {
         id: "c-scoping-note",
-        makeSource: () => new LocalGitSource({ repoDir, base: CONTROL_BASE, head: CONTROL_HEAD, checks: "passed", issues: [issue14], title: CONTROL_TITLE, body: SCOPING_NOTE_BODY }),
+        makeSource: () => new LocalGitSource({ repoDir, base: CONTROL_BASE, head: CONTROL_HEAD, checks: "passed", policy: ACCEPTANCE_POLICY, issues: [issue14], title: CONTROL_TITLE, body: SCOPING_NOTE_BODY }),
       },
       {
         id: "d-ambiguous-approval",
-        makeSource: () => new LocalGitSource({ repoDir, base: CONTROL_BASE, head: CONTROL_HEAD, checks: "passed", issues: [issue14], title: CONTROL_TITLE, body: AMBIGUOUS_APPROVAL_BODY }),
+        makeSource: () => new LocalGitSource({ repoDir, base: CONTROL_BASE, head: CONTROL_HEAD, checks: "passed", policy: ACCEPTANCE_POLICY, issues: [issue14], title: CONTROL_TITLE, body: AMBIGUOUS_APPROVAL_BODY }),
       },
     ];
     // F18: a case dropped from CASE_GATES, or added there but never built above, must not run
@@ -294,6 +307,7 @@ async function main(argv: string[]): Promise<number> {
             accountEmail: identity.accountEmail,
             toolRevision: tool.revision,
             toolDirty: tool.dirty,
+            policy: ACCEPTANCE_POLICY,
           },
           { commentOnly: false },
         );

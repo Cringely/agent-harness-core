@@ -118,6 +118,9 @@ const rows: Row[] = [
     hook: "agent-worktree-gate.ts",
     run(mode) {
       const dir = tempDir("standdown-wt-");
+      // A project root that is a git repository, so the gate's non-git allow does not apply and the
+      // dispatch is refused as before. The probe only looks for a `.git` entry.
+      mkdirSync(join(dir, ".git"));
       const r = spawn(bunHook(this.hook), dir, childEnv(mode, { CLAUDE_PROJECT_DIR: dir }), dispatchPayload);
       return { ...r, effect: false };
     },
@@ -175,35 +178,6 @@ const rows: Row[] = [
     acted(r) {
       expect(r.exitCode).toBe(0);
       expect(r.stderr).toContain("lint-doc-prose:");
-    },
-  },
-  {
-    hook: "review-gate.ts",
-    run(mode) {
-      const dir = gitRepo("standdown-rg-");
-      writeFileSync(join(dir, "changed.txt"), "v2\n");
-      git(["add", "changed.txt"], dir);
-      const transcript = join(tempDir("standdown-rg-transcript-"), "t.jsonl");
-      const edit = {
-        type: "assistant",
-        message: {
-          role: "assistant",
-          content: [{ type: "tool_use", name: "Write", input: { file_path: join(dir, "changed.txt") } }],
-        },
-      };
-      writeFileSync(transcript, JSON.stringify(edit) + "\n");
-      const payload = JSON.stringify({
-        tool_name: "Bash",
-        tool_input: { command: "git commit -m test" },
-        cwd: dir,
-        transcript_path: transcript,
-      });
-      const r = spawn(bunHook(this.hook), dir, childEnv(mode, { CLAUDE_PROJECT_DIR: dir }), payload);
-      return { ...r, effect: false };
-    },
-    acted(r) {
-      expect(r.exitCode).toBe(0);
-      expect(JSON.parse(r.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
     },
   },
   {
