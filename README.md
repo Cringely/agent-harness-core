@@ -364,6 +364,9 @@ One direction. Config is authored in `~/.claude/` on the canonical workstation, 
 `account/claude/` here, and consumed elsewhere. A divergence on a receiving machine is a bug
 rather than a fork to keep.
 
+The account layer carries the kernel, the rules that apply in every project. Code-layer rules ship
+from `core/claude/rules` and reach a project through `Install-Harness.ps1`.
+
 ### Keeping one machine's specifics out of the payload
 
 The published payload is meant to be usable by someone who is not its author, so it should not name

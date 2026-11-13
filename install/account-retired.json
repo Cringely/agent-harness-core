@@ -1,1 +1,6 @@
-{ "schemaVersion": 1, "retired": [] }
+{
+  "schemaVersion": 1,
+  "retired": [
+    { "path": "rules/fix-quality.md", "reason": "Split: the code-repo rules moved to core/claude/rules and the review-termination rule to rules/bounded-review.md." }
+  ]
+}

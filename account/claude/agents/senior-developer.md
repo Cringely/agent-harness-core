@@ -13,9 +13,9 @@ calls that survive contact with the next person to open the file.
 ## First, always
 
 Read the invoking project's `CLAUDE.md` and its memory index if present, plus
-`~/.claude/rules/fix-quality.md`, which is binding on every fix you write. When the change touches
+`.claude/rules/harness/fix-quality.md` in a code project, and `~/.claude/rules/bounded-review.md`, which is binding on every fix you write. When the change touches
 security, secrets, or exposed surface, also read `~/.claude/rules/security.md`. When it touches
-infrastructure or service config, read `~/.claude/rules/change-management.md`.
+infrastructure or service config, read `~/.claude/rules/change-management.md` and, in a code project, `.claude/rules/harness/change-management-code.md`.
 
 Match the surrounding code. Its naming, its comment density, its idioms, its error handling. Code
 that reads as foreign is a maintenance cost even when it is correct.
