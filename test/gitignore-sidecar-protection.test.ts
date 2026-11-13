@@ -36,7 +36,7 @@
 // future case, not as anything currently discriminating: a case reaching it with the sidecar
 // still on disk and its ignore state unproven is what it exists to catch.
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import {
   appendFileSync,
   copyFileSync,
@@ -45,7 +45,9 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
@@ -88,6 +90,11 @@ const GIT_ISOLATION_ENV: Record<string, string> = {
 };
 
 const tempDirs: string[] = [];
+
+// GIT_ISOLATION_DIR is made at module load, outside tempDirs, so afterEach never reaches it.
+afterAll(() => {
+  rmSync(GIT_ISOLATION_DIR, { recursive: true, force: true });
+});
 
 afterEach(() => {
   while (tempDirs.length > 0) {
@@ -193,40 +200,93 @@ if (!dubiousOwnershipSupported) {
   );
 }
 
-// F4's case needs the SPAWNED PWSH to genuinely be unable to find git, which needs confirming
-// rather than assuming a PATH-strip worked. Filters every PATH entry whose name mentions "git"
-// (not only the single directory `Bun.which` resolves) because this host's ambient PATH and the
-// one Bun itself resolves an executable against can disagree (measured: Bun.which("git") named
-// .../Git/mingw64/bin while Windows' own command resolution used .../Git/cmd, so stripping only
-// the former left git reachable) -- and the self-check itself spawns pwsh, not git directly,
-// because Bun's own child-process executable lookup was measured to ignore the `env.PATH`
-// override and fall back to the calling process's real PATH, while PowerShell's own internal
-// command resolution genuinely honors the environment block of the process it's running in.
-// Probing through git directly would then report "hidden" success or failure that has nothing
-// to do with whether the real F4 case below (which also spawns pwsh) can reproduce it.
-const strippedPath = (process.env.PATH ?? "")
-  .split(delimiter)
-  .filter((p) => p && !/git/i.test(p))
-  .join(delimiter);
-const gitTrulyHidden = (() => {
+// True only when a pwsh started under `pathValue` ran and could not resolve git. A pwsh that
+// failed to start prints nothing, so it reads as "not hidden" and the cases skip, rather than
+// reading a crash as success.
+function gitHiddenUnder(pathValue: string): boolean {
   if (!pwshPath) return false;
   try {
     const probe = Bun.spawnSync(
-      [pwshPath, "-NoProfile", "-NonInteractive", "-Command", "& git --version"],
-      { env: { ...process.env, PATH: strippedPath }, stdout: "ignore", stderr: "ignore" },
+      [pwshPath, "-NoProfile", "-NonInteractive", "-Command", "try { & git --version | Out-Null; 'found' } catch { 'hidden' }"],
+      { env: { ...process.env, PATH: pathValue }, stdout: "pipe", stderr: "ignore" },
     );
-    return probe.exitCode !== 0;
+    return probe.stdout.toString().trim() === "hidden";
   } catch {
-    return true;
+    return false;
+  }
+}
+
+// A PATH under which the spawned pwsh genuinely cannot find git, or undefined when none could
+// be built. First try: drop every entry whose name mentions "git" (not only the directory
+// `Bun.which` resolves, because that and Windows' own command resolution disagreed on this host:
+// .../Git/mingw64/bin versus .../Git/cmd). That works where git lives in its own directory, as
+// on Windows. On Linux git sits in /usr/bin beside everything else, so nothing can be stripped,
+// and the fallback is a PATH of one directory holding only symlinks to the tools below (#141:
+// without it the git-missing cases skipped on CI and no run ever exercised them). The probe
+// spawns pwsh rather than git because Bun's own executable lookup was measured to ignore an
+// `env.PATH` override, while PowerShell's command resolution honors the environment block of
+// the process it runs in.
+//
+// The binDir needs more than pwsh: on a non-Windows host the installer runs `chmod +x` on the
+// git hooks before it writes settings.json and the manifest (Install-Harness.ps1, the
+// `if (-not $IsWindows)` hook loop), and a missing chmod is a CommandNotFoundException under
+// $ErrorActionPreference = 'Stop', which would exit F4 with 1 for a reason unrelated to git.
+// Any other native command the installer gains on that path has to be added here too.
+export function gitFreeBinTools(
+  pwsh: string,
+  which: (name: string) => string | null,
+): Array<[string, string]> | undefined {
+  const tools: Array<[string, string]> = [["pwsh", pwsh]];
+  for (const name of ["chmod"]) {
+    const found = which(name);
+    if (!found) return undefined;
+    tools.push([name, found]);
+  }
+  return tools;
+}
+
+const gitFreePath: string | undefined = (() => {
+  if (!pwshPath) return undefined;
+  const stripped = (process.env.PATH ?? "")
+    .split(delimiter)
+    .filter((p) => p && !/git/i.test(p))
+    .join(delimiter);
+  if (gitHiddenUnder(stripped)) return stripped;
+  if (process.platform === "win32") return undefined;
+  try {
+    const tools = gitFreeBinTools(pwshPath, (name) => Bun.which(name) ?? null);
+    if (!tools) return undefined;
+    const binDir = join(GIT_ISOLATION_DIR, "no-git-bin");
+    mkdirSync(binDir);
+    for (const [name, target] of tools) symlinkSync(realpathSync(target), join(binDir, name));
+    return gitHiddenUnder(binDir) ? binDir : undefined;
+  } catch {
+    return undefined;
   }
 })();
-if (!gitTrulyHidden) {
+if (!gitFreePath) {
   console.warn(
     "gitignore-sidecar-protection.test.ts: could not hide git from a child process's PATH on " +
-      "this host; F4's git-missing case is skipped here (confirmed working on the Windows " +
-      "workstation this fix round was validated on).",
+      "this host; the git-missing cases (F4, R2-2) are skipped here.",
   );
 }
+
+// The git-missing cases run the installer against a deps manifest that declares nothing. With
+// the real core/claude/deps.json, the dependency preflight refuses a run without git before any
+// write (git is hard for the code layer, Git Bash for the kernel on Windows, and bun is absent
+// from the Linux bin directory above), so the cases would test the preflight instead of the
+// sidecar and hooksPath steps they exist for. The preflight has its own suite.
+const NO_DEPS_MANIFEST = join(GIT_ISOLATION_DIR, "no-deps.json");
+writeFileSync(NO_DEPS_MANIFEST, JSON.stringify({ schemaVersion: 1, deps: [] }));
+const GIT_FREE_ARGS = ["-DepsManifestPath", NO_DEPS_MANIFEST];
+
+// The skips above are for a developer host. On CI the git-missing cases must run, so a CI image
+// that loses pwsh, chmod or the symlink trick fails here instead of going green with F4 and R2-2
+// skipped.
+test.if(!!process.env.CI)("git-missing cases can run on CI (pwsh found, git hideable)", () => {
+  expect(pwshPath).toBeTruthy();
+  expect(gitFreePath).toBeTruthy();
+});
 
 describe("sidecar gitignore protection", () => {
   // (a) No pre-existing .claude/.gitignore: the installer plants core's template fresh, so the
@@ -503,21 +563,43 @@ describe("sidecar gitignore protection — round 2 findings", () => {
   // F4: git missing from PATH must fail the sidecar closed without throwing out of
   // Get-SidecarPlan. settings.json and the committed manifest are written by the caller
   // afterward and must not be lost just because git could not be asked.
-  test.skipIf(!pwshPath || !gitTrulyHidden)(
+  test.skipIf(!pwshPath || !gitFreePath)(
     "(F4) git missing from PATH: sidecar refused cleanly, settings.json and the manifest are still written",
     () => {
       const dir = freshRepo();
       mkdirSync(join(dir, ".claude"), { recursive: true });
       writeFileSync(join(dir, GITIGNORE_REL), "sentinel-keep-me\n");
 
-      const result = runInstall(dir, [], { extraEnv: { PATH: strippedPath! } });
-      // Exit code is deliberately not asserted: a separate, pre-existing, unguarded git call
-      // later in the script (core.hooksPath wiring, outside this fix's scope) also fails when
-      // git is missing and takes the overall exit code nonzero -- but only after settings.json
-      // and the manifest below are already on disk, which is what this case exists to pin.
+      const result = runInstall(dir, GIT_FREE_ARGS, { extraEnv: { PATH: gitFreePath! } });
+      // Exit 0: the core.hooksPath wiring's own git call used to throw here, after settings.json
+      // and the manifest were written, and take the run to exit 1 (#141).
+      expect(result.exitCode).toBe(0);
       expect(result.stdout.toString()).toContain("Skipping the machine-specific sidecar");
+      // The target is a repository and its hooks could not be wired, so the run says so rather
+      // than finishing as if they were in place.
+      const output = result.stdout.toString() + result.stderr.toString();
+      expect(output).toContain("core.hooksPath was NOT wired");
+      expect(output).toContain("FAILED (git not on PATH) - hook not wired");
       expect(sidecarExists(dir)).toBe(false);
       expect(existsSync(join(dir, ".claude", "settings.json"))).toBe(true);
+      expect(existsSync(join(dir, MANIFEST_REL))).toBe(true);
+    },
+    INSTALL_TIMEOUT_MS,
+  );
+
+  // F4, outside a repository: with no .git anywhere above the target there is nothing to wire,
+  // so a missing git is the same silent no-op as a git that answers "not a repository".
+  test.skipIf(!pwshPath || !gitFreePath)(
+    "(F4) git missing from PATH, target not in a repository: exit 0 and no hooksPath warning",
+    () => {
+      const dir = mkdtempSync(join(tmpdir(), "gitignore-sidecar-norepo-"));
+      tempDirs.push(dir);
+
+      const result = runInstall(dir, GIT_FREE_ARGS, { extraEnv: { PATH: gitFreePath! } });
+      expect(result.exitCode).toBe(0);
+      const output = result.stdout.toString() + result.stderr.toString();
+      expect(output).not.toContain("core.hooksPath was NOT wired");
+      expect(output).not.toContain("git:core.hooksPath");
       expect(existsSync(join(dir, MANIFEST_REL))).toBe(true);
     },
     INSTALL_TIMEOUT_MS,
@@ -616,7 +698,7 @@ describe("sidecar gitignore protection — round 2 findings", () => {
       expect(existsSync(join(dir, MANIFEST_REL))).toBe(true);
 
       const hook = runHook(dir);
-      const expected = "harness: sidecar unavailable, machine-specific checks skipped (see -Audit)\n";
+      const expected = "harness: sidecar unavailable, machine-specific checks skipped (re-run the installer for the reason)\n";
       expect(hook.stdout.toString()).toBe(expected);
       expect(hook.stdout.length).toBe(Buffer.byteLength(expected));
       expect(hook.stderr.length).toBe(0);
@@ -648,7 +730,7 @@ describe("sidecar gitignore protection — round 2 findings", () => {
   // check, so the F9 advisory above went silent. Case A pins the advisory; case B pins that
   // legacy fields carried forward from the manifest are still written.
   const FIXTURE_COMMIT = ["-c", "core.hooksPath=NUL", "-c", "user.name=Test", "-c", "user.email=test@example.com"];
-  const F9_ADVISORY = "harness: sidecar unavailable, machine-specific checks skipped (see -Audit)" + String.fromCharCode(10);
+  const F9_ADVISORY = "harness: sidecar unavailable, machine-specific checks skipped (re-run the installer for the reason)" + String.fromCharCode(10);
 
   /** Plain install, .claude/.gitignore committed and confirmed ignoring, sidecar deleted. */
   function installedCommittedNoSidecar(): string {
@@ -812,7 +894,7 @@ describe("sidecar gitignore protection — round 3 findings (R2-1, R2-2)", () =>
   // the tracked-check at all because nothing exists yet to delete on a first install. Every git
   // call the tracked-check makes throws, so this must refuse the whole run rather than guess:
   // non-zero exit, the sidecar (and everything else this run would have written) untouched.
-  test.skipIf(!pwshPath || !gitTrulyHidden)(
+  test.skipIf(!pwshPath || !gitFreePath)(
     "(R2-2) git missing from PATH, with a real stale sidecar already on disk: whole run refused, file byte-identical",
     () => {
       const dir = freshRepo();
@@ -826,7 +908,7 @@ describe("sidecar gitignore protection — round 3 findings (R2-1, R2-2)", () =>
       const manifestBefore = readFileSync(join(dir, MANIFEST_REL));
       const settingsBefore = readFileSync(join(dir, ".claude", "settings.json"));
 
-      const result = runInstall(dir, [], { extraEnv: { PATH: strippedPath! } });
+      const result = runInstall(dir, GIT_FREE_ARGS, { extraEnv: { PATH: gitFreePath! } });
       expect(result.exitCode).not.toBe(0);
       const combined = result.stdout.toString() + result.stderr.toString();
       expect(combined).toContain("Refusing to touch the machine-specific sidecar");
@@ -1261,4 +1343,93 @@ describe("sidecar gitignore protection — round 7 findings (issue #153)", () =>
     },
     INSTALL_TIMEOUT_MS,
   );
+});
+
+// #141: the manifest was built from unordered hashtables (and from [ordered] maps in a fixed,
+// unsorted order), so a no-op re-install could rewrite the committed file in a different key
+// order. Every map at every depth must come out sorted, and the check runs after each command
+// that writes the manifest, so reverting the sort at any one write site fails here. The
+// settings map is always built in a fixed order that is not sorted, so an unsorted write fails
+// deterministically rather than by hash-order chance.
+describe("manifest key order (#141)", () => {
+  /** Paths of every object in `value` whose keys are not in sorted order. */
+  function unsortedMaps(value: unknown, path = "$"): string[] {
+    if (Array.isArray(value)) return value.flatMap((v, i) => unsortedMaps(v, `${path}[${i}]`));
+    if (value === null || typeof value !== "object") return [];
+    const keys = Object.keys(value as Record<string, unknown>);
+    const own = keys.join("\n") === [...keys].sort().join("\n") ? [] : [path];
+    return own.concat(keys.flatMap((k) => unsortedMaps((value as Record<string, unknown>)[k], `${path}.${k}`)));
+  }
+
+  function readManifestRaw(dir: string): string {
+    return readFileSync(join(dir, MANIFEST_REL), "utf8");
+  }
+
+  test.skipIf(!pwshPath)(
+    "plain install writes every map sorted, and a no-op re-install leaves the manifest byte-identical",
+    () => {
+      const dir = freshRepo();
+      expect(runInstall(dir).exitCode).toBe(0);
+      const first = readManifestRaw(dir);
+      const parsed = JSON.parse(first);
+      expect(Object.keys(parsed.settings).length).toBeGreaterThan(1);
+      expect(unsortedMaps(parsed)).toEqual([]);
+
+      expect(runInstall(dir).exitCode).toBe(0);
+      expect(readManifestRaw(dir)).toBe(first);
+    },
+    INSTALL_TIMEOUT_MS * 2,
+  );
+
+  test.skipIf(!pwshPath)(
+    "-Accept, -Unaccept and -Prune each write every map sorted",
+    () => {
+      const dir = freshRepo();
+      expect(runInstall(dir).exitCode).toBe(0);
+      const agents = join(dir, ".claude", "agents");
+      mkdirSync(agents, { recursive: true });
+      writeFileSync(join(agents, "zz-b.md"), "fork b");
+      writeFileSync(join(agents, "zz-a.md"), "fork a");
+
+      // Added in reverse order, so an insertion-ordered accepted map would fail too.
+      expect(runInstall(dir, ["-Accept", "agents/zz-b.md"]).exitCode).toBe(0);
+      expect(unsortedMaps(JSON.parse(readManifestRaw(dir)))).toEqual([]);
+      expect(runInstall(dir, ["-Accept", "agents/zz-a.md"]).exitCode).toBe(0);
+      const accepted = JSON.parse(readManifestRaw(dir));
+      expect(Object.keys(accepted.accepted)).toEqual(["agents/zz-a.md", "agents/zz-b.md"]);
+      expect(unsortedMaps(accepted)).toEqual([]);
+
+      expect(runInstall(dir, ["-Unaccept", "agents/zz-b.md"]).exitCode).toBe(0);
+      expect(unsortedMaps(JSON.parse(readManifestRaw(dir)))).toEqual([]);
+
+      // An orphaned record core does not ship, so -Prune has something to drop.
+      const withOrphan = JSON.parse(readManifestRaw(dir));
+      withOrphan.files["agents/zz-orphan.md"] = "0".repeat(64);
+      writeFileSync(join(dir, MANIFEST_REL), JSON.stringify(withOrphan, null, 2));
+      expect(runInstall(dir, ["-Prune", "agents/zz-orphan.md"]).exitCode).toBe(0);
+      const pruned = JSON.parse(readManifestRaw(dir));
+      expect(pruned.files["agents/zz-orphan.md"]).toBeUndefined();
+      expect(unsortedMaps(pruned)).toEqual([]);
+    },
+    INSTALL_TIMEOUT_MS * 5,
+  );
+});
+
+// The Linux fallback PATH for the git-missing cases must carry every native command the
+// installer runs before it writes settings.json and the manifest, or those cases exit 1 for a
+// reason that has nothing to do with git (#141). The symlinking itself only happens off
+// Windows, so this pins the list, which is the part that can silently lose chmod.
+describe("git-free PATH fallback tools", () => {
+  test("carries pwsh and chmod, each pointed at its resolved binary", () => {
+    const found: Record<string, string> = { chmod: "/usr/bin/chmod" };
+    const tools = gitFreeBinTools("/opt/pwsh", (n) => found[n] ?? null);
+    expect(tools).toEqual([
+      ["pwsh", "/opt/pwsh"],
+      ["chmod", "/usr/bin/chmod"],
+    ]);
+  });
+
+  test("returns nothing when chmod cannot be resolved, so the cases skip instead of failing", () => {
+    expect(gitFreeBinTools("/opt/pwsh", () => null)).toBeUndefined();
+  });
 });
