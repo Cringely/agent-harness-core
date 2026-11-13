@@ -9,10 +9,7 @@ node_modules/
 # drift. Run the installer after cloning to get the hooks and agent defs.
 # Anchored to the repo root: unanchored, this would also ignore a `.claude/`
 # tree inside a test fixture, and the Pester suite already builds such trees.
-/.claude/*
-# Except the installed project rules: an isolated worktree agent reads rules from its own
-# tree, and a gitignored rules folder never reaches a worktree (#310, Task 11 live check).
-!/.claude/rules/
+/.claude/
 
 # Editor and script backups. change-management.md requires deleting a .bak once
 # the change it guards is stable, but nothing enforced that, and an untracked

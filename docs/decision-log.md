@@ -93,3 +93,10 @@ One entry per consequential choice, written when the choice is made. Roles only,
 - Rejected: pinning the unpatched build old enough for the 30-day rule. Dropping the Linux install and leaving install-by-hand guidance.
 - Accepted: a Linux git install resolves at run time to whatever the archive currently carries.
 - Drafted by: coordinator. Decided by: operator.
+
+## 2026-11-13: installed project rules stay gitignored (#310)
+
+- Choice: revert #330, so `.claude/rules/` in this repo goes back to being untracked installer output. A corrected live check showed isolated worktree agents already load the project rules without tracking them.
+- Rejected: keeping the tracked copies and teaching the installer to accept a tracked rule that matches core's source, which would add code for a case nothing needs.
+- Accepted: top-level `claude --worktree` sessions in this repo do not get the installed rules.
+- Drafted by: coordinator. Decided by: operator.
