@@ -64,3 +64,10 @@ One entry per consequential choice, written when the choice is made. Roles only,
 - Held: stage 2 (the homelab container), with its credential type and host, until the operator lifts the hold.
 - Rejected: keeping the October in-repository Actions design.
 - Drafted by: coordinator. Decided by: operator.
+
+## 2026-11-13: a required check binds only to this pull request's own CI run (#146)
+
+- Choice: a check run counts only as a job of a `pull_request` workflow run that comes from this repository and matches the pull request's head SHA and head ref. It must also be listed against the default branch, come from the only pull request ever opened from that branch, and be created after the pull request's last base change. Push-event runs no longer bind. Every bound run for a required check must succeed, and a cancelled run is excused only by a later success.
+- Rejected: binding on path, head SHA, event and head branch alone, because a second pull request into a writer-controlled base can pass for the real one. Binding on the run's `pull_requests` list alone was rejected because GitHub documents it as matching open pull requests, not the one that triggered the run.
+- Cost: a branch whose first pull request was closed cannot get `APPROVE` on a new pull request. The writer opens one from a new branch.
+- Drafted by: coordinator, from an App review finding. Decided by: coordinator, under the operator-approved spec. Flagged to the operator.
