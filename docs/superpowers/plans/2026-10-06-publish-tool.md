@@ -4275,6 +4275,9 @@ hand-run pipe would be drift."
 
 ### Task 11: Skill and deny rules through the account layer
 
+> **Superseded as built (2026-11-12).** The operator ruled on 2026-11-11 that the deny rules are project-scoped and that no user-wide rule ships through Install-Account. So Task 11 landed through the project installer instead of the steps below: `core/claude/templates/settings.permissions.json` holds the six rules, `install/Install-Harness.ps1` unions them into each project's `.claude/settings.json` and refuses before writing when the fragment or the project's permissions block cannot take them, and the skill ships at `core/claude/skills/publish/SKILL.md`, installed into `.claude/skills/publish/`. It names the tool through the project's `coreRepo` sidecar value rather than a folded path. `test/publish-permission-rule.test.ts` pins the fragment and the skill, and `install/Install-Harness.Tests.ps1` pins the merge and each refusal. The steps below record the account-layer route and are not to be run. The "Generated with" gate stays as built, by the same ruling.
+
+
 **Security-bearing:** yes. It writes the operator's live settings and distributes a permission rule.
 
 **Executor:** the coordinator, after the operator approves "Decisions for the operator before Task 11". Not a dispatched agent: this task edits the live account layer under `~/.claude/`, and `install/AccountShared.ps1`'s new row must land in the same commit as the export, because the exporter throws for a templated row whose file is absent (`install/Export-Account.ps1:804-861`).

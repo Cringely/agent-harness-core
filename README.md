@@ -14,7 +14,8 @@ The rule that keeps these from drifting into a mess: core is upstream. Projects 
 |---|---|
 | `core/claude/agents/` | Self-contained process roles `adversarial-reviewer`, `doc-steward`, `research-scout`, `soc-monitor`, `task-reviewer`. See `patterns/agent-def-shape.md` on why none point at a charter yet |
 | `core/claude/hooks/` | Worktree gate, write-scope gate, model-tier gate, session guardrails, drift check, wave-close handoff, prose-lint-on-write. `core/claude/templates/settings.hooks.json` is the list of Claude Code hooks that actually gets wired. This row goes stale, that file does not. The three git hooks in the same directory, `pre-commit`, `pre-push` and `commit-msg`, are wired a second way, through `core.hooksPath` (see Install) |
-| `core/claude/templates/` | `guardrails.template.md`, a settings fragment, a scratch `.gitignore` and `manifest-local.gitignore`, installed as `.claude/.gitignore` to keep the per-machine sidecar out of a commit, and `project-settings.template.md`, rendered into `.claude/rules/harness/project-settings.md`, all of which the installer applies on every run, a ceremony ledger template it applies only under `-IncludeCeremonies`, plus three reference templates it leaves in core: agent-def authoring, the reviewer-lockout protocol, and the untrusted-content boundary block |
+| `core/claude/templates/` | `guardrails.template.md`, two settings fragments (`settings.hooks.json` for the hooks, `settings.permissions.json` for the project-scoped deny of raw gh publishing), a scratch `.gitignore` and `manifest-local.gitignore`, installed as `.claude/.gitignore` to keep the per-machine sidecar out of a commit, and `project-settings.template.md`, rendered into `.claude/rules/harness/project-settings.md`, all of which the installer applies on every run, a ceremony ledger template it applies only under `-IncludeCeremonies`, plus three reference templates it leaves in core: agent-def authoring, the reviewer-lockout protocol, and the untrusted-content boundary block |
+| `core/claude/skills/` | Skills the installer copies into a project's `.claude/skills/`. Today that is `publish`, which points every issue, pull request and merge at `tools/publish/` |
 | `core/claude/rules/` | Layer rule files and layers.json, which assigns each file to the code, documents or physical layer and defines the project settings. The installer copies the layers a project records into its .claude/rules/harness/ |
 | `core/claude/deps.json` | The dependencies the kernel and each layer rely on, tools and Claude Code plugins, each with its severity per layer, a probe, and a pinned install where one exists. Both installers read it on every run (see Install) |
 | `patterns/` | The design docs behind the above, listed in [`patterns/INDEX.md`](patterns/INDEX.md) |
@@ -152,6 +153,10 @@ replaces the repository's whole hooks directory, so the step is skipped, with th
 to run by hand, when `core.hooksPath` is already set, when `.git/hooks/` already holds a real hook, or
 when git does not answer for the target's own repository. The Claude Code hooks take the other path:
 `core/claude/templates/settings.hooks.json` is merged into the project's `.claude/settings.json`.
+So is `core/claude/templates/settings.permissions.json`, whose deny rules for raw `gh pr create`,
+`gh issue create` and `gh pr merge` are added to the project's own (#274). They stay in the project:
+the account installer ships no such rule. A fragment that cannot be read or lists no rule, or a
+project `permissions` block the rules cannot be added to, stops the install before it writes.
 
 ### The identity gate is off until you configure it
 
@@ -547,8 +552,8 @@ manual run before the PR can merge again.
 
 Merges go through `tools/publish/cli.ts review-merge`, which waits for CI, runs the App reviewer
 and merges only on what its merge rule allows, posting the bypass rationale itself when it uses the
-administrator bypass. The account layer denies raw `gh pr merge` in the Bash and PowerShell tools,
-which makes the tool the default route. It does not change the point above: the deny rule is
+administrator bypass. The project installer denies raw `gh pr merge` in the Bash and PowerShell tools
+of each project it installs into, which makes the tool the default route. It does not change the point above: the deny rule is
 policy, not enforcement, because `gh -R x pr merge`, `gh api` and `sh -c` are not matched, and an
 agent shell that can mint the operator's token can still run `gh pr merge --admin`.
 [`tools/publish/README.md`](tools/publish/README.md) has the commands and the merge rule.

@@ -44,12 +44,13 @@ Describe "Install-Harness" {
                 [hashtable]$OnAdd = @{}, [hashtable]$OnInstall = @{}, [string]$Head, [string]$ExtraRowJson,
                 [string[]]$Absent = @(), [string[]]$OnlyPresent, [switch]$FailUninstall, [switch]$UninstallLeavesIt,
                 [switch]$FailUpdate, [ValidateSet('', 'UntilUninstall', 'Always')][string]$ListBrokenAfterInstall = '',
-                [switch]$ListEmptyAfterUninstall, [string]$HeadAfterInstall, [switch]$WriteSettingsOnInstall)
+                [switch]$ListEmptyAfterUninstall, [string]$HeadAfterInstall, [switch]$WriteSettingsOnInstall,
+                [switch]$BreakPermissionsOnInstall)
             $state = @{
                 Installed = $Installed; AnyProject = [bool]$AnyProject; Marketplaces = $Marketplaces
                 OnAdd = $OnAdd; OnInstall = $OnInstall; Head = $Head; Extra = $ExtraRowJson; FailUninstall = [bool]$FailUninstall; LeavesIt = [bool]$UninstallLeavesIt
                 FailUpdate = [bool]$FailUpdate; ListBroken = $ListBrokenAfterInstall; ListEmpty = [bool]$ListEmptyAfterUninstall
-                HeadAfter = $HeadAfterInstall; WriteSettings = [bool]$WriteSettingsOnInstall; InstallRan = $false; UninstallRan = $false; Broken = $false
+                HeadAfter = $HeadAfterInstall; WriteSettings = [bool]$WriteSettingsOnInstall; BreakPermissions = [bool]$BreakPermissionsOnInstall; InstallRan = $false; UninstallRan = $false; Broken = $false
             }
             $execPath = $script:depsStubExecPath
             $only = $OnlyPresent
@@ -112,6 +113,7 @@ Describe "Install-Harness" {
                         if (Test-Path -LiteralPath $sp) { $cur = Get-Content -LiteralPath $sp -Raw | ConvertFrom-Json -AsHashtable }
                         if (-not $cur.Contains('enabledPlugins')) { $cur['enabledPlugins'] = @{} }
                         $cur['enabledPlugins'][$argv[3]] = $true
+                        if ($state.BreakPermissions) { $cur['permissions'] = 'not an object' }
                         $cur | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $sp
                     }
                     return @{ ExitCode = 0; Output = '' }
@@ -309,6 +311,84 @@ Describe "Install-Harness" {
         $s = Get-Content "$script:target/.claude/settings.json" -Raw | ConvertFrom-Json
         $s.permissions.allow[0] | Should -Be "Bash(ls:*)"
         $s.hooks | Should -Not -BeNullOrEmpty
+    }
+
+    # #274: the publish deny rules are project-scoped. The installer unions the fragment's
+    # permissions.deny into the project's settings.json and keeps every rule the project already had.
+    It "merges the publish deny fragment into permissions.deny, keeping the project's own allow and deny rules" {
+        New-Item -ItemType Directory -Path "$script:target/.claude" | Out-Null
+        '{"permissions":{"allow":["Bash(ls:*)"],"deny":["Bash(rm -rf *)"]}}' | Set-Content "$script:target/.claude/settings.json"
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $s = Get-Content "$script:target/.claude/settings.json" -Raw | ConvertFrom-Json
+        $fragment = (Get-Content "$PSScriptRoot/../core/claude/templates/settings.permissions.json" -Raw | ConvertFrom-Json).permissions.deny
+        @($fragment).Count | Should -Be 6
+        $deny = @($s.permissions.deny)
+        $deny[0] | Should -Be 'Bash(rm -rf *)'
+        foreach ($rule in $fragment) { $deny | Should -Contain $rule }
+        $deny | Should -Contain 'Bash(gh pr merge *)'
+        $deny | Should -Contain 'PowerShell(gh issue create *)'
+        $deny.Count | Should -Be 7
+        @($s.permissions.allow) | Should -Be @('Bash(ls:*)')
+    }
+
+    It "writes the publish deny rules into a project that had no settings.json, and adds none twice on a re-install" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $raw = Get-Content "$script:target/.claude/settings.json" -Raw
+        $deny = @(($raw | ConvertFrom-Json).permissions.deny)
+        $deny.Count | Should -Be 6
+        $raw | Should -Match '"deny":\s*\['
+    }
+
+    It "refuses before the first copy when settings.json holds <Name>" -ForEach @(
+        @{ Name = 'permissions that is not an object'; Json = '{"permissions":["Bash(x)"]}' }
+        @{ Name = 'permissions.deny that is not a list'; Json = '{"permissions":{"deny":"Bash(x)"}}' }
+        @{ Name = 'permissions.deny with a non-string rule'; Json = '{"permissions":{"deny":["Bash(x)",3]}}' }
+    ) {
+        New-Item -ItemType Directory -Path "$script:target/.claude" | Out-Null
+        $Json | Set-Content "$script:target/.claude/settings.json"
+        { & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target } |
+            Should -Throw -ExpectedMessage '*permissions*'
+        Test-Path "$script:target/.claude/agents" | Should -BeFalse
+        Get-Content "$script:target/.claude/settings.json" -Raw | Should -Match ([regex]::Escape($Json))
+    }
+
+    It "refuses before the first copy when the deny fragment is <Name>" -ForEach @(
+        @{ Name = 'missing'; Body = $null }
+        @{ Name = 'not JSON'; Body = '{ not json' }
+        @{ Name = 'an empty list'; Body = '{"permissions":{"deny":[]}}' }
+        @{ Name = 'without permissions.deny'; Body = '{"permissions":{}}' }
+        @{ Name = 'a bare string'; Body = '{"permissions":{"deny":"Bash(gh pr merge *)"}}' }
+        @{ Name = 'holding a blank rule'; Body = '{"permissions":{"deny":["Bash(gh pr merge *)",""]}}' }
+    ) {
+        $fakeRepo = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-fakerepo-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path (Join-Path $fakeRepo 'install') -Force | Out-Null
+        Copy-Item "$PSScriptRoot/Install-Harness.ps1" (Join-Path $fakeRepo 'install/Install-Harness.ps1')
+        Copy-Item "$PSScriptRoot/Deps.ps1" (Join-Path $fakeRepo 'install/Deps.ps1')
+        Copy-Item -Recurse "$PSScriptRoot/../core" (Join-Path $fakeRepo 'core')
+        $fragmentPath = Join-Path $fakeRepo 'core/claude/templates/settings.permissions.json'
+        if ($null -eq $Body) { Remove-Item -LiteralPath $fragmentPath -Force }
+        else { Set-Content -LiteralPath $fragmentPath -Value $Body }
+
+        try {
+            { & (Join-Path $fakeRepo 'install/Install-Harness.ps1') @script:dep -Target $script:target } |
+                Should -Throw -ExpectedMessage '*settings.permissions.json*'
+            Test-Path "$script:target/.claude/agents" | Should -BeFalse
+            Test-Path "$script:target/.claude/settings.json" | Should -BeFalse
+        }
+        finally {
+            Remove-Item -Recurse -Force $fakeRepo
+        }
+    }
+
+    It "installs the publish skill under .claude/skills and tracks it in the manifest" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $skill = "$script:target/.claude/skills/publish/SKILL.md"
+        Test-Path $skill | Should -BeTrue
+        (Get-FileHash $skill -Algorithm SHA256).Hash |
+            Should -Be (Get-FileHash "$PSScriptRoot/../core/claude/skills/publish/SKILL.md" -Algorithm SHA256).Hash
+        $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+        $m['files'].Contains('skills/publish/SKILL.md') | Should -BeTrue
     }
 
     It "builds matcher groups from scratch, one per template matcher, when the target has no hooks key at all" {
@@ -2244,6 +2324,23 @@ Describe "Install-Harness" {
         }
     }
 
+    It "throws instead of reporting every installed skill as orphaned when core/claude/skills exists but is empty" {
+        $fakeRepo = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-fakerepo-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path (Join-Path $fakeRepo 'install') -Force | Out-Null
+        Copy-Item "$PSScriptRoot/Install-Harness.ps1" (Join-Path $fakeRepo 'install/Install-Harness.ps1')
+        Copy-Item "$PSScriptRoot/Deps.ps1" (Join-Path $fakeRepo 'install/Deps.ps1')
+        Copy-Item -Recurse "$PSScriptRoot/../core" (Join-Path $fakeRepo 'core')
+        Get-ChildItem -LiteralPath (Join-Path $fakeRepo 'core/claude/skills') -Recurse -File | Remove-Item -Force
+
+        try {
+            { & (Join-Path $fakeRepo 'install/Install-Harness.ps1') @script:dep -Target $script:target -Audit } |
+                Should -Throw -ExpectedMessage '*contains no skill files*'
+        }
+        finally {
+            Remove-Item -Recurse -Force $fakeRepo
+        }
+    }
+
     # Issue #227. Copilot CLI on Windows runs these command strings through PowerShell, where
     # "$CLAUDE_PROJECT_DIR" inside double quotes is an empty PowerShell variable rather than the env
     # var, so the old strings ran sh on /.claude/hooks/... and failed every session start. The
@@ -3336,6 +3433,31 @@ Describe "Install-Harness" {
             $s = Get-Content -LiteralPath "$script:target/.claude/settings.json" -Raw | ConvertFrom-Json -AsHashtable
             $s['enabledPlugins']['fake-plugin@claude-plugins-official'] | Should -BeTrue
             $s['hooks'] | Should -Not -BeNullOrEmpty
+        }
+
+        # #274: a settings.json the deny merge cannot union into is refused before the dependency
+        # preflight, so -InstallDeps installs nothing for a run that would refuse anyway.
+        It "refuses a permissions block the deny rules cannot merge into before the dependency preflight installs anything" {
+            $fixture = New-DepsFixture -Deps @(New-FakePlugin)
+            $mock = New-PluginMock -Marketplaces @{ 'claude-plugins-official' = (New-FakeMarketplaceDir) } `
+                -OnInstall @{ 'fake-plugin@claude-plugins-official' = @{ scope = 'project'; installPath = (New-FakePluginDir) } }
+            New-Item -ItemType Directory -Path "$script:target/.claude" | Out-Null
+            '{"permissions":{"deny":"Bash(x)"}}' | Set-Content "$script:target/.claude/settings.json"
+            { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -InstallDeps -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-Null } |
+                Should -Throw -ExpectedMessage '*permissions.deny*'
+            $mock.State.InstallRan | Should -BeFalse
+        }
+
+        # The second parse, after a plugin install wrote settings.json, is checked the same way, so a
+        # permissions block broken by that write refuses before the first copy too.
+        It "refuses when the dependency preflight leaves a permissions block the deny rules cannot merge into" {
+            $fixture = New-DepsFixture -Deps @(New-FakePlugin)
+            $mock = New-PluginMock -Marketplaces @{ 'claude-plugins-official' = (New-FakeMarketplaceDir) } -WriteSettingsOnInstall -BreakPermissionsOnInstall `
+                -OnInstall @{ 'fake-plugin@claude-plugins-official' = @{ scope = 'project'; installPath = (New-FakePluginDir) } }
+            { & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -InstallDeps -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-Null } |
+                Should -Throw -ExpectedMessage '*permissions value that is not an object*'
+            $mock.State.InstallRan | Should -BeTrue
+            Test-Path "$script:target/.claude/agents" | Should -BeFalse
         }
 
         It "after a winget install on Windows the re-probe sees PATH from the Machine and User scopes, and Git Bash is resolved again" {
