@@ -683,9 +683,10 @@ Describe "Account hooks" {
             }
         }
 
-        # The plans branch sends the .claude repo to the home slug, and the home project's own
-        # leaf is the account username, so both stay on the home slug.
-        It "keeps the home project and the .claude project on the home slug" {
+        # The home project's own leaf is the account username, so it stays on the home slug. A
+        # .claude project keeps its own slug: on the home slug its MEMORY.md would replace the
+        # home project's.
+        It "keeps the home project on the home slug and a .claude project on its own slug" {
             foreach ($root in $script:hookRoots) {
                 $sandbox = New-HookSandbox
                 try {
@@ -693,6 +694,7 @@ Describe "Account hooks" {
                     $dotClaude = Join-Path $sandbox '.claude'
                     Set-ProjectConfig -SandboxHome $sandbox -Paths @($sandbox, $dotClaude)
                     $homeSlug = Get-TestSlug $sandbox
+                    $dotSlug = Get-TestSlug $dotClaude
                     # A folder mapped onto itself would be merged into itself, and every file
                     # in it would count as already present and be deleted.
                     $keep = Join-Path (Join-Path (Join-Path $vault $homeSlug) 'Memory') 'keep.md'
@@ -704,10 +706,65 @@ Describe "Account hooks" {
                     }
                     Test-Path -LiteralPath (Join-Path (Join-Path (Join-Path $vault $homeSlug) 'Memory') 'MEMORY.md') |
                         Should -BeTrue -Because "$root must keep home memory on the home slug"
+                    Test-Path -LiteralPath (Join-Path (Join-Path (Join-Path $vault $dotSlug) 'Memory') 'MEMORY.md') |
+                        Should -BeTrue -Because "$root must keep .claude project memory on its own slug"
                     Test-Path -LiteralPath $keep |
                         Should -BeTrue -Because "$root must never merge the home folder into itself"
-                    @(Get-ChildItem -LiteralPath $vault -Directory).Name | Should -Be @($homeSlug) `
+                    @(Get-ChildItem -LiteralPath $vault -Directory | ForEach-Object Name | Sort-Object) |
+                        Should -Be @(@($homeSlug, $dotSlug) | Sort-Object) `
                         -Because "$root must not mint a username folder or a .claude folder"
+                }
+                finally { Remove-Item -Recurse -Force $sandbox -ErrorAction SilentlyContinue }
+            }
+        }
+
+        # Get-Item returns a directory too, and a directory's timestamp is usually recent, so
+        # without a type check the slug file would count as already present and be deleted.
+        It "keeps a slug file whose path in the leaf folder is a directory" {
+            foreach ($root in $script:hookRoots) {
+                $sandbox = New-HookSandbox
+                try {
+                    $vault = Join-Path $sandbox 'vault'
+                    $proj = Join-Path (Join-Path $sandbox 'work') 'demo-repo'
+                    Set-ProjectConfig -SandboxHome $sandbox -Paths @($proj)
+                    $slug = Get-TestSlug $proj
+                    $t0 = [datetime]::new(2026, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)
+                    $stuck = Join-Path (Join-Path (Join-Path $vault $slug) 'Memory') 'n.md'
+                    Set-VaultFile $stuck 'only copy' $t0
+                    New-Item -ItemType Directory -Force -Path (Join-Path (Join-Path (Join-Path $vault 'demo-repo') 'Memory') 'n.md') | Out-Null
+                    $r = Invoke-SyncWrite -HookRoot $root -SandboxHome $sandbox -Vault $vault `
+                        -RelPath "projects/$slug/memory/MEMORY.md"
+                    $r.ExitCode | Should -Be 0
+                    Test-Path -LiteralPath $stuck -PathType Leaf |
+                        Should -BeTrue -Because "$root must not delete a slug file that a directory blocks"
+                }
+                finally { Remove-Item -Recurse -Force $sandbox -ErrorAction SilentlyContinue }
+            }
+        }
+
+        # The handoff skill and any other vault writer may put files in a folder of their own
+        # choosing. The merge moves only the subfolders this hook writes.
+        It "leaves files outside Memory, Council and Worktrees in the slug folder" {
+            foreach ($root in $script:hookRoots) {
+                $sandbox = New-HookSandbox
+                try {
+                    $vault = Join-Path $sandbox 'vault'
+                    $proj = Join-Path (Join-Path $sandbox 'work') 'demo-repo'
+                    Set-ProjectConfig -SandboxHome $sandbox -Paths @($proj)
+                    $slug = Get-TestSlug $proj
+                    $t0 = [datetime]::new(2026, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)
+                    $other = Join-Path (Join-Path (Join-Path $vault $slug) 'Other') 'o.md'
+                    Set-VaultFile $other 'not ours' $t0
+                    Set-VaultFile (Join-Path (Join-Path (Join-Path $vault $slug) 'Council') 'c.md') 'council' $t0
+                    $r = Invoke-SyncWrite -HookRoot $root -SandboxHome $sandbox -Vault $vault `
+                        -RelPath "projects/$slug/memory/MEMORY.md"
+                    $r.ExitCode | Should -Be 0
+                    Test-Path -LiteralPath $other |
+                        Should -BeTrue -Because "$root must leave another writer's file at its path"
+                    Test-Path -LiteralPath (Join-Path (Join-Path (Join-Path $vault 'demo-repo') 'Other') 'o.md') |
+                        Should -BeFalse -Because "$root must not move another writer's file"
+                    Test-Path -LiteralPath (Join-Path (Join-Path (Join-Path $vault 'demo-repo') 'Council') 'c.md') |
+                        Should -BeTrue -Because "$root must still merge the subfolders it writes"
                 }
                 finally { Remove-Item -Recurse -Force $sandbox -ErrorAction SilentlyContinue }
             }

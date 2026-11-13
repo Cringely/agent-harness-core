@@ -38,11 +38,12 @@ else {
 # Vault folder names for this machine's projects, keyed by Claude Code slug. A slug cannot be
 # turned back into a path on its own, because a '-' in it may have been a separator or part of
 # a directory name, so the paths come from the projects map in $HOME/.claude.json. A worktree
-# path stands for the repo it sits in. The home project and any .claude repo keep the home
-# slug, as the plans branch below already does, so no folder is named after the account's
-# username. A leaf that is not a plain folder name ('..', a drive root) is dropped and that
-# project keeps its slug, so no write ever leaves the vault. Two checkouts that share a leaf
-# share a folder, which is accepted.
+# path stands for the repo it sits in. The home project keeps its slug, so no folder is named
+# after the account's username. A project checked out at a .claude folder keeps its own slug
+# too: mapping it onto the home slug would put two projects' MEMORY.md in one folder. A leaf
+# that is not a plain folder name ('..', a drive root) is dropped and that project keeps its
+# slug, so no write ever leaves the vault. Two checkouts that share a leaf share a folder,
+# which is accepted.
 function Get-VaultFolderMap {
     $map = @{}
     $cfg = Get-Content -Raw -LiteralPath (Join-Path $HOME '.claude.json') | ConvertFrom-Json
@@ -51,21 +52,26 @@ function Get-VaultFolderMap {
         if ($path -match '^(.+)\\\.claude\\worktrees\\[^\\]+$') { $path = $Matches[1] }
         $slug = $path -creplace '[^A-Za-z0-9]', '-'
         $leaf = ($path -split '\\')[-1]
-        if ($slug -eq $homeSlug -or $leaf -eq '.claude') { $leaf = $homeSlug }
+        if ($slug -eq $homeSlug -or $leaf -eq '.claude') { continue }
         if ($leaf -notmatch '^[^\\/:]+$' -or $leaf -match '^\.+$' -or $leaf -eq $slug) { continue }
         $map[$slug] = $leaf
     }
     return $map
 }
 
-# Moves one vault folder's files into another. Where both hold a file, the newer copy stays.
-# The source folder is deleted only once no file is left in it, so a move that fails leaves
-# its file in place for the next run to retry. Running it again after a full merge is a no-op,
-# because the source folder is gone.
+# Moves the Memory, Council and Worktrees files of one vault folder into another. Those are
+# the subfolders this hook writes, and a file some other writer put in the folder stays where
+# its reader expects it. Where both hold a file, the newer copy stays. A file whose path in the
+# target is a directory is left alone. The source folder is deleted only once no file is left
+# in it, so a move that fails leaves its file in place for the next run to retry. Running it
+# again after a full merge is a no-op, because the source folder is gone.
 function Merge-VaultFolder([string]$From, [string]$To) {
     $root = (Get-Item -LiteralPath $From -Force).FullName.TrimEnd('\', '/')
     foreach ($src in @(Get-ChildItem -LiteralPath $root -Recurse -File -Force)) {
-        $dst = Join-Path $To $src.FullName.Substring($root.Length + 1)
+        $rel = $src.FullName.Substring($root.Length + 1)
+        if ($rel -notmatch '^(Memory|Council|Worktrees)[\\/]') { continue }
+        $dst = Join-Path $To $rel
+        if (Test-Path -LiteralPath $dst -PathType Container) { continue }
         $have = Get-Item -LiteralPath $dst -Force
         if ($have -and $have.LastWriteTimeUtc -ge $src.LastWriteTimeUtc) {
             Remove-Item -LiteralPath $src.FullName -Force
