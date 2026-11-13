@@ -9,6 +9,10 @@
 // and posts nothing, and prints what the reviewer would be given plus the computed verification.
 // --app-id may come from PR_REVIEW_APP_ID instead.
 //
+// #174: premerge runs the merge-hygiene checks (premerge.ts) through the gh CLI. It takes no key:
+//   bun <absolute path>/tools/pr-review/cli.ts premerge --pr <n> --closes <n[,n...]|none> --terms <absolute path> [--repo owner/name] [--identity "<name> <email>"] [--expect-head <sha40>]
+// Exit codes: 0 every channel passed, 2 blocked, 1 usage or runtime error.
+//
 // #318: verification uses the reviewed repository's own required checks and CI workflow path
 // (repo-policy.ts). This repository's are built in. Any other repository needs --repo and
 // --policy, an operator-only JSON file outside every checkout. A repository without a valid entry
@@ -36,10 +40,11 @@ import { AppTokenMinter, readPrivateKey } from "./app-auth";
 import { GitHubClient } from "./github";
 import { findIdentityHits, loadIdentity, type IdentityDecl, type IdentityLoad } from "./identity";
 import { runReview, type ReviewOutcome } from "./pipeline";
+import { PremergeReadError, evaluatePremerge, formatPremerge, ghPremergeSource, loadTerms, type PremergeSource } from "./premerge";
 import { CORE_POLICY, resolvePolicy } from "./repo-policy";
 import { ClaudeCliRunner } from "./runner";
 import { REPO_ROOT, toolState } from "./tool-state";
-import { RefusalError, SHA_RE, type PrSnapshot, type PrSource, type RepoPolicy, type ReviewPoster } from "./types";
+import { RefusalError, SHA_RE, parseRepo, type PrSnapshot, type PrSource, type RepoPolicy, type ReviewPoster } from "./types";
 import { verificationOf } from "./verdict";
 
 // The repository CORE_POLICY is built in for (test/pr-review-cli.test.ts pins the two equal).
@@ -63,16 +68,90 @@ export type CliCommand =
       // #318: the operator's policy file, an absolute path. null when --policy was not given, and
       // then only DEFAULT_REPO resolves.
       policyPath: string | null;
+    }
+  | {
+      command: "premerge";
+      repo: string;
+      pr: number;
+      // The issues the pull request is expected to close, sorted. Empty means it must close none.
+      closes: number[];
+      termsPath: string;
+      identity: { name: string; email: string };
+      expectHead: string | null;
     };
 
 const USAGE = [
   'op read "<secret reference>" | bun <absolute path>/tools/pr-review/cli.ts review --pr <n> --app-id <id> --key-stdin [--post [--comment-only]] [--json] [--repo owner/name --policy <absolute path>] [--expect-head <sha40>]',
   'op read "<secret reference>" | bun <absolute path>/tools/pr-review/cli.ts snapshot --pr <n> --app-id <id> --key-stdin [--repo owner/name --policy <absolute path>] [--expect-head <sha40>]',
+  'bun <absolute path>/tools/pr-review/cli.ts premerge --pr <n> --closes <n[,n...]|none> --terms <absolute path> [--repo owner/name] [--identity "<name> <email>"] [--expect-head <sha40>]',
 ].join("\n");
+
+const IDENTITY_RE = /^([^<>\r\n]*[^<>\s]) <([^<>\s]+@[^<>\s]+)>$/;
+
+// #174. --closes is required and has no empty form: "none" says the pull request must close
+// nothing, so a forgotten value cannot read as "expect none". --identity defaults to the
+// repository owner's GitHub noreply address.
+function parsePremergeArgs(rest: readonly string[]): CliCommand {
+  let values: Record<string, string | boolean | undefined>;
+  try {
+    values = parseArgs({
+      args: [...rest],
+      options: {
+        repo: { type: "string" },
+        pr: { type: "string" },
+        closes: { type: "string" },
+        terms: { type: "string" },
+        identity: { type: "string" },
+        "expect-head": { type: "string" },
+      },
+      strict: true,
+      allowPositionals: false,
+    }).values as Record<string, string | boolean | undefined>;
+  } catch (error) {
+    throw new UsageError(error instanceof Error ? error.message : String(error));
+  }
+
+  if (typeof values.pr !== "string" || !/^[1-9][0-9]*$/.test(values.pr) || !Number.isSafeInteger(Number(values.pr))) {
+    throw new UsageError("premerge needs --pr <positive integer>");
+  }
+  const repo = typeof values.repo === "string" ? values.repo : DEFAULT_REPO;
+  const owner = parseRepo(repo);
+  if (owner === null) throw new UsageError("premerge needs --repo as owner/name");
+
+  if (typeof values.closes !== "string") throw new UsageError("premerge needs --closes <n[,n...]> or --closes none");
+  let closes: number[] = [];
+  if (values.closes !== "none") {
+    const parts = values.closes.split(",");
+    if (parts.some((part) => !/^[1-9][0-9]*$/.test(part) || !Number.isSafeInteger(Number(part)))) {
+      throw new UsageError("premerge needs --closes to be a comma-separated list of issue numbers, or none");
+    }
+    closes = [...new Set(parts.map(Number))].sort((a, b) => a - b);
+  }
+
+  if (typeof values.terms !== "string" || !isAbsolute(values.terms)) throw new UsageError("premerge needs --terms <absolute path> to the personal-term list");
+
+  let identity = { name: owner.owner, email: `${owner.owner}@users.noreply.github.com` };
+  if (values.identity !== undefined) {
+    const match = typeof values.identity === "string" ? IDENTITY_RE.exec(values.identity) : null;
+    if (match === null) throw new UsageError('premerge needs --identity in the form "<name> <email>"');
+    identity = { name: match[1]!, email: match[2]! };
+  }
+
+  let expectHead: string | null = null;
+  if (values["expect-head"] !== undefined) {
+    if (typeof values["expect-head"] !== "string" || !SHA_RE.test(values["expect-head"])) {
+      throw new UsageError("premerge needs --expect-head to be a 40-character lowercase hex commit SHA");
+    }
+    expectHead = values["expect-head"];
+  }
+
+  return { command: "premerge", repo, pr: Number(values.pr), closes, termsPath: values.terms, identity, expectHead };
+}
 
 export function parseCliArgs(argv: readonly string[], env: Record<string, string | undefined> = process.env): CliCommand {
   const [command, ...rest] = argv;
   if (command === undefined || command === "help" || command === "--help") return { command: "help" };
+  if (command === "premerge") return parsePremergeArgs(rest);
   if (command !== "review" && command !== "snapshot") throw new UsageError(`unknown command: ${command}`);
 
   const options: Parameters<typeof parseArgs>[0]["options"] = {
@@ -308,6 +387,34 @@ interface CliIo {
   // IdentityDecl calls it itself and hands the closure here, rather than main() always reading the
   // account's real ~/.claude-account-identity.json and claude CLI state.
   loadIdentity?: () => IdentityLoad;
+  // #174: same optional-and-defaulted shape, so a test can hand premerge chosen facts with no gh call.
+  buildPremergeSource?: (repo: string, pr: number) => PremergeSource;
+}
+
+// #174: the term list is loaded before GitHub is read, so a missing or empty list costs no network
+// call. Every failure is exit 2 with a channel name and nothing read from the list or the pull
+// request.
+function runPremerge(parsed: Extract<CliCommand, { command: "premerge" }>, io: CliIo): number {
+  const terms = loadTerms(parsed.termsPath);
+  if (!terms.ok) {
+    console.error(`premerge blocked: ${terms.reason}`);
+    console.log(`PREMERGE BLOCKED  #${parsed.pr}`);
+    return 2;
+  }
+  let facts;
+  try {
+    facts = (io.buildPremergeSource ?? ghPremergeSource)(parsed.repo, parsed.pr).read();
+  } catch (error) {
+    if (error instanceof PremergeReadError) {
+      console.error(`premerge blocked: ${stripControlChars(error.message)}`);
+      console.log(`PREMERGE BLOCKED  #${parsed.pr}`);
+      return 2;
+    }
+    throw error;
+  }
+  const results = evaluatePremerge(facts, { closes: parsed.closes, identity: parsed.identity, expectHead: parsed.expectHead }, terms.terms);
+  console.log(formatPremerge(parsed.pr, facts.headSha, results));
+  return results.every((r) => r.ok) ? 0 : 2;
 }
 
 // #195: buildSource and loadIdentity are left unset here rather than assigned their real
@@ -343,9 +450,13 @@ export async function main(argv: string[], io: CliIo = REAL_IO): Promise<number>
   // would put the workstation username into stderr that later tasks paste into reports).
   if (isCwdInsideRepo(io.cwd(), REPO_ROOT) || cwdHasAutoloadFile(io.cwd())) {
     throw new RefusalError(
-      "refusing to run: this command holds the App key, and Bun auto-loads bunfig.toml and .env files from the working directory; the working directory is either inside a repository checkout or itself holds one of those files, so invoke it from a directory with neither, outside every checkout",
+      "refusing to run: this command holds the App key or a GitHub token, and Bun auto-loads bunfig.toml and .env files from the working directory; the working directory is either inside a repository checkout or itself holds one of those files, so invoke it from a directory with neither, outside every checkout",
     );
   }
+
+  // #174: premerge holds no App key, but its environment carries a GitHub token that can merge, so
+  // it shares the working-directory refusal above.
+  if (parsed.command === "premerge") return runPremerge(parsed, io);
 
   // #318: before the key is read, so a repository with no valid policy entry costs no key read, no
   // token and no network call. resolvePolicy throws only RefusalError for a refusal, and its

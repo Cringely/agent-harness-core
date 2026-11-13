@@ -530,7 +530,11 @@ the review. On an owned path (hooks, agent definitions, rules, `install/`, `tool
 `test/` and the rest of that file's list) it is not enough. A code-owner review is also needed, and
 the only code owner is the operator, who authors these pull requests and whom GitHub bars from
 approving them. Those merges go through the administrator bypass the operator orders, which GitHub
-is configured to record as a rule-suite bypass (pending live verification under #235), and each one carries a comment in the pull request saying why. The
+is configured to record as a rule-suite bypass (pending live verification under #235), and each one carries a comment in the pull request saying why. A
+bypass merge also needs a passing `premerge` run (`tools/pr-review/cli.ts premerge`) on the head being
+merged: it checks the channels the diff does not carry, namely the pull request's state, checks and
+closing references, every commit's author, committer and message, and the pull request's title and
+body, which no git hook ever sees. The
 bypass skips only the default ruleset: its review rule (the approval, the code-owner review and the
 last-push approval), its code quality rule and its Copilot review. It cannot skip the second
 ruleset, "CI required", which has no bypass list. That ruleset requires the `bun test` job and the
