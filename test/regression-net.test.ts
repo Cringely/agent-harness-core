@@ -202,6 +202,25 @@ describe("runNet", () => {
     expect(calls).toEqual([["test/a.test.ts", ["does the thing"]]]);
   });
 
+  test("runs one file at a time, so slow pinned tests are never starved by a sibling bun process", async () => {
+    const root = fixtureRoot({ "test/a.test.ts": src, "test/b.test.ts": src, "test/c.test.ts": src });
+    let active = 0;
+    let peak = 0;
+    const out = await runNet({
+      manifest: ["a", "b", "c"].map((x) => defect({ id: x, tests: [{ file: `test/${x}.test.ts`, name: "does the thing" }] })),
+      root,
+      runBun: async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((done) => setTimeout(done, 20));
+        active--;
+        return junit(passed("does the thing"));
+      },
+    });
+    expect(out.map((v) => v.caught)).toEqual([true, true, true]);
+    expect(peak).toBe(1);
+  });
+
   test("a bun run that produced no report leaves its tests not caught", async () => {
     const root = fixtureRoot({ "test/a.test.ts": src });
     const out = await runNet({ manifest: [defect()], root, runBun: async () => null });

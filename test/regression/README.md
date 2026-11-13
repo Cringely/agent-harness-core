@@ -10,10 +10,9 @@ The net measures only failure classes this repository has already met. It cannot
 
 ## Running it
 
-- `bun run regression` runs every pinned test, three bun processes at a time. It takes about two minutes, because several identity-gate tests build git repositories and need around 20 seconds each.
+- `bun run regression` runs every pinned test, one bun process per file and one file at a time. It takes about two and a half minutes on a Windows workstation, because several identity-gate tests build git repositories and need 15 to 20 seconds each.
 - `bun run regression -- --static` only checks that every pinned file exists and declares every pinned test name. It runs no tests and takes well under a second. The ordinary `bun test` runs the same check (`test/regression-net.test.ts`), so a rename that orphans a pin fails CI before anyone runs the net.
 - `bun run regression -- --only <id>` restricts the run to one defect and can be repeated.
-- `REGRESSION_PARALLEL=<n>` changes the process count. Some pinned tests take 20 seconds alone against bun's 30 second per-test limit, so raising it can turn contention into false `NOT CAUGHT` results.
 
 Exit codes: 0 when every defect is caught, 1 when any is not caught or a pinned file or test name is gone, 2 when the manifest is unreadable or an option is unknown.
 

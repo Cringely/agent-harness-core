@@ -165,7 +165,9 @@ export async function runNet({ manifest, root, runBun }: NetOptions): Promise<Ve
     return source !== null && sourceDeclaresTest(source, name);
   };
 
-  // Only tests that exist are run, one bun process per file.
+  // Only tests that exist are run, one bun process per file, files in series. Several pinned tests
+  // build git repositories and take 15 to 20 s alone against bun's 30 s per-test limit, so a
+  // sibling bun process pushes them over it and the result changes from run to run.
   const toRun = new Map<string, Set<string>>();
   for (const defect of manifest) {
     for (const { file, name } of defect.tests) {
@@ -173,12 +175,10 @@ export async function runNet({ manifest, root, runBun }: NetOptions): Promise<Ve
     }
   }
   const reports = new Map<string, Map<string, Outcome[]>>();
-  await Promise.all(
-    [...toRun].map(async ([file, names]) => {
-      const xml = await runBun(file, [...names]);
-      reports.set(file, xml === null ? new Map() : parseJunit(xml));
-    }),
-  );
+  for (const [file, names] of toRun) {
+    const xml = await runBun(file, [...names]);
+    reports.set(file, xml === null ? new Map() : parseJunit(xml));
+  }
 
   return manifest.map((defect) => {
     // A defect's tests can sit in several files, so judge each test against its own file's report.

@@ -15,10 +15,6 @@ import { parseManifest, runNet, sourceDeclaresTest, testFilterPattern, type Defe
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..", "..");
-const CHUNK = 2;
-// Several pinned tests build git repositories and take 20 s alone against bun's 30 s per-test limit,
-// so wide parallelism turns contention into false "not caught" results.
-const PARALLEL = Math.max(1, Number(process.env.REGRESSION_PARALLEL) || 3);
 const TIMEOUT_MS = 10 * 60 * 1000;
 
 function usage(message: string): never {
@@ -26,8 +22,8 @@ function usage(message: string): never {
   process.exit(2);
 }
 
-/** Runs one bun process for a few pinned tests of one file and returns its JUnit report. */
-async function bunChunk(file: string, names: string[]): Promise<string | null> {
+/** Runs one bun process for the pinned tests of one file and returns its JUnit report. */
+async function bunFile(file: string, names: string[]): Promise<string | null> {
   const dir = mkdtempSync(join(tmpdir(), "regression-net-"));
   try {
     const report = join(dir, "report.xml");
@@ -40,38 +36,6 @@ async function bunChunk(file: string, names: string[]): Promise<string | null> {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
-}
-
-/** Splits a file's tests into small chunks run concurrently, so the slow git-building tests overlap. */
-function chunkedRunner() {
-  let active = 0;
-  const waiting: (() => void)[] = [];
-  const slot = async () => {
-    if (active >= PARALLEL) await new Promise<void>((go) => waiting.push(go));
-    active++;
-  };
-  const release = () => {
-    active--;
-    waiting.shift()?.();
-  };
-  return async (file: string, names: string[]): Promise<string | null> => {
-    const parts: string[][] = [];
-    for (let i = 0; i < names.length; i += CHUNK) parts.push(names.slice(i, i + CHUNK));
-    const xml = await Promise.all(
-      parts.map(async (part) => {
-        await slot();
-        try {
-          return await bunChunk(file, part);
-        } finally {
-          release();
-        }
-      }),
-    );
-    // One report per file: join the chunks' testcases. A chunk with no report contributes nothing,
-    // which leaves its tests "did not run".
-    const bodies = xml.filter((x): x is string => x !== null);
-    return bodies.length === 0 ? null : bodies.join("\n");
-  };
 }
 
 function staticVerdicts(manifest: Defect[]): Verdict[] {
@@ -127,7 +91,7 @@ async function main(): Promise<number> {
   if (only.length > 0) manifest = manifest.filter((d) => only.includes(d.id));
 
   if (staticOnly) return report(staticVerdicts(manifest), "static check, no tests run");
-  const verdicts = await runNet({ manifest, root: ROOT, runBun: chunkedRunner() });
+  const verdicts = await runNet({ manifest, root: ROOT, runBun: bunFile });
   return report(verdicts, "every pinned test run");
 }
 
