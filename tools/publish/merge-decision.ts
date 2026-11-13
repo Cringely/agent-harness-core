@@ -3,24 +3,18 @@
 // inputs are the --json fields tools/pr-review/cli.ts prints (status, event, reviewerOk, headSha,
 // severities, posted, verification) and GitHub's own enums.
 //
-// Two ways to merge, and nothing else:
-//   - the App approved, its verification passed, the merge state is CLEAN: a plain merge.
-//   - the App approved but the merge is BLOCKED (an owned path needs a code-owner review the
-//     operator cannot give), or the App could only COMMENT because CI cannot vouch for this change
-//     by design: the administrator bypass, and only when --allow-admin was passed, the reviewer
-//     actually ran, no finding sits at or above the severity floor, and the event is not
-//     REQUEST_CHANGES.
-// Both also require the review to have been posted, every check to have succeeded, and the head
-// to be the one reviewed. A severity this file does not know counts as at or above the floor.
+// Two ways to merge, both on the App's APPROVE of the reviewed head, and nothing else:
+//   - its verification passed and the merge state is CLEAN: a plain merge.
+//   - its verification passed but the merge is BLOCKED (an owned path needs a code-owner review the
+//     operator cannot give): the administrator bypass, and only when --allow-admin was passed.
+// Both also require the review to have been posted, the reviewer to have run, no finding at or
+// above the severity floor, every check to have succeeded, and the head to be the one reviewed. A
+// severity this file does not know counts as at or above the floor.
 //
-// A COMMENT also covers what must never merge by bypass: a required check with no run on the head
-// (gh only lists checks that registered, so a missing one cannot be seen here), one still pending,
-// or one the workflow does not declare. So a COMMENT is admitted only when its verification is
-// "incomplete" and every reason is one of CANNOT_VOUCH_PREFIXES, the reasons CONTRIBUTING.md lists
-// as what the tool cannot approve by design. The reasons are fixed strings tools/pr-review/verdict.ts
-// writes, not model output. Any other reason, an unknown state or an empty list refuses, so a
-// wording change in verdict.ts can only stop a bypass, never start one, and
-// test/publish-merge-decision.test.ts builds the reasons with computeVerification itself to catch it.
+// A COMMENT never merges, whatever its verification reasons, including the ones CI cannot vouch
+// for by design. CONTRIBUTING.md allows the administrator bypass on the App's APPROVE plus a
+// passing premerge, and calls any other bypass an operator override. An override is the
+// operator's to perform by hand, with a bypass-rationale comment, so this tool refuses and says so.
 
 import { BELOW_FLOOR_SEVERITIES } from "../pr-review/types";
 import { PublishError } from "./errors";
@@ -35,23 +29,6 @@ export interface ReviewResult {
   refusal: string | null;
   postedUrl: string | null;
   verification: { state: string; reasons: string[] };
-}
-
-// Each reason computeVerification gives when CI cannot vouch for a change by design. Matched as a
-// prefix: the text after it names files from the pull request.
-export const CANNOT_VOUCH_PREFIXES: readonly string[] = [
-  "the pull request edits CI definitions, so its own checks cannot vouch for it: ",
-  "the pull request edits the secret scan configuration, so its own scan cannot vouch for it: ",
-  "CI runs no Pester suite for: ",
-  "the changed-file listing is incomplete, so files this review never saw could decide it",
-];
-
-export function cannotVouchOnly(verification: ReviewResult["verification"]): boolean {
-  return (
-    verification.state === "incomplete" &&
-    verification.reasons.length > 0 &&
-    verification.reasons.every((reason) => CANNOT_VOUCH_PREFIXES.some((prefix) => reason.startsWith(prefix)))
-  );
 }
 
 export type MergeDecision = { action: "merge"; admin: boolean } | { action: "refuse"; reason: string };
@@ -146,15 +123,10 @@ export function decideMerge(input: {
     }
     return refuse(`the pull request is not mergeable (merge state ${state})`);
   }
-  if (review.event === "COMMENT" && atFloor === 0) {
-    if (!input.allowAdmin) return refuse("the review is a COMMENT with no finding at or above the floor. Only --allow-admin may merge it");
-    if (!cannotVouchOnly(review.verification)) {
-      return refuse(
-        `the review is a COMMENT for a reason the administrator bypass does not cover (verification ${enumText(review.verification.state)}, ${review.verification.reasons.length} reason(s)). Read the review's verification section`,
-      );
-    }
-    if (input.mergeState === "BLOCKED" || input.mergeState === "CLEAN") return { action: "merge", admin: true };
-    return refuse(`the pull request is not mergeable (merge state ${state})`);
+  if (review.event === "COMMENT") {
+    return refuse(
+      `the review is a COMMENT (${atFloor} finding(s) at or above the floor), and this tool merges only on the App's APPROVE. Merging it is an operator override: the operator merges by hand and records a bypass-rationale comment on the pull request`,
+    );
   }
   return refuse(`the review did not approve (event ${enumText(review.event)}, ${atFloor} finding(s) at or above the floor)`);
 }

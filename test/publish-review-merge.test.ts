@@ -24,7 +24,7 @@ const PREMERGE_CLI = join(CHECKOUT, "tools", "pr-review", "cli.ts");
 const ARGS: ReviewMergeArgs = { repo: REPO, pr: 9, closes: [], allowAdmin: false, adminReasonFile: null, method: "merge", checksTimeoutMin: 30 };
 const REASON_PATH = process.platform === "win32" ? "C:/fixture/reason.md" : "/fixture/reason.md";
 const ADMIN_ARGS: ReviewMergeArgs = { ...ARGS, allowAdmin: true, adminReasonFile: REASON_PATH };
-const REASON = "Administrator bypass: this change edits .github/workflows/, which the App cannot vouch for.";
+const REASON = "Administrator bypass: this change edits an owned path, which needs a code-owner review the operator cannot give.";
 const MERGE_SHA = "d".repeat(40);
 
 const GREEN = [{ __typename: "CheckRun", name: "bun test", status: "COMPLETED", conclusion: "SUCCESS" }];
@@ -196,10 +196,10 @@ describe("review-merge: merges", () => {
     }
   });
 
-  test("uses the administrator bypass for a COMMENT with --allow-admin, posting the reason first", async () => {
+  test("uses the administrator bypass for an APPROVE on a blocked merge with --allow-admin, posting the reason first", async () => {
     const runner = withReviewer(
       scenario({ views: [VIEW, VIEW, { ...VIEW, mergeStateStatus: "BLOCKED" }], extra: [on(["gh", "pr", "comment"], {})] }),
-      reviewerSays(CI_EDIT_COMMENT_OUTPUT),
+      reviewerSays(APPROVE_OUTPUT),
     );
     expect(await reviewMerge(ctx(runner), ADMIN_ARGS)).toContain("administrator bypass");
     const published = runner.publishing();
@@ -420,18 +420,26 @@ describe("review-merge: refuses after the reviewer runs", () => {
 
   test("a COMMENT without --allow-admin", async () => {
     const runner = withReviewer(scenario(), reviewerSays(CI_EDIT_COMMENT_OUTPUT));
-    await refusal(reviewMerge(ctx(runner), ARGS), runner, "Only --allow-admin", true);
+    await refusal(reviewMerge(ctx(runner), ARGS), runner, "operator override", true);
   });
 
-  test("a COMMENT for a required check that never ran, even with --allow-admin", async () => {
-    const output = JSON.stringify({
-      ...JSON.parse(CI_EDIT_COMMENT_OUTPUT),
-      verification: { state: "incomplete", reasons: ['required check "secret scan (Gitleaks)" has no run on the head commit'] },
+  // A COMMENT never merges through this tool, whatever its reasons, with --allow-admin and on an
+  // owned path included: merging one is an operator override, done by hand with a rationale comment.
+  const commentWith = (reasons: string[]) => JSON.stringify({ ...JSON.parse(CI_EDIT_COMMENT_OUTPUT), verification: { state: "incomplete", reasons } });
+  for (const [name, output] of [
+    ["an edit to CI definitions", CI_EDIT_COMMENT_OUTPUT],
+    ["a changed-file listing too long to read whole", commentWith(["the changed-file listing is incomplete, so files this review never saw could decide it"])],
+    ["a required check that never ran", commentWith(['required check "secret scan (Gitleaks)" has no run on the head commit'])],
+  ] as const) {
+    test(`a COMMENT for ${name}, even with --allow-admin on a blocked merge`, async () => {
+      const runner = withReviewer(
+        scenario({ views: [VIEW, VIEW, { ...VIEW, mergeStateStatus: "BLOCKED" }], extra: [on(["gh", "pr", "comment"], {})] }),
+        reviewerSays(output),
+      );
+      await refusal(reviewMerge(ctx(runner), ADMIN_ARGS), runner, "bypass-rationale comment", true);
+      expect(runner.calls.some((call) => isPremerge(call.argv))).toBe(false);
     });
-    const runner = withReviewer(scenario({ extra: [on(["gh", "pr", "comment"], {})] }), reviewerSays(output));
-    await refusal(reviewMerge(ctx(runner), ADMIN_ARGS), runner, "does not cover", true);
-    expect(runner.calls.some((call) => isPremerge(call.argv))).toBe(false);
-  });
+  }
 
   test("premerge blocked", async () => {
     const runner = withReviewer(

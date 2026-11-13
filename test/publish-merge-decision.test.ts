@@ -1,5 +1,5 @@
 // Tests for tools/publish/merge-decision.ts (#274): every way the merge decision refuses, and the
-// only two ways it merges.
+// only two ways it merges, both on the App's APPROVE.
 
 import { describe, expect, test } from "bun:test";
 import { PublishError } from "../tools/publish/errors";
@@ -40,87 +40,54 @@ describe("decideMerge(): merges", () => {
   test("the bypass on APPROVE and BLOCKED with --allow-admin", () => {
     expect(decide({ mergeState: "BLOCKED", allowAdmin: true })).toEqual({ action: "merge", admin: true });
   });
-
-  test("the bypass on a COMMENT with no at-floor finding and --allow-admin", () => {
-    expect(decide({ review: COMMENTED, mergeState: "BLOCKED", allowAdmin: true })).toEqual({ action: "merge", admin: true });
-  });
 });
 
-// A COMMENT is admitted to the bypass only when every reason the reviewer gave is one CI cannot
-// vouch for by design. Those reasons come from computeVerification itself here, so a change to its
-// wording that would stop them matching shows up as a failure rather than as a silent refusal.
-describe("decideMerge(): the COMMENT bypass reads the reviewer's verification", () => {
+// A COMMENT never merges, whatever its verification reasons. Base policy (CONTRIBUTING.md) allows
+// the administrator bypass on the App's APPROVE plus a passing premerge, and calls any other
+// bypass an operator override, which the operator performs by hand. The reasons come from
+// computeVerification itself, so every kind of reason the reviewer can give is covered.
+describe("decideMerge(): a COMMENT always refuses", () => {
   const NL = String.fromCharCode(10);
   const WORKFLOW = CORE_POLICY.requiredChecks.map((check) => `    name: ${check.name}`).join(NL);
   const GREEN_RUNS: CheckRun[] = CORE_POLICY.requiredChecks.map((check) => ({ name: check.name, appSlug: check.appSlug, status: "completed", conclusion: "success" }));
   const verify = (overrides: Partial<Parameters<typeof computeVerification>[0]>) =>
     computeVerification({ checkRuns: GREEN_RUNS, changedFiles: ["README.md"], workflowText: WORKFLOW, changedFilesComplete: true, policy: CORE_POLICY, ...overrides });
-  const bypass = (verification: { state: string; reasons: string[] }) =>
-    decide({ review: { ...APPROVED, event: "COMMENT", verification }, mergeState: "BLOCKED", allowAdmin: true });
+  const comment = (verification: { state: string; reasons: string[] }, mergeState: string) =>
+    decide({ review: { ...APPROVED, event: "COMMENT", severities: [], verification }, mergeState, allowAdmin: true });
+  const pending = GREEN_RUNS.map((run, i) => (i === 0 ? { ...run, status: "in_progress", conclusion: null } : run));
+  const cases: [string, { state: string; reasons: string[] }][] = [
+    ["an edit to CI definitions", verify({ changedFiles: [".github/workflows/test.yml"] })],
+    ["an edit to a CI action", verify({ changedFiles: [".github/actions/setup/action.yml"] })],
+    ["an edit to the secret scan configuration", verify({ changedFiles: [".gitleaks.toml"] })],
+    ["a .ps1 change whose suite CI does not run", verify({ changedFiles: ["install/Uncovered.ps1"] })],
+    ["a changed-file listing too long to read whole", verify({ changedFilesComplete: false })],
+    ["a required check with no run on the head", verify({ checkRuns: GREEN_RUNS.slice(0, -1) })],
+    ["a required check the workflow does not declare", verify({ workflowText: WORKFLOW.split(NL).slice(1).join(NL) })],
+    ["a required check still pending", verify({ checkRuns: pending })],
+    ["no workflow at the base commit", verify({ workflowText: null })],
+    ["an incomplete verification that gives no reason", { state: "incomplete", reasons: [] }],
+    ["a verification that passed, as from a comment-only run", { state: "passed", reasons: [] }],
+    ["a verification state the tool does not know", { state: "novel", reasons: [] }],
+  ];
 
-  test("the baseline verification passes, so each case below differs by one input", () => {
+  test("the baseline verification passes, so each case differs by one input", () => {
     expect(verify({})).toEqual({ state: "passed", reasons: [] });
   });
 
-  test("admits an edit to CI definitions", () => {
-    expect(bypass(verify({ changedFiles: [".github/workflows/test.yml"] }))).toEqual({ action: "merge", admin: true });
-    expect(bypass(verify({ changedFiles: [".github/actions/setup/action.yml"] }))).toEqual({ action: "merge", admin: true });
-  });
-
-  test("admits an edit to the secret scan configuration", () => {
-    expect(bypass(verify({ changedFiles: [".gitleaks.toml"] }))).toEqual({ action: "merge", admin: true });
-  });
-
-  test("admits a .ps1 change whose suite CI does not run", () => {
-    expect(bypass(verify({ changedFiles: ["install/Uncovered.ps1"] }))).toEqual({ action: "merge", admin: true });
-  });
-
-  test("admits a changed-file listing too long to read whole", () => {
-    expect(bypass(verify({ changedFilesComplete: false }))).toEqual({ action: "merge", admin: true });
-  });
-
-  test("refuses a required check with no run on the head", () => {
-    const decision = bypass(verify({ checkRuns: GREEN_RUNS.slice(0, -1) }));
-    expect(decision).toMatchObject({ action: "refuse" });
-    expect(decision.action === "refuse" ? decision.reason : "").toContain("does not cover");
-  });
-
-  test("refuses a required check whose name the workflow does not declare", () => {
-    expect(bypass(verify({ workflowText: WORKFLOW.split(NL).slice(1).join(NL) }))).toMatchObject({ action: "refuse" });
-  });
-
-  test("refuses a required check still pending", () => {
-    const runs = GREEN_RUNS.map((run, i) => (i === 0 ? { ...run, status: "in_progress", conclusion: null } : run));
-    expect(bypass(verify({ checkRuns: runs }))).toMatchObject({ action: "refuse" });
-  });
-
-  test("refuses a covered reason beside one it does not cover", () => {
-    expect(bypass(verify({ changedFiles: [".github/workflows/test.yml"], checkRuns: GREEN_RUNS.slice(1) }))).toMatchObject({ action: "refuse" });
-  });
-
-  test("refuses no workflow at the base commit", () => {
-    expect(bypass(verify({ workflowText: null }))).toMatchObject({ action: "refuse" });
-  });
-
-  test("refuses an incomplete verification that gives no reason", () => {
-    expect(bypass({ state: "incomplete", reasons: [] })).toMatchObject({ action: "refuse" });
-  });
-
-  test("refuses a state other than incomplete, even when every reason is covered", () => {
-    expect(bypass({ ...CI_EDIT, state: "failed" })).toMatchObject({ action: "refuse" });
-    expect(bypass({ ...CI_EDIT, state: "novel" })).toMatchObject({ action: "refuse" });
-  });
-
-  test("refuses a COMMENT whose verification passed, as from a comment-only run", () => {
-    expect(bypass({ state: "passed", reasons: [] })).toMatchObject({ action: "refuse" });
-  });
-
-  test("refuses a reason that only contains a covered phrase", () => {
-    expect(bypass({ state: "incomplete", reasons: [`x ${CI_EDIT.reasons[0]}`] })).toMatchObject({ action: "refuse" });
-  });
+  for (const [name, verification] of cases) {
+    for (const mergeState of ["BLOCKED", "CLEAN"]) {
+      test(`refuses ${name}, merge state ${mergeState}, even with --allow-admin`, () => {
+        const decision = comment(verification, mergeState);
+        expect(decision.action).toBe("refuse");
+        const reason = decision.action === "refuse" ? decision.reason : "";
+        expect(reason).toContain("operator override");
+        expect(reason).toContain("bypass-rationale comment");
+      });
+    }
+  }
 
   test("names no reason text in the refusal", () => {
-    const decision = bypass(verify({ checkRuns: GREEN_RUNS.slice(0, -1) }));
+    const decision = comment(verify({ checkRuns: GREEN_RUNS.slice(0, -1) }), "BLOCKED");
     expect(decision.action === "refuse" ? decision.reason : "").not.toContain("Gitleaks");
   });
 });
@@ -175,11 +142,7 @@ describe("decideMerge(): refuses", () => {
   });
 
   test("a COMMENT without --allow-admin", () => {
-    expect(refused({ review: COMMENTED, mergeState: "BLOCKED" })).toContain("Only --allow-admin");
-  });
-
-  test("a COMMENT on a merge state other than CLEAN or BLOCKED, even with --allow-admin", () => {
-    expect(refused({ review: COMMENTED, mergeState: "BEHIND", allowAdmin: true })).toContain("merge state BEHIND");
+    expect(refused({ review: COMMENTED, mergeState: "BLOCKED" })).toContain("operator override");
   });
 
   test("an APPROVE whose verification did not pass", () => {

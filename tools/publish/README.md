@@ -103,16 +103,16 @@ A `review-merge` refusal that follows its `review:` line means the App's review 
 9. `premerge` runs from the reviewer checkout on the pinned head, with `--closes`, the owner identity and the configured `termsFile`, and must print `PREMERGE OK` for this pull request and head. It checks what the diff does not carry: closing references GitHub links outside the text, every commit's author and committer, and personal terms in commit messages, title and body. Its channel lines are logged. CONTRIBUTING.md requires it for a bypass merge, and it runs before every merge here.
 10. For an administrator-bypass merge, the reason is posted as a pull request comment first. Then `gh pr merge` runs with `--match-head-commit`, and the merge is confirmed.
 
-The merge rule, from the header of `tools/publish/merge-decision.ts`, is a pure function of the reviewer's `--json` output and the pull request's state. No model prose is parsed. A pull request merges in one of two cases and no other:
+The merge rule, from the header of `tools/publish/merge-decision.ts`, is a pure function of the reviewer's `--json` output and the pull request's state. No model prose is parsed. A pull request merges only on the App's `APPROVE` with passing verification, in one of two cases and no other:
 
-- The App approved, its verification passed, and the merge state is `CLEAN`. That is a plain merge.
-- The App approved but the merge is `BLOCKED` (an owned path needs a code-owner review the operator cannot give), or the App could only `COMMENT` because CI cannot vouch for the change by design. That is the administrator bypass, and only when `--allow-admin` was passed, the reviewer actually ran, no finding sits at or above the severity floor, and the event is not `REQUEST_CHANGES`.
+- The merge state is `CLEAN`. That is a plain merge.
+- The merge is `BLOCKED`, as when an owned path needs a code-owner review the operator cannot give. That is the administrator bypass, and only when `--allow-admin` was passed.
 
-A `COMMENT` reaches the bypass only when its verification state is `incomplete` and every reason is one `CANNOT_VOUCH_PREFIXES` lists: an edit to CI definitions, an edit to the secret scan configuration, a `.ps1` file whose suite CI does not run, or a changed-file listing the reviewer could not read whole. The same event also covers a required check with no run on the head, one still pending and one the workflow does not declare. `gh` lists only checks that registered, so this tool cannot see a missing one itself, and any reason outside the list refuses.
+Both also require the review to have been posted, the reviewer to have actually run, no finding at or above the severity floor, every check to have succeeded, and the head to be the one reviewed. A severity the tool does not know counts as at or above the floor.
 
-Both also require the review to have been posted, every check to have succeeded, and the head to be the one reviewed. A severity the tool does not know counts as at or above the floor.
+A `COMMENT` never merges, whatever its verification reasons, the ones CI cannot vouch for by design included (an edit to CI definitions or to the secret scan configuration, a `.ps1` file whose suite CI does not run, a changed-file listing the reviewer could not read whole). `CONTRIBUTING.md` allows the administrator bypass on the App's `APPROVE` plus a passing `premerge`, and calls any other bypass an operator override. The tool refuses and says so, and the operator merges that pull request by hand with a bypass-rationale comment.
 
-`--allow-admin` requires `--admin-reason-file`, and the reason is posted on the pull request before the bypass merge. `CONTRIBUTING.md` has every use of the bypass say why in the pull request, and automating the bypass without that would automate a breach of the process.
+`--allow-admin` requires `--admin-reason-file`, and the reason is posted on the pull request before the bypass merge on an `APPROVE`. `CONTRIBUTING.md` has every use of the bypass say why in the pull request, and automating the bypass without that would automate a breach of the process.
 
 ### Run it from a dedicated clone
 

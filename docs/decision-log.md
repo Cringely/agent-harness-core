@@ -60,7 +60,7 @@ One entry per consequential choice, written when the choice is made. Roles only,
 
 ## 2026-11-12: publish deny rules and skill ship through the project installer (#274)
 
-- Choice: `install/Install-Harness.ps1` merges the deny of raw `gh pr create`, `gh issue create` and `gh pr merge` from `core/claude/templates/settings.permissions.json` into each project's `.claude/settings.json`, and installs the `publish` skill from `core/claude/skills/` into `.claude/skills/`. Both apply to every installed project, whatever its layers. The skill finds the tool through the `coreRepo` value in the project's gitignored sidecar, so no machine path is committed.
+- Choice: `install/Install-Harness.ps1` merges the deny of raw `gh pr create`, `gh issue create`, `gh pr merge`, `gh alias set` and related forms (14 rules) from `core/claude/templates/settings.permissions.json` into each project's `.claude/settings.json`, and installs the `publish` skill from `core/claude/skills/` into `.claude/skills/`. Both apply to every installed project, whatever its layers. The skill finds the tool through the `coreRepo` value in the project's gitignored sidecar, so no machine path is committed.
 - Rejected: user-level deny rules and the skill shipped through the account layer, as the plan first proposed. Gating the rules on the code layer, since a documents project files issues too.
 - Accepted: a project whose repository owner has no entry in the publish tool's local configuration can neither run raw gh publishing nor use the tool until one is added.
 - Flips if: an installed project has to publish through raw gh, which would call for a per-project opt-out.
