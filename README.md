@@ -153,7 +153,10 @@ is a git repository, sets `core.hooksPath` to that directory, so git runs them o
 push whoever or whatever made it, including an edit that never went through Claude Code. That setting
 replaces the repository's whole hooks directory, so the step is skipped, with the `git config` command
 to run by hand, when `core.hooksPath` is already set, when `.git/hooks/` already holds a real hook, or
-when git does not answer for the target's own repository. The Claude Code hooks take the other path:
+when git does not answer for the target's own repository. Where the dependency preflight lets a run
+without git through (git is optional outside the `code` layer), the run still finishes with exit 0,
+and a target inside a repository gets a warning with that command and a `FAILED` row for
+`git:core.hooksPath`. The Claude Code hooks take the other path:
 `core/claude/templates/settings.hooks.json` is merged into the project's `.claude/settings.json`.
 
 ### The identity gate is off until you configure it
@@ -197,8 +200,10 @@ says the divergence is the intended state. `coreCommit` is the third field, reco
 commit the layer was installed from. A manifest written before this shape existed, a flat
 path-to-hash map, is migrated on the next run with every hash preserved under `files`. The
 current shape adds `schemaVersion` (3), `layers` and `settings`, described with the install flags
-above, without dropping any of those fields. A `layers` or `settings` value outside what
-`core/claude/rules/layers.json` defines stops every installer command before it writes anything.
+above, without dropping any of those fields. Every write sorts each map's keys, so a re-install that
+changes nothing leaves the committed file byte-identical. Lists keep their order. A `layers` or
+`settings` value outside what `core/claude/rules/layers.json` defines stops every installer command
+before it writes anything.
 
 None of that travels between clones, which is exactly why two other fields never reach this file:
 `coreRepo` (an absolute path to the core checkout) and `stackDetected` (the per-machine plugin,
@@ -226,8 +231,10 @@ not trusted on its own. A full install appends the checkout it runs from, and a 
 before this check needs one re-run of the installer. Until then the hook prints one
 "not on the checkout allowlist" line at session start. `HARNESS_CORE_ALLOWLIST` points both at a
 different file. When the sidecar is missing but the committed
-manifest exists (an install ran, but the write was refused), the hook and `-Audit` each print one
-line saying so instead of going quiet. A project that installed an earlier version of this layer
+manifest exists (an install ran, but the write was refused), the hook prints one line saying so
+instead of going quiet, and points at a plain installer run, which says why the write was refused.
+`-Audit` reports it too, except on the legacy shape below, where it compares against the values
+still embedded in the manifest. A project that installed an earlier version of this layer
 has both fields embedded directly in `.harness-manifest.json`, and the next run of any installer
 command splits them into the sidecar and drops them from the committed file, as long as that run's
 ignore check passes. When it does not, the legacy values are dropped rather than migrated, same as
