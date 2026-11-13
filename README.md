@@ -38,14 +38,18 @@ Skills already global in `~/.claude` (prose review, prose linting, council revie
 
 Prerequisites: PowerShell 7 (`pwsh`). Every other tool a layer relies on is declared in
 `core/claude/deps.json`, with a probe, a minimum version and one pinned install command per platform:
-winget on Windows, apt or npm on Linux, each at an exact version. The installer probes them before
+winget on Windows, apt or npm on Linux, each at an exact version (git on Linux is the one named
+exception, below). The installer probes them before
 its first write, and a missing hard dependency refuses the install and prints its pinned command.
 The hard ones are `bun`, since every TypeScript gate is registered as a bare `bun` command and fails
 open without it, and Git Bash on Windows, which Claude Code runs the three shell hooks through. Git
 Bash is found under the Git for Windows install, never from PATH, where a bare `bash` can be the WSL
-launcher. The code layer adds `git` as a hard dependency. It has no pinned Linux package, because
-the only Ubuntu build old enough for the 30-day rule is unpatched, so on Linux that refusal tells
-you to install git by hand. A missing optional one, such as `vale` for
+launcher. The code layer adds `git` as a hard dependency. On Linux its install is `sudo apt-get
+install -y git` with no version pin, a deliberate exception to the exact-version rule (operator
+ruling 2026-11-12, #310). Ubuntu's archive keeps only the current patched build, so an exact pin
+either fails once that build is superseded or forces an unpatched one. The manifest marks this with
+an `unpinned` reason in place of `version`, which the validator accepts only on an apt install. A
+missing optional one, such as `vale` for
 the prose-lint hook, `gh` or the `claude` CLI, gets a warning with its command and the install
 carries on. Nothing is installed unless you pass `-InstallDeps`, which runs each missing
 dependency's pinned command and probes it again. `-WhatIf` runs the probes, prints each command

@@ -15,7 +15,9 @@
 #   - A probe that cannot answer (not on PATH, non-zero exit, timeout, no version in its output)
 #     is absent. That is the fail-closed reading: an unanswered probe never counts as present.
 #   - Install commands are argv arrays built from validated fields, never strings, and only from
-#     winget, apt and npm, each pinned to an exact version. No download-and-execute form exists.
+#     winget, apt and npm, each pinned to an exact version, except one named exception: an apt spec
+#     may carry `unpinned` (a reason sentence) instead of `version`, used for git on Linux (#310).
+#     No download-and-execute form exists.
 
 $script:DepsLayerNames = @('kernel', 'code', 'documents', 'physical')
 $script:DepsProbeTimeout = 10
@@ -134,15 +136,29 @@ function Get-DepsManifest {
                 $spec = $inst[$plat]
                 if ($spec -isnot [System.Collections.IDictionary]) { throw "deps manifest: '$n' install.$plat must be an object." }
                 $allowed = if ($plat -eq 'windows') { @('winget') } elseif ($plat -eq 'linux') { @('apt', 'npm') } else { throw "deps manifest: '$n' install names unknown platform '$plat'." }
-                $sources = @($spec.Keys | Where-Object { $_ -ne 'version' })
-                if ($sources.Count -ne 1 -or $allowed -notcontains $sources[0]) {
+                # `unpinned` is the one named exception to the exact-version rule (#310): an apt
+                # install with a one-sentence reason in place of `version`. Everything else needs a pin.
+                $isUnpinned = $spec.Contains('unpinned')
+                $sources = @($spec.Keys | Where-Object { $_ -ne 'version' -and $_ -ne 'unpinned' })
+                if ($isUnpinned) {
+                    if ($plat -ne 'linux' -or $sources.Count -ne 1 -or $sources[0] -ne 'apt') {
+                        throw "deps manifest: '$n' install.$plat unpinned is allowed only on an apt install."
+                    }
+                    if ($spec.Contains('version')) {
+                        throw "deps manifest: '$n' install.$plat names both version and unpinned. Choose one."
+                    }
+                    if ($spec['unpinned'] -isnot [string] -or -not $spec['unpinned'].Trim()) {
+                        throw "deps manifest: '$n' install.$plat unpinned needs a non-empty reason sentence."
+                    }
+                }
+                elseif ($sources.Count -ne 1 -or $allowed -notcontains $sources[0]) {
                     throw "deps manifest: '$n' install.$plat must name exactly one of $($allowed -join ', ') and a version."
                 }
                 $src = $sources[0]
                 if ($spec[$src] -isnot [string] -or $spec[$src] -cnotmatch $script:DepsNameGrammar[$src]) {
                     throw "deps manifest: '$n' install.$plat $src package '$($spec[$src])' is malformed."
                 }
-                if (-not (Test-DepsVersionString -Source $src -Version $spec['version'])) {
+                if (-not $isUnpinned -and -not (Test-DepsVersionString -Source $src -Version $spec['version'])) {
                     throw "deps manifest: '$n' install.$plat version '$($spec['version'])' is not an exact $src version. A range or a tag is not a pin."
                 }
             }
@@ -263,7 +279,9 @@ function Get-DepInstallCommand {
                 '--silent', '--accept-package-agreements', '--accept-source-agreements'))
     }
     if ($spec.Contains('apt')) {
-        return , ([string[]]@('sudo', 'apt-get', 'install', '-y', "$($spec['apt'])=$v"))
+        # An unpinned spec (git on Linux, #310) installs whatever the archive currently carries.
+        $target = if ($spec.Contains('unpinned')) { [string]$spec['apt'] } else { "$($spec['apt'])=$v" }
+        return , ([string[]]@('sudo', 'apt-get', 'install', '-y', $target))
     }
     if ($spec.Contains('npm')) {
         # npm checks the tarball against the registry's integrity hash on install.

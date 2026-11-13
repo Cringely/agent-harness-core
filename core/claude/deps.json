@@ -33,7 +33,8 @@
       "failMode": "Without git, the commit and push hooks never run and the installer cannot wire core.hooksPath.",
       "probe": ["git", "--version"],
       "install": {
-        "windows": { "winget": "Git.Git", "version": "2.53.0" }
+        "windows": { "winget": "Git.Git", "version": "2.53.0" },
+        "linux": { "apt": "git", "unpinned": "Ubuntu's archive keeps only the current patched build, so an exact pin either fails once that build is superseded or forces an unpatched one." }
       }
     },
     {
