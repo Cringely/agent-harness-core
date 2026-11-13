@@ -4,7 +4,7 @@
 import { describe, expect, test } from "bun:test";
 import { PublishError } from "../tools/publish/errors";
 import type { CheckEntry } from "../tools/publish/gh";
-import { atFloorCount, checksSummary, decideMerge, parseReviewOutput, type BranchRule, type BypassEvidence, type ReviewEntry, type ReviewResult } from "../tools/publish/merge-decision";
+import { atFloorCount, checksSummary, decideMerge, parseReviewOutput, type BranchRule, type BypassEvidence, type CheckRunEntry, type ReviewEntry, type ReviewResult } from "../tools/publish/merge-decision";
 import { CORE_POLICY } from "../tools/pr-review/repo-policy";
 import type { CheckRun } from "../tools/pr-review/types";
 import { computeVerification } from "../tools/pr-review/verdict";
@@ -59,6 +59,8 @@ const OWNED: BypassEvidence = {
     { id: 1, state: "APPROVED", commitId: HEAD, author: "app", authorCanPush: true },
   ],
   rules: RULES,
+  protection: null,
+  checkRuns: [{ name: "bun test", status: "COMPLETED", conclusion: "SUCCESS", appId: 1 }],
 };
 const base = { review: APPROVED, reviewedHead: HEAD, currentHead: HEAD, checks: GREEN, mergeState: "CLEAN", allowAdmin: false, bypass: null, method: "merge" };
 type Input = Parameters<typeof decideMerge>[0];
@@ -219,8 +221,8 @@ describe("decideMerge(): refuses", () => {
 // BLOCKED state alone proves nothing: the bypass needs a changed file that is code-owned at the
 // base, and the App's approval as the latest review. Anything that cannot be established refuses.
 describe("decideMerge(): refuses the bypass when the block is not shown to be the code-owner review", () => {
-  const bypassRefused = (bypass: BypassEvidence | null, review: ReviewResult = APPROVED) => {
-    const decision = decide({ review, mergeState: "BLOCKED", allowAdmin: true, bypass });
+  const bypassRefused = (bypass: BypassEvidence | null, review: ReviewResult = APPROVED, checks: CheckEntry[] = GREEN) => {
+    const decision = decide({ review, mergeState: "BLOCKED", allowAdmin: true, bypass, checks });
     expect(decision.action).toBe("refuse");
     const reason = decision.action === "refuse" ? decision.reason : "";
     expect(reason).toContain("operator");
@@ -395,6 +397,90 @@ describe("decideMerge(): refuses the bypass when the block is not shown to be th
     const reason = bypassRefused(withRules([...RULES, { type: "leaked text here", parameters: null }]));
     expect(reason).toContain("unrecognised rule");
     expect(reason).not.toContain("leaked");
+  });
+
+  // A required context that names an app needs a check run from that app. Every check of that name
+  // must have succeeded, whichever app made it.
+  const withRuns = (checkRuns: CheckRunEntry[], bypass: BypassEvidence = OWNED): BypassEvidence => ({ ...(bypass as object), checkRuns }) as BypassEvidence;
+  const run = (appId: number | null, conclusion = "SUCCESS"): CheckRunEntry => ({ name: "bun test", status: "COMPLETED", conclusion, appId });
+
+  test("a required check from an app other than the one the rule names", () => {
+    expect(bypassRefused(withRuns([run(2)]))).toContain("from the app the rule names");
+  });
+
+  test("a required check whose app could not be read", () => {
+    expect(bypassRefused(withRuns([run(null), run(1)]))).toContain("could not be read");
+  });
+
+  test("a required check that names an app, seen only in the rollup", () => {
+    expect(bypassRefused(withRuns([]))).toContain("from the app the rule names");
+  });
+
+  test("checks of a required name with mixed conclusions", () => {
+    expect(bypassRefused(withRuns([run(1), run(2, "FAILURE")]))).toContain("did not all succeed");
+  });
+
+  test("a required context with an app id that is not an integer, or a key this tool does not know", () => {
+    expect(bypassRefused(withStatus({ required_status_checks: [{ context: "bun test", integration_id: "1" }] }))).toContain("required_status_checks");
+    expect(bypassRefused(withStatus({ required_status_checks: [{ context: "bun test", app: 1 }] }))).toContain("required_status_checks");
+  });
+
+  // Reviews are grouped by author, so one with no login could hide another's request for changes.
+  test("a review with an opinion and no author login", () => {
+    const ghost: ReviewEntry = { id: 40, state: "APPROVED", commitId: HEAD, author: "", authorCanPush: true };
+    expect(bypassRefused(withFirst(other(20, "CHANGES_REQUESTED"), ghost))).toContain("no author login");
+    expect(bypassRefused(withFirst({ ...ghost, state: "DISMISSED" }))).toContain("no author login");
+  });
+
+  test("a comment with no author login does not block", () => {
+    const ghost: ReviewEntry = { id: 40, state: "COMMENTED", commitId: HEAD, author: "", authorCanPush: false };
+    expect(decide({ mergeState: "BLOCKED", allowAdmin: true, bypass: withFirst(ghost) })).toEqual({ action: "merge", admin: true });
+  });
+
+  // Classic branch protection, when the base branch has it, is checked as the rules are.
+  const CLASSIC = {
+    url: "https://api.example.test/protection",
+    required_status_checks: { url: "u", strict: false, contexts: ["bun test"], contexts_url: "u", checks: [{ context: "bun test", app_id: 1 }] },
+    required_pull_request_reviews: { url: "u", dismiss_stale_reviews: true, require_code_owner_reviews: true, required_approving_review_count: 1, require_last_push_approval: false },
+    enforce_admins: { url: "u", enabled: false },
+    required_linear_history: { enabled: false },
+    allow_force_pushes: { enabled: false },
+    allow_deletions: { enabled: false },
+    block_creations: { enabled: false },
+    required_conversation_resolution: { enabled: false },
+    lock_branch: { enabled: false },
+    allow_fork_syncing: { enabled: false },
+    required_signatures: { url: "u", enabled: false },
+  };
+  const classic = (overrides: Record<string, unknown>, rules: BranchRule[] = []): BypassEvidence => ({ ...OWNED, rules, protection: { ...CLASSIC, ...overrides } }) as BypassEvidence;
+
+  test("classic protection whose requirements, the code-owner review aside, are met", () => {
+    expect(decide({ mergeState: "BLOCKED", allowAdmin: true, bypass: classic({}) })).toEqual({ action: "merge", admin: true });
+  });
+
+  const classicCases: [string, Record<string, unknown>, string][] = [
+    ["linear history", { required_linear_history: { enabled: true } }, "classic branch protection"],
+    ["conversation resolution", { required_conversation_resolution: { enabled: true } }, "classic branch protection"],
+    ["a locked branch", { lock_branch: { enabled: true } }, "classic branch protection"],
+    ["signed commits", { required_signatures: { enabled: true } }, "classic branch protection"],
+    ["push restrictions", { restrictions: { users: [] } }, "classic branch protection"],
+    ["a key this tool does not know", { novel_protection: { enabled: false } }, "classic branch protection"],
+    ["an up-to-date branch", { required_status_checks: { ...CLASSIC.required_status_checks, strict: true } }, "classic branch protection"],
+    ["a check the head did not pass", { required_status_checks: { ...CLASSIC.required_status_checks, checks: [{ context: "Pester", app_id: null }] } }, "required check"],
+    ["a check from another app", { required_status_checks: { ...CLASSIC.required_status_checks, checks: [{ context: "bun test", app_id: 2 }] } }, "from the app"],
+    ["approval of the last push", { required_pull_request_reviews: { ...CLASSIC.required_pull_request_reviews, require_last_push_approval: true } }, "pull_request"],
+    ["two approvals", { required_pull_request_reviews: { ...CLASSIC.required_pull_request_reviews, required_approving_review_count: 2 } }, "approvals"],
+    ["a review setting this tool does not know", { required_pull_request_reviews: { ...CLASSIC.required_pull_request_reviews, novel: false } }, "classic branch protection"],
+    ["no code-owner review, with none in the rulesets either", { required_pull_request_reviews: { ...CLASSIC.required_pull_request_reviews, require_code_owner_reviews: false } }, "requires a code-owner review"],
+  ];
+  for (const [name, overrides, fragment] of classicCases) {
+    test(`classic protection requiring ${name}`, () => {
+      expect(bypassRefused(classic(overrides))).toContain(fragment);
+    });
+  }
+
+  test("classic protection that is not an object", () => {
+    expect(bypassRefused({ ...OWNED, protection: "on" } as unknown as BypassEvidence)).toContain("could not be read");
   });
 
   test("a plain CLEAN merge needs none of it", () => {

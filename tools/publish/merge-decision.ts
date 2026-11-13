@@ -15,8 +15,9 @@
 //       - the App's approval of this head as the latest submitted review, and no reviewer whose
 //         latest approval, dismissal or request for changes is a request for changes
 //       - every active rule on the base branch shown met by data the tool reads, except the
-//         code-owner review, which one of them must require. bypassRuleBlocker below says which
-//         rules it can check. Any other rule, parameter or shape refuses, since it might be unmet
+//         code-owner review, which one of them must require. That covers the rulesets and any
+//         classic branch protection. bypassRuleBlocker and protectionRules below say which rules
+//         they can check. Any other rule, parameter or shape refuses, since it might be unmet
 //     Anything that cannot be read refuses, and the merge is left to the operator.
 // Both also require the review to have been posted, the reviewer to have run, no finding at or
 // above the severity floor, every check to have succeeded, and the head to be the one reviewed. A
@@ -61,11 +62,29 @@ export interface BranchRule {
   parameters: Record<string, unknown> | null;
 }
 
+// One check run on the head, from the check-runs endpoint, which names the app that created it.
+// status and conclusion are upper-cased to match the rollup. appId is null when GitHub gave none.
+export interface CheckRunEntry {
+  name: string;
+  status: string;
+  conclusion: string;
+  appId: number | null;
+}
+
 // What review-merge reads for the bypass. codeowners is the base commit's .github/CODEOWNERS, or
 // null when the base has none. A read that failed or came back incomplete is readable: false.
 export type BypassEvidence =
   | { readable: false; reason: string }
-  | { readable: true; codeowners: string | null; changedFiles: string[]; reviews: ReviewEntry[]; rules: BranchRule[] };
+  | {
+      readable: true;
+      codeowners: string | null;
+      changedFiles: string[];
+      reviews: ReviewEntry[];
+      rules: BranchRule[];
+      // The base branch's classic protection, or null when GitHub says the branch has none.
+      protection: Record<string, unknown> | null;
+      checkRuns: CheckRunEntry[];
+    };
 
 export type MergeDecision = { action: "merge"; admin: boolean } | { action: "refuse"; reason: string };
 
@@ -147,20 +166,80 @@ function isList(value: unknown): value is unknown[] {
   return Array.isArray(value);
 }
 
-// The required_status_checks rule is met when every named context has a successful entry on the
-// head. A rule that also needs the branch up to date with the base refuses, since the tool does not
-// read that.
-function statusRuleBlocker(parameters: Record<string, unknown>, checks: readonly CheckEntry[]): string | null {
+const CONTEXT_KEYS: ReadonlySet<string> = new Set(["context", "integration_id"]);
+const succeeded = (check: { status: string; conclusion: string }) => check.status === "COMPLETED" && check.conclusion === "SUCCESS";
+
+// The required_status_checks rule is met when every named context succeeded on the head and no
+// check of that name did anything else. A context that names an app (integration_id) needs a check
+// run from that app, and refuses when any run of that name came without an app id. A rule that also
+// needs the branch up to date with the base refuses, since the tool does not read that.
+function statusRuleBlocker(parameters: Record<string, unknown>, checks: readonly CheckEntry[], runs: readonly CheckRunEntry[]): string | null {
   const shape = "a required_status_checks rule this tool cannot check";
   const contexts = parameters.required_status_checks;
   if (!Object.keys(parameters).every((key) => STATUS_KEYS.has(key)) || parameters.strict_required_status_checks_policy !== false) return shape;
-  if (!isList(contexts) || !contexts.every((entry) => isRecord(entry) && typeof entry.context === "string")) return shape;
-  for (const entry of contexts as { context: string }[]) {
-    if (!checks.some((check) => check.name === entry.context && check.status === "COMPLETED" && check.conclusion === "SUCCESS")) {
+  const wellFormed = (entry: unknown) =>
+    isRecord(entry) &&
+    typeof entry.context === "string" &&
+    Object.keys(entry).every((key) => CONTEXT_KEYS.has(key)) &&
+    (entry.integration_id === undefined || Number.isInteger(entry.integration_id));
+  if (!isList(contexts) || !contexts.every(wellFormed)) return shape;
+  for (const entry of contexts as { context: string; integration_id?: number }[]) {
+    const namedRuns = runs.filter((run) => run.name === entry.context);
+    const named = [...checks.filter((check) => check.name === entry.context), ...namedRuns];
+    if (!named.every(succeeded)) return "checks named by a required check on the base branch did not all succeed on the head";
+    if (entry.integration_id !== undefined) {
+      if (namedRuns.some((run) => run.appId === null)) return "the app behind a required check on the head could not be read";
+      if (!namedRuns.some((run) => run.appId === entry.integration_id)) {
+        return "a required check named by the base branch's rules has not succeeded on the head from the app the rule names";
+      }
+    } else if (named.length === 0) {
       return "a required check named by the base branch's rules has not succeeded on the head";
     }
   }
   return null;
+}
+
+const PROTECTION_IGNORED: ReadonlySet<string> = new Set(["url", "enforce_admins", "allow_force_pushes", "allow_deletions", "block_creations", "allow_fork_syncing"]);
+const PROTECTION_OFF: ReadonlySet<string> = new Set(["required_linear_history", "required_conversation_resolution", "lock_branch", "required_signatures"]);
+
+// Classic branch protection as the ruleset rules bypassRuleBlocker checks, or a reason it cannot be
+// read that way. Permissions that a merge cannot leave unmet (force pushes, deletions, branch
+// creation, fork syncing, whether admins are held to it) are skipped. Linear history, conversation
+// resolution, a locked branch, signed commits and push restrictions refuse when on, and any key this
+// tool does not know refuses.
+function protectionRules(protection: Record<string, unknown>): BranchRule[] | string {
+  const shape = "classic branch protection this tool cannot check";
+  const rules: BranchRule[] = [];
+  for (const [key, value] of Object.entries(protection)) {
+    if (PROTECTION_IGNORED.has(key) || key.endsWith("_url")) continue;
+    if (PROTECTION_OFF.has(key)) {
+      if (!isRecord(value) || value.enabled !== false) return shape;
+    } else if (key === "restrictions") {
+      if (value !== null) return shape;
+    } else if (key === "required_status_checks") {
+      if (!isRecord(value) || value.strict !== false) return shape;
+      const list = isList(value.checks) ? value.checks : isList(value.contexts) ? value.contexts.map((context) => ({ context })) : null;
+      if (list === null || !Object.keys(value).every((k) => ["url", "strict", "checks", "contexts", "contexts_url", "enforcement_level"].includes(k))) return shape;
+      const entries = list.map((entry) =>
+        isRecord(entry) && Number.isInteger(entry.app_id) ? { context: entry.context, integration_id: entry.app_id } : isRecord(entry) ? { context: entry.context } : entry,
+      );
+      rules.push({ type: "required_status_checks", parameters: { required_status_checks: entries, strict_required_status_checks_policy: false } });
+    } else if (key === "required_pull_request_reviews") {
+      if (!isRecord(value)) return shape;
+      const parameters: Record<string, unknown> = { require_last_push_approval: false };
+      for (const [k, v] of Object.entries(value)) {
+        if (k === "url" || k === "dismissal_restrictions" || k === "bypass_pull_request_allowances") continue;
+        else if (k === "dismiss_stale_reviews") parameters.dismiss_stale_reviews_on_push = v;
+        else if (k === "require_code_owner_reviews") parameters.require_code_owner_review = v;
+        else if (k === "required_approving_review_count" || k === "require_last_push_approval") parameters[k] = v;
+        else return shape;
+      }
+      rules.push({ type: "pull_request", parameters });
+    } else {
+      return shape;
+    }
+  }
+  return rules;
 }
 
 // The pull_request rule, apart from its code-owner review, is met when enough reviewers with push
@@ -204,13 +283,20 @@ function reviewRuleBlocker(parameters: Record<string, unknown>, opinions: readon
 // Why an active rule other than the code-owner review might be unmet, or null when none is. The
 // rule list must include a pull_request rule that requires the code-owner review, or the block
 // cannot be that review.
-function bypassRuleBlocker(rules: readonly BranchRule[], opinions: readonly ReviewEntry[], checks: readonly CheckEntry[], head: string, method: string): string | null {
+function bypassRuleBlocker(
+  rules: readonly BranchRule[],
+  opinions: readonly ReviewEntry[],
+  checks: readonly CheckEntry[],
+  runs: readonly CheckRunEntry[],
+  head: string,
+  method: string,
+): string | null {
   let codeOwnerRequired = false;
   for (const rule of rules) {
     if (PUSH_ONLY_RULES.has(rule.type)) continue;
     const parameters = rule.parameters ?? {};
     if (rule.type === "required_status_checks") {
-      const blocker = statusRuleBlocker(parameters, checks);
+      const blocker = statusRuleBlocker(parameters, checks, runs);
       if (blocker !== null) return blocker;
     } else if (rule.type === "pull_request") {
       const blocker = reviewRuleBlocker(parameters, opinions, head, method);
@@ -241,9 +327,17 @@ function bypassBlocker(bypass: BypassEvidence | null, review: ReviewResult, head
   if (latest === undefined || latest.id !== review.postedId || latest.state !== "APPROVED" || latest.commitId !== head) {
     return "the App's approval of this head is not the latest review on the pull request";
   }
+  // Opinions are grouped by author, so one with no login (a deleted account) could stand in for
+  // anyone's. It refuses instead.
+  if (bypass.reviews.some((entry) => entry.state !== "PENDING" && entry.state !== "COMMENTED" && entry.author === "")) {
+    return "a review that approves, dismisses or requests changes has no author login";
+  }
   const opinions = latestOpinions(bypass.reviews);
   if (opinions.some((entry) => entry.state === "CHANGES_REQUESTED")) return "a reviewer's latest review requests changes";
-  return bypassRuleBlocker(bypass.rules, opinions, checks, head, method);
+  const classic =
+    bypass.protection === null ? [] : isRecord(bypass.protection) ? protectionRules(bypass.protection) : "the base branch's classic protection could not be read";
+  if (typeof classic === "string") return classic;
+  return bypassRuleBlocker([...bypass.rules, ...classic], opinions, checks, bypass.checkRuns, head, method);
 }
 
 export function decideMerge(input: {

@@ -2,6 +2,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { PublishError, PublishRefusal } from "../tools/publish/errors";
+import type { RunResult } from "../tools/publish/exec";
 import { Gh } from "../tools/publish/gh";
 import { FakeRunner, HEAD, NOT_FOUND, on, REPO } from "./publish-fakes";
 
@@ -205,6 +206,47 @@ describe("prReviews()", () => {
     }
     expect(() => gh(reviews("not json\n")).prReviews(REPO, 7)).toThrow(PublishError);
     expect(() => gh(reviews("[1]\n")).prReviews(REPO, 7)).toThrow(PublishError);
+  });
+});
+
+describe("branchProtection()", () => {
+  const protection = (result: Partial<RunResult>) => new FakeRunner([TOKEN, on(["gh", "api", `repos/${REPO}/branches/main/protection`], result)]);
+
+  test("reads no protection only from GitHub's 'Branch not protected' answer", () => {
+    expect(gh(protection({ code: 1, stderr: "gh: Branch not protected (HTTP 404)" })).branchProtection(REPO, "main")).toBeNull();
+    expect(() => gh(protection({ code: 1, stderr: "gh: Not Found (HTTP 404)" })).branchProtection(REPO, "main")).toThrow(PublishError);
+    expect(() => gh(protection({ code: 1, stderr: "gh: Server Error (HTTP 500)" })).branchProtection(REPO, "main")).toThrow(PublishError);
+  });
+
+  test("returns the protection object, and throws on one that is not", () => {
+    expect(gh(protection({ stdout: `${JSON.stringify({ lock_branch: { enabled: false } })}\n` })).branchProtection(REPO, "main")).toEqual({ lock_branch: { enabled: false } });
+    expect(() => gh(protection({ stdout: "[]\n" })).branchProtection(REPO, "main")).toThrow(PublishError);
+  });
+
+  test("refuses a branch name it does not accept", () => {
+    expect(() => gh(protection({})).branchProtection(REPO, "a..b")).toThrow(PublishRefusal);
+  });
+});
+
+describe("checkRuns()", () => {
+  const runsOf = (listing: object[]) => new FakeRunner([TOKEN, on(["gh", "api", "--paginate"], { stdout: listing.map((r) => JSON.stringify(r)).join("\n") + "\n" })]);
+
+  test("returns each run with its app id, upper-casing status and conclusion", () => {
+    const runner = runsOf([
+      { total: 2, name: "bun test", status: "completed", conclusion: "success", app: 15368 },
+      { total: 2, name: "lint", status: "in_progress", conclusion: null, app: null },
+    ]);
+    expect(gh(runner).checkRuns(REPO, HEAD)).toEqual([
+      { name: "bun test", status: "COMPLETED", conclusion: "SUCCESS", appId: 15368 },
+      { name: "lint", status: "IN_PROGRESS", conclusion: "", appId: null },
+    ]);
+    expect(runner.calls[1]!.argv.slice(0, 4)).toEqual(["gh", "api", "--paginate", `repos/${REPO}/commits/${HEAD}/check-runs?per_page=100`]);
+  });
+
+  test("refuses a list shorter than its total, and throws on a run without a name or on a short sha", () => {
+    expect(() => gh(runsOf([{ total: 3, name: "a", status: "completed", conclusion: "success", app: 1 }])).checkRuns(REPO, HEAD)).toThrow(PublishRefusal);
+    expect(() => gh(runsOf([{ total: 1, status: "completed", conclusion: "success", app: 1 }])).checkRuns(REPO, HEAD)).toThrow(PublishError);
+    expect(() => gh(runsOf([])).checkRuns(REPO, "abc")).toThrow(PublishError);
   });
 });
 

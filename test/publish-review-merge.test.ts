@@ -106,6 +106,10 @@ const RULES = [
   },
 ];
 const RULES_PATH = `repos/${REPO}/rules/branches/main?per_page=100`;
+const PROTECTION = ["gh", "api", `repos/${REPO}/branches/main/protection`];
+const UNPROTECTED: Partial<RunResult> = { code: 1, stderr: "gh: Branch not protected (HTTP 404)" };
+const RUNS = [{ total: 1, name: "bun test", status: "completed", conclusion: "success", app: 15368 }];
+const RUNS_PATH = `repos/${REPO}/commits/${HEAD}/check-runs?per_page=100`;
 const paginated = (path: string, lines: unknown[]): Responder =>
   on(["gh", "api", "--paginate", path], { stdout: lines.map((line) => JSON.stringify(line)).join("\n") + "\n" });
 
@@ -119,6 +123,8 @@ function scenario(
     fileCount?: number;
     reviews?: object[];
     rules?: object[];
+    protection?: Partial<RunResult>;
+    runs?: object[];
     codeowners?: Partial<RunResult>;
   } = {},
 ): FakeRunner {
@@ -130,6 +136,8 @@ function scenario(
     paginated(`repos/${REPO}/pulls/9/files?per_page=100`, files),
     on(["gh", "api", "graphql", "--paginate"], { stdout: (opts.reviews ?? REVIEWS).map((line) => JSON.stringify(line)).join("\n") + "\n" }),
     paginated(RULES_PATH, opts.rules ?? RULES),
+    on(PROTECTION, opts.protection ?? UNPROTECTED),
+    paginated(RUNS_PATH, opts.runs ?? RUNS),
     on(CODEOWNERS_AT_BASE, opts.codeowners ?? { stdout: CODEOWNERS }),
     on(["gh", "auth", "token", "-u", "fixture-owner"], { stdout: "fake-token\n" }),
     on(["gh", "api", `repos/${REPO}`, "--jq", ".default_branch"], { stdout: "main\n" }),
@@ -269,7 +277,7 @@ describe("review-merge: merges", () => {
     const runner = withReviewer(scenario(), reviewerSays(APPROVE_OUTPUT));
     await reviewMerge(ctx(runner), ARGS);
     const lines = runner.calls.map((call) => call.argv.join(" "));
-    expect(lines.filter((line) => /CODEOWNERS|\/files|graphql|rules\/branches|changed_files/.test(line))).toEqual([]);
+    expect(lines.filter((line) => /CODEOWNERS|\/files|graphql|rules\/branches|changed_files|protection|check-runs/.test(line))).toEqual([]);
   });
 
   test("runs premerge on the reviewed head, under the configured account, before it merges", async () => {
@@ -523,6 +531,15 @@ describe("review-merge: refuses after the reviewer runs", () => {
     ["reviews that are not the expected shape", { reviews: [{ id: "1", state: "APPROVED", canPush: true, author: "reviewer-app", commit: HEAD }] }, "could not be established"],
     ["the base branch has a rule the tool cannot check", { rules: [...RULES, { type: "code_quality", parameters: { severity: "errors" } }] }, "code_quality rule"],
     ["the App's approval does not count", { reviews: [REVIEWS[0], { ...REVIEWS[1], canPush: false }] }, "counted approvals"],
+    ["classic protection could not be read", { protection: { code: 1, stderr: "gh: Server Error (HTTP 500)" } }, "could not be established"],
+    ["classic protection answers 404 for another reason", { protection: { code: 1, stderr: "gh: Not Found (HTTP 404)" } }, "could not be established"],
+    ["classic protection requires linear history", { protection: { stdout: JSON.stringify({ required_linear_history: { enabled: true } }) } }, "classic branch protection"],
+    [
+      "a required check names an app the head's run did not come from",
+      { rules: RULES.map((rule) => (rule.type === "required_status_checks" ? { ...rule, parameters: { required_status_checks: [{ context: "bun test", integration_id: 1 }], strict_required_status_checks_policy: false } } : rule)) },
+      "from the app the rule names",
+    ],
+    ["the head's check runs could not be read whole", { runs: [{ ...RUNS[0], total: 2 }] }, "could not be established"],
     ["the branch rules could not be read", { extra: [on(["gh", "api", "--paginate", RULES_PATH], { code: 1, stderr: "HTTP 500" })] }, "could not be established"],
   ];
   for (const [name, opts, fragment] of bypassCases) {

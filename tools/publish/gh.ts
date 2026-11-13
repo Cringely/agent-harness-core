@@ -13,7 +13,7 @@
 import { SHA_RE } from "../pr-review/types";
 import { PublishError, PublishRefusal } from "./errors";
 import { childEnv, type RunResult, type Runner } from "./exec";
-import type { BranchRule, ReviewEntry } from "./merge-decision";
+import type { BranchRule, CheckRunEntry, ReviewEntry } from "./merge-decision";
 
 export interface CheckEntry {
   kind: "CheckRun" | "StatusContext";
@@ -281,6 +281,52 @@ export class Gh {
       });
     }
     return reviews;
+  }
+
+  // The branch's classic protection, or null when GitHub answers "Branch not protected". Any other
+  // failure, a 404 for another reason included, throws, since it does not show the branch is
+  // unprotected.
+  branchProtection(repo: string, branch: string): Record<string, unknown> | null {
+    if (!BRANCH_RE.test(branch) || branch.includes("..")) throw new PublishRefusal("a branch name holds characters this tool does not accept");
+    const result = this.call(["api", `repos/${repo}/branches/${branch}/protection`]);
+    if (result.code !== 0) {
+      if (NOT_FOUND_RE.test(result.stderr) && /Branch not protected/.test(result.stderr)) return null;
+      throw new PublishError("gh failed while reading the branch's protection");
+    }
+    return parseLine(result.stdout.trim(), "gh returned branch protection that is not a JSON object");
+  }
+
+  // Every check run on the commit, with the id of the app that created it, or a refusal when the
+  // list cannot be read whole.
+  checkRuns(repo: string, sha: string): CheckRunEntry[] {
+    if (!SHA_RE.test(sha)) throw new PublishError("a commit id is not a full sha");
+    const out = this.ok(
+      [
+        "api",
+        "--paginate",
+        `repos/${repo}/commits/${sha}/check-runs?per_page=100`,
+        "--jq",
+        ".total_count as $total | .check_runs[] | {total: $total, name, status, conclusion, app: .app.id} | @json",
+      ],
+      "reading the head's check runs",
+    );
+    const runs: CheckRunEntry[] = [];
+    let total: unknown = 0;
+    for (const line of lines(out)) {
+      const raw = parseLine(line, "gh returned check runs that are not JSON");
+      total = raw.total;
+      if (typeof raw.name !== "string" || typeof raw.status !== "string" || (typeof raw.conclusion !== "string" && raw.conclusion !== null)) {
+        throw new PublishError("gh returned a check run without a name or status");
+      }
+      runs.push({
+        name: raw.name,
+        status: raw.status.toUpperCase(),
+        conclusion: typeof raw.conclusion === "string" ? raw.conclusion.toUpperCase() : "",
+        appId: Number.isInteger(raw.app) ? (raw.app as number) : null,
+      });
+    }
+    if (!Number.isInteger(total) || runs.length !== total) throw new PublishRefusal("the head's check runs could not be read whole");
+    return runs;
   }
 
   // Every active rule on the branch, from every ruleset that applies to it.
