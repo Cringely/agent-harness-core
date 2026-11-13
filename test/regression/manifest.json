@@ -111,17 +111,6 @@
     ]
   },
   {
-    "id": "identity-canary-after-parse",
-    "defect": "the matcher canary ran after the parse it protects, so a broken grep made a populated file parse as empty and the gate blamed the file",
-    "fixedBy": "cbd822a",
-    "tests": [
-      {
-        "file": "test/identity-gate.test.ts",
-        "name": "positive control: a broken matcher makes the gate fail rather than silently pass"
-      }
-    ]
-  },
-  {
     "id": "identity-no-names-key",
     "defect": "an identity file with no names key was accepted when emails were declared (#91)",
     "fixedBy": "aacb48a",

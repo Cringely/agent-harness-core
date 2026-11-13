@@ -10,6 +10,7 @@ import {
   runNet,
   testFilterPattern,
   type Defect,
+  type JunitCase,
   type Outcome,
 } from "./regression/net";
 
@@ -28,10 +29,10 @@ const defect = (over: Partial<Defect> = {}): Defect => ({
 
 const junit = (cases: string) =>
   `<?xml version="1.0"?><testsuites><testsuite name="s">${cases}</testsuite></testsuites>`;
-const passed = (name: string) => `<testcase name="${name}" classname="s" />`;
-const skipped = (name: string) => `<testcase name="${name}" classname="s"><skipped /></testcase>`;
-const failed = (name: string) =>
-  `<testcase name="${name}" classname="s"><failure type="AssertionError" /></testcase>`;
+const passed = (name: string, cls = "s") => `<testcase name="${name}" classname="${cls}" />`;
+const skipped = (name: string, cls = "s") => `<testcase name="${name}" classname="${cls}"><skipped /></testcase>`;
+const failed = (name: string, cls = "s") =>
+  `<testcase name="${name}" classname="${cls}"><failure type="AssertionError" /></testcase>`;
 
 describe("parseManifest", () => {
   test("accepts a well-formed entry", () => {
@@ -117,27 +118,36 @@ describe("parseJunit", () => {
     const m = parseJunit(
       junit(passed("ok &amp; fine") + skipped("sk") + failed("bad &quot;one&quot;")),
     );
-    expect(m.get("ok & fine")).toEqual(["pass"]);
-    expect(m.get("sk")).toEqual(["skip"]);
-    expect(m.get('bad "one"')).toEqual(["fail"]);
+    expect(m.map((c) => [c.name, c.outcome])).toEqual([
+      ["ok & fine", "pass"],
+      ["sk", "skip"],
+      ['bad "one"', "fail"],
+    ]);
   });
 
-  test("keeps every outcome when a name repeats", () => {
-    expect(parseJunit(junit(passed("x") + failed("x"))).get("x")).toEqual(["pass", "fail"]);
+  test("keeps every case when a title repeats, each with its describe path", () => {
+    const m = parseJunit(junit(passed("x", "first &amp; one") + failed("x", "second")));
+    expect(m).toEqual([
+      { classname: "first & one", name: "x", outcome: "pass" },
+      { classname: "second", name: "x", outcome: "fail" },
+    ]);
   });
 
   test("an errored case is a fail", () => {
-    expect(parseJunit(junit(`<testcase name="e"><error /></testcase>`)).get("e")).toEqual(["fail"]);
+    expect(parseJunit(junit(`<testcase name="e"><error /></testcase>`))).toEqual([
+      { classname: "", name: "e", outcome: "fail" },
+    ]);
   });
 });
 
 describe("judgeDefect", () => {
   const declares = () => true;
   const fileExists = () => true;
-  const outcomes = (entries: [string, Outcome[]][]) => new Map<string, Outcome[]>(entries);
+  const outcomes = (entries: [string, Outcome][]): JunitCase[] =>
+    entries.map(([name, outcome]) => ({ classname: "s", name, outcome }));
 
   test("caught when every pinned test ran and passed", () => {
-    const v = judgeDefect(defect(), { fileExists, declares, outcomes: outcomes([["does the thing", ["pass"]]]) });
+    const v = judgeDefect(defect(), { fileExists, declares, outcomes: outcomes([["does the thing", "pass"]]) });
     expect(v.caught).toBe(true);
   });
 
@@ -155,9 +165,8 @@ describe("judgeDefect", () => {
 
   test("not caught when the test is skipped, failing, or never ran", () => {
     for (const o of [
-      outcomes([["does the thing", ["skip"]]]),
-      outcomes([["does the thing", ["fail"]]]),
-      outcomes([["does the thing", ["pass", "fail"]]]),
+      outcomes([["does the thing", "skip"]]),
+      outcomes([["does the thing", "fail"]]),
       outcomes([]),
     ]) {
       expect(judgeDefect(defect(), { fileExists, declares, outcomes: o }).caught).toBe(false);
@@ -169,10 +178,30 @@ describe("judgeDefect", () => {
     const v = judgeDefect(d, {
       fileExists,
       declares,
-      outcomes: outcomes([["one", ["pass"]], ["two", ["fail"]]]),
+      outcomes: outcomes([["one", "pass"], ["two", "fail"]]),
     });
     expect(v.caught).toBe(false);
     expect(v.reasons).toHaveLength(1);
+  });
+
+  // The pin names a title, not a describe path. A same-titled twin elsewhere in the file must not
+  // be able to speak for the pinned test, whichever way the twin went.
+  test("not caught when two describes share the title, one passing and one failing", () => {
+    const xml = junit(passed("does the thing", "first describe") + failed("does the thing", "second describe"));
+    const v = judgeDefect(defect(), { fileExists, declares, outcomes: parseJunit(xml) });
+    expect(v.caught).toBe(false);
+    expect(v.reasons.join("\n")).toContain("first describe > does the thing");
+    expect(v.reasons.join("\n")).toContain("second describe > does the thing");
+  });
+
+  test("not caught when a passing twin hides a skipped pinned test", () => {
+    const xml = junit(passed("does the thing", "first describe") + skipped("does the thing", "second describe"));
+    expect(judgeDefect(defect(), { fileExists, declares, outcomes: parseJunit(xml) }).caught).toBe(false);
+  });
+
+  test("a longer title ending in the pinned one does not stand in for it", () => {
+    const xml = junit(passed("it also does the thing", "s"));
+    expect(judgeDefect(defect(), { fileExists, declares, outcomes: parseJunit(xml) }).caught).toBe(false);
   });
 });
 

@@ -105,18 +105,31 @@ function decode(value: string): string {
   });
 }
 
-/** Outcomes per test title from a bun JUnit report. A case with no child element passed. A filtered
- * out or skipped case carries <skipped>, a failing one <failure> or <error>. */
-export function parseJunit(xml: string): Map<string, Outcome[]> {
-  const out = new Map<string, Outcome[]>();
+/** One test case of a bun JUnit report. `classname` is the describe path the case sits under. */
+export interface JunitCase {
+  classname: string;
+  name: string;
+  outcome: Outcome;
+}
+
+/** The full test path as the report gives it: the describe path, then the title. */
+export function fullName(c: JunitCase): string {
+  return c.classname === "" ? c.name : `${c.classname} > ${c.name}`;
+}
+
+/** Every case of a bun JUnit report, each with its describe path, so two tests sharing a title in
+ * different describes stay two cases. A case with no child element passed. A filtered out or skipped
+ * case carries <skipped>, a failing one <failure> or <error>. */
+export function parseJunit(xml: string): JunitCase[] {
+  const out: JunitCase[] = [];
   const cases = /<testcase\b([^>]*?)(?:\/>|>([\s\S]*?)<\/testcase>)/g;
   for (const match of xml.matchAll(cases)) {
     const name = /\bname="([^"]*)"/.exec(match[1])?.[1];
     if (name === undefined) continue;
     const body = match[2] ?? "";
     const outcome: Outcome = /<(?:failure|error)\b/.test(body) ? "fail" : /<skipped\b/.test(body) ? "skip" : "pass";
-    const key = decode(name);
-    out.set(key, [...(out.get(key) ?? []), outcome]);
+    const classname = /\bclassname="([^"]*)"/.exec(match[1])?.[1] ?? "";
+    out.push({ classname: decode(classname), name: decode(name), outcome });
   }
   return out;
 }
@@ -124,7 +137,7 @@ export function parseJunit(xml: string): Map<string, Outcome[]> {
 export interface Evidence {
   fileExists: (file: string) => boolean;
   declares: (file: string, name: string) => boolean;
-  outcomes: Map<string, Outcome[]>;
+  outcomes: JunitCase[];
 }
 
 export function judgeDefect(defect: Defect, evidence: Evidence): Verdict {
@@ -135,10 +148,15 @@ export function judgeDefect(defect: Defect, evidence: Evidence): Verdict {
     } else if (!evidence.declares(file, name)) {
       reasons.push(`no test named "${name}" in ${file}`);
     } else {
-      const seen = evidence.outcomes.get(name);
-      if (!seen || seen.length === 0) reasons.push(`did not run: "${name}"`);
-      else if (seen.includes("fail")) reasons.push(`failed: "${name}"`);
-      else if (!seen.includes("pass")) reasons.push(`skipped, so it pins nothing: "${name}"`);
+      // The pin names a title, not a describe path, so the title must pick out exactly one case.
+      // Two cases sharing it (another describe, a describe loop) cannot be told apart, and letting
+      // either one speak would let a passing twin mask the pinned test.
+      const matches = evidence.outcomes.filter((c) => c.name === name);
+      if (matches.length === 0) reasons.push(`did not run: "${name}"`);
+      else if (matches.length > 1) {
+        reasons.push(`ambiguous, ${matches.length} tests share the title "${name}": ${matches.map(fullName).join(" | ")}`);
+      } else if (matches[0].outcome === "fail") reasons.push(`failed: "${name}"`);
+      else if (matches[0].outcome === "skip") reasons.push(`skipped, so it pins nothing: "${name}"`);
     }
   }
   return { id: defect.id, defect: defect.defect, fixedBy: defect.fixedBy, caught: reasons.length === 0, reasons };
@@ -174,10 +192,10 @@ export async function runNet({ manifest, root, runBun }: NetOptions): Promise<Ve
       if (declares(file, name)) toRun.set(file, (toRun.get(file) ?? new Set()).add(name));
     }
   }
-  const reports = new Map<string, Map<string, Outcome[]>>();
+  const reports = new Map<string, JunitCase[]>();
   for (const [file, names] of toRun) {
     const xml = await runBun(file, [...names]);
-    reports.set(file, xml === null ? new Map() : parseJunit(xml));
+    reports.set(file, xml === null ? [] : parseJunit(xml));
   }
 
   return manifest.map((defect) => {
@@ -189,7 +207,7 @@ export async function runNet({ manifest, root, runBun }: NetOptions): Promise<Ve
         {
           fileExists: (file) => sourceOf(file) !== null,
           declares,
-          outcomes: reports.get(test.file) ?? new Map(),
+          outcomes: reports.get(test.file) ?? [],
         },
       );
       reasons.push(...verdict.reasons);
