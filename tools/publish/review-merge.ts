@@ -19,7 +19,10 @@
 //   7. the reviewer runs from the work directory, outside every checkout, with the key piped from
 //      the configured key command, --expect-head pinned, --post and --json
 //   8. the pull request is read again (waiting out an UNKNOWN merge state), the closing-keyword
-//      audit repeats, and decideMerge rules
+//      audit repeats, and decideMerge rules. With --allow-admin, what the bypass needs is read
+//      first: .github/CODEOWNERS at the default branch head (the base, never the pull request's
+//      head), the whole changed-file list, and the pull request's reviews. A read that fails or
+//      comes back incomplete is handed to decideMerge as unreadable, which refuses the bypass
 //   9. premerge (tools/pr-review/premerge.ts) runs from the reviewer checkout on the pinned head,
 //      with --closes, the configured term list and the owner identity, and must print its OK line
 //      for this pull request and head. It checks what the diff does not carry: closing references
@@ -42,7 +45,7 @@ import { PublishError, PublishRefusal } from "./errors";
 import { parseRepo } from "../pr-review/types";
 import { childEnv, type RunResult, type Runner } from "./exec";
 import { Gh, type PrState } from "./gh";
-import { checksSummary, decideMerge, enumText, parseReviewOutput, type ReviewResult } from "./merge-decision";
+import { checksSummary, decideMerge, enumText, parseReviewOutput, type BypassEvidence, type ReviewResult } from "./merge-decision";
 import { assertClean, loadBody } from "./publish";
 import { compareClosing, findClosingRefs } from "./scan";
 
@@ -254,6 +257,24 @@ function runPremerge(ctx: ReviewMergeContext, gh: Gh, owner: OwnerIdentity, revi
   }
 }
 
+// What decideMerge needs to tell a code-owner block from any other. A failed or incomplete read
+// becomes readable: false rather than a throw, so a plain CLEAN merge is not refused over it.
+function readBypassEvidence(gh: Gh, repo: string, pr: number, defaultBranch: string): BypassEvidence {
+  try {
+    const base = gh.branchHead(repo, defaultBranch);
+    if (base === null) return { readable: false, reason: "the default branch could not be read" };
+    return {
+      readable: true,
+      codeowners: gh.fileAt(repo, ".github/CODEOWNERS", base, "reading CODEOWNERS at the base commit"),
+      changedFiles: gh.prChangedFiles(repo, pr),
+      reviews: gh.prReviews(repo, pr),
+    };
+  } catch (error) {
+    if (error instanceof PublishRefusal || error instanceof PublishError) return { readable: false, reason: error.message };
+    throw error;
+  }
+}
+
 function settledView(ctx: ReviewMergeContext, gh: Gh, repo: string, pr: number): PrState {
   let view = gh.prView(repo, pr);
   for (let i = 0; i < MERGE_STATE_POLLS && view.mergeStateStatus === "UNKNOWN"; i++) {
@@ -312,6 +333,7 @@ export async function reviewMerge(ctx: ReviewMergeContext, args: ReviewMergeArgs
     checks: final.checks,
     mergeState: final.mergeStateStatus,
     allowAdmin: args.allowAdmin,
+    bypass: args.allowAdmin ? readBypassEvidence(gh, args.repo, args.pr, defaultBranch) : null,
   });
   if (decision.action === "refuse") throw new PublishRefusal(`not merged: ${decision.reason}`);
 

@@ -5,8 +5,15 @@
 //
 // Two ways to merge, both on the App's APPROVE of the reviewed head, and nothing else:
 //   - its verification passed and the merge state is CLEAN: a plain merge.
-//   - its verification passed but the merge is BLOCKED (an owned path needs a code-owner review the
-//     operator cannot give): the administrator bypass, and only when --allow-admin was passed.
+//   - its verification passed but the merge is BLOCKED: the administrator bypass, only when
+//     --allow-admin was passed and the block is shown to be the code-owner review the operator
+//     cannot give. BLOCKED alone does not show that, because the default ruleset also blocks on
+//     other rules, and on an approval GitHub does not count. So the bypass also needs a changed file
+//     that is code-owned under .github/CODEOWNERS read at the base commit (the pull request could
+//     edit its own copy), and the App's approval of this head as the latest review on the pull
+//     request. Every required check succeeding on the head is already part of a passed
+//     verification. Anything that cannot be read, or a CODEOWNERS line codeowners.ts does not
+//     accept, refuses and leaves the merge to the operator.
 // Both also require the review to have been posted, the reviewer to have run, no finding at or
 // above the severity floor, every check to have succeeded, and the head to be the one reviewed. A
 // severity this file does not know counts as at or above the floor.
@@ -17,6 +24,7 @@
 // operator's to perform by hand, with a bypass-rationale comment, so this tool refuses and says so.
 
 import { BELOW_FLOOR_SEVERITIES } from "../pr-review/types";
+import { isOwned, parseCodeowners } from "./codeowners";
 import { PublishError } from "./errors";
 import type { CheckEntry } from "./gh";
 
@@ -28,8 +36,22 @@ export interface ReviewResult {
   severities: string[];
   refusal: string | null;
   postedUrl: string | null;
+  postedId: number | null;
   verification: { state: string; reasons: string[] };
 }
+
+// One review as GitHub lists it on the pull request, in its order (oldest first).
+export interface ReviewEntry {
+  id: number;
+  state: string;
+  commitId: string;
+}
+
+// What review-merge reads for the bypass. codeowners is the base commit's .github/CODEOWNERS, or
+// null when the base has none. A read that failed or came back incomplete is readable: false.
+export type BypassEvidence =
+  | { readable: false; reason: string }
+  | { readable: true; codeowners: string | null; changedFiles: string[]; reviews: ReviewEntry[] };
 
 export type MergeDecision = { action: "merge"; admin: boolean } | { action: "refuse"; reason: string };
 
@@ -78,6 +100,7 @@ export function parseReviewOutput(stdout: string): ReviewResult {
     severities: severities as string[],
     refusal: typeof refusal === "string" ? refusal : null,
     postedUrl: isRecord(posted) && typeof posted.htmlUrl === "string" ? posted.htmlUrl : null,
+    postedId: isRecord(posted) && Number.isInteger(posted.id) ? (posted.id as number) : null,
     verification: { state: verification.state, reasons: [...(verification.reasons as string[])] },
   };
 }
@@ -92,6 +115,27 @@ export function checksSummary(checks: readonly CheckEntry[]): { ok: boolean; tot
   return { ok: checks.length > 0 && pending === 0 && failing === 0, total: checks.length, failing, pending };
 }
 
+const OPERATOR = "The operator merges it by hand, with a bypass-rationale comment";
+
+// Why the bypass may not be taken, or null when the block is the code-owner review. Reasons name
+// line numbers and counts, never a path or CODEOWNERS text, which the pull request's author chose.
+function bypassBlocker(bypass: BypassEvidence | null, review: ReviewResult, head: string): string | null {
+  if (!bypass) return "the code-owner block could not be established";
+  if (!bypass.readable) return `the code-owner block could not be established: ${bypass.reason}`;
+  if (bypass.codeowners === null) return "the base commit has no .github/CODEOWNERS, so the block is not a code-owner review";
+  const parsed = parseCodeowners(bypass.codeowners);
+  if (!parsed.ok) return `.github/CODEOWNERS at the base commit has a line this tool does not accept (line ${parsed.line})`;
+  if (!bypass.changedFiles.some((file) => isOwned(parsed.rules, file))) {
+    return "no changed file is code-owned at the base commit, so the block is something other than the code-owner review";
+  }
+  const submitted = bypass.reviews.filter((entry) => entry.state !== "PENDING");
+  const latest = submitted[submitted.length - 1];
+  if (latest === undefined || latest.id !== review.postedId || latest.state !== "APPROVED" || latest.commitId !== head) {
+    return "the App's approval of this head is not the latest review on the pull request";
+  }
+  return null;
+}
+
 export function decideMerge(input: {
   review: ReviewResult;
   reviewedHead: string;
@@ -99,6 +143,8 @@ export function decideMerge(input: {
   checks: readonly CheckEntry[];
   mergeState: string;
   allowAdmin: boolean;
+  // Read only when --allow-admin was passed. Null otherwise.
+  bypass: BypassEvidence | null;
 }): MergeDecision {
   const { review } = input;
   const refuse = (reason: string): MergeDecision => ({ action: "refuse", reason });
@@ -117,9 +163,11 @@ export function decideMerge(input: {
     if (review.verification.state !== "passed") return refuse("the App approved, but its verification did not pass");
     if (input.mergeState === "CLEAN") return { action: "merge", admin: false };
     if (input.mergeState === "BLOCKED") {
-      return input.allowAdmin
-        ? { action: "merge", admin: true }
-        : refuse("the App approved but the merge is blocked, as on an owned path. Rerun with --allow-admin to use the administrator bypass");
+      if (!input.allowAdmin) {
+        return refuse("the App approved but the merge is blocked, as on an owned path. Rerun with --allow-admin to use the administrator bypass");
+      }
+      const blocker = bypassBlocker(input.bypass, review, input.reviewedHead);
+      return blocker === null ? { action: "merge", admin: true } : refuse(`${blocker}. ${OPERATOR}`);
     }
     return refuse(`the pull request is not mergeable (merge state ${state})`);
   }

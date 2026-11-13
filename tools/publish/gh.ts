@@ -13,6 +13,7 @@
 import { SHA_RE } from "../pr-review/types";
 import { PublishError, PublishRefusal } from "./errors";
 import { childEnv, type RunResult, type Runner } from "./exec";
+import type { ReviewEntry } from "./merge-decision";
 
 export interface CheckEntry {
   kind: "CheckRun" | "StatusContext";
@@ -99,11 +100,11 @@ export class Gh {
     return sha;
   }
 
-  fileAt(repo: string, path: string, ref: string): string | null {
+  fileAt(repo: string, path: string, ref: string, what = "reading a template file"): string | null {
     const result = this.call(["api", "-H", "Accept: application/vnd.github.raw", `repos/${repo}/contents/${path}?ref=${encodeURIComponent(ref)}`]);
     if (result.code !== 0) {
       if (NOT_FOUND_RE.test(result.stderr)) return null;
-      throw new PublishError("gh failed while reading a template file");
+      throw new PublishError(`gh failed while ${what}`);
     }
     return result.stdout;
   }
@@ -202,6 +203,49 @@ export class Gh {
       throw new PublishRefusal("the pull request's commit list could not be read whole, so its closing keywords cannot be audited");
     }
     return messages;
+  }
+
+  // Every changed file's path, or a refusal when the list cannot be read whole (GitHub's files
+  // endpoint stops at 3000), because an unread file decides whether the change is code-owned.
+  prChangedFiles(repo: string, pr: number): string[] {
+    const total = Number(this.ok(["api", `repos/${repo}/pulls/${pr}`, "--jq", ".changed_files"], "counting the pull request's changed files").trim());
+    const out = this.ok(["api", "--paginate", `repos/${repo}/pulls/${pr}/files?per_page=100`, "--jq", ".[].filename | @json"], "reading the changed files");
+    let files: unknown[];
+    try {
+      files = out
+        .split(/\r?\n/)
+        .filter((line) => line.trim() !== "")
+        .map((line) => JSON.parse(line) as unknown);
+    } catch {
+      throw new PublishError("gh returned changed files that are not JSON strings");
+    }
+    if (!Number.isInteger(total) || files.length !== total || !files.every((file) => typeof file === "string" && file !== "")) {
+      throw new PublishRefusal("the pull request's changed-file list could not be read whole");
+    }
+    return files as string[];
+  }
+
+  // The pull request's reviews in GitHub's order, oldest first.
+  prReviews(repo: string, pr: number): ReviewEntry[] {
+    const out = this.ok(
+      ["api", "--paginate", `repos/${repo}/pulls/${pr}/reviews?per_page=100`, "--jq", ".[] | {id, state, commit_id} | @json"],
+      "reading the pull request's reviews",
+    );
+    const reviews: ReviewEntry[] = [];
+    for (const line of out.split(/\r?\n/)) {
+      if (line.trim() === "") continue;
+      let raw: Record<string, unknown>;
+      try {
+        raw = JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        throw new PublishError("gh returned reviews that are not JSON");
+      }
+      if (!Number.isInteger(raw.id) || typeof raw.state !== "string" || (typeof raw.commit_id !== "string" && raw.commit_id !== null)) {
+        throw new PublishError("gh returned a review without an id, state or commit");
+      }
+      reviews.push({ id: raw.id as number, state: raw.state, commitId: typeof raw.commit_id === "string" ? raw.commit_id : "" });
+    }
+    return reviews;
   }
 
   watchChecks(repo: string, pr: number, timeoutMs: number): "finished" | "timed-out" {

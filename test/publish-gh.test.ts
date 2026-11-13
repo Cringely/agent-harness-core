@@ -162,6 +162,44 @@ describe("prCommitMessages()", () => {
   });
 });
 
+describe("prChangedFiles()", () => {
+  const files = (count: string, listing: string) =>
+    new FakeRunner([TOKEN, on(["gh", "api", `repos/${REPO}/pulls/7`, "--jq", ".changed_files"], { stdout: count }), on(["gh", "api", "--paginate"], { stdout: listing })]);
+
+  test("returns every path when the count reconciles", () => {
+    const runner = files("2\n", `${JSON.stringify("a.md")}\n${JSON.stringify("tools/x.ts")}\n`);
+    expect(gh(runner).prChangedFiles(REPO, 7)).toEqual(["a.md", "tools/x.ts"]);
+    expect(runner.calls[2]!.argv).toEqual(["gh", "api", "--paginate", `repos/${REPO}/pulls/7/files?per_page=100`, "--jq", ".[].filename | @json"]);
+  });
+
+  test("refuses a list shorter than the pull request's changed-file count, as past GitHub's 3000-file cap", () => {
+    expect(() => gh(files("3001\n", `${JSON.stringify("a.md")}\n`)).prChangedFiles(REPO, 7)).toThrow(PublishRefusal);
+  });
+
+  test("refuses a count that is not a number, and an entry that is not a path", () => {
+    expect(() => gh(files("null\n", `${JSON.stringify("a.md")}\n`)).prChangedFiles(REPO, 7)).toThrow(PublishRefusal);
+    expect(() => gh(files("1\n", "7\n")).prChangedFiles(REPO, 7)).toThrow(PublishRefusal);
+  });
+});
+
+describe("prReviews()", () => {
+  const reviews = (listing: string) => new FakeRunner([TOKEN, on(["gh", "api", "--paginate"], { stdout: listing })]);
+
+  test("returns each review in GitHub's order, reading a missing commit as none", () => {
+    const listing = [{ id: 2, state: "COMMENTED", commit_id: null }, { id: 1, state: "APPROVED", commit_id: HEAD }].map((r) => JSON.stringify(r)).join("\n");
+    expect(gh(reviews(`${listing}\n`)).prReviews(REPO, 7)).toEqual([
+      { id: 2, state: "COMMENTED", commitId: "" },
+      { id: 1, state: "APPROVED", commitId: HEAD },
+    ]);
+  });
+
+  test("throws on a review without an integer id or a state", () => {
+    expect(() => gh(reviews(`${JSON.stringify({ id: "1", state: "APPROVED", commit_id: HEAD })}\n`)).prReviews(REPO, 7)).toThrow(PublishError);
+    expect(() => gh(reviews(`${JSON.stringify({ id: 1, commit_id: HEAD })}\n`)).prReviews(REPO, 7)).toThrow(PublishError);
+    expect(() => gh(reviews("not json\n")).prReviews(REPO, 7)).toThrow(PublishError);
+  });
+});
+
 describe("publishing calls", () => {
   test("createPr passes values as --flag=value and the body on stdin", () => {
     const runner = new FakeRunner([TOKEN, on(["gh", "pr", "create"], { stdout: `https://github.com/${REPO}/pull/9\n` })]);

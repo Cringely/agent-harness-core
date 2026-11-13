@@ -80,10 +80,37 @@ function gitSub(argv: readonly string[]): string[] {
   return argv[0] === "git" && at !== -1 ? argv.slice(at + 2) : [];
 }
 
-function scenario(opts: { views?: object[]; commits?: string[]; extra?: Responder[]; merged?: string } = {}): FakeRunner {
+// What the bypass reads by default: an owned file among the changes, CODEOWNERS at the base commit,
+// and the App's posted review (id 1, APPROVE_OUTPUT) as the latest review on the head.
+const CODEOWNERS = "# owners\n/tools/ @fixture-owner\n";
+const CODEOWNERS_AT_BASE = ["gh", "api", "-H", "Accept: application/vnd.github.raw", `repos/${REPO}/contents/.github/CODEOWNERS?ref=${BASE_HEAD}`];
+const REVIEWS = [
+  { id: 5, state: "COMMENTED", commit_id: HEAD },
+  { id: 1, state: "APPROVED", commit_id: HEAD },
+];
+const paginated = (path: string, lines: unknown[]): Responder =>
+  on(["gh", "api", "--paginate", path], { stdout: lines.map((line) => JSON.stringify(line)).join("\n") + "\n" });
+
+function scenario(
+  opts: {
+    views?: object[];
+    commits?: string[];
+    extra?: Responder[];
+    merged?: string;
+    files?: string[];
+    fileCount?: number;
+    reviews?: object[];
+    codeowners?: Partial<RunResult>;
+  } = {},
+): FakeRunner {
   const commits = opts.commits ?? ["feat: x"];
+  const files = opts.files ?? ["README.md", "tools/x.ts"];
   return new FakeRunner([
     ...(opts.extra ?? []),
+    on(["gh", "api", `repos/${REPO}/pulls/9`, "--jq", ".changed_files"], { stdout: `${opts.fileCount ?? files.length}\n` }),
+    paginated(`repos/${REPO}/pulls/9/files?per_page=100`, files),
+    paginated(`repos/${REPO}/pulls/9/reviews?per_page=100`, opts.reviews ?? REVIEWS),
+    on(CODEOWNERS_AT_BASE, opts.codeowners ?? { stdout: CODEOWNERS }),
     on(["gh", "auth", "token", "-u", "fixture-owner"], { stdout: "fake-token\n" }),
     on(["gh", "api", `repos/${REPO}`, "--jq", ".default_branch"], { stdout: "main\n" }),
     on(["gh", "api", `repos/${REPO}/branches/main`], { stdout: `${BASE_HEAD}\n` }),
@@ -206,6 +233,23 @@ describe("review-merge: merges", () => {
     expect(published.map((argv) => argv[2])).toEqual(["comment", "merge"]);
     expect(published[1]).toContain("--admin");
     expect(runner.calls.find((call) => call.argv[2] === "comment")!.options.stdin).toBe(REASON);
+  });
+
+  test("reads CODEOWNERS for the bypass at the base commit, never at the pull request's head", async () => {
+    const runner = withReviewer(
+      scenario({ views: [VIEW, VIEW, { ...VIEW, mergeStateStatus: "BLOCKED" }], extra: [on(["gh", "pr", "comment"], {})] }),
+      reviewerSays(APPROVE_OUTPUT),
+    );
+    await reviewMerge(ctx(runner), ADMIN_ARGS);
+    const reads = runner.calls.map((call) => call.argv.join(" ")).filter((line) => line.includes("CODEOWNERS"));
+    expect(reads).toEqual([CODEOWNERS_AT_BASE.join(" ")]);
+  });
+
+  test("reads nothing for the bypass without --allow-admin", async () => {
+    const runner = withReviewer(scenario(), reviewerSays(APPROVE_OUTPUT));
+    await reviewMerge(ctx(runner), ARGS);
+    const lines = runner.calls.map((call) => call.argv.join(" "));
+    expect(lines.filter((line) => /CODEOWNERS|\/files|\/reviews|changed_files/.test(line))).toEqual([]);
   });
 
   test("runs premerge on the reviewed head, under the configured account, before it merges", async () => {
@@ -438,6 +482,25 @@ describe("review-merge: refuses after the reviewer runs", () => {
       );
       await refusal(reviewMerge(ctx(runner), ADMIN_ARGS), runner, "bypass-rationale comment", true);
       expect(runner.calls.some((call) => isPremerge(call.argv))).toBe(false);
+    });
+  }
+
+  // A BLOCKED merge state with --allow-admin gets the bypass only when the block is shown to be the
+  // code-owner review. Each case leaves the merge to the operator, and posts no bypass reason.
+  const BLOCKED = [VIEW, VIEW, { ...VIEW, mergeStateStatus: "BLOCKED" }];
+  const bypassCases: [string, Parameters<typeof scenario>[0], string][] = [
+    ["no changed file is code-owned", { files: ["README.md", "docs/x.md"] }, "no changed file is code-owned"],
+    ["the changed-file list is shorter than GitHub's count", { files: ["README.md"], fileCount: 2 }, "could not be read whole"],
+    ["the base commit has no CODEOWNERS", { codeowners: { code: 1, stderr: "gh: Not Found (HTTP 404)" } }, "no .github/CODEOWNERS"],
+    ["CODEOWNERS could not be read", { codeowners: { code: 1, stderr: "gh: Server Error (HTTP 500)" } }, "could not be established"],
+    ["a CODEOWNERS line this tool does not accept", { codeowners: { stdout: "/tools/ @fixture-owner\n*.md @fixture-owner\n" } }, "(line 2)"],
+    ["another review after the App's", { reviews: [...REVIEWS, { id: 6, state: "COMMENTED", commit_id: HEAD }] }, "latest review"],
+    ["reviews that are not the expected shape", { reviews: [{ id: "1", state: "APPROVED", commit_id: HEAD }] }, "could not be established"],
+  ];
+  for (const [name, opts, fragment] of bypassCases) {
+    test(`an administrator bypass when ${name}`, async () => {
+      const runner = withReviewer(scenario({ ...opts, views: BLOCKED, extra: [on(["gh", "pr", "comment"], {})] }), reviewerSays(APPROVE_OUTPUT));
+      await refusal(reviewMerge(ctx(runner), ADMIN_ARGS), runner, fragment, true);
     });
   }
 

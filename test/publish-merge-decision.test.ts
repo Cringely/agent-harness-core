@@ -4,7 +4,7 @@
 import { describe, expect, test } from "bun:test";
 import { PublishError } from "../tools/publish/errors";
 import type { CheckEntry } from "../tools/publish/gh";
-import { atFloorCount, checksSummary, decideMerge, parseReviewOutput, type ReviewResult } from "../tools/publish/merge-decision";
+import { atFloorCount, checksSummary, decideMerge, parseReviewOutput, type BypassEvidence, type ReviewResult } from "../tools/publish/merge-decision";
 import { CORE_POLICY } from "../tools/pr-review/repo-policy";
 import type { CheckRun } from "../tools/pr-review/types";
 import { computeVerification } from "../tools/pr-review/verdict";
@@ -22,13 +22,25 @@ const APPROVED: ReviewResult = {
   severities: ["naming"],
   refusal: null,
   postedUrl: "https://github.com/o/r/pull/9#pullrequestreview-1",
+  postedId: 1,
   verification: { state: "passed", reasons: [] },
 };
 // What the reviewer reports for a pull request that edits CI definitions: every required check ran
 // and succeeded, but CI cannot vouch for a change to itself.
 const CI_EDIT = { state: "incomplete", reasons: ["the pull request edits CI definitions, so its own checks cannot vouch for it: .github/workflows/test.yml"] };
 const COMMENTED: ReviewResult = { ...APPROVED, event: "COMMENT", verification: CI_EDIT };
-const base = { review: APPROVED, reviewedHead: HEAD, currentHead: HEAD, checks: GREEN, mergeState: "CLEAN", allowAdmin: false };
+// What review-merge reads for the bypass: CODEOWNERS at the base, the changed files, and the
+// pull request's reviews in the order GitHub lists them, the App's own approval last.
+const OWNED: BypassEvidence = {
+  readable: true,
+  codeowners: "# owned\n/tools/ @owner\n",
+  changedFiles: ["README.md", "tools/x.ts"],
+  reviews: [
+    { id: 7, state: "COMMENTED", commitId: "c".repeat(40) },
+    { id: 1, state: "APPROVED", commitId: HEAD },
+  ],
+};
+const base = { review: APPROVED, reviewedHead: HEAD, currentHead: HEAD, checks: GREEN, mergeState: "CLEAN", allowAdmin: false, bypass: null };
 type Input = Parameters<typeof decideMerge>[0];
 const decide = (overrides: Partial<Input>) => decideMerge({ ...base, ...overrides });
 
@@ -37,8 +49,13 @@ describe("decideMerge(): merges", () => {
     expect(decide({})).toEqual({ action: "merge", admin: false });
   });
 
-  test("the bypass on APPROVE and BLOCKED with --allow-admin", () => {
-    expect(decide({ mergeState: "BLOCKED", allowAdmin: true })).toEqual({ action: "merge", admin: true });
+  test("the bypass on APPROVE and BLOCKED with --allow-admin, an owned changed file and the App's approval last", () => {
+    expect(decide({ mergeState: "BLOCKED", allowAdmin: true, bypass: OWNED })).toEqual({ action: "merge", admin: true });
+  });
+
+  test("the bypass ignores a pending review, which GitHub has not submitted", () => {
+    const bypass = { ...OWNED, reviews: [...OWNED.reviews, { id: 8, state: "PENDING", commitId: HEAD }] };
+    expect(decide({ mergeState: "BLOCKED", allowAdmin: true, bypass })).toEqual({ action: "merge", admin: true });
   });
 });
 
@@ -178,6 +195,83 @@ describe("decideMerge(): refuses", () => {
   });
 });
 
+// The bypass skips the default ruleset, which blocks for more than the code-owner review. So a
+// BLOCKED state alone proves nothing: the bypass needs a changed file that is code-owned at the
+// base, and the App's approval as the latest review. Anything that cannot be established refuses.
+describe("decideMerge(): refuses the bypass when the block is not shown to be the code-owner review", () => {
+  const bypassRefused = (bypass: BypassEvidence | null, review: ReviewResult = APPROVED) => {
+    const decision = decide({ review, mergeState: "BLOCKED", allowAdmin: true, bypass });
+    expect(decision.action).toBe("refuse");
+    const reason = decision.action === "refuse" ? decision.reason : "";
+    expect(reason).toContain("operator");
+    return reason;
+  };
+
+  test("no evidence was gathered", () => {
+    expect(bypassRefused(null)).toContain("could not be established");
+  });
+
+  test("the evidence could not be read", () => {
+    expect(bypassRefused({ readable: false, reason: "the changed-file list could not be read whole" })).toContain("changed-file list could not be read whole");
+  });
+
+  test("the base has no CODEOWNERS", () => {
+    expect(bypassRefused({ ...OWNED, codeowners: null })).toContain("no .github/CODEOWNERS");
+  });
+
+  test("a CODEOWNERS line this tool cannot read, naming the line and not its text", () => {
+    const reason = bypassRefused({ ...OWNED, codeowners: "/tools/ @owner\n*.secret-pattern @owner\n" });
+    expect(reason).toContain("line 2");
+    expect(reason).not.toContain("secret-pattern");
+  });
+
+  test("no changed file is owned", () => {
+    expect(bypassRefused({ ...OWNED, changedFiles: ["README.md", "docs/x.md"] })).toContain("no changed file is code-owned");
+  });
+
+  test("an empty changed-file list", () => {
+    expect(bypassRefused({ ...OWNED, changedFiles: [] })).toContain("no changed file is code-owned");
+  });
+
+  test("a changed file a later line unowns", () => {
+    expect(bypassRefused({ ...OWNED, codeowners: "/tools/ @owner\n/tools/free/\n", changedFiles: ["tools/free/x.ts"] })).toContain(
+      "no changed file is code-owned",
+    );
+  });
+
+  test("a review that carries no posted id", () => {
+    expect(bypassRefused(OWNED, { ...APPROVED, postedId: null })).toContain("latest review");
+  });
+
+  test("another review submitted after the App's", () => {
+    expect(bypassRefused({ ...OWNED, reviews: [...OWNED.reviews, { id: 9, state: "COMMENTED", commitId: HEAD }] })).toContain("latest review");
+  });
+
+  test("an approval of this head that is not the one the App just posted", () => {
+    expect(bypassRefused({ ...OWNED, reviews: [{ id: 3, state: "APPROVED", commitId: HEAD }] })).toContain("latest review");
+  });
+
+  test("the App's review missing from the list", () => {
+    expect(bypassRefused({ ...OWNED, reviews: [OWNED.reviews[0]!] })).toContain("latest review");
+  });
+
+  test("no reviews at all", () => {
+    expect(bypassRefused({ ...OWNED, reviews: [] })).toContain("latest review");
+  });
+
+  test("the App's review listed in a state other than APPROVED", () => {
+    expect(bypassRefused({ ...OWNED, reviews: [{ id: 1, state: "DISMISSED", commitId: HEAD }] })).toContain("latest review");
+  });
+
+  test("the App's review listed against another commit", () => {
+    expect(bypassRefused({ ...OWNED, reviews: [{ id: 1, state: "APPROVED", commitId: "c".repeat(40) }] })).toContain("latest review");
+  });
+
+  test("a plain CLEAN merge needs none of it", () => {
+    expect(decide({ allowAdmin: true, bypass: null })).toEqual({ action: "merge", admin: false });
+  });
+});
+
 describe("helpers", () => {
   test("atFloorCount counts load-bearing and unknown severities", () => {
     expect(atFloorCount(["correctness", "naming", "fails-open", "other", "made-up"])).toBe(3);
@@ -203,6 +297,13 @@ describe("parseReviewOutput()", () => {
       body: "ignored",
     });
     expect(parseReviewOutput(out)).toEqual({ ...APPROVED, postedUrl: "https://example.test/r" });
+  });
+
+  test("reads a posted id only when it is an integer", () => {
+    const fields = { status: "posted", event: "APPROVE", reviewerOk: true, headSha: HEAD, severities: [], refusal: null, verification: { state: "passed", reasons: [] } };
+    expect(parseReviewOutput(JSON.stringify({ ...fields, posted: { id: "1", htmlUrl: "u" } })).postedId).toBeNull();
+    expect(parseReviewOutput(JSON.stringify({ ...fields, posted: { id: 1.5, htmlUrl: "u" } })).postedId).toBeNull();
+    expect(parseReviewOutput(JSON.stringify({ ...fields, posted: null })).postedId).toBeNull();
   });
 
   test("throws on output with no verification, or one of the wrong shape", () => {
