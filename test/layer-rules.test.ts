@@ -105,13 +105,35 @@ describe("layers.json", () => {
 
 type Split = (typeof SPLITS)[keyof typeof SPLITS];
 
+// Deliberate edits to a kernel half after the move, applied to the fixture before the kernel
+// comparison so the fixtures stay the pre-move originals. Each [from, to] must occur exactly once.
+// Task 13 repointed a kernel mention of fix-quality.md, which no longer loads outside code projects.
+const KERNEL_EDITS: Record<string, [string, string][]> = {
+  "change-management.md": [
+    ["security.md for security, fix-quality.md for code", "security.md for security, the code layer's fix-quality.md for code"],
+  ],
+};
+
+function applyKernelEdits(original: string, sections: Section[]): Section[] {
+  let out = sections;
+  for (const [from, to] of KERNEL_EDITS[original] ?? []) {
+    const hits = out.reduce((n, s) => n + s.body.split(from).length - 1, 0);
+    if (hits !== 1) throw new Error(`kernel edit for ${original} matched ${hits} times, expected 1`);
+    out = out.map((s) => ({ heading: s.heading, body: s.body.replace(from, to) }));
+  }
+  return out;
+}
+
 // Checks one split against an account rules directory. Throws on any mismatch, so a test can
 // point it at a temp directory without touching the account tree.
 function verifySplit(original: string, split: Split, accountDir: string): void {
   const fixtureText = read(join(fixtures, original));
   const fx = sectionsOf(fixtureText);
   const codeSecs = pick(fx.sections, split.codeSections);
-  const kernelSecs = fx.sections.filter((s) => !split.codeSections.some((h) => h === s.heading));
+  const kernelSecs = applyKernelEdits(
+    original,
+    fx.sections.filter((s) => !split.codeSections.some((h) => h === s.heading)),
+  );
 
   const codePre = split.preambleStaysIn === "code" ? fx.preamble : split.newPreamble;
   const kernelPre = split.preambleStaysIn === "kernel" ? fx.preamble : split.newPreamble;
@@ -164,6 +186,38 @@ describe("the split loses and adds nothing", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// A pointer to the account copy of a rule that moved into the code layer. After the cutover
+// ~/.claude/rules/fix-quality.md does not exist on any machine, so a file naming it points nowhere.
+export const DANGLING_RULE_POINTER = /(?:~\/\.claude|\{\{CLAUDE_HOME\}\})\/rules\/fix-quality\.md/;
+
+function textFilesUnder(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true, recursive: true })) {
+    if (!entry.isFile()) continue;
+    const p = join(entry.parentPath, entry.name);
+    const buf = readFileSync(p);
+    if (buf.includes(0)) continue; // binary
+    out.push(p);
+  }
+  return out;
+}
+
+describe("moved rules", () => {
+  test("the pointer matcher matches the account path it guards", () => {
+    const literal = ["`", "~", "/.claude/rules/", "fix-quality", ".md`"].join("");
+    expect(DANGLING_RULE_POINTER.test(literal)).toBe(true);
+    expect(DANGLING_RULE_POINTER.test(literal.replace("~/.claude", "{{CLAUDE_HOME}}"))).toBe(true);
+    expect(DANGLING_RULE_POINTER.test(".claude/rules/harness/fix-quality.md")).toBe(false);
+  });
+
+  test("no account or core file points at a moved rule by its account path", () => {
+    const files = [join(root, "account", "claude"), join(root, "core", "claude")].flatMap(textFilesUnder);
+    expect(files.length).toBeGreaterThan(100);
+    const hits = files.filter((f) => DANGLING_RULE_POINTER.test(readFileSync(f, "utf8")));
+    expect(hits).toEqual([]);
   });
 });
 

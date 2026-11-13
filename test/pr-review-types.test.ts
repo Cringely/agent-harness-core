@@ -4,15 +4,19 @@
 // them, so a defect here would reach every file that trusts the shared copy.
 
 import { describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import {
   BELOW_FLOOR_SEVERITIES,
   CONFIDENCE_SET,
   CONFIDENCES,
+  LIVING_DOC_PATHS,
   LOAD_BEARING_SET,
   LOAD_BEARING_SEVERITIES,
   RefusalError,
   SEVERITY_SET,
   SHA_RE,
+  TRUSTED_CONTEXT_PATHS,
   parseRepo,
 } from "../tools/pr-review/types";
 
@@ -92,5 +96,14 @@ describe("parseRepo", () => {
     ["a slash-adjacent control character", "Cringely/agent-harness-core\n"],
   ])("rejects %s", (_label, repo) => {
     expect(parseRepo(repo)).toBeNull();
+  });
+});
+
+// The reviewer reads these at the pull request's base commit. A path that no longer exists in the
+// tree is read as nothing, so the standard it held drops out of the review without an error.
+describe("reviewer context paths", () => {
+  const root = join(import.meta.dir, "..");
+  test.each([...TRUSTED_CONTEXT_PATHS, ...LIVING_DOC_PATHS])("%s exists in this repository", (path) => {
+    expect(existsSync(join(root, path))).toBe(true);
   });
 });

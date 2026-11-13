@@ -35,18 +35,6 @@ This is a homelab environment. Balance between move-fast experimentation and avo
 
 All commits must use the user's GitHub identity only. Never add Claude as a co-author or include any `Co-Authored-By` trailer. The commit author is always the user. Do not add bot signatures, co-author lines, or any attribution to Claude in commit messages.
 
-## Decision Documentation
-
-**In commit messages:**
-- Why this change was needed (not just what changed)
-- What was considered and rejected
-- Any trade-offs made
-
-**In code comments:**
-- Why non-obvious configuration exists
-- Warnings about things that look wrong but are intentional
-- References to relevant docs or issues
-
 ## Decision Notes
 
 Before infrastructure, security, or process changes, check the Decisions group in MEMORY.md. Read any note relevant to the area. Check both scopes. Decision notes routinely live under a different project's memory directory than the one you are working in, and several projects' MEMORY.md files carry no Decisions group at all, so an absent group is not evidence that no decision exists. A conflict with an `accepted` decision is flagged to the user, not overridden. `proposed` notes are recommendations only.
@@ -110,7 +98,7 @@ When the same class of failure appears more than once across sessions, promote i
 **How to promote:**
 1. Identify the general rule behind the specific fix
 2. Write it as a testable, actionable constraint (not "be careful with X")
-3. Add it to the most relevant rules file (change-management.md for process, security.md for security, fix-quality.md for code and fix patterns)
+3. Add it to the most relevant rules file (change-management.md for process, security.md for security, the code layer's fix-quality.md for code and fix patterns)
 4. Remove or shorten the original MEMORY.md entry to a pointer
 
 **Examples of promotable patterns from past work:**
@@ -136,13 +124,6 @@ When the same class of failure appears more than once across sessions, promote i
 - A one-time migration step (belongs in MEMORY.md or commit history)
 - A service-specific config value (belongs in the service's documentation)
 - A fix for a bug that was patched upstream
-
-## Session Close Protocol
-
-Before ending any session with code or config changes:
-1. **Commit last known good state** — all working changes must be in a commit before the session closes. Never leave uncommitted working changes.
-2. **Push to remote** — ensure the commit is on GitHub, not just local.
-3. **Sync production** — pull on the production host if production was the work target.
 
 ## Deliverables Do Not Live in the Scratchpad
 

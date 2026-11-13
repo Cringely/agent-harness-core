@@ -213,6 +213,17 @@ Describe "Install-Harness" {
             $sidecar['pluginHashes'][$Id]
         }
 
+        # -Mutate edits the record in place, or returns a value that replaces the whole entry.
+        function Set-BrokenPluginRecord {
+            param([scriptblock]$Mutate)
+            $path = "$script:target/.claude/.harness-manifest.local.json"
+            $sidecar = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -AsHashtable
+            $id = 'fake-plugin@claude-plugins-official'
+            $replacement = & $Mutate $sidecar['pluginHashes'][$id]
+            if ($null -ne $replacement) { $sidecar['pluginHashes'][$id] = $replacement }
+            $sidecar | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $path
+        }
+
         function Get-DepsInstallCalls {
             param($Recorder)
             @($Recorder.Calls | Where-Object { @('winget', 'sudo', 'npm') -contains $_.Argv[0] -and (@($_.Argv) -join ' ') -match 'install' })
@@ -297,7 +308,7 @@ Describe "Install-Harness" {
         # Gap 2: the spec-and-plan-before-implementation requirement, new in this repo, quoted
         # verbatim from the issue thread's own plugin-independent restatement.
         $guardrails | Should -Match 'exist as artifacts before implementation starts'
-        # Ported from account/claude/rules/fix-quality.md's "Work has to be able to end".
+        # Ported from account/claude/rules/bounded-review.md's "Work has to be able to end".
         $guardrails | Should -Match 'never opens an issue of its own'
         # #217: the Docs verdict top-block line, above the session-start-end marker so the
         # SessionStart hook reprints it every session.
@@ -3246,6 +3257,114 @@ Describe "Install-Harness" {
             (Read-PluginRecord $script:target)['hash'] | Should -Be $second
             $after = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit -DepsManifestPath $fixture -DepsRunner $mock.Runner *>&1 | Out-String -Width 500
             $after | Should -Not -Match 'plugin-changed'
+        }
+
+        # A record the sidecar holds but that cannot vouch for the installed copy must never read
+        # as unchanged: it is re-recorded like a first sighting, and -Audit never calls it clean.
+        Context "a plugin record that cannot vouch for the installed copy" {
+            BeforeEach {
+                $script:brokenFixture = New-DepsFixture -Deps @(New-FakePlugin)
+                $script:brokenDir = New-FakePluginDir
+                $abs = (Resolve-Path -LiteralPath $script:target).Path
+                $script:brokenMock = New-PluginMock -Installed @{ 'fake-plugin@claude-plugins-official' = @{ scope = 'project'; projectPath = $abs; installPath = $script:brokenDir } } `
+                    -Marketplaces @{ 'claude-plugins-official' = (New-FakeMarketplaceDir) }
+                & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -DepsManifestPath $script:brokenFixture -DepsRunner $script:brokenMock.Runner *>&1 | Out-Null
+                $script:brokenGoodHash = Get-PluginContentHash -Path $script:brokenDir
+            }
+
+            It "<Name>: -Audit does not report it clean, and a plain run re-records it with a warning" -TestCases @(
+                @{ Name = 'hash key missing'; Mutate = { param($r) $r.Remove('hash') } }
+                @{ Name = 'hash empty'; Mutate = { param($r) $r['hash'] = '' } }
+                @{ Name = 'hash is a number'; Mutate = { param($r) $r['hash'] = 5 } }
+                @{ Name = 'hash is an array'; Mutate = { param($r) $r['hash'] = @('a', 'b') } }
+                @{ Name = 'entry is a string'; Mutate = { param($r) 'not a record' } }
+                @{ Name = 'entry is a number'; Mutate = { param($r) 42 } }
+                @{ Name = 'entry is an array'; Mutate = { param($r) , @('a', 'b') } }
+            ) {
+                Set-BrokenPluginRecord $Mutate
+                $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit -Quiet -DepsManifestPath $script:brokenFixture -DepsRunner $script:brokenMock.Runner *>&1 | Out-String
+                $audit | Should -Match 'plugin-unverified\tplugin:fake-plugin@claude-plugins-official'
+                $audit | Should -Not -Match 'plugin-changed'
+
+                $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -DepsManifestPath $script:brokenFixture -DepsRunner $script:brokenMock.Runner *>&1 | Out-String -Width 500
+                $out | Should -Match 'recorded entry has no usable hash'
+                $rec = Read-PluginRecord $script:target
+                $rec['hash'] | Should -Be $script:brokenGoodHash
+                $rec['installPath'] | Should -Be $script:brokenDir
+
+                $after = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit -Quiet -DepsManifestPath $script:brokenFixture -DepsRunner $script:brokenMock.Runner *>&1 | Out-String
+                $after | Should -Not -Match 'plugin-'
+            }
+
+            It "-InstallDeps also re-records a hashless record" {
+                Set-BrokenPluginRecord { param($r) $r.Remove('hash') }
+                & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -InstallDeps -DepsManifestPath $script:brokenFixture -DepsRunner $script:brokenMock.Runner *>&1 | Out-Null
+                (Read-PluginRecord $script:target)['hash'] | Should -Be $script:brokenGoodHash
+            }
+
+            # A record with a usable hash can still detect a change without its installPath: the
+            # preflight hashes the path the plugin listing gives, so only an unchanged copy may be
+            # re-recorded on a plain run.
+            It "a record with a hash but no installPath: an unchanged copy gets its installPath recorded" {
+                Set-BrokenPluginRecord { param($r) $r.Remove('installPath') }
+                $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit -Quiet -DepsManifestPath $script:brokenFixture -DepsRunner $script:brokenMock.Runner *>&1 | Out-String
+                $audit | Should -Match 'plugin-unverified	plugin:fake-plugin@claude-plugins-official'
+                $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -DepsManifestPath $script:brokenFixture -DepsRunner $script:brokenMock.Runner *>&1 | Out-String -Width 500
+                $out | Should -Not -Match 'changed since recorded'
+                $rec = Read-PluginRecord $script:target
+                $rec['hash'] | Should -Be $script:brokenGoodHash
+                $rec['installPath'] | Should -Be $script:brokenDir
+                $after = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit -Quiet -DepsManifestPath $script:brokenFixture -DepsRunner $script:brokenMock.Runner *>&1 | Out-String
+                $after | Should -Not -Match 'plugin-'
+            }
+
+            It "a record with a hash but no installPath does not hide a changed copy, and only -InstallDeps re-records it" {
+                Set-BrokenPluginRecord { param($r) $r.Remove('installPath') }
+                Set-Content -LiteralPath (Join-Path $script:brokenDir 'skills/one/SKILL.md') -Value 'changed before the repair'
+                $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -DepsManifestPath $script:brokenFixture -DepsRunner $script:brokenMock.Runner *>&1 | Out-String -Width 500
+                $out | Should -Match 'changed since recorded'
+                $out | Should -Not -Match 'could not vouch'
+                $rec = Read-PluginRecord $script:target
+                $rec['hash'] | Should -Be $script:brokenGoodHash
+                $rec.Contains('installPath') | Should -BeFalse
+
+                & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -InstallDeps -DepsManifestPath $script:brokenFixture -DepsRunner $script:brokenMock.Runner *>&1 | Out-Null
+                $rec = Read-PluginRecord $script:target
+                $rec['hash'] | Should -Be (Get-PluginContentHash -Path $script:brokenDir)
+                $rec['installPath'] | Should -Be $script:brokenDir
+            }
+
+            It "a hashless record does not hide a later content change" {
+                Set-BrokenPluginRecord { param($r) $r.Remove('hash') }
+                & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -DepsManifestPath $script:brokenFixture -DepsRunner $script:brokenMock.Runner *>&1 | Out-Null
+                Set-Content -LiteralPath (Join-Path $script:brokenDir 'skills/one/SKILL.md') -Value 'changed after the repair'
+                $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -DepsManifestPath $script:brokenFixture -DepsRunner $script:brokenMock.Runner *>&1 | Out-String -Width 500
+                $out | Should -Match 'changed since recorded'
+            }
+
+            # A folder that exists but cannot be read cannot be hashed. Without the CLI, -Audit has
+            # no other evidence, so it reports unverified rather than calling the copy changed or clean.
+            It "-Audit reports plugin-unverified when the recorded folder cannot be hashed" {
+                $locked = Join-Path $script:brokenDir 'skills/one/SKILL.md'
+                $handle = $null
+                try {
+                    if ($script:hostWin) {
+                        $handle = [System.IO.File]::Open($locked, 'Open', 'Read', 'None')
+                    }
+                    else { chmod 000 $locked }
+                    $hashes = $true
+                    try { $null = Get-PluginContentHash -Path $script:brokenDir } catch { $hashes = $false }
+                    if ($hashes) { Set-ItResult -Skipped -Because 'this host can still read the locked file, so the folder stays hashable'; return }
+
+                    $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit -Quiet -DepsManifestPath $script:brokenFixture -DepsRunner $script:brokenMock.Runner *>&1 | Out-String
+                    $audit | Should -Match "plugin-unverified`tplugin:fake-plugin@claude-plugins-official"
+                    $audit | Should -Not -Match 'plugin-changed'
+                }
+                finally {
+                    if ($handle) { $handle.Dispose() }
+                    elseif (-not $script:hostWin) { chmod 644 $locked }
+                }
+            }
         }
 
         It "Get-PluginContentHash is order- and line-ending-stable" {

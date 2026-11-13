@@ -3,7 +3,7 @@
 // This is repository tooling, not core: nothing under install/ copies tools/ anywhere.
 
 // The severity floor from #120's option-A ruling, which places it where
-// account/claude/rules/fix-quality.md does ("Work has to be able to end"). A finding at one of
+// account/claude/rules/bounded-review.md does ("Work has to be able to end"). A finding at one of
 // these severities withholds approval; one below the floor is displayed and never does.
 export const LOAD_BEARING_SEVERITIES = ["correctness", "security", "fails-open"] as const;
 export const BELOW_FLOOR_SEVERITIES = ["comment-accuracy", "stale-citation", "naming", "coverage-gap", "other"] as const;
@@ -129,7 +129,7 @@ export const TRUSTED_CONTEXT_PATHS = [
   "CONTRIBUTING.md",
   "core/claude/templates/guardrails.template.md",
   "core/claude/rules/fix-quality.md",
-  "account/claude/rules/fix-quality.md",
+  "account/claude/rules/bounded-review.md",
   "account/claude/rules/security.md",
 ] as const;
 

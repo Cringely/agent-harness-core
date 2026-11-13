@@ -64,6 +64,15 @@ commit pin, but only while that marketplace is registered from Anthropic's own r
 marketplace registered under one of those names from anywhere else is refused, and nothing from it
 is installed or recorded. The installer records a content hash of its install directory in the sidecar and warns
 when that hash changes, and `-InstallDeps` records it again once you have looked at the change. A
+record with no usable hash vouches for nothing, and `-Audit` reports it as `plugin-unverified`. For
+an installed, enabled plugin the next run warns and records the current copy afresh, with two
+exceptions. A pinned third-party plugin is checked against its pin rather than its record, so the
+run leaves that record alone. A first-party plugin that follows its marketplace sha loses the
+recorded sha along with the record, so when the marketplace sha differs from the manifest pin the
+run warns about that move instead, and `-InstallDeps` updates the plugin and records the new copy.
+A record with a hash but no install path is also `plugin-unverified` in `-Audit`, yet it still
+detects a change. A plain run records the install path when the installed copy matches the hash. A
+changed copy warns `changed since recorded` and waits for `-InstallDeps`, like any changed plugin. A
 third-party plugin needs either a pin, checked before it is installed and again after, or an
 `allowUnpinnedPlugins` entry in the project manifest whose `risk` sentence says what the project is
 accepting. The prose-lint hook also wants the
@@ -306,9 +315,14 @@ printed.
 `plugin-changed` means a project-scope plugin's install directory no longer hashes to what the
 sidecar recorded. `-Audit` hashes the recorded directory itself and never calls the Claude Code CLI.
 Review the change, then re-run the installer with `-InstallDeps` to record it again.
-`plugin-unverified` means a newer copy sits beside the recorded install directory, as an update into
-a new version folder leaves one, or the folder holding it could not be listed. The recorded hash may
-then not be the active plugin's. Re-run the installer, which reads the plugin listing again.
+`plugin-unverified` means the recorded hash cannot be trusted to describe the active plugin. That
+holds when a newer copy sits beside the recorded install directory, as an update into a new version
+folder leaves one, when the folder holding it could not be listed, or when the recorded folder
+exists but could not be hashed. It also holds when the record has no usable hash or no install path.
+Re-run the installer, which reads the plugin listing again and records the current copy afresh. Two
+cases stay put. A broken record for a pinned third-party plugin is never rewritten, so delete that
+entry from the sidecar by hand. A broken record for a first-party plugin that follows its marketplace
+sha needs `-InstallDeps` when the marketplace sha differs from the manifest pin.
 
 This is the mechanical half of the findings flow in CONTRIBUTING.md.
 Run it periodically per project (SpaceMolt wires it into a `core_harvest` ceremony, see that
@@ -369,6 +383,9 @@ every machine sits unregistered somewhere, and no distribution path is why one d
 One direction. Config is authored in `~/.claude/` on the canonical workstation, exported into
 `account/claude/` here, and consumed elsewhere. A divergence on a receiving machine is a bug
 rather than a fork to keep.
+
+The account layer carries the kernel, the rules that apply in every project. Code-layer rules ship
+from `core/claude/rules` and reach a project through `Install-Harness.ps1`.
 
 ### Keeping one machine's specifics out of the payload
 
