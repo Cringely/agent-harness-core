@@ -1,4 +1,5 @@
 {
+  "cleanupPeriodDays": 90,
   "env": {
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
     "ENABLE_TOOL_SEARCH": "auto:5",
@@ -147,7 +148,7 @@
     "superpowers@claude-plugins-official": true,
     "ponytail@ponytail": true,
     "caveman@caveman": true,
-    "document-skills@anthropic-agent-skills": true
+    "document-skills@anthropic-agent-skills": false
   },
   "extraKnownMarketplaces": {
     "ponytail": {
@@ -177,7 +178,7 @@
       "effortLevel": "high"
     },
     "claude-opus-5-5": {
-      "effortLevel": "high"
+      "effortLevel": "medium"
     }
   },
   "awaySummaryEnabled": false,
