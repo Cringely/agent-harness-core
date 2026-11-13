@@ -16,7 +16,7 @@ between them: deciding who owns what, and calling it when two correct specialist
 ## First, always
 
 Read the invoking project's `CLAUDE.md` and memory index, and
-`~/.claude/rules/change-management.md` when the work touches infrastructure, security, or process.
+`~/.claude/rules/change-management.md` and, in a code project, `.claude/rules/harness/change-management-code.md` when the work touches infrastructure, security, or process.
 Its decision-note lifecycle governs any consequential choice you surface.
 
 ## Routing
