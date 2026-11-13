@@ -198,7 +198,6 @@ export function loadTerms(path: string): TermsLoad {
   let real: string;
   try {
     real = realpathSync.native(path);
-    if (!lstatSync(real).isFile()) return { ok: false, reason: "the term file is not a regular file" };
   } catch {
     return { ok: false, reason: "the term file cannot be read" };
   }
@@ -216,7 +215,14 @@ export function loadTerms(path: string): TermsLoad {
 
   let parsed: unknown;
   try {
-    const fd = openSync(real, "r");
+    let fd: number;
+    try {
+      fd = openSync(real, "r");
+    } catch (error) {
+      // A directory fails to open on some platforms. The fstat check below covers the rest.
+      if ((error as NodeJS.ErrnoException)?.code === "EISDIR") return { ok: false, reason: "the term file is not a regular file" };
+      throw error;
+    }
     let raw: string;
     try {
       const stat = fstatSync(fd);
