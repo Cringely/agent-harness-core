@@ -23,7 +23,7 @@ const TIMEOUT_MS = 120_000;
 const CR = String.fromCharCode(13);
 
 const STUB_EXPORTER = [
-  "param([string]$ClaudeHome, [string]$OutputRoot)",
+  "param([string]$ClaudeHome, [string]$OutputRoot, [string]$CoreRepo)",
   "$ErrorActionPreference = 'Stop'",
   "Add-Content -LiteralPath (Join-Path (Split-Path $ClaudeHome -Parent) 'export-ran.log') -Value 'ran'",
   "if (Test-Path -LiteralPath (Join-Path (Split-Path $ClaudeHome -Parent) 'FAIL')) {",
@@ -324,16 +324,91 @@ describe("account payload check — staged path shapes", () => {
   }, TIMEOUT_MS);
 });
 
-describe("account payload check — no exporter in this tree", () => {
-  test("notice, exit 0, nothing run", () => {
+describe("account payload check — the exporter beside the check script", () => {
+  test("no exporter beside the script: refused, nothing run", () => {
     const f = setup();
     rmSync(join(f.repo, "install", "Export-Account.ps1"));
     writeAt(f.repo, "account/claude/rules/a.md", "anything\n");
     git(["add", "account/claude/rules/a.md"], f.repo);
 
     const r = runCheck(f);
-    expect(r.exitCode).toBe(0);
+    expect(r.exitCode).toBe(1);
     expect(r.stderr.toString()).toContain("Export-Account.ps1");
     expect(exportRan(f)).toBe(false);
+  }, TIMEOUT_MS);
+
+  // The installed copy sits in the hook directory, outside every work tree.
+  // It must run the exporter beside it and never the one the checked-out
+  // branch carries.
+  function installCopy(f: Fixture, withExporter: boolean): string {
+    const dir = join(f.home, "..", "installed");
+    writeAt(dir, "check-account-payload.sh", readFileSync(CHECK_SRC, "utf8"));
+    if (withExporter) writeAt(dir, "Export-Account.ps1", STUB_EXPORTER);
+    // The work tree's exporter records that it ran and writes nothing.
+    writeAt(
+      f.repo,
+      "install/Export-Account.ps1",
+      "param([string]$ClaudeHome, [string]$OutputRoot, [string]$CoreRepo)\n" +
+        "Add-Content -LiteralPath (Join-Path (Split-Path $ClaudeHome -Parent) 'tree-export-ran.log') -Value 'ran'\n",
+    );
+    return join(dir, "check-account-payload.sh");
+  }
+
+  function runInstalled(f: Fixture, script: string) {
+    const shDir = posixShDir();
+    const basePath = process.env.PATH ?? "";
+    return Bun.spawnSync([posixSh(), script.split(String.fromCharCode(92)).join("/")], {
+      cwd: f.repo,
+      env: {
+        ...process.env,
+        HOME: f.home,
+        USERPROFILE: f.home,
+        PATH: shDir ? `${basePath}${delimiter}${shDir}` : basePath,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+  }
+
+  test("installed copy runs its own exporter, not the work tree's", () => {
+    const f = setup();
+    const script = installCopy(f, true);
+    writeAt(f.source, "rules/a.md", "changed at the source\n");
+    writeAt(f.repo, "account/claude/rules/a.md", "changed at the source\n");
+    git(["add", "account/claude/rules/a.md"], f.repo);
+
+    const r = runInstalled(f, script);
+    expect(r.exitCode).toBe(0);
+    expect(exportRan(f)).toBe(true);
+    expect(existsSync(join(f.home, "tree-export-ran.log"))).toBe(false);
+  }, TIMEOUT_MS);
+
+  test("installed copy with no exporter beside it: refused, the work tree's exporter not run", () => {
+    const f = setup();
+    const script = installCopy(f, false);
+    writeAt(f.repo, "account/claude/rules/a.md", "anything\n");
+    git(["add", "account/claude/rules/a.md"], f.repo);
+
+    const r = runInstalled(f, script);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr.toString()).toContain("Export-Account.ps1");
+    expect(existsSync(join(f.home, "tree-export-ran.log"))).toBe(false);
+  }, TIMEOUT_MS);
+});
+
+describe("account payload check — ignore rules do not hide an exported file", () => {
+  test("staged deletion of an export file an ignore rule matches: refused", () => {
+    const f = setup();
+    for (const root of [f.source, join(f.repo, "account", "claude")]) {
+      writeAt(root, ".gitignore", "ignored.md\n");
+      writeAt(root, "ignored.md", "kept by the export\n");
+    }
+    git(["add", "-f", "account/claude/.gitignore", "account/claude/ignored.md"], f.repo);
+    git(["commit", "-q", "--no-verify", "-m", "ignored export file"], f.repo);
+    git(["rm", "-q", "account/claude/ignored.md"], f.repo);
+
+    const r = runCheck(f);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr.toString()).toContain("account/claude/ignored.md");
   }, TIMEOUT_MS);
 });

@@ -355,12 +355,19 @@ fi
 
 # --- per-clone chained check (#75) ----------------------------------------
 # Opt-in per clone, through the local git config harness.preCommitChain, the
-# same opt-in shape as harness.personalTermsFile. Its value is a POSIX sh
-# script, named by a path relative to the top of the work tree (git runs every
-# hook from there), and it runs with `sh` after every gate above has passed. A
-# non-zero exit refuses the commit. This repository chains
-# install/check-account-payload.sh this way on the workstation that exports
-# the account layer.
+# same opt-in shape as harness.personalTermsFile. Its value is the file name of
+# a POSIX sh script in this hook's own directory, and the script runs with `sh`
+# after every gate above has passed. A non-zero exit refuses the commit. This
+# repository chains check-account-payload.sh this way on the workstation that
+# exports the account layer.
+#
+# THE SCRIPT COMES FROM THE HOOK DIRECTORY, NEVER THE WORK TREE
+# A path into the work tree would run whatever the checked-out branch carries,
+# in the committer's shell, on every commit. The hook directory is the
+# installed copy git runs this file from, so a script there carries the same
+# trust as this hook and no branch can change it. A value holding a slash or a
+# backslash is a path, not a file name, and refuses, so it cannot reach back
+# into a checkout.
 #
 # A chain point, not an edit to a project's installed copy of this file. An
 # edited installed hook reads as project-modified drift in the installer's
@@ -368,26 +375,30 @@ fi
 # above at the pinned version, because the installer stops updating a file
 # once it is pinned.
 #
-# --local only. A global value would run a repository-relative path in every
-# repository on the machine.
+# --local only. A global value would opt in every repository on the machine.
 #
-# A configured script missing from this tree prints a notice and passes: git
-# config is shared by every worktree of a clone, and a branch cut before the
-# script existed would otherwise refuse every commit. A config read that fails,
-# and a key set but empty, refuse, as harness.personalTermsFile does.
-chain_script=$(git config --local --get harness.preCommitChain 2>/dev/null)
+# Every configured failure refuses: a key set but empty, a value that is a
+# path, a script missing from the hook directory, and a config read that
+# fails. A clone that opted into a gate never commits with that gate off.
+chain_name=$(git config --local --get harness.preCommitChain 2>/dev/null)
 chain_rc=$?
 case $chain_rc in
   0)
-    if [ -z "$chain_script" ]; then
+    if [ -z "$chain_name" ]; then
       echo "pre-commit: refused. git config harness.preCommitChain is set but empty. Point it at a script, or unset it to opt this clone out." >&2
       exit 1
     fi
-    if [ -f "$chain_script" ]; then
-      sh "$chain_script" || exit 1
-    else
-      echo "pre-commit: git config harness.preCommitChain names '$chain_script', which is not in this tree. Chained check skipped." >&2
+    case "$chain_name" in
+      */* | *\\*)
+        echo "pre-commit: refused. git config harness.preCommitChain is '$chain_name', a path. It must be the file name of a script in the hook directory ($hook_dir), so a checked-out branch cannot supply it." >&2
+        exit 1
+        ;;
+    esac
+    if [ ! -f "$hook_dir/$chain_name" ]; then
+      echo "pre-commit: refused. git config harness.preCommitChain names '$chain_name', which is not in the hook directory ($hook_dir). Install it there, or unset the key to opt this clone out." >&2
+      exit 1
     fi
+    sh "$hook_dir/$chain_name" || exit 1
     ;;
   1) ;;
   *)

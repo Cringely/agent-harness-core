@@ -203,13 +203,18 @@ and where it is set, a list that is missing, empty or malformed is a hard refusa
 read by `install/Export-Account.ps1`, described below.
 
 `pre-commit` can also chain one check of a clone's own. Set the local git config
-`harness.preCommitChain` to a POSIX sh script, named by a path relative to the top of the work tree,
-and the hook runs it with `sh` after the identity gate and secret scan pass. A non-zero exit refuses
-the commit. Only the clone's local config counts, never a global value. A key set but empty refuses,
-and a script missing from the current tree prints a notice and passes, because every worktree of a
-clone shares its config and an older branch may not carry the script. This is how a project adds a
-gate without editing its installed `pre-commit`, which the audit would report as project-modified.
-Pinning the edit as an accepted overlay would stop the installer from updating the gates above it.
+`harness.preCommitChain` to the file name of a POSIX sh script in the hook directory, beside the
+installed `pre-commit`, and the hook runs it with `sh` after the identity gate and secret scan pass.
+A non-zero exit refuses the commit. The script is never taken from the work tree, and a value
+holding a slash or a backslash refuses: a path into a checkout would run whatever the checked-out
+branch carries, in the committer's shell, on every commit. A chained script is trusted exactly as
+far as the hook beside it. Where `.claude/` is gitignored, as it is here, no branch can change
+either one, and every worktree reads the same hook directory through `core.hooksPath`. Only the
+clone's local config counts, never a global value. A key set but empty refuses, and so does a
+script missing from the hook directory, so a clone that opted in never commits with its gate off.
+This is how a project adds a gate without editing its installed `pre-commit`, which the audit would
+report as project-modified. Pinning the edit as an accepted overlay would stop the installer from
+updating the gates above it.
 
 The `.harness-manifest.json` behind that is a record of two different things, not one. `files` maps
 each installed path to the SHA256 it had at install time, which is what makes a project edit
@@ -424,10 +429,11 @@ absolute paths into six placeholder tokens. A second export with nothing changed
 content diff, so `git diff account/claude` after a run is a usable review of what moved. Read
 that with `git diff` and not `git status`: the export writes LF where a Windows checkout writes
 CRLF, so a no-change re-export flips working-tree line endings and `git status` lists every file
-it rewrote. On the exporting workstation, a commit is checked against a fresh export as well (see
-"The payload check at commit" below). It refuses to write an `mcpServers` entry carrying anything the memory secret scanner
+it rewrote. The exporter refuses to write an `mcpServers` entry carrying anything the memory secret scanner
 recognises, or a POSIX home path that no `{{WSL_HOME}}` fold reached. Where a WSL home did resolve,
-a copied file still carrying that path after the fold stops the run the same way.
+a copied file still carrying that path after the fold stops the run the same way. On the exporting
+workstation, once its clone opts in, a commit is also checked against a fresh export (see "The
+payload check at commit" below).
 
 It also refuses to finish at all when any file in the written payload still carries an identifying
 string, in one of three classes: the workstation username, the operator's legal name, or a personal
@@ -464,11 +470,19 @@ such as `/srv` or `/opt`, because a pattern that broad would also match `/dev/nu
 
 The rule that `account/claude/` is generated and never hand-edited has a mechanical check on the
 exporting workstation. `install/check-account-payload.sh` is chained into this repo's `pre-commit`
-through the chain point described in the install section, so the clone there opts in once:
+through the chain point described in the install section. The clone there opts in by copying the
+check and the three exporter files it needs into the hook directory, then setting the key:
 
 ```
-git config --local harness.preCommitChain install/check-account-payload.sh
+cp install/check-account-payload.sh install/Export-Account.ps1 install/AccountShared.ps1 install/Restore-ClaudeProject.ps1 .claude/hooks/
+git config --local harness.preCommitChain check-account-payload.sh
 ```
+
+Run the copy in the main checkout at a commit you have reviewed. The check runs the exporter
+beside it, never the one in the work tree, so a branch that edits either script changes nothing a
+commit runs until the copy is refreshed. Refresh it after any of the four files changes. A stale
+copy fails closed: its export differs from the payload a newer exporter wrote, and the commit is
+refused.
 
 When a commit stages any path under `account/claude/`, the check runs a fresh export into a temp
 directory and refuses the commit if a staged path differs from what the export wrote there. A
@@ -476,15 +490,17 @@ staged deletion of a file the export still writes refuses, and so does a staged 
 does not write. Only the staged paths are compared, so drift elsewhere in the payload does not
 block a commit that leaves it alone. The comparison runs through git's own filters: the export is
 added to a throwaway repository carrying the staged `.gitattributes`, and blob ids are compared, so
-a line-ending difference that `git add` would normalise away is not a mismatch. A refusal names
+a line-ending difference that `git add` would normalise away is not a mismatch. That `git add` runs
+with `--force`, so no ignore rule, on the machine or inside the export, hides an exported file from
+the comparison. A refusal names
 the paths and never prints their contents, and the exporter's own output is not repeated.
 
 A commit that stages nothing under `account/claude/` pays one `git diff` and is never refused by
 this check. Where it does stage payload paths, the check fails closed. A machine with no
 `~/.claude` source or no `pwsh` refuses, since a payload change that cannot be compared with a
 fresh export cannot be told apart from a hand edit. An export that refuses, on an identifying
-string or anything else, refuses the commit too. A tree with no `install/Export-Account.ps1`, which
-is any other repository or a branch older than the exporter, gets a notice and passes.
+string or anything else, refuses the commit too, and so does an installed copy with no
+`Export-Account.ps1` beside the check.
 
 Install, on any machine, after a `git pull`:
 
