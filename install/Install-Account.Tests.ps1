@@ -206,8 +206,19 @@ BeforeAll {
     }
 
     $script:dep = @{ DepsRunner = (New-DepsStub).Runner }
+
+    # #293: both scripts default -CcstatuslineConfig to ~/.config/ccstatusline/settings.json, the
+    # installer to WRITE it. Every call in this file gets a path under a directory that does not
+    # exist instead, so no case reads or writes the operator's real file. The ccstatusline cases
+    # pass -CcstatuslineConfig explicitly.
+    $script:noCcstatusline = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-noccs-" + [guid]::NewGuid() + '/settings.json')
+    $PSDefaultParameterValues['Install-Account.ps1:CcstatuslineConfig'] = $script:noCcstatusline
+    $PSDefaultParameterValues['Export-Account.ps1:CcstatuslineConfig'] = $script:noCcstatusline
 }
 AfterAll {
+    $PSDefaultParameterValues.Remove('Install-Account.ps1:CcstatuslineConfig')
+    $PSDefaultParameterValues.Remove('Export-Account.ps1:CcstatuslineConfig')
+    Remove-Item -Recurse -Force (Split-Path -Parent $script:noCcstatusline) -ErrorAction SilentlyContinue
     Remove-Item -Recurse -Force $script:depsStubRoot -ErrorAction SilentlyContinue
 }
 
@@ -1711,7 +1722,7 @@ Describe "Install-Account" {
     # which Convert-SettingsForTarget already sanitises before Merge-AccountSettings ever sees
     # it. The receiver's own settings.json takes no such pass, and Merge-AccountSettings and
     # Merge-HookEvent do their own @()-wrapping of its properties, so the same
-    # "Cannot index into a null array" hazard documented at Install-Account.ps1:810-821 recurs
+    # "Cannot index into a null array" hazard documented at Install-Account.ps1:820-831 recurs
     # here, fed this time by hand-edited data instead of the exporter's own output. Four cases
     # below, one It per site, matching this file's convention for the three sites already pinned
     # on the payload side.
@@ -2970,6 +2981,158 @@ Describe "Install-Account" {
         }
         finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
     }
+
+    # #293: ccstatusline's own config, installed to -CcstatuslineConfig with a version-gated
+    # overwrite. The receiver's file is replaced only when the payload's format version is known
+    # and at least the receiver's known version. Anything unknown on either side keeps the
+    # receiver's file and warns, so no case below can destroy a receiver's layout without a
+    # payload known to be the same format or newer.
+    Context "ccstatusline config (#293)" {
+        BeforeAll {
+            function script:New-CcsCase {
+                param([string]$Payload, $Receiver)
+                $p = New-StandInPayload; $h = New-StandInClaudeHome
+                $target = Join-Path $h 'dotconfig/ccstatusline/settings.json'
+                if ($Payload) {
+                    New-Item -ItemType Directory -Path (Join-Path $p 'ccstatusline') -Force | Out-Null
+                    Set-Content -LiteralPath (Join-Path $p 'ccstatusline/settings.json') -Value $Payload -NoNewline
+                }
+                if ($null -ne $Receiver) {
+                    New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+                    Set-Content -LiteralPath $target -Value $Receiver -NoNewline
+                }
+                [pscustomobject]@{ P = $p; H = $h; Target = $target }
+            }
+            function script:Invoke-CcsInstall {
+                param($Case, [string]$NpmGlobal = 'C:/npm/node_modules', [switch]$DryRun)
+                & $script:install @script:dep -PayloadRoot $Case.P -ClaudeHome $Case.H `
+                    -ClaudeJson (Join-Path $Case.H 'claude.json') -CoreRepo 'C:\projects\agent-harness-core' `
+                    -NpmGlobal $NpmGlobal -CcstatuslineConfig $Case.Target `
+                    -TargetIsWindows:$true -SkipPreflight -WhatIf:$DryRun *>&1 | Out-String -Width 500
+            }
+            $script:ccsV3 = '{"version":3,"lines":[[{"id":"1","type":"custom-command","commandPath":"pwsh -File {{CLAUDE_HOME}}/scripts/w.ps1"}]]}'
+            $script:ccsV4 = '{"version":4,"lines":[[{"id":"1","type":"model","layout":"payload-v4"}]]}'
+            $script:receiverV3 = '{"version":3,"lines":[[{"id":"9","type":"model","layout":"receiver-v3"}]]}'
+            $script:receiverV5 = '{"version":5,"lines":[[{"id":"9","type":"model","layout":"receiver-v5"}]]}'
+        }
+
+        It "installs the payload config where the receiver has none, with its tokens expanded" {
+            $c = New-CcsCase -Payload $script:ccsV3
+            try {
+                Invoke-CcsInstall $c | Out-Null
+                Test-Path -LiteralPath $c.Target | Should -BeTrue
+                $doc = Get-Content -LiteralPath $c.Target -Raw | ConvertFrom-Json
+                $doc.version | Should -Be 3
+                $doc.lines[0][0].commandPath | Should -Be "pwsh -File $($c.H -replace '\\', '/')/scripts/w.ps1"
+            }
+            finally { Remove-Item -Recurse -Force $c.P, $c.H -ErrorAction SilentlyContinue }
+        }
+
+        It "overwrites the receiver's config when the payload's format version is newer" {
+            $c = New-CcsCase -Payload $script:ccsV4 -Receiver $script:receiverV3
+            try {
+                Invoke-CcsInstall $c | Out-Null
+                Get-Content -LiteralPath $c.Target -Raw | Should -Be $script:ccsV4
+            }
+            finally { Remove-Item -Recurse -Force $c.P, $c.H -ErrorAction SilentlyContinue }
+        }
+
+        It "overwrites the receiver's config when both carry the same format version" {
+            $c = New-CcsCase -Payload $script:ccsV3 -Receiver $script:receiverV3
+            try {
+                Invoke-CcsInstall $c | Out-Null
+                (Get-Content -LiteralPath $c.Target -Raw) | Should -Match 'scripts/w\.ps1'
+                (Get-Content -LiteralPath $c.Target -Raw) | Should -Not -Match 'receiver-v3'
+            }
+            finally { Remove-Item -Recurse -Force $c.P, $c.H -ErrorAction SilentlyContinue }
+        }
+
+        It "keeps a receiver config whose format version is newer than the payload's, and warns" {
+            # ccstatusline rewrites its own config on an upgrade, so a receiver that upgraded
+            # ccstatusline ahead of the exporting workstation holds a newer format. Copying the
+            # older payload over it would downgrade the format under the newer program.
+            $c = New-CcsCase -Payload $script:ccsV4 -Receiver $script:receiverV5
+            try {
+                $out = Invoke-CcsInstall $c
+                Get-Content -LiteralPath $c.Target -Raw | Should -Be $script:receiverV5
+                $out | Should -Match 'ccstatusline config.*version 5.*version 4'
+            }
+            finally { Remove-Item -Recurse -Force $c.P, $c.H -ErrorAction SilentlyContinue }
+        }
+
+        It "keeps a receiver config that <Case>, and warns" -ForEach @(
+            @{ Case = 'is not valid JSON'; Receiver = '{"version":3, "lines": [' }
+            @{ Case = 'carries no version'; Receiver = '{"lines":[]}' }
+            @{ Case = 'carries a version that is not an integer'; Receiver = '{"version":"9","lines":[]}' }
+            @{ Case = 'is not a JSON object'; Receiver = '[1,2,3]' }
+            @{ Case = 'is empty'; Receiver = '' }
+        ) {
+            $c = New-CcsCase -Payload $script:ccsV4 -Receiver $Receiver
+            try {
+                $out = Invoke-CcsInstall $c
+                Get-Content -LiteralPath $c.Target -Raw | Should -Be $(if ($Receiver) { $Receiver } else { $null })
+                $out | Should -Match 'ccstatusline config.*kept'
+            }
+            finally { Remove-Item -Recurse -Force $c.P, $c.H -ErrorAction SilentlyContinue }
+        }
+
+        It "does not install a payload config that <Case>, keeping the receiver's" -ForEach @(
+            @{ Case = 'carries no version'; Payload = '{"lines":[[{"id":"1","type":"model","layout":"payload"}]]}' }
+            @{ Case = 'is not valid JSON'; Payload = '{"version":4, "lines": [' }
+        ) {
+            $c = New-CcsCase -Payload $Payload -Receiver $script:receiverV3
+            try {
+                $out = Invoke-CcsInstall $c
+                Get-Content -LiteralPath $c.Target -Raw | Should -Be $script:receiverV3
+                $out | Should -Match 'ccstatusline config.*not installed'
+            }
+            finally { Remove-Item -Recurse -Force $c.P, $c.H -ErrorAction SilentlyContinue }
+        }
+
+        It "does not install an unversioned payload config even where the receiver has none" {
+            $c = New-CcsCase -Payload '{"lines":[]}'
+            try {
+                Invoke-CcsInstall $c | Out-Null
+                Test-Path -LiteralPath $c.Target | Should -BeFalse
+            }
+            finally { Remove-Item -Recurse -Force $c.P, $c.H -ErrorAction SilentlyContinue }
+        }
+
+        It "skips the config on the npm-absent branch, where no ccstatusline would read it" {
+            $c = New-CcsCase -Payload $script:ccsV4 -Receiver $script:receiverV3
+            $fresh = New-CcsCase -Payload $script:ccsV4
+            try {
+                Invoke-CcsInstall $c -NpmGlobal '' | Out-Null
+                Invoke-CcsInstall $fresh -NpmGlobal '' | Out-Null
+                Get-Content -LiteralPath $c.Target -Raw | Should -Be $script:receiverV3
+                Test-Path -LiteralPath $fresh.Target | Should -BeFalse
+            }
+            finally { Remove-Item -Recurse -Force $c.P, $c.H, $fresh.P, $fresh.H -ErrorAction SilentlyContinue }
+        }
+
+        It "writes no config under -WhatIf" {
+            $c = New-CcsCase -Payload $script:ccsV4 -Receiver $script:receiverV3
+            $fresh = New-CcsCase -Payload $script:ccsV4
+            try {
+                Invoke-CcsInstall $c -DryRun | Out-Null
+                Invoke-CcsInstall $fresh -DryRun | Out-Null
+                Get-Content -LiteralPath $c.Target -Raw | Should -Be $script:receiverV3
+                Test-Path -LiteralPath $fresh.Target | Should -BeFalse
+            }
+            finally { Remove-Item -Recurse -Force $c.P, $c.H, $fresh.P, $fresh.H -ErrorAction SilentlyContinue }
+        }
+
+        It "refuses an explicitly empty -CcstatuslineConfig rather than falling back to the live path" {
+            $p = New-StandInPayload; $h = New-StandInClaudeHome
+            try {
+                { & $script:install @script:dep -PayloadRoot $p -ClaudeHome $h `
+                        -ClaudeJson (Join-Path $h 'claude.json') -CcstatuslineConfig '' `
+                        -TargetIsWindows:$true -SkipPreflight *>$null } |
+                    Should -Throw '*-CcstatuslineConfig was passed empty*'
+            }
+            finally { Remove-Item -Recurse -Force $p, $h -ErrorAction SilentlyContinue }
+        }
+    }
 }
 
 Describe "Account layer round trip" {
@@ -3154,5 +3317,37 @@ exit 0
                 Should -Be 'uvx'
         }
         finally { Remove-Item -Recurse -Force $canonHome, $out, $fresh -ErrorAction SilentlyContinue }
+    }
+
+    It "a ccstatusline config folds, expands and folds back to the same payload bytes (#293)" {
+        $canonHome = New-CanonicalHome
+        $out1 = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-rt-ccs1-" + [guid]::NewGuid())
+        $out2 = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-rt-ccs2-" + [guid]::NewGuid())
+        $ccs = Join-Path $canonHome 'dotconfig/ccstatusline/settings.json'
+        try {
+            $ch = Join-Path $canonHome '.claude'
+            New-Item -ItemType Directory -Path (Split-Path -Parent $ccs) -Force | Out-Null
+            $cmd = ("pwsh -File " + ($ch -replace '/', '\') + '\scripts\w.ps1') | ConvertTo-Json
+            "{ `"version`": 3, `"lines`": [ [ { `"id`": `"1`", `"type`": `"custom-command`", `"commandPath`": $cmd } ] ] }" |
+                Set-Content -LiteralPath $ccs
+
+            $a = & $script:exportArgs $canonHome $out1
+            & $script:export @a -CcstatuslineConfig $ccs | Out-Null
+            $payload1 = Get-Content (Join-Path $out1 'ccstatusline/settings.json') -Raw
+            $payload1 | Should -Match '\{\{CLAUDE_HOME\}\}/scripts/w\.ps1'
+
+            & $script:install @script:dep -PayloadRoot $out1 -ClaudeHome $ch `
+                -ClaudeJson (Join-Path $canonHome '.claude.json') `
+                -CoreRepo 'C:\projects\agent-harness-core' -NpmGlobal 'C:/npm/node_modules' `
+                -VaultPath $a.VaultPath -HomeSlug $a.HomeSlug -CcstatuslineConfig $ccs `
+                -TargetIsWindows:$true -SkipPreflight | Out-Null
+            (Get-Content $ccs -Raw | ConvertFrom-Json).lines[0][0].commandPath |
+                Should -Be "pwsh -File $($ch -replace '\\', '/')/scripts/w.ps1"
+
+            $b = & $script:exportArgs $canonHome $out2
+            & $script:export @b -CcstatuslineConfig $ccs | Out-Null
+            Get-Content (Join-Path $out2 'ccstatusline/settings.json') -Raw | Should -Be $payload1
+        }
+        finally { Remove-Item -Recurse -Force $canonHome, $out1, $out2 -ErrorAction SilentlyContinue }
     }
 }

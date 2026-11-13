@@ -42,6 +42,12 @@ foreach ($fnName in 'Get-ProjectSlug', 'Convert-HookCommand', 'Test-ResidualWind
 $script:AccountTreeDirs = @('rules', 'agents', 'skills', 'tools/prose-lint', 'tools/not-ai', 'hooks')
 $script:AccountRootFiles = @('statusline-command.ps1', 'statusline-command.sh')
 
+# #293: ccstatusline keeps its widget layout in ~/.config/ccstatusline/settings.json, outside
+# ~/.claude, so no tree above reaches it. The payload carries it at this path. It sits inside the
+# payload root so the export's whole-payload gates scan it like any other payload file, and it is
+# not under any $AccountTreeDirs entry, so the installer's tree copy never puts it in ~/.claude.
+$script:AccountCcstatuslinePayload = 'ccstatusline/settings.json'
+
 # Payload-relative paths that never travel. model-tier-gate.ts is core-owned: the installer
 # copies it from core/claude/hooks/ in the same clone, and two copies in one repo would drift.
 # The HANDOFF is internal agent traffic naming a script that no longer exists under that name.
