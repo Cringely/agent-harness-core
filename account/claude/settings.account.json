@@ -147,8 +147,7 @@
     "code-review@claude-plugins-official": true,
     "superpowers@claude-plugins-official": true,
     "ponytail@ponytail": true,
-    "caveman@caveman": true,
-    "document-skills@anthropic-agent-skills": false
+    "caveman@caveman": true
   },
   "extraKnownMarketplaces": {
     "ponytail": {
@@ -161,12 +160,6 @@
       "source": {
         "source": "github",
         "repo": "JuliusBrussee/caveman"
-      }
-    },
-    "anthropic-agent-skills": {
-      "source": {
-        "source": "github",
-        "repo": "anthropics/skills"
       }
     }
   },
