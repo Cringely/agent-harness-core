@@ -653,6 +653,55 @@ describe("not-ai gate — blockquotes are excluded from sentence rhythm", () => 
     expect(json.counts.sentences).toBe(2);
   });
 
+  test.skipIf(!PYTHON)("a fence directly under a quote ends the quote and the prose after it counts", () => {
+    // No blank line anywhere. The fence opens a new block, so the sentence after the closing
+    // fence is the document's own prose, not a lazy continuation of the quote above.
+    const { json } = runGate(
+      "blockquote-then-fence.md",
+      [
+        "> Quoted line that opens a block quote right here in the document.",
+        "```",
+        "code inside the fence is program text and never counts.",
+        "```",
+        "Real sentence after the closing fence is prose that must be counted today.",
+        "",
+      ].join("\n"),
+    );
+    expect(json.counts.sentences).toBe(1);
+  });
+
+  test.skipIf(!PYTHON)("a thematic break directly under a quote ends the quote", () => {
+    const { json } = runGate(
+      "blockquote-then-break.md",
+      [
+        "> Quoted line that opens a block quote right here in the document.",
+        "---",
+        "Real sentence after the thematic break is prose that must be counted today.",
+        "",
+      ].join("\n"),
+    );
+    expect(json.counts.sentences).toBe(1);
+  });
+
+  test.skipIf(!PYTHON)("a fence or thematic break under a quote ends it for bold labels too", () => {
+    const { json } = runGate(
+      "blockquote-then-fence-label.md",
+      [
+        "> Quoted line that opens a block quote right here in the document.",
+        "```",
+        "code",
+        "```",
+        "**Real label:** run-in label right after the fence is counted as usual.",
+        "",
+        "> Second quote opens here and is quoted text only in this document.",
+        "***",
+        "**Second label:** run-in label right after the break is counted as well.",
+        "",
+      ].join("\n"),
+    );
+    expect(json.counts.bold_label_run_in).toBe(2);
+  });
+
   test.skipIf(!PYTHON)("a greater-than sign that does not start the line is ordinary prose", () => {
     const { json } = runGate(
       "greater-than.md",

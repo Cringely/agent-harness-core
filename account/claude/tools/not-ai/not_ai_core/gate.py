@@ -63,6 +63,9 @@ TABLE_ROW_RE = re.compile(r"^\s*\|")
 # continuations and belong to the quote until a blank line or a block that cannot
 # continue a paragraph (heading, fence, list item).
 BLOCKQUOTE_RE = re.compile(r"^ {0,3}>")
+# A thematic break (`---`, `***`, `___`, spaced or not) is a block that cannot continue a
+# paragraph, so it ends a quote the way a heading does.
+THEMATIC_BREAK_RE = re.compile(r"^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$")
 TABLE_SEPARATOR_RE = re.compile(r"^[\s|:-]+$")
 
 # 's is ambiguous between a contraction ("it's" = it is) and a possessive
@@ -259,6 +262,7 @@ def _prose_blocks(text: str) -> tuple[list[str], bool]:
             continue
         if fence_match:
             flush()
+            in_quote = False
             in_fence = True
             fence_char = fence_match.group(1)[0]
             fence_length = len(fence_match.group(1))
@@ -278,6 +282,9 @@ def _prose_blocks(text: str) -> tuple[list[str], bool]:
             in_quote = False
             index += 1
             continue
+
+        if in_quote and THEMATIC_BREAK_RE.match(line):
+            in_quote = False
 
         # A quote line opens a quote that runs to the next blank line (an open
         # paragraph above it is untouched and flushes as usual). Inside it,
@@ -417,11 +424,14 @@ def _bold_label_lines(text: str) -> Iterable[str]:
                 fence_lines.append(line)
             continue
         if fence_match:
+            in_quote = False
             in_fence = True
             fence_char = fence_match.group(1)[0]
             fence_length = len(fence_match.group(1))
             fence_lines = []
             continue
+        if in_quote and THEMATIC_BREAK_RE.match(line):
+            in_quote = False
         if not line.strip() or ATX_HEADING_RE.match(line):
             in_quote = False
             continue
