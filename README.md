@@ -334,7 +334,7 @@ Three more rows say the check did not cover a definition, so a clean audit is ne
 for it. `agent-keys-unparsed` means a frontmatter line is not a key, a `#` comment, a blank line or an
 indented or `- ` continuation of the key above it, or the opening `---` has no closing `---` line.
 Fix that line or the markers and re-run `-Audit`. `agent-keys-unreadable` names one definition that
-could not be read, for example because another process holds it open. Make it readable and re-run
+could not be read when another process holds it open. Make it readable and re-run
 `-Audit`. The audit carries on with the other definitions. `agent-keys-unchecked` means the allowlist
 file is missing, unparsable or empty in the core checkout, so no definition was vouched for. Restore
 `core/claude/agent-frontmatter-keys.json` or update the core checkout, then re-run `-Audit`. A
