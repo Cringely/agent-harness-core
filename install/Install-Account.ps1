@@ -179,7 +179,7 @@ $ClaudeJson  = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFrom
 # Review round 2 addendum: -PayloadRoot and -ClaudeHome must not be the same directory, or
 # nested inside each other. Copy-PayloadTree reads recursively from -PayloadRoot while writing
 # into -ClaudeHome, so either direction of nesting means the copy walks a tree it is
-# concurrently writing into. Same failure class Export-Account.ps1:273-276 guards against for its
+# concurrently writing into. Same failure class Export-Account.ps1:274-277 guards against for its
 # own -OutputRoot/-ClaudeHome pair ("the mirror deletes each allowlisted directory"), though the
 # shape of the damage differs there (containment would delete the live account layer; here it
 # would make the copy read from inside its own destination).

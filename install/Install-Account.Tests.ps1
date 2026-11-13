@@ -1722,7 +1722,7 @@ Describe "Install-Account" {
     # which Convert-SettingsForTarget already sanitises before Merge-AccountSettings ever sees
     # it. The receiver's own settings.json takes no such pass, and Merge-AccountSettings and
     # Merge-HookEvent do their own @()-wrapping of its properties, so the same
-    # "Cannot index into a null array" hazard documented at Install-Account.ps1:820-831 recurs
+    # "Cannot index into a null array" hazard documented at Install-Account.ps1:824-835 recurs
     # here, fed this time by hand-edited data instead of the exporter's own output. Four cases
     # below, one It per site, matching this file's convention for the three sites already pinned
     # on the payload side.
