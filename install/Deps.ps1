@@ -823,16 +823,22 @@ function Get-PluginInstallCommands {
     return , $cmds.ToArray()
 }
 
-# A sidecar plugin record vouches for an installed copy only with a non-empty string hash and a
-# non-empty string installPath. Anything else (hand-edited, partly written) is not a record.
+# A record can detect a changed copy with a non-empty string hash alone: the preflight hashes the
+# path the plugin listing gives and compares it with this value.
+function Test-PluginRecordHasHash {
+    param($Record)
+    if ($Record -isnot [System.Collections.IDictionary] -or -not $Record.Contains('hash')) { return $false }
+    $v = $Record['hash']
+    return ($v -is [string]) -and -not [string]::IsNullOrWhiteSpace($v)
+}
+
+# -Audit has no CLI listing, so it also needs the recorded installPath to find the folder to
+# hash. A record is fully well formed only with both, each a non-empty string.
 function Test-PluginRecordWellFormed {
     param($Record)
-    if ($Record -isnot [System.Collections.IDictionary]) { return $false }
-    foreach ($key in 'hash', 'installPath') {
-        $v = if ($Record.Contains($key)) { $Record[$key] } else { $null }
-        if ($v -isnot [string] -or [string]::IsNullOrWhiteSpace($v)) { return $false }
-    }
-    return $true
+    if (-not (Test-PluginRecordHasHash $Record)) { return $false }
+    $v = if ($Record.Contains('installPath')) { $Record['installPath'] } else { $null }
+    return ($v -is [string]) -and -not [string]::IsNullOrWhiteSpace($v)
 }
 
 function New-PluginRecord {
@@ -912,13 +918,16 @@ function Invoke-PluginDepsPreflight {
             Write-Warning "plugin $id is unpinned third-party code, allowed by this project's manifest. Recorded risk: $($opt[0]['risk'])"
         }
 
-        # A record that cannot vouch for the installed copy counts as no record, so the first-seen
-        # path below re-records it. Reading it as "unchanged" would switch drift detection off.
+        # A record with no usable hash cannot vouch for the installed copy, so it counts as no
+        # record and the first-seen path below re-records it. Reading it as "unchanged" would
+        # switch drift detection off. A record with a hash but no installPath still detects a
+        # change, so it stays a record: only an unchanged copy gets its installPath filled in.
         $rec = $null
         $recBroken = $false
         if ($Records.Contains($id)) {
-            if (Test-PluginRecordWellFormed $Records[$id]) { $rec = $Records[$id] } else { $recBroken = $true }
+            if (Test-PluginRecordHasHash $Records[$id]) { $rec = $Records[$id] } else { $recBroken = $true }
         }
+        $recNoPath = $rec -and -not (Test-PluginRecordWellFormed $rec)
         $recHash = if ($rec) { [string]$rec['hash'] } else { $null }
         $r = & $probe $recHash
 
@@ -966,7 +975,7 @@ function Invoke-PluginDepsPreflight {
                 }
             }
             if (-not $rec) {
-                if ($recBroken) { Write-Warning "plugin ${id}: its recorded entry has no usable hash or installPath, so it could not vouch for the installed copy. Recording the current copy; review it if you did not expect this." }
+                if ($recBroken) { Write-Warning "plugin ${id}: its recorded entry has no usable hash, so it could not vouch for the installed copy. Recording the current copy; review it if you did not expect this." }
                 $Records[$id] = New-PluginRecord -Result $r -Sha $currentSha
                 $changed = $true
                 continue
@@ -974,6 +983,13 @@ function Invoke-PluginDepsPreflight {
             if ($r.Changed) {
                 Write-Warning "plugin $id changed since recorded: $($r.InstallPath) now hashes to $($r.Hash), recorded $recHash. Review the change, then re-run with -InstallDeps to re-record it."
                 if ($InstallDeps) { $Records[$id] = New-PluginRecord -Result $r -Sha $currentSha; $changed = $true }
+            }
+            elseif ($recNoPath) {
+                # The copy still matches the recorded hash, so recording where it lives loses nothing.
+                Write-Warning "plugin ${id}: its recorded entry had no installPath. The installed copy matches the recorded hash, so its install path is recorded now."
+                $keepSha = if ($currentSha) { $currentSha } elseif ($rec['sha']) { [string]$rec['sha'] } else { $null }
+                $Records[$id] = New-PluginRecord -Result $r -Sha $keepSha
+                $changed = $true
             }
             continue
         }

@@ -3174,7 +3174,6 @@ Describe "Install-Harness" {
                 @{ Name = 'hash empty'; Mutate = { param($r) $r['hash'] = '' } }
                 @{ Name = 'hash is a number'; Mutate = { param($r) $r['hash'] = 5 } }
                 @{ Name = 'hash is an array'; Mutate = { param($r) $r['hash'] = @('a', 'b') } }
-                @{ Name = 'installPath missing'; Mutate = { param($r) $r.Remove('installPath') } }
                 @{ Name = 'entry is a string'; Mutate = { param($r) 'not a record' } }
                 @{ Name = 'entry is a number'; Mutate = { param($r) 42 } }
                 @{ Name = 'entry is an array'; Mutate = { param($r) , @('a', 'b') } }
@@ -3185,7 +3184,7 @@ Describe "Install-Harness" {
                 $audit | Should -Not -Match 'plugin-changed'
 
                 $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -DepsManifestPath $script:brokenFixture -DepsRunner $script:brokenMock.Runner *>&1 | Out-String -Width 500
-                $out | Should -Match 'recorded entry has no usable hash or installPath'
+                $out | Should -Match 'recorded entry has no usable hash'
                 $rec = Read-PluginRecord $script:target
                 $rec['hash'] | Should -Be $script:brokenGoodHash
                 $rec['installPath'] | Should -Be $script:brokenDir
@@ -3198,6 +3197,38 @@ Describe "Install-Harness" {
                 Set-BrokenPluginRecord { param($r) $r.Remove('hash') }
                 & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -InstallDeps -DepsManifestPath $script:brokenFixture -DepsRunner $script:brokenMock.Runner *>&1 | Out-Null
                 (Read-PluginRecord $script:target)['hash'] | Should -Be $script:brokenGoodHash
+            }
+
+            # A record with a usable hash can still detect a change without its installPath: the
+            # preflight hashes the path the plugin listing gives, so only an unchanged copy may be
+            # re-recorded on a plain run.
+            It "a record with a hash but no installPath: an unchanged copy gets its installPath recorded" {
+                Set-BrokenPluginRecord { param($r) $r.Remove('installPath') }
+                $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit -Quiet -DepsManifestPath $script:brokenFixture -DepsRunner $script:brokenMock.Runner *>&1 | Out-String
+                $audit | Should -Match 'plugin-unverified	plugin:fake-plugin@claude-plugins-official'
+                $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -DepsManifestPath $script:brokenFixture -DepsRunner $script:brokenMock.Runner *>&1 | Out-String -Width 500
+                $out | Should -Not -Match 'changed since recorded'
+                $rec = Read-PluginRecord $script:target
+                $rec['hash'] | Should -Be $script:brokenGoodHash
+                $rec['installPath'] | Should -Be $script:brokenDir
+                $after = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit -Quiet -DepsManifestPath $script:brokenFixture -DepsRunner $script:brokenMock.Runner *>&1 | Out-String
+                $after | Should -Not -Match 'plugin-'
+            }
+
+            It "a record with a hash but no installPath does not hide a changed copy, and only -InstallDeps re-records it" {
+                Set-BrokenPluginRecord { param($r) $r.Remove('installPath') }
+                Set-Content -LiteralPath (Join-Path $script:brokenDir 'skills/one/SKILL.md') -Value 'changed before the repair'
+                $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -DepsManifestPath $script:brokenFixture -DepsRunner $script:brokenMock.Runner *>&1 | Out-String -Width 500
+                $out | Should -Match 'changed since recorded'
+                $out | Should -Not -Match 'could not vouch'
+                $rec = Read-PluginRecord $script:target
+                $rec['hash'] | Should -Be $script:brokenGoodHash
+                $rec.Contains('installPath') | Should -BeFalse
+
+                & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -InstallDeps -DepsManifestPath $script:brokenFixture -DepsRunner $script:brokenMock.Runner *>&1 | Out-Null
+                $rec = Read-PluginRecord $script:target
+                $rec['hash'] | Should -Be (Get-PluginContentHash -Path $script:brokenDir)
+                $rec['installPath'] | Should -Be $script:brokenDir
             }
 
             It "a hashless record does not hide a later content change" {
