@@ -1,4 +1,5 @@
 {
+  "cleanupPeriodDays": 90,
   "env": {
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
     "ENABLE_TOOL_SEARCH": "auto:5",
@@ -14,6 +15,11 @@
   "skillOverrides": {
     "filesystem-context": "off"
   },
+  "deniedMcpServers": [
+    {
+      "serverName": "claude.ai tldraw"
+    }
+  ],
   "hooks": {
     "PreToolUse": [
       {
@@ -157,13 +163,22 @@
       }
     }
   },
+  "outputStyle": "Explanatory",
   "alwaysThinkingEnabled": true,
   "effortLevel": "xhigh",
+  "modelSettings": {
+    "claude-opus-5": {
+      "effortLevel": "high"
+    },
+    "claude-opus-5-5": {
+      "effortLevel": "medium"
+    }
+  },
   "awaySummaryEnabled": false,
   "skipDangerousModePermissionPrompt": true,
   "preferredNotifChannel": "auto",
+  "switchModelsOnFlag": false,
   "teammateMode": "auto",
   "inputNeededNotifEnabled": true,
-  "agentPushNotifEnabled": true,
-  "outputStyle": "Explanatory"
+  "agentPushNotifEnabled": true
 }

@@ -3105,10 +3105,56 @@ Describe "Install-Harness" {
             $specs.Count | Should -BeGreaterThan 5
             foreach ($spec in $specs) {
                 $spec.Contains('brew') | Should -BeFalse
+                if ($spec.Contains('unpinned')) {
+                    # The one named exception: git on Linux (operator ruling 2026-11-12, #310).
+                    $spec.Contains('version') | Should -BeFalse
+                    $spec.Contains('apt') | Should -BeTrue
+                    continue
+                }
                 $src = @($spec.Keys | Where-Object { $_ -ne 'version' })[0]
                 $grammar = @{ winget = '^\d+(\.\d+){1,3}$'; npm = '^\d+\.\d+\.\d+$'; apt = '^(\d+:)?[0-9][A-Za-z0-9.+~-]*$' }[$src]
                 $spec['version'] | Should -Match $grammar
             }
+            # Git is the only unpinned install in the shipped manifest.
+            $unpinnedOwners = @($tools | Where-Object { $_.Contains('install') -and @($_['install'].Values | Where-Object { $_.Contains('unpinned') }).Count -gt 0 } | ForEach-Object { $_['name'] })
+            $unpinnedOwners | Should -Be @('git')
+        }
+
+        It "git's Linux install is an unpinned apt install, and its argv carries no version" {
+            $m = Get-DepsManifest -Path $script:shippedDeps
+            $gitEntry = @($m['deps'] | Where-Object { $_['name'] -eq 'git' })[0]
+            $spec = $gitEntry['install']['linux']
+            $spec['apt'] | Should -Be 'git'
+            $spec['unpinned'] | Should -BeOfType [string]
+            $spec['unpinned'].Trim().Length | Should -BeGreaterThan 0
+            $cmd = Get-DepInstallCommand -Dep $gitEntry -IsWindows $false
+            @($cmd).Count | Should -Be 5
+            $cmd | Should -Be @('sudo', 'apt-get', 'install', '-y', 'git')
+            # The Windows install stays pinned.
+            $gitEntry['install']['windows']['version'] | Should -Be '2.53.0'
+        }
+
+        It "an unpinned apt spec builds an argv array with the bare package name" {
+            $dep = New-FakeDep
+            $dep['install'] = [ordered]@{ linux = [ordered]@{ apt = 'fake-hard'; unpinned = 'The archive keeps only the current patched build.' } }
+            $m = Get-DepsManifest -Path (New-DepsFixture -Deps @($dep))
+            $cmd = Get-DepInstallCommand -Dep $m['deps'][0] -IsWindows $false
+            $cmd -is [string[]] | Should -BeTrue
+            $cmd | Should -Be @('sudo', 'apt-get', 'install', '-y', 'fake-hard')
+            (Get-DepGuidance -Dep $m['deps'][0] -IsWindows $false) | Should -Be 'install with: sudo apt-get install -y fake-hard'
+        }
+
+        It "Get-DepsManifest refuses an unpinned install: <Case>" -ForEach @(
+            @{ Case = 'on winget'; Plat = 'windows'; Spec = [ordered]@{ winget = 'Example.FakeHard'; unpinned = 'a reason' } }
+            @{ Case = 'on npm'; Plat = 'linux'; Spec = [ordered]@{ npm = 'fake-tool'; unpinned = 'a reason' } }
+            @{ Case = 'with an empty reason'; Plat = 'linux'; Spec = [ordered]@{ apt = 'fake-hard'; unpinned = '' } }
+            @{ Case = 'with a blank reason'; Plat = 'linux'; Spec = [ordered]@{ apt = 'fake-hard'; unpinned = '   ' } }
+            @{ Case = 'with a non-string reason'; Plat = 'linux'; Spec = [ordered]@{ apt = 'fake-hard'; unpinned = $true } }
+            @{ Case = 'beside a version'; Plat = 'linux'; Spec = [ordered]@{ apt = 'fake-hard'; version = '1.2.3'; unpinned = 'a reason' } }
+        ) {
+            $dep = New-FakeDep
+            $dep['install'] = [ordered]@{ $Plat = $Spec }
+            { Get-DepsManifest -Path (New-DepsFixture -Deps @($dep)) } | Should -Throw -ExpectedMessage '*unpinned*'
         }
 
         It "Get-DepsManifest rejects <Version> as a <Source> version" -ForEach @(
@@ -3673,14 +3719,18 @@ Describe "Install-Harness" {
             @($mock.Calls | Where-Object { $_.Argv[0] -eq 'claude' -and $_.Argv[2] -eq 'uninstall' }).Count | Should -Be 0
         }
 
-        It "git has no pinned Linux install, so a Linux code layer refuses with install-by-hand guidance" {
+        It "git installs on Linux through an unpinned apt command, so a Linux code layer refuses with that command rather than install-by-hand guidance" {
             $m = Get-DepsManifest -Path $script:shippedDeps
             $gitEntry = @($m['deps'] | Where-Object { $_['name'] -eq 'git' })[0]
-            $gitEntry['install'].Contains('linux') | Should -BeFalse
+            $gitEntry['install'].Contains('linux') | Should -BeTrue
             $rec = New-DepsRecorder -Answer { param($argv) if ($argv[0] -eq 'git') { @{ ExitCode = 127 } } }
-            { Invoke-DepsPreflight -Manifest $m -Layers @('kernel', 'code') -IsWindows $false -InstallDeps $true -Runner $rec.Runner -ShouldInstall { $true } 3>$null 6>$null } |
-                Should -Throw -ExpectedMessage '*no pinned install for linux: install git 2.43.0 or later from a pinned release, then re-run*'
-            @(Get-DepsInstallCalls $rec).Count | Should -Be 0
+            $msg = $null
+            try { Invoke-DepsPreflight -Manifest $m -Layers @('kernel', 'code') -IsWindows $false -InstallDeps $false -Runner $rec.Runner -ShouldInstall { $true } 3>$null 6>$null | Out-Null }
+            catch { $msg = $_.Exception.Message }
+            $msg | Should -Match 'missing hard dependency'
+            $msg.Contains('sudo apt-get install -y git') | Should -BeTrue
+            $msg.Contains('git=') | Should -BeFalse
+            $msg.Contains('no pinned install') | Should -BeFalse
         }
 
         It "a plugin present but not enabled at the declared scope counts as missing" {

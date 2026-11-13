@@ -849,6 +849,23 @@ function ConvertTo-ManifestV3 {
     return $m
 }
 
+# Key-sorted copy of the manifest, for every write of the committed file (#141). The manifest is
+# a plain @{} hashtable whose enumeration order changes from one process to the next, and
+# settings is built in a fixed order that is not sorted, so a re-install that changed nothing
+# could still rewrite the committed file in a different order. Ordinal, so the order is the same
+# on every host and culture, and the copy's own comparer is ordinal too, so two keys differing
+# only in case stay two keys. Only maps are sorted. Lists keep their order, which carries meaning.
+function ConvertTo-SortedMap {
+    param($Map)
+
+    if ($Map -isnot [System.Collections.IDictionary]) { return , $Map }
+    $keys = [string[]]@($Map.Keys)
+    [System.Array]::Sort($keys, [System.StringComparer]::Ordinal)
+    $sorted = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)
+    foreach ($key in $keys) { $sorted[$key] = ConvertTo-SortedMap -Map $Map[$key] }
+    return , $sorted
+}
+
 # The project's layers for this install: -Layers when given, otherwise what the manifest records.
 # The manifest has already been through ConvertTo-ManifestV3, so its layers key is always present.
 function Resolve-ProjectLayers {
@@ -1575,7 +1592,7 @@ if ($Accept) {
     # retry once git answers still has its pin to make (round-4 B). See Get-SidecarPlan.
     $sidecarPlan = Get-SidecarPlan -TargetDir $Target
     $manifest['accepted'][$acceptKey] = Get-FileHashHex -Path $acceptPath
-    $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
+    (ConvertTo-SortedMap -Map $manifest) | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
     $null = Invoke-SidecarPlan -Plan $sidecarPlan -Sidecar $sidecar
     Write-Host "Accepted overlay '$acceptKey' pinned at $($manifest['accepted'][$acceptKey])."
     return
@@ -1609,7 +1626,7 @@ if ($Unaccept) {
     # before the manifest write for the same reason.
     $sidecarPlan = Get-SidecarPlan -TargetDir $Target
     $manifest['accepted'].Remove($unacceptKey)
-    $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
+    (ConvertTo-SortedMap -Map $manifest) | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
     $null = Invoke-SidecarPlan -Plan $sidecarPlan -Sidecar $sidecar
     Write-Host "Dropped the accepted-overlay pin on '$unacceptKey'. The file itself was left alone; the audit now judges it against core again."
     return
@@ -1679,7 +1696,7 @@ if ($Prune) {
     # before the manifest write for the same reason.
     $sidecarPlan = Get-SidecarPlan -TargetDir $Target
     $manifest['files'].Remove($pruneKey)
-    $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
+    (ConvertTo-SortedMap -Map $manifest) | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
     $null = Invoke-SidecarPlan -Plan $sidecarPlan -Sidecar $sidecar
 
     if (-not (Test-Path -LiteralPath $prunePath -PathType Leaf)) {
@@ -2477,7 +2494,7 @@ else {
 }
 
 $settings | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $settingsPath
-$manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
+(ConvertTo-SortedMap -Map $manifest) | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
 
 # Git hooksPath wiring. The Claude Code PostToolUse hooks above only see this
 # session's direct Write/Edit tool calls — a script-applied OLD/NEW patch
@@ -2493,11 +2510,37 @@ $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
 $hooksDstAbs = (Resolve-Path -LiteralPath $hooksDst).Path
 
 $gitDirRaw = $null
-$gitCheck = & git -C $Target rev-parse --git-dir 2>$null
-if ($LASTEXITCODE -eq 0) { $gitDirRaw = $gitCheck }
+$gitBinaryMissing = $false
+# The catch is typed because `& git` on a PATH without git throws a terminating
+# CommandNotFoundException under $ErrorActionPreference = 'Stop' (#141). By here settings.json
+# and the manifest are already written, so an unguarded call aborted a run that had otherwise
+# succeeded and exited 1 over the one step left. Any other exception still propagates.
+try {
+    $gitCheck = & git -C $Target rev-parse --git-dir 2>$null
+    if ($LASTEXITCODE -eq 0) { $gitDirRaw = $gitCheck }
+}
+catch [System.Management.Automation.CommandNotFoundException] {
+    $gitBinaryMissing = $true
+}
 
 if (-not $gitDirRaw) {
-    # Not a git repository (or git missing from PATH) — nothing to wire.
+    # Not a git repository: nothing to wire. A missing git binary is different when the target
+    # does sit in a repository (a .git at or above it): its git hooks are expected and nothing
+    # could wire them, so say so rather than finish as if they were in place.
+    if ($gitBinaryMissing) {
+        $probe = (Resolve-Path -LiteralPath $Target).Path
+        $targetIsRepo = $false
+        while ($probe) {
+            if (Test-Path -LiteralPath (Join-Path $probe '.git')) { $targetIsRepo = $true; break }
+            $parent = Split-Path -Parent $probe
+            if (-not $parent -or $parent -eq $probe) { break }
+            $probe = $parent
+        }
+        if ($targetIsRepo) {
+            Write-Warning "git is not on PATH, so core.hooksPath was NOT wired: the harness's git hooks (commit-msg, pre-commit, pre-push) will not run until it is. Install git and re-run the installer, or wire it by hand: git -C `"$Target`" config core.hooksPath `"$hooksDstAbs`""
+            $results.Add([pscustomobject]@{ File = 'git:core.hooksPath'; Action = 'FAILED (git not on PATH) - hook not wired' })
+        }
+    }
 }
 elseif (-not (Test-GitAnswersForTarget -AbsTarget (Resolve-Path -LiteralPath $Target).Path -IgnoreIndex)) {
     # Issue #145. Every probe below asks git through `-C $Target`, and GIT_DIR, GIT_WORK_TREE,
@@ -2512,10 +2555,9 @@ elseif (-not (Test-GitAnswersForTarget -AbsTarget (Resolve-Path -LiteralPath $Ta
     # reused rather than reimplemented: one shared definition of "git answers for this target,"
     # though the two call sites now read different answers from it by design. This call site
     # passes -IgnoreIndex, the sidecar probe does not (see the function's own comment for why).
-    # A missing git never reaches this elseif: `& git ...` on a PATH without git throws a
-    # terminating CommandNotFoundException at the rev-parse above, under this script's
-    # $ErrorActionPreference = 'Stop', with no try/catch there to hold it. The whole run aborts,
-    # not just this branch.
+    # A missing git never reaches this elseif: the rev-parse above catches its
+    # CommandNotFoundException (#141) and sends the run to the not-a-repository branch, which
+    # warns and adds a FAILED hooksPath row when the target sits in a repository, and exits 0.
     #
     # Dubious ownership is not excluded the same way (#165, corrected from an earlier version of
     # this comment that claimed it was). Without a location variable exported, it exits 128 at the
