@@ -209,8 +209,9 @@ A non-zero exit refuses the commit. The script is never taken from the work tree
 holding a slash or a backslash refuses: a path into a checkout would run whatever the checked-out
 branch carries, in the committer's shell, on every commit. A chained script is trusted exactly as
 far as the hook beside it. Where `.claude/` is gitignored, as it is here, the hook directory is
-installer output, which a checkout or merge does not write, and every worktree reads the same hook
-directory through `core.hooksPath`. Only the
+installer output that every worktree reads through `core.hooksPath`. A branch that tracks files
+under `.claude/hooks/` replaces them on checkout, switch, merge or pull, and re-running the
+installer restores them. Only the
 clone's local config counts, never a global value. A key set but empty refuses, and so does a
 script missing from the hook directory, so a clone that opted in never commits with its gate off.
 This is how a project adds a gate without editing its installed `pre-commit`, which the audit would
@@ -489,7 +490,9 @@ When a commit stages any path under `account/claude/`, the check runs a fresh ex
 directory and refuses the commit if a staged path differs from what the export wrote there. A
 staged deletion of a file the export still writes refuses, and so does a staged file the export
 does not write. File mode counts too: a staged change to the executable bit, or a file turned into
-a symlink, refuses even when the bytes match. Only the staged paths are compared, so drift elsewhere in the payload does not
+a symlink, refuses even when the bytes match. On a checkout with `core.filemode` false, a tracked
+file keeps the mode HEAD has, the way `git add` does, so an unmodified export of a tracked
+executable is not refused. Only the staged paths are compared, so drift elsewhere in the payload does not
 block a commit that leaves it alone. The comparison runs through git's own filters: the export is
 added to a throwaway repository carrying the staged `.gitattributes`, and blob ids and index modes are compared, so
 a line-ending difference that `git add` would normalise away is not a mismatch. That `git add` runs

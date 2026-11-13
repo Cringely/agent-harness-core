@@ -212,6 +212,43 @@ describe("account payload check — refusals", () => {
     expect(r.stderr.toString()).toContain("account/claude/rules/a.md");
   }, TIMEOUT_MS);
 
+  // A checkout whose core.filemode is false (the Git for Windows default) keeps
+  // the mode an existing index entry has when a file is re-added. The comparison
+  // has to see that, or an unmodified export of a tracked executable refuses.
+  describe("on a checkout with core.filemode=false", () => {
+    function trackExecutable(f: Fixture) {
+      git(["update-index", "--chmod=+x", "account/claude/rules/a.md"], f.repo);
+      git(["commit", "-q", "--no-verify", "-m", "make a.md executable"], f.repo);
+      git(["config", "core.filemode", "false"], f.repo);
+      const tracked = git(["ls-files", "--stage", "account/claude/rules/a.md"], f.repo).stdout.toString();
+      expect(tracked.startsWith("100755 ")).toBe(true);
+    }
+
+    test("a tracked 100755 file re-exported with new content: exit 0", () => {
+      const f = setup();
+      trackExecutable(f);
+      writeAt(f.repo, "account/claude/rules/a.md", "alpha v2\n");
+      writeAt(f.source, "rules/a.md", "alpha v2\n");
+      git(["add", "account/claude/rules/a.md"], f.repo);
+      const staged = git(["ls-files", "--stage", "account/claude/rules/a.md"], f.repo).stdout.toString();
+      expect(staged.startsWith("100755 ")).toBe(true);
+
+      const r = runCheck(f);
+      expect(r.exitCode).toBe(0);
+    }, TIMEOUT_MS);
+
+    test("a tracked file turned into a symlink with the same bytes: refused, path named", () => {
+      const f = setup();
+      trackExecutable(f);
+      const blob = indexBlob(f, "account/claude/rules/a.md");
+      git(["update-index", "--cacheinfo", `120000,${blob},account/claude/rules/a.md`], f.repo);
+
+      const r = runCheck(f);
+      expect(r.exitCode).toBe(1);
+      expect(r.stderr.toString()).toContain("account/claude/rules/a.md");
+    }, TIMEOUT_MS);
+  });
+
   test("export fails: refused, exporter output not repeated", () => {
     const f = setup();
     writeAt(f.home, "FAIL", "");

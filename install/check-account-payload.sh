@@ -6,9 +6,12 @@
 # IT RUNS FROM AN INSTALLED COPY, NEVER FROM THE WORK TREE
 # The chain point only runs a script that sits in the hook directory, which in
 # this repository is the main checkout's gitignored .claude/hooks/, shared by
-# every worktree through core.hooksPath. That directory is installer output,
-# and git does not write ignored paths on a checkout or merge. This script in
-# turn runs the exporter that sits beside it, never the one in the work tree.
+# every worktree through core.hooksPath. That directory is installer output.
+# This script runs with the same exposure as the installed pre-commit beside
+# it, and so does the exporter it runs from there. A branch that tracks files
+# under .claude/hooks/ replaces them on checkout, switch, merge or pull, and
+# re-running the installer restores them. The exporter beside this script is
+# the one that runs, never the one in the work tree.
 # Install the copy from the main checkout at a commit you have reviewed, and
 # copy again after any of the four files changes:
 #
@@ -136,11 +139,28 @@ export_rc=$?
 [ "$export_rc" -eq 0 ] ||
   refuse "The fresh export failed (exit $export_rc), so the staged account/claude paths cannot be checked. Run pwsh -NoProfile -File $exporter_src to see why. Its output is not repeated here because it names the account home."
 
+# Read from the real repository, so the throwaway one is built the way it is.
+# Where core.filemode is false (the Git for Windows default), `git add` keeps the
+# mode an existing index entry has instead of reading it from the file system. A
+# throwaway repository with no entries adds every file as 100644, so an
+# unmodified export of a tracked 100755 file would differ from what the real
+# repository stages. The throwaway repository gets the same setting, and its
+# index is seeded with the modes HEAD tracks, which is what `git add` would keep.
+filemode=$(git config --bool --get core.filemode 2>/dev/null || echo true)
+: >"$work/seed"
+if [ "$filemode" = false ] && git rev-parse -q --verify HEAD >/dev/null 2>&1; then
+  git -c core.quotePath=false ls-tree -r HEAD -- ':(top)account/claude/' |
+    awk -F '\t' '{ split($1, m, " "); print m[1] " " m[3] " 0\t" $2 }' >"$work/seed" ||
+    refuse "The account payload check could not read the tracked modes under account/claude."
+fi
+
 (
   unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
     GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX GIT_NAMESPACE
   cd "$work/repo" &&
     git init -q &&
+    { [ "$filemode" != false ] || git config core.filemode false; } &&
+    git update-index --add --index-info <"$work/seed" &&
     cp "$work/gitattributes" .gitattributes &&
     git -c core.safecrlf=false add -A -f -- account/claude &&
     git -c core.quotePath=false ls-files --stage -- account/claude >"$work/exported"

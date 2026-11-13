@@ -365,9 +365,12 @@ fi
 # A path into the work tree would run whatever the checked-out branch carries,
 # in the committer's shell, on every commit. The hook directory is the
 # installed copy git runs this file from, so a script there carries the same
-# trust as this hook. Here that directory is gitignored installer output, which
-# a checkout or merge does not write. A slash or a backslash in the value is a
-# path, not a file name, and refuses, so it cannot reach back into a checkout.
+# trust as this hook. Where a project commits .claude/hooks/, a branch that
+# edits the script changes what runs. Where it is gitignored installer output,
+# a checkout, switch, merge or pull still replaces a file there when the
+# incoming tree tracks it, and re-running the installer restores it. A slash
+# or a backslash in the value is a path, not a file name, and refuses, so the
+# value cannot name a file in the work tree.
 #
 # A chain point, not an edit to a project's installed copy of this file. An
 # edited installed hook reads as project-modified drift in the installer's
