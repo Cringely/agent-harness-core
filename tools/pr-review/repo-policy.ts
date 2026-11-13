@@ -12,7 +12,7 @@
 // never a value from the file, the file's own path, or another repository in it: the reason
 // reaches stdout under --json, and the path carries the workstation username.
 
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { closeSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { RefusalError, parseRepo, type RepoPolicy, type RequiredCheck } from "./types";
 
@@ -227,10 +227,9 @@ export function parsePolicyFile(raw: string): PolicyLoad {
 export interface PolicyFsOps {
   lstatSync: (path: string) => { isSymbolicLink(): boolean; isFile(): boolean; size: number };
   realpathSync: (path: string) => string;
-  readFileSync: (path: string, encoding: "utf8") => string;
 }
 
-const REAL_FS: PolicyFsOps = { lstatSync, realpathSync: (path) => realpathSync.native(path), readFileSync };
+const REAL_FS: PolicyFsOps = { lstatSync, realpathSync: (path) => realpathSync.native(path) };
 
 function isMissing(error: unknown): boolean {
   const code = (error as { code?: unknown } | null)?.code;
@@ -277,7 +276,15 @@ export function loadPolicyFile(path: string, fs: Partial<PolicyFsOps> = {}): Pol
 
   let raw: string;
   try {
-    raw = ops.readFileSync(real, "utf8");
+    const fd = openSync(real, "r");
+    try {
+      const fdStat = fstatSync(fd);
+      if (!fdStat.isFile()) return { ok: false, reason: "the policy file is not a regular file" };
+      if (fdStat.size > MAX_POLICY_FILE_BYTES) return { ok: false, reason: `the policy file is larger than ${MAX_POLICY_FILE_BYTES} bytes` };
+      raw = readFileSync(fd, "utf8");
+    } finally {
+      closeSync(fd);
+    }
   } catch {
     return { ok: false, reason: "the policy file cannot be read" };
   }

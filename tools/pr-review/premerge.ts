@@ -9,7 +9,7 @@
 // comes back in an unexpected shape are each a failure, never a pass. No output carries a matched
 // value, a term or the term file's path: a failure names its channel and a count.
 
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { closeSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { SHA_RE, UNSAFE_CHARS, parseRepo } from "./types";
 
@@ -216,7 +216,16 @@ export function loadTerms(path: string): TermsLoad {
 
   let parsed: unknown;
   try {
-    const raw = readFileSync(real, "utf8");
+    const fd = openSync(real, "r");
+    let raw: string;
+    try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile()) return { ok: false, reason: "the term file is not a regular file" };
+      if (stat.size > MAX_TERMS_FILE_BYTES) return { ok: false, reason: "the term file is too large" };
+      raw = readFileSync(fd, "utf8");
+    } finally {
+      closeSync(fd);
+    }
     if (Buffer.byteLength(raw, "utf8") > MAX_TERMS_FILE_BYTES) return { ok: false, reason: "the term file is too large" };
     parsed = JSON.parse(raw);
   } catch {
