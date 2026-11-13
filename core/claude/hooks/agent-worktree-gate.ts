@@ -46,8 +46,9 @@
 //     The fail-open tier below is reserved for malformed stdin and our own
 //     bugs, where classification never ran at all).
 //   - No definition file → only the known built-ins are hardcoded: Explore and
-//     Plan are read-only (their published grant denies Write and Edit, see
-//     BUILTIN_READ_ONLY);
+//     Plan are trusted as read-only (see BUILTIN_READ_ONLY). Their grant is not
+//     read-only, since it still includes Bash. The trust rests on their built-in
+//     prompt, which tells them not to modify files;
 //     general-purpose, fork, and an OMITTED subagent_type (the tool defaults it to
 //     general-purpose) have all tools. Any other unknown type requires isolation —
 //     an unknown role is not evidence it is read-only.
@@ -140,11 +141,12 @@ const READ_ONLY_TOOLS = new Set([
 
 /**
  * Built-in subagent types with no `.claude/agents/<type>.md` definition file.
- * Explore and Plan are read-only per the built-in subagents section of the Claude Code subagent
- * docs (code.claude.com/docs/en/sub-agents), which gives both "read-only tools; Write and Edit are
- * denied", and per the Agent tool's own roster ("All tools except Agent, Artifact, ExitPlanMode,
- * Edit, Write, NotebookEdit"). No source documents a grant for any other built-in, so none is
- * listed: an uncited grant is not proof of read-only. general-purpose
+ * Explore and Plan are trusted as read-only because their built-in prompt is read-only, not
+ * because their tool grant is. The Agent tool's own roster lists them with "All tools except Agent,
+ * Artifact, ExitPlanMode, Edit, Write, NotebookEdit", so both hold Bash and could write through it.
+ * The gate exempts them anyway (operator ruling, #190): the prompt keeps them to reading and
+ * Write and Edit are withheld. No source documents a read-only prompt for any other built-in,
+ * so none is listed. general-purpose
  * and fork carry all tools and deliberately have no entry here — they fall
  * through to the requires-isolation default, exactly like unknown types.
  */
