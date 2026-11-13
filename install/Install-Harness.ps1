@@ -430,10 +430,12 @@ function Get-AgentFrontmatterAllowlist {
 # test/agent-frontmatter-keys.test.ts: a leading `---` block, keys matched at column 0 so an
 # indented continuation or a `key:` inside a description value is never read as a key. Both
 # patterns tolerate CRLF, since a Windows checkout may hold it. Returns $null when the file has
-# no frontmatter block.
+# no frontmatter block. A zero-byte file reads as $null under Get-Content -Raw, and matching a
+# regex against $null throws, so an empty def is answered as having no frontmatter.
 function Get-AgentFrontmatterKeys {
     param([string]$Path)
     $text = Get-Content -LiteralPath $Path -Raw
+    if ([string]::IsNullOrEmpty($text)) { return $null }
     $block = [regex]::Match($text, '^---\r?\n([\s\S]*?)\r?\n---')
     if (-not $block.Success) { return $null }
     $keys = [System.Collections.Generic.List[string]]::new()
@@ -1893,7 +1895,13 @@ if ($Audit) {
             }
             else {
                 foreach ($agentDef in $agentDefsOnDisk) {
-                    $defKeys = Get-AgentFrontmatterKeys -Path $agentDef.FullName
+                    # One unreadable def must not abort the audit: the session-start drift check
+                    # discards a failed audit, which would hide every other row. Say so instead.
+                    try { $defKeys = Get-AgentFrontmatterKeys -Path $agentDef.FullName }
+                    catch {
+                        $results.Add([pscustomobject]@{ File = "agents/$($agentDef.Name)"; Status = 'agent-keys-unreadable' })
+                        continue
+                    }
                     if ($null -eq $defKeys) { continue }
                     $unknownKeys = @($defKeys | Where-Object { $allowedAgentKeys -cnotcontains $_ } | Select-Object -Unique)
                     if ($unknownKeys.Count -gt 0) {

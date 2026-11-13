@@ -565,6 +565,30 @@ Describe "Install-Harness" {
         $out | Should -Not -Match 'agents/mine[.]md\s+unknown-key'
     }
 
+    It "audit survives a zero-byte agent def and still reports a typo in another def" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        New-Item -ItemType File -Path "$script:target/.claude/agents/empty.md" | Out-Null
+        Set-Content -LiteralPath "$script:target/.claude/agents/typo.md" -Value "---`nname: typo`ndescription: x`nreasoning_effort: low`n---`nbody"
+        $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $out | Should -Match 'agents/typo[.]md\s+unknown-key [(]reasoning_effort[)]'
+        $out | Should -Not -Match 'Value cannot be null'
+    }
+
+    It "audit reports agent-keys-unreadable for a def that cannot be read, and keeps auditing" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        # A directory named like a def makes Get-ChildItem -File skip it, so lock a real file instead.
+        $locked = "$script:target/.claude/agents/locked.md"
+        Set-Content -LiteralPath $locked -Value "---`nname: locked`n---`nbody"
+        Set-Content -LiteralPath "$script:target/.claude/agents/typo.md" -Value "---`nname: typo`ndescription: x`nreasoning_effort: low`n---`nbody"
+        $fs = [System.IO.File]::Open($locked, 'Open', 'Read', 'None')
+        try {
+            $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        }
+        finally { $fs.Dispose() }
+        $out | Should -Match 'agents/locked[.]md\s+agent-keys-unreadable'
+        $out | Should -Match 'agents/typo[.]md\s+unknown-key [(]reasoning_effort[)]'
+    }
+
     It "audit stays silent on unknown keys after a clean install of the shipped defs" {
         & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
         $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500

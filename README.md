@@ -328,7 +328,8 @@ and refuses nothing. Fix the spelling the row names. The accepted keys are liste
 case-sensitively and only at the left margin of the frontmatter block, so nested `hooks` entries and
 a colon inside a description are not read as keys. An `effort` value is never judged, so `effort` on a
 haiku definition is not a finding. `agent-keys-unchecked` means that file is missing or unreadable in
-the core checkout, so the check did not run and no definition was vouched for.
+the core checkout, so the check did not run and no definition was vouched for. `agent-keys-unreadable` names one definition that could not be read, so its keys were not
+checked. The audit carries on with the other definitions. A zero-byte definition has no frontmatter and is not a finding.
 
 This is the mechanical half of the findings flow in CONTRIBUTING.md.
 Run it periodically per project (SpaceMolt wires it into a `core_harvest` ceremony, see that
