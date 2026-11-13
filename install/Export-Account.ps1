@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-    Exports this workstation's ~/.claude account layer into account/claude/ in this repo.
+    Exports this workstation's ~/.claude account layer, and ccstatusline's own config file
+    (~/.config/ccstatusline/settings.json), into account/claude/ in this repo.
 
 .DESCRIPTION
     Runs on the canonical workstation only. Config is authored in ~/.claude here, exported
@@ -1118,8 +1119,11 @@ if (-not $SkipMcp) {
 # gates scan it like every other payload file. Parsed and folded string by string rather than
 # text-replaced, for the reason settings.json is: JSON doubles every backslash, so a Windows path
 # in a custom-command widget would not match the fold's single-separator pattern. One traversal,
-# Update-AccountServerStrings, reaches every string at any depth. The strings it collects are not
-# gated here: the loop below scans the whole written file.
+# Update-AccountServerStrings, reaches every string at any depth. Every string it collects, key
+# names included, is checked against the scan hook's secret patterns before anything is written,
+# the way the mcpServers loop does. The whole-payload loop below has no secret-pattern pass, so
+# without this check a token pasted into a custom-command or custom-text widget would reach the
+# payload and only the pre-commit hook would catch it.
 #
 # The source is mirrored like an allowlisted tree: absent at source means a payload copy left by
 # an earlier export goes, so a receiver does not keep installing a layout the workstation dropped.
@@ -1136,7 +1140,15 @@ if (Test-Path -LiteralPath $CcstatuslineConfig -PathType Leaf) {
     if ($ccs -isnot [System.Management.Automation.PSCustomObject]) {
         throw "ccstatusline config '$CcstatuslineConfig' is not a JSON object."
     }
-    $null = Update-AccountServerStrings -Value $ccs -Folds $folds -Collected ([System.Collections.Generic.List[string]]::new())
+    $ccsCollected = [System.Collections.Generic.List[string]]::new()
+    $null = Update-AccountServerStrings -Value $ccs -Folds $folds -Collected $ccsCollected
+    $ccsPatterns = @(Get-SecretPattern -ScanHookPath (Join-Path $ClaudeHome 'hooks/Scan-MemorySecrets.ps1'))
+    foreach ($s in $ccsCollected) {
+        $hits = @(Test-AccountSecret -Text $s -Patterns $ccsPatterns)
+        if ($hits.Count -gt 0) {
+            throw "Refusing to export $($script:AccountCcstatuslinePayload): $($hits -join ', ') in a widget string or key. Keep secrets out of the config, in 1Password or an environment variable."
+        }
+    }
     $null = New-Item -ItemType Directory -Path (Split-Path $ccsPayload -Parent) -Force
     $ccs | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $ccsPayload -Encoding utf8
     Write-Host "  $($script:AccountCcstatuslinePayload): written$dryRun"

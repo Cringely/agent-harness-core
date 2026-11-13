@@ -28,6 +28,10 @@
     settings rewrite can reach (a Store path with an embedded version, a WSL launcher into
     another user's home) are here too (Task 11). Task 12 follows.
 
+    ccstatusline's own config file, ~/.config/ccstatusline/settings.json (-CcstatuslineConfig),
+    is installed from the payload's ccstatusline/settings.json, version-gated so an older
+    payload never replaces a newer receiver file.
+
     The update path is `git pull` then re-run this script. Install overwrites;
     settings.local.json is the per-machine escape hatch. A copy cannot remove anything, so the
     retire list (install/account-retired.json) is how a removal reaches a receiver: each listed

@@ -2803,6 +2803,49 @@ exit 0
             finally { Remove-Item -Recurse -Force $stand, $out, $terms -ErrorAction SilentlyContinue }
         }
 
+        It "refuses a token-shaped string in a widget, writes nothing, and never prints the value" -ForEach @(
+            @{ Label = 'custom-text'; Where = 'text' }
+            @{ Label = 'custom-command'; Where = 'command' }
+        ) {
+            # Every string in the config reaches a public payload, and a custom-command or
+            # custom-text widget is free text. The stand-in hook's table carries the sk_ rule.
+            $stand = New-StandInHome
+            $out = New-OutputRoot
+            $secret = 'sk_livetoken0123456789abcdef'
+            try {
+                $src = if ($Where -eq 'text') { New-CcstatuslineSource -Dir $stand -Text "key $secret" }
+                else { New-CcstatuslineSource -Dir $stand -CommandPath "curl -H 'x-key: $secret' example.invalid" }
+                $msg = $null
+                try { Invoke-CcsExport -Stand $stand -Out $out -Source $src }
+                catch { $msg = $_.Exception.Message }
+
+                $msg | Should -Not -BeNullOrEmpty -Because "a secret-shaped string must abort the export"
+                $msg | Should -Match 'ccstatusline'
+                $msg | Should -Match 'API token' -Because "the pattern name must come from the scan hook's table"
+                $msg | Should -Not -Match ([regex]::Escape($secret))
+                Test-Path -LiteralPath (Join-Path $out 'ccstatusline/settings.json') |
+                    Should -BeFalse -Because "a failed gate must leave nothing behind to commit"
+                Test-Path -LiteralPath (Join-Path $out 'ccstatusline') | Should -BeFalse
+            }
+            finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+        }
+
+        It "refuses a token-shaped property NAME in the config" {
+            $stand = New-StandInHome
+            $out = New-OutputRoot
+            try {
+                $src = Join-Path $stand 'ccstatusline-settings.json'
+                '{"version": 3, "lines": [], "sk_livetoken0123456789abcdef": true}' | Set-Content -LiteralPath $src
+                $msg = $null
+                try { Invoke-CcsExport -Stand $stand -Out $out -Source $src }
+                catch { $msg = $_.Exception.Message }
+                $msg | Should -Match 'API token'
+                $msg | Should -Not -Match 'sk_livetoken'
+                Test-Path -LiteralPath (Join-Path $out 'ccstatusline') | Should -BeFalse
+            }
+            finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+        }
+
         It "removes the payload copy an earlier export wrote once the source config is gone" {
             $stand = New-StandInHome
             $out = New-OutputRoot

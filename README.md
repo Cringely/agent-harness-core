@@ -422,7 +422,9 @@ a copied file still carrying that path after the fold stops the run the same way
 ccstatusline keeps its widget layout outside `~/.claude/`, in `~/.config/ccstatusline/settings.json`
 on every OS. The export carries that file as `account/claude/ccstatusline/settings.json`, or reads
 the file `-CcstatuslineConfig` names instead. Its strings are folded the way `mcpServers` strings
-are, and the written file goes through every gate described below. A config that is not a JSON
+are. Every string and key in it is checked against the memory secret scanner's patterns before
+anything is written, so a token pasted into a widget refuses the export without printing the value,
+and the written file then goes through every gate described below. A config that is not a JSON
 object refuses the export. With no config at the source, a copy left by an earlier export is
 removed.
 
