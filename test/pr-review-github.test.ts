@@ -8,6 +8,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { GitHubClient, MAX_FILE_PAGES } from "../tools/pr-review/github";
+import { CORE_POLICY } from "../tools/pr-review/repo-policy";
 import { MAX_HEAD_FILE_FETCHES, RefusalError, type TokenMinter } from "../tools/pr-review/types";
 
 const BASE = "1".repeat(40);
@@ -91,6 +92,7 @@ function fakeGitHub(options: FakeOptions = {}) {
       if (ref === BASE && file === "README.md") return new Response("BASE README");
       if (ref === BASE && file === "tools/pr-review/README.md") return new Response("BASE PR-REVIEW README");
       if (ref === BASE && file === ".github/workflows/test.yml") return new Response("jobs:\n");
+      if (ref === BASE && file === ".github/workflows/ci.yml") return new Response("OTHER WORKFLOW");
       if (ref === HEAD && file !== "docs/old.md") return new Response(`HEAD ${file}`);
       return json({ message: "Not Found" }, 404);
     }
@@ -146,8 +148,8 @@ function countingMinter() {
   return minter as TokenMinter & { mints: number };
 }
 
-const client = (fake: ReturnType<typeof fakeGitHub>, minter = countingMinter()) =>
-  new GitHubClient({ repo: "owner/name", pr: 7, minter, fetchImpl: fake.impl });
+const client = (fake: ReturnType<typeof fakeGitHub>, minter = countingMinter(), workflowPath = ".github/workflows/test.yml") =>
+  new GitHubClient({ repo: "owner/name", pr: 7, minter, workflowPath, fetchImpl: fake.impl });
 
 describe("GitHubClient.snapshot()", () => {
   test("assembles the pull request, following file pagination and renames", async () => {
@@ -286,7 +288,7 @@ describe("GitHubClient.snapshot()", () => {
     const snap = await client(fake).snapshot();
     expect(snap.checkRuns.length).toBe(101);
     const { verificationOf } = await import("../tools/pr-review/verdict");
-    expect(verificationOf(snap).state).toBe("failed");
+    expect(verificationOf(snap, CORE_POLICY).state).toBe("failed");
   });
 
   test("sends filter=latest explicitly on the check-run listing", async () => {
@@ -467,6 +469,31 @@ describe("GitHubClient as a poster", () => {
     ["owner/name", 0],
     ["../name", 7],
   ] as const)("the constructor refuses repo %p pr %p", (repo, pr) => {
-    expect(() => new GitHubClient({ repo, pr, minter: countingMinter(), fetchImpl: fakeGitHub().impl })).toThrow();
+    expect(() => new GitHubClient({ repo, pr, minter: countingMinter(), workflowPath: ".github/workflows/test.yml", fetchImpl: fakeGitHub().impl })).toThrow();
+  });
+
+  // #318: the path goes into a contents-API URL fetched with the installation
+  // token, and a dot-dot segment survives encodeURIComponent.
+  test.each([
+    ["missing", undefined],
+    ["empty", ""],
+    ["a dot-dot segment", ".github/workflows/../../x.yml"],
+    ["a directory", ".github/workflows/"],
+    ["outside .github/workflows", "ci/config.yml"],
+  ])("the constructor refuses a workflow path that is %s", (_label, workflowPath) => {
+    expect(
+      () => new GitHubClient({ repo: "owner/name", pr: 7, minter: countingMinter(), workflowPath: workflowPath as string, fetchImpl: fakeGitHub().impl }),
+    ).toThrow();
+  });
+});
+
+describe("GitHubClient: the workflow read is the configured one (#318)", () => {
+  test("fetches the configured workflow path at the base SHA, not this repository's", async () => {
+    const fake = fakeGitHub();
+    const snap = await client(fake, countingMinter(), ".github/workflows/ci.yml").snapshot();
+    expect(snap.workflowText).toBe("OTHER WORKFLOW");
+    const workflowFetches = fake.calls.filter((c) => c.url.pathname.includes("/contents/.github/workflows/"));
+    expect(workflowFetches.map((c) => c.url.pathname)).toEqual(["/repos/owner/name/contents/.github/workflows/ci.yml"]);
+    expect(workflowFetches[0]!.url.searchParams.get("ref")).toBe(BASE);
   });
 });

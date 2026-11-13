@@ -5,8 +5,10 @@
 .DESCRIPTION
     Runs on any workstation from a clone, on Windows or Linux. Content directories are copied
     over the top of ~/.claude and model-tier-gate.ts is sourced from core rather than the
-    payload, so the repo holds one copy of it. A preflight warns about every prerequisite tool
-    absent from PATH without gating the install. On a Linux target every .sh hook under
+    payload, so the repo holds one copy of it. A preflight probes every kernel dependency
+    core/claude/deps.json declares: a missing hard one (bun, and Git Bash on Windows) refuses the
+    install before its first write, and a missing optional one warns. -InstallDeps runs each
+    pinned install command instead. On a Linux target every .sh hook under
     hooks/ is chmod +x'd; the operator gets the same warning either way if chmod is missing or
     if it runs and fails. Supports -WhatIf: every file write is a built-in cmdlet that honours
     $WhatIfPreference on its own, and the one write that is not, the chmod call, is wrapped in
@@ -27,9 +29,11 @@
     another user's home) are here too (Task 11). Task 12 follows.
 
     The update path is `git pull` then re-run this script. Install overwrites;
-    settings.local.json is the per-machine escape hatch. Removal does not propagate to a
-    receiver and a receiver's own edit to an installed file is reverted without comment. Both
-    follow from having no manifest, and both are intended.
+    settings.local.json is the per-machine escape hatch. A copy cannot remove anything, so the
+    retire list (install/account-retired.json) is how a removal reaches a receiver: each listed
+    file is renamed aside before the copy, never deleted. A receiver's own edit to a file the
+    layer still ships is reverted without comment, which follows from having no manifest and is
+    intended.
 
 .PARAMETER ClaudeHome
     Where to install. Defaults to $HOME/.claude.
@@ -62,7 +66,24 @@
     branches from a Windows host, the same "Test seam" Restore-ClaudeProject.ps1:88-95 names.
 
 .PARAMETER SkipPreflight
-    Skip the prerequisite probe. Test seam.
+    Skip the dependency preflight. Test seam.
+
+.PARAMETER InstallDeps
+    Run the pinned install command (winget, apt or npm, each at an exact version) for every
+    missing kernel dependency, then re-probe it. Each command goes through ShouldProcess, so
+    -WhatIf prints it and runs nothing. Without it nothing is installed.
+
+.PARAMETER DepsManifestPath
+    Test seam. The dependency manifest to read in place of core/claude/deps.json.
+
+.PARAMETER DepsRunner
+    Test seam. Replaces the process runner every probe and install goes through.
+
+.PARAMETER RetiredListPath
+    The list of files the account layer no longer ships. Defaults to install/account-retired.json
+    beside this script. Each receiver's copy of a listed file is renamed to <path>.retired-<UTC
+    stamp>, never deleted. The list is read and validated before the first copy, and one that
+    cannot be read or parsed stops the install.
 
 .EXAMPLE
     pwsh -NoProfile -File install/Install-Account.ps1
@@ -83,11 +104,19 @@ param(
     [string]$VaultPath,
     [string]$HomeSlug,
     [bool]$TargetIsWindows = $(if ($PSVersionTable.PSVersion.Major -lt 6) { $true } else { $IsWindows }),
-    [switch]$SkipPreflight
+    [switch]$SkipPreflight,
+    [switch]$InstallDeps,
+    [string]$DepsManifestPath,
+    [scriptblock]$DepsRunner,
+    [string]$RetiredListPath
 )
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'AccountShared.ps1')
+. (Join-Path $PSScriptRoot 'Deps.ps1')
+# Captured here, because the ShouldInstall callback runs inside Deps.ps1's functions, where a
+# bare $PSCmdlet could resolve to another command's.
+$script:accountCmdlet = $PSCmdlet
 
 $repoRoot = Split-Path $PSScriptRoot -Parent
 
@@ -98,7 +127,7 @@ $repoRoot = Split-Path $PSScriptRoot -Parent
 # environment variable or a failed lookup. ContainsKey distinguishes "passed empty" from
 # "omitted", the same test -NpmGlobal already uses below for the opposite reason: there, an
 # explicit empty is a real request rather than an error.
-foreach ($n in 'ClaudeHome', 'PayloadRoot', 'ClaudeJson') {
+foreach ($n in 'ClaudeHome', 'PayloadRoot', 'ClaudeJson', 'RetiredListPath') {
     if ($PSBoundParameters.ContainsKey($n) -and -not $PSBoundParameters[$n]) {
         throw "-$n was passed empty. Omit it to take the default, or pass a real path."
     }
@@ -107,6 +136,7 @@ foreach ($n in 'ClaudeHome', 'PayloadRoot', 'ClaudeJson') {
 if (-not $ClaudeHome)  { $ClaudeHome = Join-Path $HOME '.claude' }
 if (-not $ClaudeJson)  { $ClaudeJson = Join-Path $HOME '.claude.json' }
 if (-not $PayloadRoot) { $PayloadRoot = Join-Path (Join-Path $repoRoot 'account') 'claude' }
+if (-not $RetiredListPath) { $RetiredListPath = Join-Path $PSScriptRoot 'account-retired.json' }
 
 # GetUnresolvedProviderPathFromPSPath, not [System.IO.Path]::GetFullPath: see
 # Export-Account.ps1:249-257 for the full reasoning (GetFullPath resolves a relative path
@@ -224,26 +254,142 @@ Write-Host "Payload         : $PayloadRoot"
 Write-Host "Claude home     : $ClaudeHome"
 
 # Every consumer of these fails open when the tool is absent, so without this the kit goes
-# silently dead on a fresh box and looks installed. jq only matters on Linux when the
-# npm-absent branch points statusLine.command at statusline-command.sh, which calls jq three
-# times.
-function Test-Prerequisite {
-    param([bool]$NeedJq)
-    $wanted = @('pwsh', 'vale', 'bun', 'node', 'bash', 'uvx')
-    if ($NeedJq) { $wanted += 'jq' }
-    $missing = @()
-    foreach ($t in $wanted) {
-        if (-not (Get-Command $t -ErrorAction SilentlyContinue)) { $missing += $t }
+# silently dead on a fresh box and looks installed. The kernel's entries in core/claude/deps.json
+# replace the fixed list that used to live here. jq's condition (Linux, npm absent, because the
+# npm-absent branch points statusLine.command at statusline-command.sh, which calls jq) is the
+# entry's onlyWhenAbsent, decided here by $npmPresent, the value Convert-SettingsForTarget routes
+# the statusline on, not by the preflight's own npm probe. The two can disagree (-NpmGlobal '', or
+# npm root -g failing while npm --version answers), and only $npmPresent says which script runs.
+# -IsWindows is the target platform, not the host's: the suite runs Linux-target cases on the
+# Windows CI leg.
+if (-not $SkipPreflight) {
+    $depsPath = if ($DepsManifestPath) { $DepsManifestPath } else { Join-Path (Join-Path $repoRoot 'core/claude') 'deps.json' }
+    $depsManifest = Get-DepsManifest -Path $depsPath
+    $depsRunnerBlock = if ($DepsRunner) { $DepsRunner } else { ${function:Invoke-DefaultDepsRunner} }
+    $depsShouldInstall = { param($What, $Action) $script:accountCmdlet.ShouldProcess($What, $Action) }
+    # Plugins: this script owns user scope only, through -ClaudeHome. Its plugin commands run from
+    # the home directory, and their recorded hashes live under state/, which the exporter's
+    # allowlist does not reach, so a machine-local installPath never travels in the payload.
+    $pluginRecordsPath = Join-Path (Join-Path $ClaudeHome 'state') 'harness-plugin-hashes.json'
+    $pluginRecords = @{}
+    if (Test-Path -LiteralPath $pluginRecordsPath -PathType Leaf) {
+        try {
+            $loadedRecords = Get-Content -LiteralPath $pluginRecordsPath -Raw | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+            if ($loadedRecords -is [System.Collections.IDictionary]) {
+                foreach ($k in @($loadedRecords.Keys)) { $pluginRecords[$k] = $loadedRecords[$k] }
+            }
+        }
+        catch {
+            Write-Warning "Ignoring unparsable plugin hash records at $pluginRecordsPath. They are rebuilt from what is installed now, so drift since the last record is not reported this run."
+        }
     }
-    return @($missing)
+    $depsOutcome = Invoke-DepsPreflight -Manifest $depsManifest -Layers @('kernel') -IsWindows $TargetIsWindows `
+        -InstallDeps ([bool]$InstallDeps) -Runner $depsRunnerBlock -ShouldInstall $depsShouldInstall `
+        -PluginScope 'user' -PluginCwd $HOME -PluginRecords $pluginRecords -KnownPresence @{ npm = $npmPresent }
+    if ($depsOutcome.PluginRecordsChanged) {
+        $null = New-Item -ItemType Directory -Path (Split-Path -Parent $pluginRecordsPath) -Force
+        $depsOutcome.PluginRecords | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $pluginRecordsPath
+    }
 }
 
-if (-not $SkipPreflight) {
-    $needJq = (-not $TargetIsWindows) -and (-not $npmPresent)
-    $missing = @(Test-Prerequisite -NeedJq $needJq)
-    if ($missing.Count -gt 0) {
-        Write-Warning "Not on PATH: $($missing -join ', '). Each one's consumer fails open, so the feature it drives will be silently absent rather than reporting an error."
+# Retire list (Task 10, #310). A removal from the account layer cannot reach a receiver by
+# copying, since the copy only adds and overwrites. install/account-retired.json names each file
+# the layer no longer ships, and this renames the receiver's copy aside to <path>.retired-<UTC
+# stamp> rather than deleting it, so a receiver's own edit survives. Claude Code loads only *.md
+# from rules/, so the renamed file stops loading.
+#
+# This renames files on the receiver, so every entry is validated before any rename, and the
+# validation is an allowlist rather than a search for bad spellings. A path is slash-separated
+# segments of [A-Za-z0-9._-], at least two of them, the first exactly (case-sensitive) one of the
+# four trees below, with no empty, '.' or '..' segment, no segment ending in a dot, and no
+# Windows device name. That excludes by construction: '..' traversal, an absolute or UNC path
+# (leading or doubled slash), a drive letter or stream suffix (':'), and every backslash variant.
+# The anchor is \z, not $, because $ also matches just before a trailing line feed.
+# The containing directory is then resolved through reparse points and must still sit inside
+# <home>/<first segment>, so a rules/ that is a junction or symlink out of the home is refused
+# with nothing renamed. A listed path that is itself a directory, or a link to one, is refused
+# too: Claude Code finds a skill as any skills/*/SKILL.md and reads rules/ recursively, so a
+# renamed directory keeps loading while the run reports it retired. Retirement covers files, and
+# a skill is retired by listing its SKILL.md. A list that cannot be read or parsed throws, because skipping it would
+# make the retire step fail open. A payload that still ships a retired path is refused: the
+# list and the layer contradict each other, and one of them is wrong.
+$script:RetireTrees = @('rules', 'agents', 'skills', 'hooks')
+
+function Invoke-AccountRetirement {
+    param(
+        [Parameter(Mandatory)][string]$ClaudeHome,
+        [Parameter(Mandatory)][string]$PayloadRoot,
+        [Parameter(Mandatory)][string]$ListPath
+    )
+    $label = "retired-paths list ($ListPath)"
+    if (-not (Test-Path -LiteralPath $ListPath -PathType Leaf)) {
+        throw "${label}: not found. Restore install/account-retired.json or pass -RetiredListPath."
     }
+    $data = $null
+    try { $data = Get-Content -LiteralPath $ListPath -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable -ErrorAction Stop }
+    catch { throw "${label}: cannot be read or parsed ($($_.Exception.Message))." }
+    if ($data -isnot [System.Collections.IDictionary]) { throw "${label}: the top level must be an object." }
+    if (-not $data.Contains('schemaVersion') -or ($data['schemaVersion'] -isnot [int] -and $data['schemaVersion'] -isnot [long]) -or $data['schemaVersion'] -ne 1) {
+        throw "${label}: schemaVersion must be 1."
+    }
+    if (-not $data.Contains('retired') -or $data['retired'] -isnot [System.Collections.IList]) {
+        throw "${label}: 'retired' must be an array."
+    }
+
+    $onWindows = ($PSVersionTable.PSVersion.Major -lt 6) -or $IsWindows
+    $cmp = if ($onWindows) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
+    $sep = [System.IO.Path]::DirectorySeparatorChar
+    $homeReal = Resolve-ContainmentPath -Path $ClaudeHome -OnWindows $onWindows
+    $plan = [System.Collections.Generic.List[object]]::new()
+
+    foreach ($entry in @($data['retired'])) {
+        if ($entry -isnot [System.Collections.IDictionary]) { throw "${label}: every entry must be an object with a path and a reason." }
+        $path = $entry['path']
+        $reason = $entry['reason']
+        if ($path -isnot [string] -or [string]::IsNullOrWhiteSpace($path)) { throw "${label}: an entry has no path string." }
+        if ($reason -isnot [string] -or [string]::IsNullOrWhiteSpace($reason) -or $reason -match '[\x00-\x1f\x7f]') {
+            throw "${label}: '$path' needs a one-line reason."
+        }
+        $segments = $path -split '/'
+        $bad = ($path -cnotmatch '^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+\z') -or
+            ($script:RetireTrees -cnotcontains $segments[0]) -or
+            (@($segments | Where-Object { $_ -eq '.' -or $_ -eq '..' -or $_.EndsWith('.') -or $_ -match '^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\.|$)' }).Count -gt 0)
+        if ($bad) {
+            throw "${label}: '$path' is not a relative path under rules/, agents/, skills/ or hooks/ (no '..', no absolute, drive-qualified or backslash form)."
+        }
+
+        $source = Join-Path $ClaudeHome $path
+        $parentReal = Resolve-ContainmentPath -Path (Split-Path -Parent $source) -OnWindows $onWindows
+        $treeReal = Join-Path $homeReal $segments[0]
+        if (-not ($parentReal.Equals($treeReal, $cmp) -or $parentReal.StartsWith("$treeReal$sep", $cmp))) {
+            throw "${label}: '$path' resolves to '$parentReal', outside '$treeReal'. Nothing was renamed."
+        }
+        $present = Get-Item -LiteralPath (Join-Path $parentReal $segments[-1]) -Force -ErrorAction SilentlyContinue
+        if ($present -and $present.PSIsContainer) {
+            throw "${label}: '$path' is a directory on this receiver. Retirement covers files only, so list the files inside it (a skill by its SKILL.md)."
+        }
+        if (Test-Path -LiteralPath (Join-Path $PayloadRoot $path)) {
+            throw "${label}: the payload still carries '$path'. Remove it from the payload or from the list; nothing was renamed or copied."
+        }
+        $plan.Add([pscustomobject]@{ Path = $path; Reason = $reason; Source = (Join-Path $parentReal $segments[-1]) })
+    }
+
+    $moved = 0
+    $stamp = (Get-Date -AsUTC).ToString('yyyyMMddTHHmmssZ')
+    foreach ($item in $plan) {
+        if (-not (Get-Item -LiteralPath $item.Source -Force -ErrorAction SilentlyContinue)) { continue }
+        # No -Force below: Move-Item onto an existing file throws, so a name collision stops the
+        # run instead of replacing an earlier retired copy. Only files get here (see above).
+        $newName = "$(Split-Path -Leaf $item.Source).retired-$stamp"
+        if (-not $script:accountCmdlet.ShouldProcess($item.Source, "Retire (rename to $newName)")) { continue }
+        Move-Item -LiteralPath $item.Source -Destination (Join-Path (Split-Path -Parent $item.Source) $newName) -Confirm:$false
+        Write-Host "Retired $($item.Path) (now $newName): $($item.Reason)"
+        $moved++
+    }
+    if ($moved -gt 0) {
+        Write-Warning 'Rule files moved out of the account layer into project layers. Run pwsh <core>/install/Install-Harness.ps1 -Target <project> in each project on this machine that uses the harness, so each keeps its copy.'
+    }
+    return $moved
 }
 
 function Copy-PayloadTree {
@@ -295,6 +441,10 @@ $mcpMixedStateWarning = $mixedStateWarning + " The mcpServers merge into '$Claud
 # computed once at script scope, reused at every status line below rather than re-testing
 # $WhatIfPreference at each site. Same pattern as Export-Account.ps1's own $dryRun.
 $dryRun = if ($WhatIfPreference) { ' (dry run)' } else { '' }
+
+# After the dependency preflight, so a receiver refused for a missing dependency has had nothing
+# renamed, and before the first copy, so a payload that contradicts the list copies nothing.
+$null = Invoke-AccountRetirement -ClaudeHome $ClaudeHome -PayloadRoot $PayloadRoot -ListPath $RetiredListPath
 
 try {
     $null = New-Item -ItemType Directory -Path $ClaudeHome -Force
@@ -508,7 +658,7 @@ function Convert-SettingsForTarget {
             #
             # Also wraps the pipeline OUTPUT: a single surviving hook unwraps to a bare scalar
             # and would serialise `"hooks": {...} instead of "hooks": [...]`
-            # (install/Install-Harness.ps1:1616-1618).
+            # (install/Install-Harness.ps1:2193-2196).
             $kept = @(@($group.hooks) | Where-Object {
                     $_ -and ($NpmPresent -or ($_.command -notmatch 'ccstatusline'))
                 })

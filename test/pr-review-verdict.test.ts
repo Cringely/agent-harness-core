@@ -5,26 +5,37 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { CORE_POLICY } from "../tools/pr-review/repo-policy";
 import {
-  REQUIRED_CHECKS,
   ciCoveredPesterSuites,
   computeEvent,
   computeVerification,
   verificationOf,
+  workflowDeclaresName,
 } from "../tools/pr-review/verdict";
 import {
   BELOW_FLOOR_SEVERITIES,
   LOAD_BEARING_SEVERITIES,
   type CheckRun,
   type PrSnapshot,
+  type RepoPolicy,
+  type RequiredCheck,
   type Verification,
 } from "../tools/pr-review/types";
 
+const REQUIRED_CHECKS = CORE_POLICY.requiredChecks;
 const REPO_ROOT = join(import.meta.dir, "..");
-const REAL_WORKFLOW = readFileSync(join(REPO_ROOT, ".github", "workflows", "test.yml"), "utf8");
+// Built from the policy's own path, so moving CORE_POLICY to another workflow
+// moves the job-name pin with it.
+const REAL_WORKFLOW = readFileSync(join(REPO_ROOT, ...CORE_POLICY.ciWorkflowPath.split("/")), "utf8");
 
-const green = (): CheckRun[] =>
-  REQUIRED_CHECKS.map((c) => ({ name: c.name, appSlug: c.appSlug, status: "completed", conclusion: "success" }));
+const greenFor = (checks: readonly RequiredCheck[]): CheckRun[] =>
+  checks.map((c) => ({ name: c.name, appSlug: c.appSlug, status: "completed", conclusion: "success" }));
+const green = (): CheckRun[] => greenFor(REQUIRED_CHECKS);
+
+// #318: verification reads a required check only when its name appears as a `name:` line in the
+// base-commit workflow, so every synthetic workflow below carries the core names.
+const jobNameLines = (checks: readonly RequiredCheck[]) => checks.map((c, i) => [`  job-${i}:`, `    name: ${c.name}`]).flat();
 
 const withRun = (index: number, patch: Partial<CheckRun>): CheckRun[] =>
   green().map((run, i) => (i === index ? { ...run, ...patch } : run));
@@ -45,6 +56,7 @@ const manyRuns = (index: number, patches: ReadonlyArray<Partial<CheckRun>>): Che
 // purpose, which is what a Windows checkout hands the parser.
 const WORKFLOW = [
   "jobs:",
+  ...jobNameLines(REQUIRED_CHECKS),
   "  pester-test:",
   "    steps:",
   "      # Run them by hand until the coupling is removed:",
@@ -59,18 +71,25 @@ const verify = (
   changedFiles: string[] = ["README.md"],
   workflowText: string | null = WORKFLOW,
   changedFilesComplete = true,
-) => computeVerification({ checkRuns, changedFiles, workflowText, changedFilesComplete });
+  policy: RepoPolicy = CORE_POLICY,
+) => computeVerification({ checkRuns, changedFiles, workflowText, changedFilesComplete, policy });
 
 const PASSED: Verification = { state: "passed", reasons: [] };
 const FAILED: Verification = { state: "failed", reasons: ["x"] };
 const INCOMPLETE: Verification = { state: "incomplete", reasons: ["x"] };
 
-describe("REQUIRED_CHECKS is tied to the workflow it measures", () => {
+describe("CORE_POLICY's required checks are tied to the workflow they measure", () => {
   // Pinned on the real file rather than restated: renaming a job in test.yml without updating
-  // REQUIRED_CHECKS turns every future review into COMMENT, and this test names the cause.
-  test.each(REQUIRED_CHECKS.map((c) => c.name))("the workflow declares a job named %p", (name) => {
+  // CORE_POLICY turns every future review into COMMENT, and this test names the cause. The second
+  // assertion is the same matcher verification itself applies at the base commit (#318).
+  test.each(REQUIRED_CHECKS.map((c) => c.name))("the workflow has a name: line for %p", (name) => {
     const lines = REAL_WORKFLOW.split(/\r?\n/).map((line) => line.trim());
     expect(lines).toContain(`name: ${name}`);
+    expect(workflowDeclaresName(REAL_WORKFLOW, name)).toBe(true);
+  });
+
+  test("CORE_POLICY verifies against its real workflow as passed when every check is green", () => {
+    expect(verify(green(), ["README.md"], REAL_WORKFLOW).state).toBe("passed");
   });
 });
 
@@ -200,12 +219,22 @@ describe("computeVerification()", () => {
   test("install/AccountShared.ps1 is covered when only one of its two declared suites runs", () => {
     const onlyExport = [
       "jobs:",
+      ...jobNameLines(REQUIRED_CHECKS),
       "  pester-test:",
       "    steps:",
       "      - name: Export-Account.Tests.ps1",
       "        run: pwsh -NoProfile -File install/Export-Account.Tests.ps1",
     ].join("\r\n");
     expect(verify(green(), ["install/AccountShared.ps1"], onlyExport).state).toBe("passed");
+  });
+
+  // #310: install/Deps.ps1 has no sibling suite. Both installer suites drive it and both run in
+  // the real workflow. A workflow naming neither stays incomplete.
+  test("install/Deps.ps1 is covered by its declared suites on the real workflow", () => {
+    expect(verify(green(), ["install/Deps.ps1"], REAL_WORKFLOW).state).toBe("passed");
+  });
+  test("install/Deps.ps1 is incomplete when neither declared suite runs", () => {
+    expect(verify(green(), ["install/Deps.ps1"]).state).toBe("incomplete");
   });
 
   // #209: account/claude/hooks/*.ps1 has no sibling suite, but install/Account-Hooks.Tests.ps1
@@ -354,14 +383,14 @@ describe("verificationOf() reads exactly the four fields from a PrSnapshot", () 
   });
 
   test("changedFilesComplete true, isOpen false", () => {
-    expect(verificationOf(buildSnapshot(true, false))).toEqual({
+    expect(verificationOf(buildSnapshot(true, false), CORE_POLICY)).toEqual({
       state: "incomplete",
       reasons: ["CI runs no Pester suite for: install/Install-Harness.ps1"],
     });
   });
 
   test("changedFilesComplete false, isOpen true", () => {
-    expect(verificationOf(buildSnapshot(false, true))).toEqual({
+    expect(verificationOf(buildSnapshot(false, true), CORE_POLICY)).toEqual({
       state: "incomplete",
       reasons: [
         "the changed-file listing is incomplete, so files this review never saw could decide it",
@@ -444,5 +473,132 @@ describe("a .gitattributes edit can blank the scan's diff, so the scan cannot vo
 
   test("a file that merely ends in the name is not a scanner edit", () => {
     expect(verify(green(), ["docs/not.gitattributes.md", "x.gitattributes"]).state).toBe("passed");
+  });
+});
+
+// #318: verification reads the reviewed repository's own policy, never this repository's.
+describe("computeVerification() under a repository's own policy (#318)", () => {
+  const FOREIGN: RepoPolicy = {
+    repo: "owner/example",
+    ciWorkflowPath: ".github/workflows/ci.yml",
+    requiredChecks: [{ name: "ci", appSlug: "github-actions" }],
+    pesterCoverage: false,
+  };
+  const FOREIGN_WORKFLOW = ["name: ci", "on: pull_request", "jobs:", "  ci:", "    name: ci", "    runs-on: ubuntu-latest"].join("\n");
+
+  test("a foreign repository's own check, green: passed", () => {
+    expect(verify(greenFor(FOREIGN.requiredChecks), ["src/a.ts"], FOREIGN_WORKFLOW, true, FOREIGN)).toEqual({ state: "passed", reasons: [] });
+  });
+
+  test("this repository's four green runs without the foreign check: incomplete, naming the foreign check", () => {
+    const result = verify(green(), ["src/a.ts"], FOREIGN_WORKFLOW, true, FOREIGN);
+    expect(result.state).toBe("incomplete");
+    expect(result.reasons.join("\n")).toContain('"ci"');
+  });
+
+  test("a foreign repository with pesterCoverage false: a changed .ps1 with no suite still passes", () => {
+    const result = verify(greenFor(FOREIGN.requiredChecks), ["scripts/tool.ps1"], FOREIGN_WORKFLOW, true, FOREIGN);
+    expect(result).toEqual({ state: "passed", reasons: [] });
+  });
+
+  test("the same .ps1 under CORE_POLICY stays incomplete", () => {
+    expect(verify(green(), ["scripts/tool.ps1"]).state).toBe("incomplete");
+  });
+
+  // Critique item 1: running the Pester check is the withholding branch, so only a literal false
+  // may skip it. A hand-built policy missing the field keeps the check.
+  test.each([
+    ["missing", undefined],
+    ["a string", "false"],
+    ["null", null],
+  ])("a policy whose pesterCoverage is %s still reports the uncovered .ps1", (_label, value) => {
+    const policy = { ...FOREIGN, pesterCoverage: value } as unknown as RepoPolicy;
+    if (value === undefined) delete (policy as unknown as Record<string, unknown>).pesterCoverage;
+    const result = verify(greenFor(FOREIGN.requiredChecks), ["scripts/tool.ps1"], FOREIGN_WORKFLOW, true, policy);
+    expect(result.state).toBe("incomplete");
+    expect(result.reasons.join("\n")).toContain("scripts/tool.ps1");
+  });
+
+  test("no workflow at the base commit: the reason names the policy's own workflow path", () => {
+    const result = verify(greenFor(FOREIGN.requiredChecks), ["src/a.ts"], null, true, FOREIGN);
+    expect(result.state).toBe("incomplete");
+    expect(result.reasons.join("\n")).toContain(".github/workflows/ci.yml is absent at the base commit");
+  });
+
+  test("an empty requiredChecks list is incomplete, never passed", () => {
+    const empty = { ...FOREIGN, requiredChecks: [] };
+    const result = verify([], ["src/a.ts"], FOREIGN_WORKFLOW, true, empty);
+    expect(result.state).toBe("incomplete");
+    expect(result.reasons.join("\n")).toContain("no required checks are configured");
+  });
+
+  test("a missing policy is incomplete, never passed", () => {
+    const result = computeVerification({
+      checkRuns: green(),
+      changedFiles: ["src/a.ts"],
+      workflowText: WORKFLOW,
+      changedFilesComplete: true,
+    } as unknown as Parameters<typeof computeVerification>[0]);
+    expect(result.state).toBe("incomplete");
+  });
+
+  // Critique item 11: a green run with the right name from some other workflow, while the
+  // configured workflow never declares that job, does not vouch for anything.
+  test("a green required check whose name is not a name: line in the base-commit workflow: incomplete", () => {
+    const other = ["jobs:", "  ci:", "    name: something else"].join("\n");
+    const result = verify(greenFor(FOREIGN.requiredChecks), ["src/a.ts"], other, true, FOREIGN);
+    expect(result.state).toBe("incomplete");
+    expect(result.reasons.join("\n")).toContain('required check "ci" does not appear as a name: line in the CI workflow at the base commit');
+  });
+
+  test("a step's `- name:` line naming the check does not count as a name: line", () => {
+    const stepOnly = ["jobs:", "  build:", "    steps:", "      - name: ci"].join("\n");
+    expect(verify(greenFor(FOREIGN.requiredChecks), ["src/a.ts"], stepOnly, true, FOREIGN).state).toBe("incomplete");
+  });
+
+  test("under CORE_POLICY, a workflow missing one core check's name: line: incomplete, naming it", () => {
+    const missing = WORKFLOW.split("\r\n").filter((line) => line.trim() !== `name: ${REQUIRED_CHECKS[3]!.name}`).join("\r\n");
+    const result = verify(green(), ["README.md"], missing);
+    expect(result.state).toBe("incomplete");
+    expect(result.reasons.join("\n")).toContain(REQUIRED_CHECKS[3]!.name);
+  });
+
+  test("verificationOf() passes the policy through", () => {
+    const snap = {
+      repo: "owner/example",
+      number: 1,
+      title: "",
+      body: "",
+      baseSha: "a".repeat(40),
+      headSha: "b".repeat(40),
+      isOpen: true,
+      diff: "",
+      changedFiles: ["scripts/tool.ps1"],
+      changedFilesComplete: true,
+      commitMessages: [],
+      headFiles: [],
+      omittedFiles: [],
+      linkedIssues: [],
+      trustedContext: [],
+      livingDocs: [],
+      workflowText: FOREIGN_WORKFLOW,
+      checkRuns: greenFor(FOREIGN.requiredChecks),
+    } satisfies PrSnapshot;
+    expect(verificationOf(snap, FOREIGN)).toEqual({ state: "passed", reasons: [] });
+    expect(verificationOf(snap, CORE_POLICY).state).toBe("incomplete");
+  });
+});
+
+// Critique item 3: a local composite action under .github/actions/ is pulled from the pull
+// request's own head by `uses: ./...`, so an edit there rewrites the CI that vouches for it.
+describe("an edit under .github/actions/ is a CI-definition edit (#318)", () => {
+  test.each([".github/actions/setup/action.yml", ".github/actions/x.sh"])("%s: incomplete even when every check is green", (path) => {
+    const result = verify(green(), [path]);
+    expect(result.state).toBe("incomplete");
+    expect(result.reasons.join("\n")).toContain(path);
+  });
+
+  test("a CODEOWNERS edit stays approvable", () => {
+    expect(verify(green(), [".github/CODEOWNERS"]).state).toBe("passed");
   });
 });

@@ -1,6 +1,6 @@
 # Portable PR reviewer: hub design (#146 refresh)
 
-**Status:** proposed, 2026-11-11, revision 2. Replaces the October design (`docs/superpowers/specs/2026-10-05-pr-review-ci-design.md` on branch `feat/146-ci-reviewer`) as the plan of record for #146. The October design stays valid as the reversal option below. No implementation plan exists yet. A builder plans stage 1 now. Stage 2 is a separate plan, gated on the operator's answers to open questions 1 and 4.
+**Status:** approved by the operator 2026-11-12, revision 2. Stage 2 is on hold by operator ruling of the same day. Replaces the October design (`docs/superpowers/specs/2026-10-05-pr-review-ci-design.md` on branch `feat/146-ci-reviewer`) as the plan of record for #146. The October design stays valid as the reversal option below. No implementation plan exists yet. A builder plans stage 1 now. Stage 2 is a separate plan, gated on the operator's answers to open questions 1 and 4.
 
 This revision folds in a builder check and a security review of the first draft, and three operator rulings of 2026-11-11: the workstation service-account token's reach is accepted as is, the merge guard has no override, and the stage 2 credential and host stay open. Revision 2 closes two blockers a security re-review found in revision 1's fixes (an edited App review laundering a rewound base past the deployer, and an API-created check run joining the real check suite) and folds in its minor findings. Findings not adopted are listed at the end with a reason each.
 

@@ -4,25 +4,27 @@
 // opened as a pull request against master today.
 //
 // CI's result is not something a local repository knows, so the caller states it with `checks`,
-// and syntheticCheckRuns() turns that statement into check runs with the real required names.
+// and syntheticCheckRuns() turns that statement into check runs with the policy's required names.
+// The policy (#318) also names the workflow read at the base commit.
 
+import { workflowPathProblem } from "./repo-policy";
 import { selectHeadFiles } from "./snapshot";
 import {
   LIVING_DOC_PATHS,
   TRUSTED_CONTEXT_PATHS,
-  WORKFLOW_PATH,
   type CheckRun,
   type FileText,
   type IssueText,
   type PrSnapshot,
   type PrSource,
+  type RepoPolicy,
+  type RequiredCheck,
 } from "./types";
-import { REQUIRED_CHECKS } from "./verdict";
 
 export type SyntheticChecks = "passed" | "failed" | "incomplete";
 
-export function syntheticCheckRuns(state: SyntheticChecks): CheckRun[] {
-  return REQUIRED_CHECKS.map((check, i) => {
+export function syntheticCheckRuns(state: SyntheticChecks, checks: readonly RequiredCheck[]): CheckRun[] {
+  return checks.map((check, i) => {
     if (i === 0 && state === "failed") return { name: check.name, appSlug: check.appSlug, status: "completed", conclusion: "failure" };
     if (i === 0 && state === "incomplete") return { name: check.name, appSlug: check.appSlug, status: "in_progress", conclusion: null };
     return { name: check.name, appSlug: check.appSlug, status: "completed", conclusion: "success" };
@@ -34,6 +36,7 @@ export interface LocalSourceOptions {
   base: string;
   head: string;
   checks: SyntheticChecks;
+  policy: RepoPolicy;
   issues?: IssueText[];
   title?: string;
   body?: string;
@@ -53,7 +56,10 @@ function gitOrNull(repoDir: string, args: string[]): string | null {
 }
 
 export class LocalGitSource implements PrSource {
-  constructor(private readonly options: LocalSourceOptions) {}
+  constructor(private readonly options: LocalSourceOptions) {
+    const problem = workflowPathProblem(options.policy?.ciWorkflowPath);
+    if (problem !== null) throw new Error(`the policy's workflow path ${problem}`);
+  }
 
   async snapshot(): Promise<PrSnapshot> {
     const { repoDir } = this.options;
@@ -104,8 +110,8 @@ export class LocalGitSource implements PrSource {
       linkedIssues: this.options.issues ?? [],
       trustedContext,
       livingDocs,
-      workflowText: gitOrNull(repoDir, ["show", `${baseSha}:${WORKFLOW_PATH}`]),
-      checkRuns: syntheticCheckRuns(this.options.checks),
+      workflowText: gitOrNull(repoDir, ["show", `${baseSha}:${this.options.policy.ciWorkflowPath}`]),
+      checkRuns: syntheticCheckRuns(this.options.checks, this.options.policy.requiredChecks),
     };
   }
 }

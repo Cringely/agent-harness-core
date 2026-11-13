@@ -4,7 +4,7 @@ This is a process layer and pattern documentation, extracted from the SpaceMolt 
 
 ## Layering model
 
-Three layers make up a working setup. This repo is the core layer: the shared agent definitions, hooks, and templates that apply to any project. `~/.claude` is the user's global layer, already carrying personal skills and rules that apply across every repo the user touches. A project's own `.claude/` directory is the installed copy of core plus whatever that project adds on its own.
+Three layers make up a working setup. This repo is the core layer: the shared agent definitions, hooks, and templates that apply to any project. `~/.claude` is the user's global layer, already carrying personal skills and rules that apply across every repo the user touches. A project's own `.claude/` directory is the installed copy of core plus whatever that project adds on its own. The account layer is the kernel, and layer rules ship from core into each project.
 
 The rule that keeps these from drifting into a mess: core is upstream. Projects never edit an installed file in place. If a project needs something different, it adds a project-local file alongside the installed one rather than changing it, and if the change turns out to be broadly useful, it goes back to core through the flow in CONTRIBUTING.md. Editing installed files directly is how forks rot: the next install silently overwrites the edit, or the project drifts far enough that re-installing breaks it.
 
@@ -14,16 +14,19 @@ The rule that keeps these from drifting into a mess: core is upstream. Projects 
 |---|---|
 | `core/claude/agents/` | Self-contained process roles `adversarial-reviewer`, `doc-steward`, `research-scout`, `soc-monitor`, `task-reviewer`. See `patterns/agent-def-shape.md` on why none point at a charter yet |
 | `core/claude/hooks/` | Worktree gate, write-scope gate, model-tier gate, session guardrails, drift check, wave-close handoff, prose-lint-on-write. `core/claude/templates/settings.hooks.json` is the list of Claude Code hooks that actually gets wired. This row goes stale, that file does not. The three git hooks in the same directory, `pre-commit`, `pre-push` and `commit-msg`, are wired a second way, through `core.hooksPath` (see Install) |
-| `core/claude/templates/` | `guardrails.template.md`, a settings fragment, a scratch `.gitignore` and `manifest-local.gitignore`, installed as `.claude/.gitignore` to keep the per-machine sidecar out of a commit, all of which the installer applies on every run, a ceremony ledger template it applies only under `-IncludeCeremonies`, plus three reference templates it leaves in core: agent-def authoring, the reviewer-lockout protocol, and the untrusted-content boundary block |
+| `core/claude/templates/` | `guardrails.template.md`, a settings fragment, a scratch `.gitignore` and `manifest-local.gitignore`, installed as `.claude/.gitignore` to keep the per-machine sidecar out of a commit, and `project-settings.template.md`, rendered into `.claude/rules/harness/project-settings.md`, all of which the installer applies on every run, a ceremony ledger template it applies only under `-IncludeCeremonies`, plus three reference templates it leaves in core: agent-def authoring, the reviewer-lockout protocol, and the untrusted-content boundary block |
+| `core/claude/rules/` | Layer rule files and layers.json, which assigns each file to the code, documents or physical layer and defines the project settings. The installer copies the layers a project records into its .claude/rules/harness/ |
+| `core/claude/deps.json` | The dependencies the kernel and each layer rely on, tools and Claude Code plugins, each with its severity per layer, a probe, and a pinned install where one exists. Both installers read it on every run (see Install) |
 | `patterns/` | The design docs behind the above, listed in [`patterns/INDEX.md`](patterns/INDEX.md) |
-| `install/` | The installer that copies core into a project's `.claude/`. The `Export-Account.ps1` and `Install-Account.ps1` pair that carries the account layer between machines (see below), with `AccountShared.ps1`, the library both dot-source for the payload tables they have to agree on. `Restore-ClaudeProject.ps1` for moving a project, its session history and the `~/.claude` global layer to another machine. `Start-CappedCopilot.ps1`, which launches Copilot CLI with a per-session credit cap. And the Pester suites beside them |
+| `install/` | The installer that copies core into a project's `.claude/`. The `Export-Account.ps1` and `Install-Account.ps1` pair that carries the account layer between machines (see below), with `AccountShared.ps1`, the library both dot-source for the payload tables they have to agree on. `Deps.ps1`, the dependency preflight both installers dot-source. `Restore-ClaudeProject.ps1` for moving a project, its session history and the `~/.claude` global layer to another machine. `Start-CappedCopilot.ps1`, which launches Copilot CLI with a per-session credit cap. And the Pester suites beside them |
 | `tools/pr-review/` | This repository's own pull request reviewer, run by hand: a tool-less model reviews the diff, code computes the verdict, and a GitHub App posts it (#120). Outside the paths `.github/CODEOWNERS` assigns, its approval is what normally supplies the one approving review `master` requires before a merge. On an owned path the operator merges through the recorded administrator bypass alongside the App approval (see Testing and merging). Not part of core, and nothing installs it. [`tools/pr-review/README.md`](tools/pr-review/README.md) covers setup and commands |
 | `account/claude/` | The workstation account layer: rules, agents, skills, the Vale prose-lint kit, hooks, and templated `settings.account.json` and `mcp-servers.json`. Generated by `install/Export-Account.ps1`, never hand-edited |
 | `packs.json`, `packs/` | The source of the installable plugin packs and the packs generated from it, with `.claude-plugin/marketplace.json` beside them. Generated by `tools/packs/cli.ts`, never hand-edited (see Packs) |
 | `tools/packs/` | The pack generator and its `--check` drift gate (#254). Not part of core, and nothing installs it |
-| `test/` | The `bun test` suite, covering the hooks, the agent definitions (frontmatter keys, names, and the doc-steward tool grant), `tools/pr-review/` and `tools/packs/`, plus the CI secret-scan job's workflow steps (`secret-scan-ci.test.ts`) |
-| `docs/` | Design specs and plans under `docs/superpowers/`, the security control register (`docs/security-controls.md`, pinned by `test/security-controls.test.ts`), and two HTML writeups at the top level: a memory-systems assessment and a two-day recap from 2026-08-02 |
-| `.github/workflows/` | `test.yml`, the one workflow. `tools/pr-review/verdict.ts`'s `REQUIRED_CHECKS` names which of its jobs the pull request reviewer reads to decide what CI vouches for (see Testing and merging). `.gitleaks.toml` at the repo root configures its secret-scan job |
+| `tools/model-currency/` | The kernel's model currency check: every exact model ID, and every tier alias written as a `model` setting or a `--model` option, under the roots given, against the latest models, with aliases resolved live. Anything in scope it did not read (an unreadable, oversize or binary file, or a symlink) makes the run inconclusive instead of clean. Excluded classes (`.jsonl` files, backup names, and a default list of directories such as `worktrees` and `.superpowers`) are counted in the last line as excluded. Run by hand. Nothing installs it |
+| `test/` | The `bun test` suite, covering the hooks, the agent definitions (frontmatter keys, names, and the doc-steward tool grant), `tools/pr-review/`, `tools/packs/` and `tools/model-currency/`, plus the CI secret-scan job's workflow steps (`secret-scan-ci.test.ts`), and the layer rules: `layer-rules.test.ts` checks the shape of `core/claude/rules/layers.json` and pins the split of the core rule files against the originals in `test/fixtures/rules-premove/` |
+| `docs/` | Design specs and plans under `docs/superpowers/`, the security control register (`docs/security-controls.md`, pinned by `test/security-controls.test.ts`), the decision log (`docs/decision-log.md`), and two HTML writeups at the top level: a memory-systems assessment and a two-day recap from 2026-08-02 |
+| `.github/workflows/` | `test.yml`, the one workflow. `CORE_POLICY` in `tools/pr-review/repo-policy.ts` names which of its jobs the pull request reviewer reads to decide what CI vouches for (see Testing and merging). `.gitleaks.toml` at the repo root configures its secret-scan job |
 
 ## What's deliberately absent
 
@@ -33,14 +36,33 @@ Skills already global in `~/.claude` (prose review, prose linting, council revie
 
 ## Install
 
-Prerequisites: PowerShell 7 (`pwsh`). `bun` on PATH for the TypeScript hooks (every wired hook except
-the three `sh` ones), without it the gates stop enforcing and Claude Code surfaces an error notice on
-stderr per dispatch (the installer warns when it cannot find `bun`, and installs anyway, since the
-registrations it writes are correct either way). Git Bash or another POSIX `sh` on Windows for the
-three shell hooks (`session-start-guardrails.sh`, `session-start-drift-check.sh`,
-`wave-close-handoff.sh`). The prose-lint hook also
-wants `vale` and the prose-lint styles kit on the machine. Missing either degrades to an advisory
-skip, never a blocked write. `session-start-drift-check.sh` also wants `sed`, `tr` and `awk`
+Prerequisites: PowerShell 7 (`pwsh`). Every other tool a layer relies on is declared in
+`core/claude/deps.json`, with a probe, a minimum version and one pinned install command per platform:
+winget on Windows, apt or npm on Linux, each at an exact version. The installer probes them before
+its first write, and a missing hard dependency refuses the install and prints its pinned command.
+The hard ones are `bun`, since every TypeScript gate is registered as a bare `bun` command and fails
+open without it, and Git Bash on Windows, which Claude Code runs the three shell hooks through. Git
+Bash is found under the Git for Windows install, never from PATH, where a bare `bash` can be the WSL
+launcher. The code layer adds `git` as a hard dependency. It has no pinned Linux package, because
+the only Ubuntu build old enough for the 30-day rule is unpatched, so on Linux that refusal tells
+you to install git by hand. A missing optional one, such as `vale` for
+the prose-lint hook, `gh` or the `claude` CLI, gets a warning with its command and the install
+carries on. Nothing is installed unless you pass `-InstallDeps`, which runs each missing
+dependency's pinned command and probes it again. `-WhatIf` runs the probes, prints each command
+`-InstallDeps` would run, and stops before writing anything.
+
+Claude Code plugins are declared in the same file. This installer handles the project-scope ones a
+layer uses, such as `code-review` and `feature-dev` for the code layer, and leaves user-scope
+plugins to the account installer. A plugin from Anthropic's two marketplaces is trusted without a
+commit pin, but only while that marketplace is registered from Anthropic's own repository. A
+marketplace registered under one of those names from anywhere else is refused, and nothing from it
+is installed or recorded. The installer records a content hash of its install directory in the sidecar and warns
+when that hash changes, and `-InstallDeps` records it again once you have looked at the change. A
+third-party plugin needs either a pin, checked before it is installed and again after, or an
+`allowUnpinnedPlugins` entry in the project manifest whose `risk` sentence says what the project is
+accepting. The prose-lint hook also wants the
+prose-lint styles kit on the machine. Missing it degrades to an advisory skip, never a blocked
+write. `session-start-drift-check.sh` also wants `sed`, `tr` and `awk`
 (Git Bash ships all three) plus a reachable core checkout. Missing any of them makes it print
 nothing, which is also what it does when the project has no drift.
 
@@ -92,6 +114,35 @@ pwsh install/Install-Harness.ps1 -Target <project-root>
 runs standup/wave ceremonies. `-Force` overwrites files the project has modified since install. The
 default is to skip a modified file and warn.
 
+`-Layers` names the project layers: `code`, `documents`, `physical`, or `none` for no project
+layers. It takes a list (`-Layers code,documents`) or one comma-separated string. The kernel is
+always on and is never listed, and `none` cannot be combined with a layer. The choice is recorded
+in the manifest, so a later run without `-Layers` keeps it. A fresh install, and a manifest written
+before layers existed, record `code`. Each layer's rule files, listed in
+`core/claude/rules/layers.json`, install into `.claude/rules/harness/` and are tracked like any
+other managed file. A hand-written file already at one of those paths is kept and reported, the
+same as anywhere else in the layer.
+
+Three settings are recorded beside the layers. `-StatusCadence` is `silent` or `heartbeat`,
+`-Audience` is `peer-engineer` or `plain-all-roles`, and `-LengthBudget` sets a default word
+budget, with `0` clearing it. A flag sets its value, the recorded value stays when the flag is
+omitted, and a project with nothing recorded gets a default from its layers: `heartbeat` when they
+include `documents` or `physical`, `plain-all-roles` when they include `documents` without `code`,
+and no length budget. Changing `-Layers` alone never changes a recorded setting. The four flags
+apply to an install run only, and the installer refuses them beside `-Audit`, `-Accept`,
+`-Unaccept` or `-Prune`.
+
+Every install writes `.claude/rules/harness/project-settings.md` from the recorded layers and
+settings, using `core/claude/templates/project-settings.template.md`. It is not tracked in the
+manifest's `files` map. Instead its first line is a marker holding a hash of the rest, and an
+install regenerates the file only when it is absent or still matches that marker. A hand edit, or
+a file at that path the installer never wrote, is kept with a warning, as with any other modified
+managed file, and `-Force` replaces it. Change a setting by re-running the installer with its flag.
+
+Dropping a layer never deletes its rule files. A file still on disk is left in place with a
+warning, since it may carry project edits. Delete it by hand if the layer is gone for good, and the
+next install drops its record from the manifest.
+
 `pre-commit`, `pre-push` and `commit-msg` are git hooks rather than Claude Code hooks. The
 installer copies them into `.claude/hooks/` with the rest and then, when the target
 is a git repository, sets `core.hooksPath` to that directory, so git runs them on every commit and
@@ -140,7 +191,10 @@ each installed path to the SHA256 it had at install time, which is what makes a 
 detectable. `accepted` maps a path to the hash of the project's own fork, pinned deliberately, and
 says the divergence is the intended state. `coreCommit` is the third field, recording which core
 commit the layer was installed from. A manifest written before this shape existed, a flat
-path-to-hash map, is migrated on the next run with every hash preserved under `files`.
+path-to-hash map, is migrated on the next run with every hash preserved under `files`. The
+current shape adds `schemaVersion` (3), `layers` and `settings`, described with the install flags
+above, without dropping any of those fields. A `layers` or `settings` value outside what
+`core/claude/rules/layers.json` defines stops every installer command before it writes anything.
 
 None of that travels between clones, which is exactly why two other fields never reach this file:
 `coreRepo` (an absolute path to the core checkout) and `stackDetected` (the per-machine plugin,
@@ -220,6 +274,24 @@ splits three ways instead: a key core no longer ships whose file already left th
 `orphaned (already removed)`, one where the on-disk copy still matches the hash recorded at install
 reads `orphaned (unmodified)`, and one the project edited since reads `orphaned (modified)`. All
 three are `-Prune`'s job, the last of them followed by `-Accept` to pin the fork.
+
+Layers add six statuses. `not-installed (layer not selected)` is a rule file for a layer the
+project does not record, and like `not-installed (ceremony-gated)` it is listed but not counted.
+`installed (layer not selected)` is one still on disk after its layer was dropped. Delete it by
+hand, and the next install drops its record. `settings-missing` and `settings-stale` mean
+`project-settings.md` is absent, or is as the installer wrote it but differs, line endings aside,
+from what the manifest now renders, and a re-run rewrites it. `settings-modified` means it was
+edited by hand or never written by the installer, so installs keep it. Move the change into the
+manifest with the setting's flag, then delete the file and re-run. `manifest-invalid` means the manifest's `layers` or `settings` value is one
+the installer refuses. Fix the value the error names. Under `-Audit -Quiet` that is the only row
+printed.
+
+`plugin-changed` means a project-scope plugin's install directory no longer hashes to what the
+sidecar recorded. `-Audit` hashes the recorded directory itself and never calls the Claude Code CLI.
+Review the change, then re-run the installer with `-InstallDeps` to record it again.
+`plugin-unverified` means a newer copy sits beside the recorded install directory, as an update into
+a new version folder leaves one, or the folder holding it could not be listed. The recorded hash may
+then not be the active plugin's. Re-run the installer, which reads the plugin listing again.
 
 This is the mechanical half of the findings flow in CONTRIBUTING.md.
 Run it periodically per project (SpaceMolt wires it into a `core_harvest` ceremony, see that
@@ -363,18 +435,50 @@ PowerShell hook invocations for a non-Windows target, deep-merges
 `settings.json` rather than replacing it (Claude Code writes that file itself, and an overwrite
 would revert every `/plugin` toggle on every pull), adds missing `mcpServers` entries to
 `~/.claude.json` without touching an existing one, and prints every command still carrying a
-source-machine path. Prerequisites are `pwsh` 7 and git. `vale`, `bun`, `node`, `bash` (Git Bash on
-Windows), `uvx` and, on a Linux box with no `npm`, `jq` each drive one feature that fails open
-without it, which is what the preflight warning makes visible. `npm` is checked on its own: without
-it the two `ccstatusline` hook entries are dropped and `statusLine.command` is pointed at the shipped
+source-machine path. Prerequisites are `pwsh` 7 and git. The script runs the project installer's
+preflight against the kernel entries in `core/claude/deps.json`. `bun`, and Git Bash on Windows, are
+hard and refuse the install before anything is copied. `git`, `vale`, `python3`, `npm`, `node`,
+`uvx`, `ccstatusline`, `op`, `bash` on Linux and, on a Linux box with no `npm`, `jq` each drive one
+feature that fails open without it, so each gets a warning naming its pinned command, or saying to
+install it by hand where none is pinned. Whether `npm` is there for `jq`'s purpose is the answer
+`-NpmGlobal` or `npm root -g` gives, the same one that decides where the statusline points. `-InstallDeps` and `-WhatIf` work as
+they do for the project installer. The kernel's user-scope plugins, `superpowers` among them, are
+this script's to handle, with their content hashes recorded in `state/harness-plugin-hashes.json`
+under the Claude home, a folder the exporter never copies. Separately, `npm root -g` fills the `{{NPM_GLOBAL}}` token: without
+`npm` the two `ccstatusline` hook entries are dropped and `statusLine.command` is pointed at the shipped
 statusline script for the platform instead. Where `npm` is present, those hook entries still expect
 `ccstatusline` itself to be installed globally, so `node` can resolve it under the global
 `node_modules` path rather than a project-local one.
 
-Two limits follow from having no manifest, and both are intended. A file or hook entry deleted
-on the canonical box stays on receivers, because the copy overwrites and the merge adds. And a
+Two limits follow from having no manifest, and both are intended. A hook entry deleted from
+`settings.account.json` stays in a receiver's `settings.json`, because the merge only adds. And a
 receiver's own edit to an installed file is reverted by the next install without comment.
-`settings.local.json` is the per-machine escape hatch and never travels. The round trip and the
+`settings.local.json` is the per-machine escape hatch and never travels.
+
+A file deleted from the layer would also stay on receivers, because the copy only overwrites. The
+retire list, `install/account-retired.json`, is how that removal reaches a receiver:
+
+```
+{ "schemaVersion": 1, "retired": [ { "path": "rules/old.md", "reason": "Moved into the code layer." } ] }
+```
+
+Each path names a file under `rules/`, `agents/`, `skills/` or `hooks/`, and a skill is retired by
+listing its `SKILL.md`. The installer validates every entry before it renames anything. A path that
+is absolute, drive-qualified, written with backslashes, or climbs with `..` is refused with nothing
+renamed. So is a path with a link out of the account home anywhere on the way to the item, and so is
+a path that is a directory on the receiver or a link to one, since a renamed directory keeps
+loading. A listed path that is itself a link to a file is different: the link is renamed and its
+target is never touched. The installer renames the receiver's copy to `<path>.retired-<UTC stamp>`
+and never deletes it, so a local edit survives. Claude Code loads only `*.md` from `rules/`, so the
+renamed file stops loading. A rename never overwrites an earlier one, because a name collision
+stops the run, and `-WhatIf` renames nothing. A list
+that cannot be read or parsed stops the install, and so does a payload that still carries a listed
+path. The rename runs after the dependency preflight and before the first copy.
+
+When a rule moves from the account layer into a project layer, the receiver needs the project copy
+before the account copy goes. So the update order on a receiver is `git pull`, then
+`Install-Harness.ps1 -Target <project>` in each project that uses the harness, then
+`Install-Account.ps1`. After a rename the installer prints that instruction again. The round trip and the
 install into an empty home are both exercised by the Pester suites beside the scripts, in fixture
 homes. Whether either script has yet been run for real on a second machine is not recorded in this
 repository.
@@ -397,10 +501,10 @@ after it proceeds on a red run. CONTRIBUTING.md has the measurements behind that
 
 CI is one workflow, `.github/workflows/test.yml`. A Linux job runs `bun test`. Separate jobs run
 every Pester suite under `install/` end to end, one on Windows and one again on Linux, one step per
-suite so a `run:` line names each individually. `tools/pr-review/verdict.ts`'s `REQUIRED_CHECKS` is
+suite so a `run:` line names each individually. `CORE_POLICY` in `tools/pr-review/repo-policy.ts` is
 the source of truth for which of those jobs gate the pull request reviewer's own verification
 state, the Linux Pester job included. The reviewer counts a suite as covered only when `test.yml` at the pull request's base
-names it on a `run:` line, and takes its verification state from what `REQUIRED_CHECKS` reported
+names it on a `run:` line, and takes its verification state from what `CORE_POLICY`'s checks reported
 for the head commit.
 
 The workflow also carries a Gitleaks secret scan that runs on pull requests only, configured by
@@ -414,7 +518,7 @@ same rules, and a binary that scans clean passes. The scan reads `.gitleaks.toml
 working tree detached to the base commit and `--ignore-gitleaks-allow`, so a pull request cannot
 allowlist its own secret through `.gitleaks.toml`, `.gitleaksignore` or an inline `gitleaks:allow`
 comment. When the base has no config file, the built-in rules apply. The job
-is in `REQUIRED_CHECKS`, so a failed or missing scan keeps the reviewer from approving. A pull
+is in `CORE_POLICY`, so a failed or missing scan keeps the reviewer from approving. A pull
 request that edits `.gitleaks.toml`, `.gitleaksignore` or a `.gitattributes` at any depth reads as incomplete, the same way an edit under
 `.github/workflows/` does. Adding the job to the "CI required" ruleset is an operator change made
 once the job has run on a pull request.
@@ -430,7 +534,7 @@ is configured to record as a rule-suite bypass (pending live verification under 
 bypass skips only the default ruleset: its review rule (the approval, the code-owner review and the
 last-push approval), its code quality rule and its Copilot review. It cannot skip the second
 ruleset, "CI required", which has no bypass list. That ruleset requires the `bun test` job and the
-Pester jobs on Windows and on Linux to pass (the same set `REQUIRED_CHECKS` reads),
+Pester jobs on Windows and on Linux to pass (the same set `CORE_POLICY` reads),
 blocks a merge on a CodeQL error-level alert or a security alert at high severity or higher, and
 forbids force-pushing to or deleting `master`. It holds for every merge, the operator's included,
 so a CI outage blocks every merge until the operator edits the ruleset. The bypass is policy, not

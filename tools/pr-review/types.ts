@@ -123,11 +123,12 @@ export interface TokenMinter {
 
 // Read at the pull request's BASE commit, so a PR that edits one of these files cannot change the
 // standard it is reviewed against. #120 names CONTRIBUTING.md, the guardrails file and the
-// relevant account rules. `.claude/guardrails.md` is gitignored in this repository, so the
-// template it is installed from stands in for it.
+// relevant rules, in core and in the account layer. `.claude/guardrails.md` is gitignored in this
+// repository, so the template it is installed from stands in for it.
 export const TRUSTED_CONTEXT_PATHS = [
   "CONTRIBUTING.md",
   "core/claude/templates/guardrails.template.md",
+  "core/claude/rules/fix-quality.md",
   "account/claude/rules/fix-quality.md",
   "account/claude/rules/security.md",
 ] as const;
@@ -138,7 +139,22 @@ export const TRUSTED_CONTEXT_PATHS = [
 // reviewer runs against more than this one repository.
 export const LIVING_DOC_PATHS = ["README.md", "tools/pr-review/README.md"] as const;
 
-export const WORKFLOW_PATH = ".github/workflows/test.yml";
+// #318: what verification reads for one repository. CORE_POLICY (repo-policy.ts) is this
+// repository's. Any other comes from the operator's policy file and nowhere else. A required check
+// is keyed on name and app together: a run with the right name from any other app does not count.
+export interface RequiredCheck {
+  name: string;
+  appSlug: string;
+}
+
+export interface RepoPolicy {
+  repo: string;
+  ciWorkflowPath: string;
+  requiredChecks: readonly RequiredCheck[];
+  // True only on CORE_POLICY. The policy file cannot set it, and the loader writes false on every
+  // file entry. verdict.ts skips the Pester coverage rule only on a literal false.
+  pesterCoverage: boolean;
+}
 
 // Size caps. Each bounds what an attacker-sized pull request can make one review cost.
 // MAX_DIFF_BYTES: larger diffs get COMMENT without a model run. Round one of #98, the largest
