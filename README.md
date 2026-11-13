@@ -63,8 +63,8 @@ marketplace registered under one of those names from anywhere else is refused, a
 is installed or recorded. The installer records a content hash of its install directory in the sidecar and warns
 when that hash changes, and `-InstallDeps` records it again once you have looked at the change. A
 record with no usable hash or install path vouches for nothing. `-Audit` reports it as
-`plugin-unverified`, and the next run warns and records the current copy afresh, with two
-exceptions. A pinned third-party plugin is checked against its pin rather than its record, so the
+`plugin-unverified`, and for an installed, enabled plugin the next run warns and records the
+current copy afresh, with two exceptions. A pinned third-party plugin is checked against its pin rather than its record, so the
 run leaves that record alone. A first-party plugin that follows its marketplace sha loses the
 recorded sha along with the record, so when the marketplace sha differs from the manifest pin the
 run warns about that move instead, and `-InstallDeps` updates the plugin and records the new copy. A
@@ -306,9 +306,14 @@ printed.
 `plugin-changed` means a project-scope plugin's install directory no longer hashes to what the
 sidecar recorded. `-Audit` hashes the recorded directory itself and never calls the Claude Code CLI.
 Review the change, then re-run the installer with `-InstallDeps` to record it again.
-`plugin-unverified` means a newer copy sits beside the recorded install directory, as an update into
-a new version folder leaves one, or the folder holding it could not be listed. The recorded hash may
-then not be the active plugin's. Re-run the installer, which reads the plugin listing again.
+`plugin-unverified` means the recorded hash cannot be trusted to describe the active plugin. That
+holds when a newer copy sits beside the recorded install directory, as an update into a new version
+folder leaves one, when the folder holding it could not be listed, or when the recorded folder
+exists but could not be hashed. It also holds when the record has no usable hash or install path.
+Re-run the installer, which reads the plugin listing again and records the current copy afresh. Two
+cases stay put. A broken record for a pinned third-party plugin is never rewritten, so delete that
+entry from the sidecar by hand. A broken record for a first-party plugin that follows its marketplace
+sha needs `-InstallDeps` when the marketplace sha differs from the manifest pin.
 
 This is the mechanical half of the findings flow in CONTRIBUTING.md.
 Run it periodically per project (SpaceMolt wires it into a `core_harvest` ceremony, see that
