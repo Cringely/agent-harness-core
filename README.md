@@ -16,7 +16,7 @@ The rule that keeps these from drifting into a mess: core is upstream. Projects 
 | `core/claude/hooks/` | Worktree gate, write-scope gate, model-tier gate, session guardrails, drift check, wave-close handoff, prose-lint-on-write. `core/claude/templates/settings.hooks.json` is the list of Claude Code hooks that actually gets wired. This row goes stale, that file does not. The three git hooks in the same directory, `pre-commit`, `pre-push` and `commit-msg`, are wired a second way, through `core.hooksPath` (see Install) |
 | `core/claude/templates/` | `guardrails.template.md`, a settings fragment, a scratch `.gitignore` and `manifest-local.gitignore`, installed as `.claude/.gitignore` to keep the per-machine sidecar out of a commit, and `project-settings.template.md`, rendered into `.claude/rules/harness/project-settings.md`, all of which the installer applies on every run, a ceremony ledger template it applies only under `-IncludeCeremonies`, plus three reference templates it leaves in core: agent-def authoring, the reviewer-lockout protocol, and the untrusted-content boundary block |
 | `core/claude/rules/` | Layer rule files and layers.json, which assigns each file to the code, documents or physical layer and defines the project settings. The installer copies the layers a project records into its .claude/rules/harness/ |
-| `core/claude/deps.json` | The dependencies the kernel and each layer rely on, tools and Claude Code plugins, each with its severity per layer, a probe, and a pinned install where one exists. Both installers read it on every run (see Install) |
+| `core/claude/deps.json` | The dependencies the kernel and each layer rely on, tools and Claude Code plugins, each with its severity per layer, a probe, and a pinned install where one exists (git on Linux is installed unpinned). Both installers read it on every run (see Install) |
 | `patterns/` | The design docs behind the above, listed in [`patterns/INDEX.md`](patterns/INDEX.md) |
 | `install/` | The installer that copies core into a project's `.claude/`. The `Export-Account.ps1` and `Install-Account.ps1` pair that carries the account layer between machines (see below), with `AccountShared.ps1`, the library both dot-source for the payload tables they have to agree on. `Deps.ps1`, the dependency preflight both installers dot-source. `Restore-ClaudeProject.ps1` for moving a project, its session history and the `~/.claude` global layer to another machine. `Start-CappedCopilot.ps1`, which launches Copilot CLI with a per-session credit cap. And the Pester suites beside them |
 | `tools/pr-review/` | This repository's own pull request reviewer, run by hand: a tool-less model reviews the diff, code computes the verdict, and a GitHub App posts it (#120). Outside the paths `.github/CODEOWNERS` assigns, its approval is what normally supplies the one approving review `master` requires before a merge. On an owned path the operator merges through the recorded administrator bypass alongside the App approval (see Testing and merging). Not part of core, and nothing installs it. [`tools/pr-review/README.md`](tools/pr-review/README.md) covers setup and commands |
@@ -37,18 +37,22 @@ Skills already global in `~/.claude` (prose review, prose linting, council revie
 ## Install
 
 Prerequisites: PowerShell 7 (`pwsh`). Every other tool a layer relies on is declared in
-`core/claude/deps.json`, with a probe, a minimum version and one pinned install command per platform:
-winget on Windows, apt or npm on Linux, each at an exact version. The installer probes them before
-its first write, and a missing hard dependency refuses the install and prints its pinned command.
+`core/claude/deps.json`, with a probe, a minimum version and one install command per platform:
+winget on Windows, apt or npm on Linux, each at an exact version (git on Linux is the one named
+exception, below). The installer probes them before
+its first write, and a missing hard dependency refuses the install and prints its install command.
 The hard ones are `bun`, since every TypeScript gate is registered as a bare `bun` command and fails
 open without it, and Git Bash on Windows, which Claude Code runs the three shell hooks through. Git
 Bash is found under the Git for Windows install, never from PATH, where a bare `bash` can be the WSL
-launcher. The code layer adds `git` as a hard dependency. It has no pinned Linux package, because
-the only Ubuntu build old enough for the 30-day rule is unpatched, so on Linux that refusal tells
-you to install git by hand. A missing optional one, such as `vale` for
+launcher. The code layer adds `git` as a hard dependency. On Linux its install is `sudo apt-get
+install -y git` with no version pin, a deliberate exception to the exact-version rule (operator
+ruling 2026-11-12, #310). Ubuntu's archive keeps only the current patched build, so an exact pin
+either fails once that build is superseded or forces an unpatched one. The manifest marks this with
+an `unpinned` reason in place of `version`, which the validator accepts only on an apt install. A
+missing optional one, such as `vale` for
 the prose-lint hook, `gh` or the `claude` CLI, gets a warning with its command and the install
 carries on. Nothing is installed unless you pass `-InstallDeps`, which runs each missing
-dependency's pinned command and probes it again. `-WhatIf` runs the probes, prints each command
+dependency's install command and probes it again. `-WhatIf` runs the probes, prints each command
 `-InstallDeps` would run, and stops before writing anything.
 
 Claude Code plugins are declared in the same file. This installer handles the project-scope ones a
@@ -149,7 +153,10 @@ is a git repository, sets `core.hooksPath` to that directory, so git runs them o
 push whoever or whatever made it, including an edit that never went through Claude Code. That setting
 replaces the repository's whole hooks directory, so the step is skipped, with the `git config` command
 to run by hand, when `core.hooksPath` is already set, when `.git/hooks/` already holds a real hook, or
-when git does not answer for the target's own repository. The Claude Code hooks take the other path:
+when git does not answer for the target's own repository. Where the dependency preflight lets a run
+without git through (git is optional outside the `code` layer), the run still finishes with exit 0,
+and a target inside a repository gets a warning with that command and a `FAILED` row for
+`git:core.hooksPath`. The Claude Code hooks take the other path:
 `core/claude/templates/settings.hooks.json` is merged into the project's `.claude/settings.json`.
 
 ### The identity gate is off until you configure it
@@ -193,8 +200,10 @@ says the divergence is the intended state. `coreCommit` is the third field, reco
 commit the layer was installed from. A manifest written before this shape existed, a flat
 path-to-hash map, is migrated on the next run with every hash preserved under `files`. The
 current shape adds `schemaVersion` (3), `layers` and `settings`, described with the install flags
-above, without dropping any of those fields. A `layers` or `settings` value outside what
-`core/claude/rules/layers.json` defines stops every installer command before it writes anything.
+above, without dropping any of those fields. Every write sorts each map's keys, so a re-install that
+changes nothing leaves the committed file byte-identical. Lists keep their order. A `layers` or
+`settings` value outside what `core/claude/rules/layers.json` defines stops every installer command
+before it writes anything.
 
 None of that travels between clones, which is exactly why two other fields never reach this file:
 `coreRepo` (an absolute path to the core checkout) and `stackDetected` (the per-machine plugin,
@@ -222,8 +231,10 @@ not trusted on its own. A full install appends the checkout it runs from, and a 
 before this check needs one re-run of the installer. Until then the hook prints one
 "not on the checkout allowlist" line at session start. `HARNESS_CORE_ALLOWLIST` points both at a
 different file. When the sidecar is missing but the committed
-manifest exists (an install ran, but the write was refused), the hook and `-Audit` each print one
-line saying so instead of going quiet. A project that installed an earlier version of this layer
+manifest exists (an install ran, but the write was refused), the hook prints one line saying so
+instead of going quiet, and points at a plain installer run, which says why the write was refused.
+`-Audit` reports it too, except on the legacy shape below, where it compares against the values
+still embedded in the manifest. A project that installed an earlier version of this layer
 has both fields embedded directly in `.harness-manifest.json`, and the next run of any installer
 command splits them into the sidecar and drops them from the committed file, as long as that run's
 ignore check passes. When it does not, the legacy values are dropped rather than migrated, same as
@@ -439,8 +450,9 @@ source-machine path. Prerequisites are `pwsh` 7 and git. The script runs the pro
 preflight against the kernel entries in `core/claude/deps.json`. `bun`, and Git Bash on Windows, are
 hard and refuse the install before anything is copied. `git`, `vale`, `python3`, `npm`, `node`,
 `uvx`, `ccstatusline`, `op`, `bash` on Linux and, on a Linux box with no `npm`, `jq` each drive one
-feature that fails open without it, so each gets a warning naming its pinned command, or saying to
-install it by hand where none is pinned. Whether `npm` is there for `jq`'s purpose is the answer
+feature that fails open without it, so each gets a warning naming its install command (pinned, except git on Linux, which installs
+unpinned through apt because the archive keeps only the current patched build), or saying to
+install it by hand where it has no install command. Whether `npm` is there for `jq`'s purpose is the answer
 `-NpmGlobal` or `npm root -g` gives, the same one that decides where the statusline points. `-InstallDeps` and `-WhatIf` work as
 they do for the project installer. The kernel's user-scope plugins, `superpowers` among them, are
 this script's to handle, with their content hashes recorded in `state/harness-plugin-hashes.json`
@@ -530,7 +542,11 @@ the review. On an owned path (hooks, agent definitions, rules, `install/`, `tool
 `test/` and the rest of that file's list) it is not enough. A code-owner review is also needed, and
 the only code owner is the operator, who authors these pull requests and whom GitHub bars from
 approving them. Those merges go through the administrator bypass the operator orders, which GitHub
-is configured to record as a rule-suite bypass (pending live verification under #235), and each one carries a comment in the pull request saying why. The
+is configured to record as a rule-suite bypass (pending live verification under #235), and each one carries a comment in the pull request saying why. A
+bypass merge also needs a passing `premerge` run (`tools/pr-review/cli.ts premerge`) on the head being
+merged: it checks the channels the diff does not carry, namely the pull request's state, checks and
+closing references, every commit's author, committer and message, and the pull request's title and
+body, which no git hook ever sees. The
 bypass skips only the default ruleset: its review rule (the approval, the code-owner review and the
 last-push approval), its code quality rule and its Copilot review. It cannot skip the second
 ruleset, "CI required", which has no bypass list. That ruleset requires the `bun test` job and the

@@ -78,3 +78,10 @@ One entry per consequential choice, written when the choice is made. Roles only,
 - Rejected: the coordinator reading the content through the contents API as data, because reading as data stops the content from running as code but does not stop it steering a model session that holds a credential. Running every enrollment step in a disposable environment with a one-repository token, because most steps need no write access at all, and that environment stays available for step 6 only.
 - Spec: `docs/superpowers/specs/2026-11-11-portable-pr-review-design.md`, Enrolling a repository.
 - Drafted by: coordinator. Decided by: coordinator, after the operator approved revision 2 of the spec. Flagged to the operator, and awaits the operator's approval as part of revision 3.
+
+## 2026-11-12: git installs on Linux through apt without a version pin (#310)
+
+- Choice: on Linux the installer installs git with `sudo apt-get install -y git`, unpinned. This is a named exception to the exact-version rule for installs, limited to an apt spec that carries an `unpinned` reason in place of `version`. Ubuntu's archive keeps only the current patched build, so an exact pin fails once that build is superseded.
+- Rejected: pinning the unpatched build old enough for the 30-day rule. Dropping the Linux install and leaving install-by-hand guidance.
+- Accepted: a Linux git install resolves at run time to whatever the archive currently carries.
+- Drafted by: coordinator. Decided by: operator.
