@@ -6,14 +6,18 @@
 // Two ways to merge, both on the App's APPROVE of the reviewed head, and nothing else:
 //   - its verification passed and the merge state is CLEAN: a plain merge.
 //   - its verification passed but the merge is BLOCKED: the administrator bypass, only when
-//     --allow-admin was passed and the block is shown to be the code-owner review the operator
-//     cannot give. BLOCKED alone does not show that, because the default ruleset also blocks on
-//     other rules, and on an approval GitHub does not count. So the bypass also needs a changed file
-//     that is code-owned under .github/CODEOWNERS read at the base commit (the pull request could
-//     edit its own copy), and the App's approval of this head as the latest review on the pull
-//     request. Every required check succeeding on the head is already part of a passed
-//     verification. Anything that cannot be read, or a CODEOWNERS line codeowners.ts does not
-//     accept, refuses and leaves the merge to the operator.
+//     --allow-admin was passed and the code-owner review the operator cannot give is shown to be
+//     the only requirement left unmet. BLOCKED alone does not show that: the bypass skips every rule
+//     in the default ruleset, and GitHub reports no list of which ones are unmet. So the bypass
+//     needs all of these, read rather than inferred:
+//       - a changed file code-owned under .github/CODEOWNERS read at the base commit (the pull
+//         request could edit its own copy)
+//       - the App's approval of this head as the latest submitted review, and no reviewer whose
+//         latest approval, dismissal or request for changes is a request for changes
+//       - every active rule on the base branch shown met by data the tool reads, except the
+//         code-owner review, which one of them must require. bypassRuleBlocker below says which
+//         rules it can check. Any other rule, parameter or shape refuses, since it might be unmet
+//     Anything that cannot be read refuses, and the merge is left to the operator.
 // Both also require the review to have been posted, the reviewer to have run, no finding at or
 // above the severity floor, every check to have succeeded, and the head to be the one reviewed. A
 // severity this file does not know counts as at or above the floor.
@@ -40,18 +44,28 @@ export interface ReviewResult {
   verification: { state: string; reasons: string[] };
 }
 
-// One review as GitHub lists it on the pull request, in its order (oldest first).
+// One review as GitHub lists it on the pull request, in its order (oldest first). id is the REST
+// id the reviewer's --json output carries. authorCanPush is GitHub's own answer to whether the
+// author has push access, which decides whether its approval counts toward a review rule.
 export interface ReviewEntry {
   id: number;
   state: string;
   commitId: string;
+  author: string;
+  authorCanPush: boolean;
+}
+
+// One active rule on the base branch, as GitHub's rules-for-a-branch endpoint lists it.
+export interface BranchRule {
+  type: string;
+  parameters: Record<string, unknown> | null;
 }
 
 // What review-merge reads for the bypass. codeowners is the base commit's .github/CODEOWNERS, or
 // null when the base has none. A read that failed or came back incomplete is readable: false.
 export type BypassEvidence =
   | { readable: false; reason: string }
-  | { readable: true; codeowners: string | null; changedFiles: string[]; reviews: ReviewEntry[] };
+  | { readable: true; codeowners: string | null; changedFiles: string[]; reviews: ReviewEntry[]; rules: BranchRule[] };
 
 export type MergeDecision = { action: "merge"; admin: boolean } | { action: "refuse"; reason: string };
 
@@ -117,9 +131,103 @@ export function checksSummary(checks: readonly CheckEntry[]): { ok: boolean; tot
 
 const OPERATOR = "The operator merges it by hand, with a bypass-rationale comment";
 
-// Why the bypass may not be taken, or null when the block is the code-owner review. Reasons name
-// line numbers and counts, never a path or CODEOWNERS text, which the pull request's author chose.
-function bypassBlocker(bypass: BypassEvidence | null, review: ReviewResult, head: string): string | null {
+// Each reviewer's latest review that states an opinion: not a comment, and not a pending review,
+// which GitHub has not submitted. Neither clears an earlier request for changes.
+function latestOpinions(reviews: readonly ReviewEntry[]): ReviewEntry[] {
+  const latest = new Map<string, ReviewEntry>();
+  for (const entry of reviews) if (entry.state !== "PENDING" && entry.state !== "COMMENTED") latest.set(entry.author, entry);
+  return [...latest.values()];
+}
+
+// Push protections a merge into the base branch cannot violate: it neither force-pushes nor deletes.
+const PUSH_ONLY_RULES: ReadonlySet<string> = new Set(["non_fast_forward", "deletion"]);
+const STATUS_KEYS: ReadonlySet<string> = new Set(["required_status_checks", "strict_required_status_checks_policy", "do_not_enforce_on_create"]);
+
+function isList(value: unknown): value is unknown[] {
+  return Array.isArray(value);
+}
+
+// The required_status_checks rule is met when every named context has a successful entry on the
+// head. A rule that also needs the branch up to date with the base refuses, since the tool does not
+// read that.
+function statusRuleBlocker(parameters: Record<string, unknown>, checks: readonly CheckEntry[]): string | null {
+  const shape = "a required_status_checks rule this tool cannot check";
+  const contexts = parameters.required_status_checks;
+  if (!Object.keys(parameters).every((key) => STATUS_KEYS.has(key)) || parameters.strict_required_status_checks_policy !== false) return shape;
+  if (!isList(contexts) || !contexts.every((entry) => isRecord(entry) && typeof entry.context === "string")) return shape;
+  for (const entry of contexts as { context: string }[]) {
+    if (!checks.some((check) => check.name === entry.context && check.status === "COMPLETED" && check.conclusion === "SUCCESS")) {
+      return "a required check named by the base branch's rules has not succeeded on the head";
+    }
+  }
+  return null;
+}
+
+// The pull_request rule, apart from its code-owner review, is met when enough reviewers with push
+// access approved this head as their latest opinion and every other parameter is in a state the
+// tool can show met. Approval of the last push by someone other than the pusher needs the pusher,
+// which no read here names. Thread resolution, named reviewers and the extra approval for
+// unattributed changes are not read either, so each refuses when on. A parameter this tool does not
+// know refuses whatever its value.
+function reviewRuleBlocker(parameters: Record<string, unknown>, opinions: readonly ReviewEntry[], head: string, method: string): string | null {
+  const shape = "a pull_request rule this tool cannot check";
+  for (const [key, value] of Object.entries(parameters)) {
+    switch (key) {
+      case "require_code_owner_review":
+      case "dismiss_stale_reviews_on_push":
+        if (typeof value !== "boolean") return shape;
+        break;
+      case "require_last_push_approval":
+      case "required_review_thread_resolution":
+      case "require_extra_approval_for_unattributed_changes":
+        if (value !== false) return shape;
+        break;
+      case "required_reviewers":
+        if (!isList(value) || value.length > 0) return shape;
+        break;
+      case "allowed_merge_methods":
+        if (!isList(value) || !value.includes(method)) return shape;
+        break;
+      case "required_approving_review_count": {
+        if (!Number.isInteger(value) || (value as number) < 0) return shape;
+        const counted = opinions.filter((entry) => entry.state === "APPROVED" && entry.commitId === head && entry.authorCanPush).length;
+        if (counted < (value as number)) return "the pull request has fewer counted approvals than the base branch's review rule requires";
+        break;
+      }
+      default:
+        return shape;
+    }
+  }
+  return null;
+}
+
+// Why an active rule other than the code-owner review might be unmet, or null when none is. The
+// rule list must include a pull_request rule that requires the code-owner review, or the block
+// cannot be that review.
+function bypassRuleBlocker(rules: readonly BranchRule[], opinions: readonly ReviewEntry[], checks: readonly CheckEntry[], head: string, method: string): string | null {
+  let codeOwnerRequired = false;
+  for (const rule of rules) {
+    if (PUSH_ONLY_RULES.has(rule.type)) continue;
+    const parameters = rule.parameters ?? {};
+    if (rule.type === "required_status_checks") {
+      const blocker = statusRuleBlocker(parameters, checks);
+      if (blocker !== null) return blocker;
+    } else if (rule.type === "pull_request") {
+      const blocker = reviewRuleBlocker(parameters, opinions, head, method);
+      if (blocker !== null) return blocker;
+      if (parameters.require_code_owner_review === true) codeOwnerRequired = true;
+    } else {
+      const type = /^[a-z_]{1,40}$/.test(rule.type) ? `a ${rule.type}` : "an unrecognised";
+      return `the base branch has ${type} rule this tool cannot check, so something besides the code-owner review may be unmet`;
+    }
+  }
+  return codeOwnerRequired ? null : "no rule on the base branch requires a code-owner review, so the block is something else";
+}
+
+// Why the bypass may not be taken, or null when the block is the code-owner review alone. Reasons
+// name line numbers and rule types, never a path or CODEOWNERS text, which the pull request's
+// author chose.
+function bypassBlocker(bypass: BypassEvidence | null, review: ReviewResult, head: string, checks: readonly CheckEntry[], method: string): string | null {
   if (!bypass) return "the code-owner block could not be established";
   if (!bypass.readable) return `the code-owner block could not be established: ${bypass.reason}`;
   if (bypass.codeowners === null) return "the base commit has no .github/CODEOWNERS, so the block is not a code-owner review";
@@ -133,7 +241,9 @@ function bypassBlocker(bypass: BypassEvidence | null, review: ReviewResult, head
   if (latest === undefined || latest.id !== review.postedId || latest.state !== "APPROVED" || latest.commitId !== head) {
     return "the App's approval of this head is not the latest review on the pull request";
   }
-  return null;
+  const opinions = latestOpinions(bypass.reviews);
+  if (opinions.some((entry) => entry.state === "CHANGES_REQUESTED")) return "a reviewer's latest review requests changes";
+  return bypassRuleBlocker(bypass.rules, opinions, checks, head, method);
 }
 
 export function decideMerge(input: {
@@ -145,6 +255,8 @@ export function decideMerge(input: {
   allowAdmin: boolean;
   // Read only when --allow-admin was passed. Null otherwise.
   bypass: BypassEvidence | null;
+  // The merge method review-merge will use, which the base branch's review rule must allow.
+  method: string;
 }): MergeDecision {
   const { review } = input;
   const refuse = (reason: string): MergeDecision => ({ action: "refuse", reason });
@@ -166,7 +278,7 @@ export function decideMerge(input: {
       if (!input.allowAdmin) {
         return refuse("the App approved but the merge is blocked, as on an owned path. Rerun with --allow-admin to use the administrator bypass");
       }
-      const blocker = bypassBlocker(input.bypass, review, input.reviewedHead);
+      const blocker = bypassBlocker(input.bypass, review, input.reviewedHead, input.checks, input.method);
       return blocker === null ? { action: "merge", admin: true } : refuse(`${blocker}. ${OPERATOR}`);
     }
     return refuse(`the pull request is not mergeable (merge state ${state})`);

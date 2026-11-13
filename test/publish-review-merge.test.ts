@@ -81,13 +81,31 @@ function gitSub(argv: readonly string[]): string[] {
 }
 
 // What the bypass reads by default: an owned file among the changes, CODEOWNERS at the base commit,
-// and the App's posted review (id 1, APPROVE_OUTPUT) as the latest review on the head.
+// the App's posted review (id 1, APPROVE_OUTPUT) as the latest review on the head, and base branch
+// rules of which only the code-owner review is unmet.
 const CODEOWNERS = "# owners\n/tools/ @fixture-owner\n";
 const CODEOWNERS_AT_BASE = ["gh", "api", "-H", "Accept: application/vnd.github.raw", `repos/${REPO}/contents/.github/CODEOWNERS?ref=${BASE_HEAD}`];
 const REVIEWS = [
-  { id: 5, state: "COMMENTED", commit_id: HEAD },
-  { id: 1, state: "APPROVED", commit_id: HEAD },
+  { id: 5, state: "COMMENTED", canPush: false, author: "scanner", commit: HEAD },
+  { id: 1, state: "APPROVED", canPush: true, author: "reviewer-app", commit: HEAD },
 ];
+const RULES = [
+  { type: "deletion", parameters: null },
+  { type: "required_status_checks", parameters: { required_status_checks: [{ context: "bun test" }], strict_required_status_checks_policy: false } },
+  {
+    type: "pull_request",
+    parameters: {
+      allowed_merge_methods: ["merge", "rebase"],
+      dismiss_stale_reviews_on_push: true,
+      require_code_owner_review: true,
+      require_last_push_approval: false,
+      required_approving_review_count: 1,
+      required_review_thread_resolution: false,
+      required_reviewers: [],
+    },
+  },
+];
+const RULES_PATH = `repos/${REPO}/rules/branches/main?per_page=100`;
 const paginated = (path: string, lines: unknown[]): Responder =>
   on(["gh", "api", "--paginate", path], { stdout: lines.map((line) => JSON.stringify(line)).join("\n") + "\n" });
 
@@ -100,6 +118,7 @@ function scenario(
     files?: string[];
     fileCount?: number;
     reviews?: object[];
+    rules?: object[];
     codeowners?: Partial<RunResult>;
   } = {},
 ): FakeRunner {
@@ -109,7 +128,8 @@ function scenario(
     ...(opts.extra ?? []),
     on(["gh", "api", `repos/${REPO}/pulls/9`, "--jq", ".changed_files"], { stdout: `${opts.fileCount ?? files.length}\n` }),
     paginated(`repos/${REPO}/pulls/9/files?per_page=100`, files),
-    paginated(`repos/${REPO}/pulls/9/reviews?per_page=100`, opts.reviews ?? REVIEWS),
+    on(["gh", "api", "graphql", "--paginate"], { stdout: (opts.reviews ?? REVIEWS).map((line) => JSON.stringify(line)).join("\n") + "\n" }),
+    paginated(RULES_PATH, opts.rules ?? RULES),
     on(CODEOWNERS_AT_BASE, opts.codeowners ?? { stdout: CODEOWNERS }),
     on(["gh", "auth", "token", "-u", "fixture-owner"], { stdout: "fake-token\n" }),
     on(["gh", "api", `repos/${REPO}`, "--jq", ".default_branch"], { stdout: "main\n" }),
@@ -249,7 +269,7 @@ describe("review-merge: merges", () => {
     const runner = withReviewer(scenario(), reviewerSays(APPROVE_OUTPUT));
     await reviewMerge(ctx(runner), ARGS);
     const lines = runner.calls.map((call) => call.argv.join(" "));
-    expect(lines.filter((line) => /CODEOWNERS|\/files|\/reviews|changed_files/.test(line))).toEqual([]);
+    expect(lines.filter((line) => /CODEOWNERS|\/files|graphql|rules\/branches|changed_files/.test(line))).toEqual([]);
   });
 
   test("runs premerge on the reviewed head, under the configured account, before it merges", async () => {
@@ -494,15 +514,29 @@ describe("review-merge: refuses after the reviewer runs", () => {
     ["the base commit has no CODEOWNERS", { codeowners: { code: 1, stderr: "gh: Not Found (HTTP 404)" } }, "no .github/CODEOWNERS"],
     ["CODEOWNERS could not be read", { codeowners: { code: 1, stderr: "gh: Server Error (HTTP 500)" } }, "could not be established"],
     ["a CODEOWNERS line this tool does not accept", { codeowners: { stdout: "/tools/ @fixture-owner\n*.md @fixture-owner\n" } }, "(line 2)"],
-    ["another review after the App's", { reviews: [...REVIEWS, { id: 6, state: "COMMENTED", commit_id: HEAD }] }, "latest review"],
-    ["reviews that are not the expected shape", { reviews: [{ id: "1", state: "APPROVED", commit_id: HEAD }] }, "could not be established"],
+    ["another review after the App's", { reviews: [...REVIEWS, { id: 6, state: "COMMENTED", canPush: true, author: "someone", commit: HEAD }] }, "latest review"],
+    [
+      "another reviewer's earlier request for changes still stands",
+      { reviews: [{ id: 4, state: "CHANGES_REQUESTED", canPush: true, author: "someone", commit: HEAD }, ...REVIEWS] },
+      "requests changes",
+    ],
+    ["reviews that are not the expected shape", { reviews: [{ id: "1", state: "APPROVED", canPush: true, author: "reviewer-app", commit: HEAD }] }, "could not be established"],
+    ["the base branch has a rule the tool cannot check", { rules: [...RULES, { type: "code_quality", parameters: { severity: "errors" } }] }, "code_quality rule"],
+    ["the App's approval does not count", { reviews: [REVIEWS[0], { ...REVIEWS[1], canPush: false }] }, "counted approvals"],
+    ["the branch rules could not be read", { extra: [on(["gh", "api", "--paginate", RULES_PATH], { code: 1, stderr: "HTTP 500" })] }, "could not be established"],
   ];
   for (const [name, opts, fragment] of bypassCases) {
     test(`an administrator bypass when ${name}`, async () => {
-      const runner = withReviewer(scenario({ ...opts, views: BLOCKED, extra: [on(["gh", "pr", "comment"], {})] }), reviewerSays(APPROVE_OUTPUT));
+      const runner = withReviewer(scenario({ ...opts, views: BLOCKED, extra: [...(opts?.extra ?? []), on(["gh", "pr", "comment"], {})] }), reviewerSays(APPROVE_OUTPUT));
       await refusal(reviewMerge(ctx(runner), ADMIN_ARGS), runner, fragment, true);
     });
   }
+
+  test("an administrator bypass by a merge method the base branch's review rule does not allow", async () => {
+    const rules = RULES.map((rule) => (rule.type === "pull_request" ? { ...rule, parameters: { ...rule.parameters, allowed_merge_methods: ["merge"] } } : rule));
+    const runner = withReviewer(scenario({ rules, views: BLOCKED, extra: [on(["gh", "pr", "comment"], {})] }), reviewerSays(APPROVE_OUTPUT));
+    await refusal(reviewMerge(ctx(runner), { ...ADMIN_ARGS, method: "rebase" }), runner, "pull_request rule", true);
+  });
 
   test("premerge blocked", async () => {
     const runner = withReviewer(

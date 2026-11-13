@@ -587,8 +587,9 @@ manual run before the PR can merge again.
 Merges go through `tools/publish/cli.ts review-merge`, which waits for CI, runs the App reviewer
 and merges only on the App's APPROVE of the reviewed head. On an owned path it takes the
 administrator bypass under `--allow-admin`, once it has found a changed file owned under
-`.github/CODEOWNERS` at the base commit and the App's approval as the latest review, and posts the
-bypass rationale first. A COMMENT makes it
+`.github/CODEOWNERS` at the base commit, the App's approval as the latest review, and every other
+active rule on `master` shown met, and posts the bypass rationale first. Under the current rulesets
+it cannot show that, so it refuses and the operator merges those by hand. A COMMENT makes it
 refuse, whatever its reasons: merging that pull request is an operator override, done by hand with a
 bypass-rationale comment. The project installer denies raw `gh pr merge` in the Bash and PowerShell tools
 of each project it installs into, which makes the tool the default route. It does not change the point above: the deny list is

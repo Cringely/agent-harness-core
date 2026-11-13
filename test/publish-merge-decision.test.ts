@@ -4,7 +4,7 @@
 import { describe, expect, test } from "bun:test";
 import { PublishError } from "../tools/publish/errors";
 import type { CheckEntry } from "../tools/publish/gh";
-import { atFloorCount, checksSummary, decideMerge, parseReviewOutput, type BypassEvidence, type ReviewResult } from "../tools/publish/merge-decision";
+import { atFloorCount, checksSummary, decideMerge, parseReviewOutput, type BranchRule, type BypassEvidence, type ReviewEntry, type ReviewResult } from "../tools/publish/merge-decision";
 import { CORE_POLICY } from "../tools/pr-review/repo-policy";
 import type { CheckRun } from "../tools/pr-review/types";
 import { computeVerification } from "../tools/pr-review/verdict";
@@ -29,6 +29,25 @@ const APPROVED: ReviewResult = {
 // and succeeded, but CI cannot vouch for a change to itself.
 const CI_EDIT = { state: "incomplete", reasons: ["the pull request edits CI definitions, so its own checks cannot vouch for it: .github/workflows/test.yml"] };
 const COMMENTED: ReviewResult = { ...APPROVED, event: "COMMENT", verification: CI_EDIT };
+// The base branch's active rules when nothing but the code-owner review can be unmet: push-only
+// protections, a required check the head passed, and a review rule the App's approval meets.
+const PR_RULE = {
+  allowed_merge_methods: ["merge", "rebase"],
+  dismiss_stale_reviews_on_push: true,
+  require_code_owner_review: true,
+  require_last_push_approval: false,
+  required_approving_review_count: 1,
+  required_review_thread_resolution: false,
+  required_reviewers: [],
+  require_extra_approval_for_unattributed_changes: false,
+};
+const STATUS_RULE = { do_not_enforce_on_create: false, required_status_checks: [{ context: "bun test", integration_id: 1 }], strict_required_status_checks_policy: false };
+const RULES: BranchRule[] = [
+  { type: "non_fast_forward", parameters: null },
+  { type: "deletion", parameters: null },
+  { type: "required_status_checks", parameters: STATUS_RULE },
+  { type: "pull_request", parameters: PR_RULE },
+];
 // What review-merge reads for the bypass: CODEOWNERS at the base, the changed files, and the
 // pull request's reviews in the order GitHub lists them, the App's own approval last.
 const OWNED: BypassEvidence = {
@@ -36,11 +55,12 @@ const OWNED: BypassEvidence = {
   codeowners: "# owned\n/tools/ @owner\n",
   changedFiles: ["README.md", "tools/x.ts"],
   reviews: [
-    { id: 7, state: "COMMENTED", commitId: "c".repeat(40) },
-    { id: 1, state: "APPROVED", commitId: HEAD },
+    { id: 7, state: "COMMENTED", commitId: "c".repeat(40), author: "other", authorCanPush: true },
+    { id: 1, state: "APPROVED", commitId: HEAD, author: "app", authorCanPush: true },
   ],
+  rules: RULES,
 };
-const base = { review: APPROVED, reviewedHead: HEAD, currentHead: HEAD, checks: GREEN, mergeState: "CLEAN", allowAdmin: false, bypass: null };
+const base = { review: APPROVED, reviewedHead: HEAD, currentHead: HEAD, checks: GREEN, mergeState: "CLEAN", allowAdmin: false, bypass: null, method: "merge" };
 type Input = Parameters<typeof decideMerge>[0];
 const decide = (overrides: Partial<Input>) => decideMerge({ ...base, ...overrides });
 
@@ -54,7 +74,7 @@ describe("decideMerge(): merges", () => {
   });
 
   test("the bypass ignores a pending review, which GitHub has not submitted", () => {
-    const bypass = { ...OWNED, reviews: [...OWNED.reviews, { id: 8, state: "PENDING", commitId: HEAD }] };
+    const bypass = { ...OWNED, reviews: [...OWNED.reviews, { id: 8, state: "PENDING", commitId: HEAD, author: "app", authorCanPush: true }] };
     expect(decide({ mergeState: "BLOCKED", allowAdmin: true, bypass })).toEqual({ action: "merge", admin: true });
   });
 });
@@ -244,11 +264,11 @@ describe("decideMerge(): refuses the bypass when the block is not shown to be th
   });
 
   test("another review submitted after the App's", () => {
-    expect(bypassRefused({ ...OWNED, reviews: [...OWNED.reviews, { id: 9, state: "COMMENTED", commitId: HEAD }] })).toContain("latest review");
+    expect(bypassRefused({ ...OWNED, reviews: [...OWNED.reviews, { id: 9, state: "COMMENTED", commitId: HEAD, author: "other", authorCanPush: true }] })).toContain("latest review");
   });
 
   test("an approval of this head that is not the one the App just posted", () => {
-    expect(bypassRefused({ ...OWNED, reviews: [{ id: 3, state: "APPROVED", commitId: HEAD }] })).toContain("latest review");
+    expect(bypassRefused({ ...OWNED, reviews: [{ id: 3, state: "APPROVED", commitId: HEAD, author: "app", authorCanPush: true }] })).toContain("latest review");
   });
 
   test("the App's review missing from the list", () => {
@@ -260,11 +280,121 @@ describe("decideMerge(): refuses the bypass when the block is not shown to be th
   });
 
   test("the App's review listed in a state other than APPROVED", () => {
-    expect(bypassRefused({ ...OWNED, reviews: [{ id: 1, state: "DISMISSED", commitId: HEAD }] })).toContain("latest review");
+    expect(bypassRefused({ ...OWNED, reviews: [{ id: 1, state: "DISMISSED", commitId: HEAD, author: "app", authorCanPush: true }] })).toContain("latest review");
   });
 
   test("the App's review listed against another commit", () => {
-    expect(bypassRefused({ ...OWNED, reviews: [{ id: 1, state: "APPROVED", commitId: "c".repeat(40) }] })).toContain("latest review");
+    expect(bypassRefused({ ...OWNED, reviews: [{ id: 1, state: "APPROVED", commitId: "c".repeat(40), author: "app", authorCanPush: true }] })).toContain("latest review");
+  });
+
+  // Another reviewer's request for changes stays until that reviewer approves or it is dismissed.
+  // A comment or a pending review does not clear it.
+  const other = (id: number, state: string): ReviewEntry => ({ id, state, commitId: HEAD, author: "other", authorCanPush: true });
+  const withFirst = (...first: ReviewEntry[]): BypassEvidence => ({ ...OWNED, reviews: [...first, ...OWNED.reviews] });
+
+  test("another reviewer's latest opinion requests changes", () => {
+    expect(bypassRefused(withFirst(other(20, "CHANGES_REQUESTED")))).toContain("requests changes");
+  });
+
+  test("a request for changes followed only by a comment or a pending review", () => {
+    expect(bypassRefused(withFirst(other(20, "CHANGES_REQUESTED"), other(21, "COMMENTED")))).toContain("requests changes");
+    expect(bypassRefused(withFirst(other(20, "CHANGES_REQUESTED"), other(21, "PENDING")))).toContain("requests changes");
+  });
+
+  test("the App's own earlier request for changes, superseded by its approval, does not block", () => {
+    const earlier: ReviewEntry = { id: 30, state: "CHANGES_REQUESTED", commitId: "c".repeat(40), author: "app", authorCanPush: true };
+    expect(decide({ mergeState: "BLOCKED", allowAdmin: true, bypass: withFirst(earlier) })).toEqual({ action: "merge", admin: true });
+  });
+
+  test("a request for changes later approved or dismissed by the same reviewer does not block", () => {
+    for (const later of ["APPROVED", "DISMISSED"]) {
+      expect(decide({ mergeState: "BLOCKED", allowAdmin: true, bypass: withFirst(other(20, "CHANGES_REQUESTED"), other(21, later)) })).toEqual({
+        action: "merge",
+        admin: true,
+      });
+    }
+  });
+
+  // The bypass skips every rule in the default ruleset, so each active rule on the base branch other
+  // than the code-owner review must be shown met from data the tool reads. A rule it cannot check
+  // refuses.
+  const withRules = (rules: BranchRule[]): BypassEvidence => ({ ...OWNED, rules });
+  const withPr = (overrides: Record<string, unknown>): BypassEvidence =>
+    withRules([...RULES.filter((rule) => rule.type !== "pull_request"), { type: "pull_request", parameters: { ...PR_RULE, ...overrides } }]);
+  const withStatus = (overrides: Record<string, unknown>): BypassEvidence =>
+    withRules([...RULES.filter((rule) => rule.type !== "required_status_checks"), { type: "required_status_checks", parameters: { ...STATUS_RULE, ...overrides } }]);
+
+  for (const type of ["code_quality", "code_scanning", "copilot_code_review", "update", "merge_queue", "workflows"]) {
+    test(`a ${type} rule this tool cannot check`, () => {
+      expect(bypassRefused(withRules([...RULES, { type, parameters: {} }]))).toContain(`${type} rule`);
+    });
+  }
+
+  test("this repository's own rules as of this change, which the tool cannot show met", () => {
+    const live: BranchRule[] = [
+      { type: "required_status_checks", parameters: { ...STATUS_RULE, required_status_checks: [{ context: "bun test" }] } },
+      { type: "code_scanning", parameters: { code_scanning_tools: [{ tool: "CodeQL" }] } },
+      { type: "non_fast_forward", parameters: null },
+      { type: "deletion", parameters: null },
+      { type: "code_quality", parameters: { severity: "errors" } },
+      { type: "copilot_code_review", parameters: { review_on_push: true } },
+      { type: "pull_request", parameters: { ...PR_RULE, require_last_push_approval: true, require_extra_approval_for_unattributed_changes: true } },
+    ];
+    expect(bypassRefused(withRules(live))).toContain("rule this tool cannot check");
+  });
+
+  test("no rule on the base branch requires a code-owner review", () => {
+    expect(bypassRefused(withRules(RULES.filter((rule) => rule.type !== "pull_request")))).toContain("requires a code-owner review");
+    expect(bypassRefused(withPr({ require_code_owner_review: false }))).toContain("requires a code-owner review");
+    expect(bypassRefused(withRules([]))).toContain("requires a code-owner review");
+  });
+
+  test("a required check the head has not passed", () => {
+    expect(bypassRefused(withStatus({ required_status_checks: [{ context: "bun test" }, { context: "Pester" }] }))).toContain("required check");
+  });
+
+  test("a required-check rule that also needs the branch up to date, or is not shaped as expected", () => {
+    expect(bypassRefused(withStatus({ strict_required_status_checks_policy: true }))).toContain("required_status_checks");
+    expect(bypassRefused(withStatus({ required_status_checks: "bun test" }))).toContain("required_status_checks");
+    expect(bypassRefused(withStatus({ required_status_checks: [{ name: "bun test" }] }))).toContain("required_status_checks");
+    expect(bypassRefused(withStatus({ novel_setting: false }))).toContain("required_status_checks");
+  });
+
+  test("fewer counted approvals than the review rule requires", () => {
+    expect(bypassRefused(withPr({ required_approving_review_count: 2 }))).toContain("approvals");
+  });
+
+  test("an App approval GitHub does not count, from an author without push access", () => {
+    const reviews = OWNED.reviews.map((entry) => (entry.id === 1 ? { ...entry, authorCanPush: false } : entry));
+    expect(bypassRefused({ ...OWNED, reviews })).toContain("approvals");
+  });
+
+  const prCases: [string, Record<string, unknown>][] = [
+    ["approval of the last push by someone else, which the tool cannot attribute", { require_last_push_approval: true }],
+    ["resolved review threads", { required_review_thread_resolution: true }],
+    ["named required reviewers", { required_reviewers: [{ reviewer: { id: 1 } }] }],
+    ["an extra approval for unattributed changes", { require_extra_approval_for_unattributed_changes: true }],
+    ["a merge method list without the one used", { allowed_merge_methods: ["squash"] }],
+    ["a parameter this tool does not know", { novel_requirement: false }],
+    ["a count that is not an integer", { required_approving_review_count: "1" }],
+    ["a code-owner flag that is not a boolean", { require_code_owner_review: "true" }],
+  ];
+  for (const [name, overrides] of prCases) {
+    test(`a review rule requiring ${name}`, () => {
+      expect(bypassRefused(withPr(overrides))).toContain("pull_request");
+    });
+  }
+
+  test("a review rule with no parameters", () => {
+    expect(bypassRefused(withRules([...RULES.filter((rule) => rule.type !== "pull_request"), { type: "pull_request", parameters: null }]))).toContain(
+      "requires a code-owner review",
+    );
+  });
+
+  test("a rule type that is not a plain enum value is not echoed", () => {
+    const reason = bypassRefused(withRules([...RULES, { type: "leaked text here", parameters: null }]));
+    expect(reason).toContain("unrecognised rule");
+    expect(reason).not.toContain("leaked");
   });
 
   test("a plain CLEAN merge needs none of it", () => {

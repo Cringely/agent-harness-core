@@ -13,7 +13,7 @@
 import { SHA_RE } from "../pr-review/types";
 import { PublishError, PublishRefusal } from "./errors";
 import { childEnv, type RunResult, type Runner } from "./exec";
-import type { ReviewEntry } from "./merge-decision";
+import type { BranchRule, ReviewEntry } from "./merge-decision";
 
 export interface CheckEntry {
   kind: "CheckRun" | "StatusContext";
@@ -41,6 +41,24 @@ const PR_URL_RE = /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+$/;
 const ISSUE_URL_RE = /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/issues\/\d+$/;
 const NOT_FOUND_RE = /HTTP 404/;
 export const BRANCH_RE = /^[A-Za-z0-9._/-]+$/;
+
+const REVIEWS_QUERY =
+  "query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviews(first: 100, after: $endCursor) { pageInfo { hasNextPage endCursor } nodes { databaseId state authorCanPushToRepository author { login } commit { oid } } } } } }";
+
+function lines(text: string): string[] {
+  return text.split(/\r?\n/).filter((line) => line.trim() !== "");
+}
+
+function parseLine(line: string, what: string): Record<string, unknown> {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(line);
+  } catch {
+    throw new PublishError(what);
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new PublishError(what);
+  return raw as Record<string, unknown>;
+}
 
 function lastLine(text: string): string {
   const lines = text.trim().split(/\r?\n/);
@@ -225,27 +243,58 @@ export class Gh {
     return files as string[];
   }
 
-  // The pull request's reviews in GitHub's order, oldest first.
+  // The pull request's reviews in GitHub's order, oldest first, from GraphQL, which alone says
+  // whether each author can push (and so whether an approval counts). databaseId is the REST id.
   prReviews(repo: string, pr: number): ReviewEntry[] {
+    const [owner, name] = repo.split("/");
     const out = this.ok(
-      ["api", "--paginate", `repos/${repo}/pulls/${pr}/reviews?per_page=100`, "--jq", ".[] | {id, state, commit_id} | @json"],
+      [
+        "api",
+        "graphql",
+        "--paginate",
+        "-F",
+        `owner=${owner}`,
+        "-F",
+        `name=${name}`,
+        "-F",
+        `number=${pr}`,
+        "-f",
+        `query=${REVIEWS_QUERY}`,
+        "--jq",
+        ".data.repository.pullRequest.reviews.nodes[] | {id: .databaseId, state, canPush: .authorCanPushToRepository, author: .author.login, commit: .commit.oid} | @json",
+      ],
       "reading the pull request's reviews",
     );
     const reviews: ReviewEntry[] = [];
-    for (const line of out.split(/\r?\n/)) {
-      if (line.trim() === "") continue;
-      let raw: Record<string, unknown>;
-      try {
-        raw = JSON.parse(line) as Record<string, unknown>;
-      } catch {
-        throw new PublishError("gh returned reviews that are not JSON");
+    for (const line of lines(out)) {
+      const raw = parseLine(line, "gh returned reviews that are not JSON");
+      const commit = raw.commit;
+      if (!Number.isInteger(raw.id) || typeof raw.state !== "string" || typeof raw.canPush !== "boolean" || (typeof commit !== "string" && commit !== null)) {
+        throw new PublishError("gh returned a review without an id, state, push flag or commit");
       }
-      if (!Number.isInteger(raw.id) || typeof raw.state !== "string" || (typeof raw.commit_id !== "string" && raw.commit_id !== null)) {
-        throw new PublishError("gh returned a review without an id, state or commit");
-      }
-      reviews.push({ id: raw.id as number, state: raw.state, commitId: typeof raw.commit_id === "string" ? raw.commit_id : "" });
+      reviews.push({
+        id: raw.id as number,
+        state: raw.state,
+        commitId: typeof commit === "string" ? commit : "",
+        author: typeof raw.author === "string" ? raw.author : "",
+        authorCanPush: raw.canPush,
+      });
     }
     return reviews;
+  }
+
+  // Every active rule on the branch, from every ruleset that applies to it.
+  branchRules(repo: string, branch: string): BranchRule[] {
+    if (!BRANCH_RE.test(branch) || branch.includes("..")) throw new PublishRefusal("a branch name holds characters this tool does not accept");
+    const out = this.ok(["api", "--paginate", `repos/${repo}/rules/branches/${branch}?per_page=100`, "--jq", ".[] | {type, parameters} | @json"], "reading the branch's rules");
+    return lines(out).map((line) => {
+      const raw = parseLine(line, "gh returned branch rules that are not JSON");
+      const parameters = raw.parameters;
+      if (typeof raw.type !== "string" || (parameters !== null && parameters !== undefined && (typeof parameters !== "object" || Array.isArray(parameters)))) {
+        throw new PublishError("gh returned a branch rule without a type or with unusable parameters");
+      }
+      return { type: raw.type, parameters: (parameters ?? null) as Record<string, unknown> | null };
+    });
   }
 
   watchChecks(repo: string, pr: number, timeoutMs: number): "finished" | "timed-out" {

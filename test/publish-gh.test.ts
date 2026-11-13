@@ -183,20 +183,52 @@ describe("prChangedFiles()", () => {
 });
 
 describe("prReviews()", () => {
-  const reviews = (listing: string) => new FakeRunner([TOKEN, on(["gh", "api", "--paginate"], { stdout: listing })]);
+  const reviews = (listing: string) => new FakeRunner([TOKEN, on(["gh", "api", "graphql", "--paginate"], { stdout: listing })]);
+  const APPROVAL = { id: 1, state: "APPROVED", canPush: true, author: "reviewer-app", commit: HEAD };
 
-  test("returns each review in GitHub's order, reading a missing commit as none", () => {
-    const listing = [{ id: 2, state: "COMMENTED", commit_id: null }, { id: 1, state: "APPROVED", commit_id: HEAD }].map((r) => JSON.stringify(r)).join("\n");
-    expect(gh(reviews(`${listing}\n`)).prReviews(REPO, 7)).toEqual([
-      { id: 2, state: "COMMENTED", commitId: "" },
-      { id: 1, state: "APPROVED", commitId: HEAD },
+  test("returns each review in GitHub's order, with its author and push access, reading a missing commit or author as none", () => {
+    const listing = [{ id: 2, state: "COMMENTED", canPush: false, author: null, commit: null }, APPROVAL].map((r) => JSON.stringify(r)).join("\n");
+    const runner = reviews(`${listing}\n`);
+    expect(gh(runner).prReviews(REPO, 7)).toEqual([
+      { id: 2, state: "COMMENTED", commitId: "", author: "", authorCanPush: false },
+      { id: 1, state: "APPROVED", commitId: HEAD, author: "reviewer-app", authorCanPush: true },
     ]);
+    const argv = runner.calls[1]!.argv;
+    expect(argv.slice(0, 10)).toEqual(["gh", "api", "graphql", "--paginate", "-F", "owner=fixture-owner", "-F", "name=fixture-repo", "-F", "number=7"]);
+    expect(argv[11]).toContain("authorCanPushToRepository");
+    expect(argv[11]).toContain("endCursor");
   });
 
-  test("throws on a review without an integer id or a state", () => {
-    expect(() => gh(reviews(`${JSON.stringify({ id: "1", state: "APPROVED", commit_id: HEAD })}\n`)).prReviews(REPO, 7)).toThrow(PublishError);
-    expect(() => gh(reviews(`${JSON.stringify({ id: 1, commit_id: HEAD })}\n`)).prReviews(REPO, 7)).toThrow(PublishError);
+  test("throws on a review without an integer id, a state, a push flag, or JSON", () => {
+    for (const bad of [{ ...APPROVAL, id: "1" }, { ...APPROVAL, state: undefined }, { ...APPROVAL, canPush: "true" }, { ...APPROVAL, commit: 7 }]) {
+      expect(() => gh(reviews(`${JSON.stringify(bad)}\n`)).prReviews(REPO, 7)).toThrow(PublishError);
+    }
     expect(() => gh(reviews("not json\n")).prReviews(REPO, 7)).toThrow(PublishError);
+    expect(() => gh(reviews("[1]\n")).prReviews(REPO, 7)).toThrow(PublishError);
+  });
+});
+
+describe("branchRules()", () => {
+  const rules = (listing: string) => new FakeRunner([TOKEN, on(["gh", "api", "--paginate"], { stdout: listing })]);
+
+  test("returns each active rule with its parameters", () => {
+    const listing = [{ type: "deletion" }, { type: "code_quality", parameters: { severity: "errors" } }].map((r) => JSON.stringify(r)).join("\n");
+    const runner = rules(`${listing}\n`);
+    expect(gh(runner).branchRules(REPO, "main")).toEqual([
+      { type: "deletion", parameters: null },
+      { type: "code_quality", parameters: { severity: "errors" } },
+    ]);
+    expect(runner.calls[1]!.argv).toEqual(["gh", "api", "--paginate", `repos/${REPO}/rules/branches/main?per_page=100`, "--jq", ".[] | {type, parameters} | @json"]);
+  });
+
+  test("throws on a rule without a type or with parameters that are not an object", () => {
+    expect(() => gh(rules(`${JSON.stringify({ parameters: {} })}\n`)).branchRules(REPO, "main")).toThrow(PublishError);
+    expect(() => gh(rules(`${JSON.stringify({ type: "x", parameters: [1] })}\n`)).branchRules(REPO, "main")).toThrow(PublishError);
+    expect(() => gh(rules(`${JSON.stringify({ type: "x", parameters: "on" })}\n`)).branchRules(REPO, "main")).toThrow(PublishError);
+  });
+
+  test("refuses a branch name it does not accept", () => {
+    expect(() => gh(rules("")).branchRules(REPO, "a..b")).toThrow(PublishRefusal);
   });
 });
 

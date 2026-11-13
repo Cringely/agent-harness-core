@@ -21,7 +21,8 @@
 //   8. the pull request is read again (waiting out an UNKNOWN merge state), the closing-keyword
 //      audit repeats, and decideMerge rules. With --allow-admin, what the bypass needs is read
 //      first: .github/CODEOWNERS at the default branch head (the base, never the pull request's
-//      head), the whole changed-file list, and the pull request's reviews. A read that fails or
+//      head), the whole changed-file list, the pull request's reviews and the default branch's
+//      active rules. A read that fails or
 //      comes back incomplete is handed to decideMerge as unreadable, which refuses the bypass
 //   9. premerge (tools/pr-review/premerge.ts) runs from the reviewer checkout on the pinned head,
 //      with --closes, the configured term list and the owner identity, and must print its OK line
@@ -268,6 +269,7 @@ function readBypassEvidence(gh: Gh, repo: string, pr: number, defaultBranch: str
       codeowners: gh.fileAt(repo, ".github/CODEOWNERS", base, "reading CODEOWNERS at the base commit"),
       changedFiles: gh.prChangedFiles(repo, pr),
       reviews: gh.prReviews(repo, pr),
+      rules: gh.branchRules(repo, defaultBranch),
     };
   } catch (error) {
     if (error instanceof PublishRefusal || error instanceof PublishError) return { readable: false, reason: error.message };
@@ -334,6 +336,7 @@ export async function reviewMerge(ctx: ReviewMergeContext, args: ReviewMergeArgs
     mergeState: final.mergeStateStatus,
     allowAdmin: args.allowAdmin,
     bypass: args.allowAdmin ? readBypassEvidence(gh, args.repo, args.pr, defaultBranch) : null,
+    method: args.method,
   });
   if (decision.action === "refuse") throw new PublishRefusal(`not merged: ${decision.reason}`);
 
