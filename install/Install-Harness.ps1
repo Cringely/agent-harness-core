@@ -1794,11 +1794,20 @@ if ($Audit) {
     if ($sidecar['pluginHashes'] -is [System.Collections.IDictionary]) {
         foreach ($pluginId in @($sidecar['pluginHashes'].Keys | Sort-Object)) {
             $pluginRec = $sidecar['pluginHashes'][$pluginId]
-            if ($pluginRec -isnot [System.Collections.IDictionary]) { continue }
+            # A record that cannot vouch for any copy, and a folder that cannot be hashed, are
+            # both unverified. Skipping either, or comparing null to null, would read as clean.
+            if (-not (Test-PluginRecordWellFormed $pluginRec)) {
+                $results.Add([pscustomobject]@{ File = "plugin:$pluginId"; Status = 'plugin-unverified' })
+                continue
+            }
             $nowHash = $null
-            $recPath = [string]$pluginRec['installPath']
-            if ($recPath -and (Test-Path -LiteralPath $recPath -PathType Container)) {
-                try { $nowHash = Get-PluginContentHash -Path $recPath } catch { $nowHash = $null }
+            $recPath = $pluginRec['installPath']
+            if (Test-Path -LiteralPath $recPath -PathType Container) {
+                try { $nowHash = Get-PluginContentHash -Path $recPath }
+                catch {
+                    $results.Add([pscustomobject]@{ File = "plugin:$pluginId"; Status = 'plugin-unverified' })
+                    continue
+                }
             }
             if ($nowHash -ne $pluginRec['hash']) {
                 $results.Add([pscustomobject]@{ File = "plugin:$pluginId"; Status = 'plugin-changed' })
@@ -1862,7 +1871,7 @@ if ($Audit) {
         # recovery for one and the pin-drop for the other rather than sending both to the
         # installer. (CONTRIBUTING.md's drift-detection gate: every class the audit reports needs
         # a standing response, and the classes that must never be auto-repaired are named as such.)
-        Write-Host "$($attention.Count) file(s) need attention. project-modified/untracked-differs = candidates to promote into core; core-updated/not-installed = re-run installer to pull down; overlay-changed = re-review the fork, then re-pin with -Accept; missing = re-run the installer if the row is a tracked file, but a missing pinned overlay exists only in the project's own history, so restore it from there or drop the pin with -Unaccept; orphaned (already removed/unmodified/modified) = -Prune the key to drop the stale manifest record -- the file, if any is still there, is left on disk for you to delete by hand or -Accept to pin as an overlay. installed (layer not selected) = delete the file by hand, and the next install drops its record. settings-missing/settings-stale = re-run the installer, which rewrites .claude/rules/harness/project-settings.md from the manifest. settings-modified = the installer keeps that file because it was edited by hand or never written by the installer, so move the change into the manifest with the setting's flag, then delete the file and re-run. manifest-invalid = fix the layers or settings value the error names. plugin-changed = re-run the installer with -InstallDeps to re-record after reviewing the change. plugin-unverified = a newer copy exists than the recorded one, or its folder could not be listed, so the recorded hash may not be the active plugin's. Re-run the installer so it re-reads the plugin listing."
+        Write-Host "$($attention.Count) file(s) need attention. project-modified/untracked-differs = candidates to promote into core; core-updated/not-installed = re-run installer to pull down; overlay-changed = re-review the fork, then re-pin with -Accept; missing = re-run the installer if the row is a tracked file, but a missing pinned overlay exists only in the project's own history, so restore it from there or drop the pin with -Unaccept; orphaned (already removed/unmodified/modified) = -Prune the key to drop the stale manifest record -- the file, if any is still there, is left on disk for you to delete by hand or -Accept to pin as an overlay. installed (layer not selected) = delete the file by hand, and the next install drops its record. settings-missing/settings-stale = re-run the installer, which rewrites .claude/rules/harness/project-settings.md from the manifest. settings-modified = the installer keeps that file because it was edited by hand or never written by the installer, so move the change into the manifest with the setting's flag, then delete the file and re-run. manifest-invalid = fix the layers or settings value the error names. plugin-changed = re-run the installer with -InstallDeps to re-record after reviewing the change. plugin-unverified = a newer copy exists than the recorded one, or its folder could not be listed or hashed, or the record lacks a usable hash or installPath, so the recorded hash may not be the active plugin's. Re-run the installer so it re-reads the plugin listing."
     }
 
     # Stack drift: report-only, same as the file audit above — never writes the manifest or
