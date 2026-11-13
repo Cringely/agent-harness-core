@@ -211,12 +211,14 @@ Describe "Install-Harness" {
             $sidecar['pluginHashes'][$Id]
         }
 
+        # -Mutate edits the record in place, or returns a value that replaces the whole entry.
         function Set-BrokenPluginRecord {
             param([scriptblock]$Mutate)
             $path = "$script:target/.claude/.harness-manifest.local.json"
             $sidecar = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -AsHashtable
-            $rec = $sidecar['pluginHashes']['fake-plugin@claude-plugins-official']
-            & $Mutate $rec
+            $id = 'fake-plugin@claude-plugins-official'
+            $replacement = & $Mutate $sidecar['pluginHashes'][$id]
+            if ($null -ne $replacement) { $sidecar['pluginHashes'][$id] = $replacement }
             $sidecar | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $path
         }
 
@@ -3173,10 +3175,14 @@ Describe "Install-Harness" {
                 @{ Name = 'hash is a number'; Mutate = { param($r) $r['hash'] = 5 } }
                 @{ Name = 'hash is an array'; Mutate = { param($r) $r['hash'] = @('a', 'b') } }
                 @{ Name = 'installPath missing'; Mutate = { param($r) $r.Remove('installPath') } }
+                @{ Name = 'entry is a string'; Mutate = { param($r) 'not a record' } }
+                @{ Name = 'entry is a number'; Mutate = { param($r) 42 } }
+                @{ Name = 'entry is an array'; Mutate = { param($r) , @('a', 'b') } }
             ) {
                 Set-BrokenPluginRecord $Mutate
                 $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit -Quiet -DepsManifestPath $script:brokenFixture -DepsRunner $script:brokenMock.Runner *>&1 | Out-String
-                $audit | Should -Match 'plugin-(changed|unverified)\tplugin:fake-plugin@claude-plugins-official'
+                $audit | Should -Match 'plugin-unverified\tplugin:fake-plugin@claude-plugins-official'
+                $audit | Should -Not -Match 'plugin-changed'
 
                 $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -DepsManifestPath $script:brokenFixture -DepsRunner $script:brokenMock.Runner *>&1 | Out-String -Width 500
                 $out | Should -Match 'recorded entry has no usable hash or installPath'
@@ -3200,6 +3206,30 @@ Describe "Install-Harness" {
                 Set-Content -LiteralPath (Join-Path $script:brokenDir 'skills/one/SKILL.md') -Value 'changed after the repair'
                 $out = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -DepsManifestPath $script:brokenFixture -DepsRunner $script:brokenMock.Runner *>&1 | Out-String -Width 500
                 $out | Should -Match 'changed since recorded'
+            }
+
+            # A folder that exists but cannot be read cannot be hashed. Without the CLI, -Audit has
+            # no other evidence, so it reports unverified rather than calling the copy changed or clean.
+            It "-Audit reports plugin-unverified when the recorded folder cannot be hashed" {
+                $locked = Join-Path $script:brokenDir 'skills/one/SKILL.md'
+                $handle = $null
+                try {
+                    if ($script:hostWin) {
+                        $handle = [System.IO.File]::Open($locked, 'Open', 'Read', 'None')
+                    }
+                    else { chmod 000 $locked }
+                    $hashes = $true
+                    try { $null = Get-PluginContentHash -Path $script:brokenDir } catch { $hashes = $false }
+                    if ($hashes) { Set-ItResult -Skipped -Because 'this host can still read the locked file, so the folder stays hashable'; return }
+
+                    $audit = & "$PSScriptRoot/Install-Harness.ps1" -Target $script:target -Audit -Quiet -DepsManifestPath $script:brokenFixture -DepsRunner $script:brokenMock.Runner *>&1 | Out-String
+                    $audit | Should -Match "plugin-unverified`tplugin:fake-plugin@claude-plugins-official"
+                    $audit | Should -Not -Match 'plugin-changed'
+                }
+                finally {
+                    if ($handle) { $handle.Dispose() }
+                    elseif (-not $script:hostWin) { chmod 644 $locked }
+                }
             }
         }
 

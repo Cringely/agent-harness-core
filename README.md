@@ -62,8 +62,12 @@ commit pin, but only while that marketplace is registered from Anthropic's own r
 marketplace registered under one of those names from anywhere else is refused, and nothing from it
 is installed or recorded. The installer records a content hash of its install directory in the sidecar and warns
 when that hash changes, and `-InstallDeps` records it again once you have looked at the change. A
-record with no usable hash or install path vouches for nothing, so the next run warns and records the
-current copy afresh. A
+record with no usable hash or install path vouches for nothing. `-Audit` reports it as
+`plugin-unverified`, and the next run warns and records the current copy afresh, with two
+exceptions. A pinned third-party plugin is checked against its pin rather than its record, so the
+run leaves that record alone. A first-party plugin that follows its marketplace sha loses the
+recorded sha along with the record, so when the marketplace sha differs from the manifest pin the
+run warns about that move instead, and `-InstallDeps` updates the plugin and records the new copy. A
 third-party plugin needs either a pin, checked before it is installed and again after, or an
 `allowUnpinnedPlugins` entry in the project manifest whose `risk` sentence says what the project is
 accepting. The prose-lint hook also wants the

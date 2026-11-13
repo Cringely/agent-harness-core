@@ -916,7 +916,7 @@ function Invoke-PluginDepsPreflight {
         # path below re-records it. Reading it as "unchanged" would switch drift detection off.
         $rec = $null
         $recBroken = $false
-        if ($Records.Contains($id) -and $Records[$id] -is [System.Collections.IDictionary]) {
+        if ($Records.Contains($id)) {
             if (Test-PluginRecordWellFormed $Records[$id]) { $rec = $Records[$id] } else { $recBroken = $true }
         }
         $recHash = if ($rec) { [string]$rec['hash'] } else { $null }
