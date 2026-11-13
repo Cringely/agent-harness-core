@@ -3,11 +3,16 @@
 // anywhere: nothing under install/ copies tools/.
 //
 // The App's private key is read only from stdin, piped from 1Password (operator ruling, 2026-09-11):
-//   op read "<secret reference>" | bun <absolute path>/tools/pr-review/cli.ts review --pr <n> --app-id <id> --key-stdin [--post [--comment-only]] [--json] [--repo owner/name] [--expect-head <sha40>]
-//   op read "<secret reference>" | bun <absolute path>/tools/pr-review/cli.ts snapshot --pr <n> --app-id <id> --key-stdin [--repo owner/name] [--expect-head <sha40>]
+//   op read "<secret reference>" | bun <absolute path>/tools/pr-review/cli.ts review --pr <n> --app-id <id> --key-stdin [--post [--comment-only]] [--json] [--repo owner/name --policy <absolute path>] [--expect-head <sha40>]
+//   op read "<secret reference>" | bun <absolute path>/tools/pr-review/cli.ts snapshot --pr <n> --app-id <id> --key-stdin [--repo owner/name --policy <absolute path>] [--expect-head <sha40>]
 // review without --post is a dry run. snapshot mints a token and reads the pull request, runs no model
 // and posts nothing, and prints what the reviewer would be given plus the computed verification.
 // --app-id may come from PR_REVIEW_APP_ID instead.
+//
+// #318: verification uses the reviewed repository's own required checks and CI workflow path
+// (repo-policy.ts). This repository's are built in. Any other repository needs --repo and
+// --policy, an operator-only JSON file outside every checkout. A repository without a valid entry
+// refuses before the key is read, and nothing is posted.
 //
 // BUN-CWD: Bun auto-loads bunfig.toml and .env from the current working directory rather than the
 // script's own directory (live capture, 2026-09-11), and only from the literal cwd, never an
@@ -25,18 +30,20 @@
 
 import type { KeyObject } from "node:crypto";
 import { readdirSync, realpathSync } from "node:fs";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { AppTokenMinter, readPrivateKey } from "./app-auth";
 import { GitHubClient } from "./github";
 import { findIdentityHits, loadIdentity, type IdentityDecl, type IdentityLoad } from "./identity";
 import { runReview, type ReviewOutcome } from "./pipeline";
+import { CORE_POLICY, resolvePolicy } from "./repo-policy";
 import { ClaudeCliRunner } from "./runner";
 import { REPO_ROOT, toolState } from "./tool-state";
-import { RefusalError, SHA_RE, type PrSnapshot, type PrSource, type ReviewPoster } from "./types";
+import { RefusalError, SHA_RE, type PrSnapshot, type PrSource, type RepoPolicy, type ReviewPoster } from "./types";
 import { verificationOf } from "./verdict";
 
-export const DEFAULT_REPO = "Cringely/agent-harness-core";
+// The repository CORE_POLICY is built in for (test/pr-review-cli.test.ts pins the two equal).
+export const DEFAULT_REPO = CORE_POLICY.repo;
 
 export class UsageError extends Error {}
 
@@ -53,11 +60,14 @@ export type CliCommand =
       // #155: the head the caller means to review or snapshot, if it knows one (a 40-character
       // lowercase hex commit SHA). null when --expect-head was not given.
       expectHead: string | null;
+      // #318: the operator's policy file, an absolute path. null when --policy was not given, and
+      // then only DEFAULT_REPO resolves.
+      policyPath: string | null;
     };
 
 const USAGE = [
-  'op read "<secret reference>" | bun <absolute path>/tools/pr-review/cli.ts review --pr <n> --app-id <id> --key-stdin [--post [--comment-only]] [--json] [--repo owner/name] [--expect-head <sha40>]',
-  'op read "<secret reference>" | bun <absolute path>/tools/pr-review/cli.ts snapshot --pr <n> --app-id <id> --key-stdin [--repo owner/name] [--expect-head <sha40>]',
+  'op read "<secret reference>" | bun <absolute path>/tools/pr-review/cli.ts review --pr <n> --app-id <id> --key-stdin [--post [--comment-only]] [--json] [--repo owner/name --policy <absolute path>] [--expect-head <sha40>]',
+  'op read "<secret reference>" | bun <absolute path>/tools/pr-review/cli.ts snapshot --pr <n> --app-id <id> --key-stdin [--repo owner/name --policy <absolute path>] [--expect-head <sha40>]',
 ].join("\n");
 
 export function parseCliArgs(argv: readonly string[], env: Record<string, string | undefined> = process.env): CliCommand {
@@ -71,6 +81,7 @@ export function parseCliArgs(argv: readonly string[], env: Record<string, string
     "app-id": { type: "string" },
     "key-stdin": { type: "boolean" },
     "expect-head": { type: "string" },
+    policy: { type: "string" },
     ...(command === "review" ? { post: { type: "boolean" }, "comment-only": { type: "boolean" }, json: { type: "boolean" } } : {}),
   };
   let values: Record<string, string | boolean | undefined>;
@@ -102,6 +113,18 @@ export function parseCliArgs(argv: readonly string[], env: Record<string, string
     expectHead = values["expect-head"];
   }
 
+  // #318: flag only, no environment fallback. --policy without --repo is refused:
+  // an operator who meant another repository's pull request and forgot --repo would otherwise get
+  // this repository's pull request of the same number reviewed, and with --post, approved.
+  let policyPath: string | null = null;
+  if (values.policy !== undefined) {
+    if (typeof values.policy !== "string" || !isAbsolute(values.policy)) {
+      throw new UsageError(`${command} needs --policy to be an absolute path`);
+    }
+    if (typeof values.repo !== "string") throw new UsageError(`${command} needs --repo with --policy, naming the repository to review`);
+    policyPath = values.policy;
+  }
+
   return {
     command,
     repo: typeof values.repo === "string" ? values.repo : DEFAULT_REPO,
@@ -111,12 +134,13 @@ export function parseCliArgs(argv: readonly string[], env: Record<string, string
     commentOnly: values["comment-only"] === true,
     json: command === "snapshot" || values.json === true,
     expectHead,
+    policyPath,
   };
 }
 
 // Names, paths, counts and SHAs only: the pull request's own text is untrusted and has no business in
 // a smoke test's output.
-export function summarizeSnapshot(snapshot: PrSnapshot): Record<string, unknown> {
+export function summarizeSnapshot(snapshot: PrSnapshot, policy: RepoPolicy): Record<string, unknown> {
   return {
     repo: snapshot.repo,
     number: snapshot.number,
@@ -136,7 +160,7 @@ export function summarizeSnapshot(snapshot: PrSnapshot): Record<string, unknown>
     checkRuns: snapshot.checkRuns,
     // cv3: the one place that draws computeVerification's four fields out of a PrSnapshot, so this
     // call site and pipeline.ts's cannot drift apart the way the plan's own duplicates already had.
-    verification: verificationOf(snapshot),
+    verification: verificationOf(snapshot, policy),
   };
 }
 
@@ -267,8 +291,8 @@ export function reportRefusal(message: string, json: boolean): number {
 // added as a fourth required CliIo field: every existing test that builds a partial CliIo (the
 // BUN-CWD and stdin-refusal tests below) never reaches this call, so requiring it there would
 // break them for no reason.
-function realBuildSource(repo: string, pr: number, appId: string, key: KeyObject): PrSource & ReviewPoster {
-  return new GitHubClient({ repo, pr, minter: new AppTokenMinter({ appId, key, repo }) });
+function realBuildSource(repo: string, pr: number, appId: string, key: KeyObject, workflowPath: string): PrSource & ReviewPoster {
+  return new GitHubClient({ repo, pr, workflowPath, minter: new AppTokenMinter({ appId, key, repo }) });
 }
 
 // A seam over process-level effects (the real stdin read, and process.exit itself), so main() can be
@@ -278,7 +302,7 @@ interface CliIo {
   cwd: () => string;
   exit: (code: number) => never;
   stdin: { isTTY: boolean; read: () => Promise<string> };
-  buildSource?: (repo: string, pr: number, appId: string, key: KeyObject) => PrSource & ReviewPoster;
+  buildSource?: (repo: string, pr: number, appId: string, key: KeyObject, workflowPath: string) => PrSource & ReviewPoster;
   // #195: same optional-and-defaulted shape as buildSource above. loadIdentity() already takes an
   // options bag that overrides the real profile (identity.ts), so a test that needs a chosen
   // IdentityDecl calls it itself and hands the closure here, rather than main() always reading the
@@ -323,6 +347,17 @@ export async function main(argv: string[], io: CliIo = REAL_IO): Promise<number>
     );
   }
 
+  // #318: before the key is read, so a repository with no valid policy entry costs no key read, no
+  // token and no network call. resolvePolicy throws only RefusalError for a refusal, and its
+  // messages carry no file path and no other repository from the file.
+  let policy: RepoPolicy;
+  try {
+    policy = resolvePolicy(parsed.repo, parsed.policyPath);
+  } catch (error) {
+    if (error instanceof RefusalError) return reportRefusal(error.message, parsed.json);
+    throw error;
+  }
+
   const key = await readPrivateKey(io.stdin);
   if (!key.ok) {
     console.error(`refused: ${stripControlChars(key.reason)}`);
@@ -334,7 +369,7 @@ export async function main(argv: string[], io: CliIo = REAL_IO): Promise<number>
     // means nothing downstream can end up waiting on that dangling read first.
     io.exit(2);
   }
-  const github = (io.buildSource ?? realBuildSource)(parsed.repo, parsed.pr, parsed.appId, key.key);
+  const github = (io.buildSource ?? realBuildSource)(parsed.repo, parsed.pr, parsed.appId, key.key, policy.ciWorkflowPath);
 
   // #167: wraps both commands, not only review's own runReview() call below -- github.snapshot()
   // can itself throw RefusalError (a fork or deleted-repo pull request, one not targeting the
@@ -348,7 +383,7 @@ export async function main(argv: string[], io: CliIo = REAL_IO): Promise<number>
       if (parsed.expectHead !== null && parsed.expectHead !== snap.headSha) {
         return reportRefusal(`refusing to snapshot: the pull request's head is ${snap.headSha}, not the expected ${parsed.expectHead}`, parsed.json);
       }
-      console.log(JSON.stringify(summarizeSnapshot(snap), null, 2));
+      console.log(JSON.stringify(summarizeSnapshot(snap, policy), null, 2));
       return 0;
     }
 
@@ -375,6 +410,7 @@ export async function main(argv: string[], io: CliIo = REAL_IO): Promise<number>
         accountEmail: identity.accountEmail,
         toolRevision: tool.revision,
         toolDirty: tool.dirty,
+        policy,
       },
       { commentOnly: parsed.commentOnly, expectHead: parsed.expectHead },
     );

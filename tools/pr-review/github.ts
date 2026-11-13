@@ -18,6 +18,7 @@
 // posting, is what catches a push landing after this function returns.
 
 import { GITHUB_API, githubHeaders } from "./app-auth";
+import { workflowPathProblem } from "./repo-policy";
 import { linkedIssueNumbers, selectHeadFiles } from "./snapshot";
 import {
   LIVING_DOC_PATHS,
@@ -25,7 +26,6 @@ import {
   RefusalError,
   SHA_RE,
   TRUSTED_CONTEXT_PATHS,
-  WORKFLOW_PATH,
   parseRepo,
   type CheckRun,
   type FileText,
@@ -97,9 +97,14 @@ export class GitHubClient implements PrSource, ReviewPoster {
   // base had already changed.
   private baseline: { baseRef: string; baseSha: string; changedFiles: number | undefined } | null = null;
 
-  constructor(private readonly options: { repo: string; pr: number; minter: TokenMinter; fetchImpl?: typeof fetch }) {
+  // workflowPath (#318) is the reviewed repository's own CI workflow, from its RepoPolicy. Checked
+  // here as well as in the policy loader, since it goes into a contents-API URL fetched with the
+  // installation token.
+  constructor(private readonly options: { repo: string; pr: number; minter: TokenMinter; workflowPath: string; fetchImpl?: typeof fetch }) {
     if (parseRepo(options.repo) === null) throw new Error("the repository must be given as owner/name");
     if (!Number.isInteger(options.pr) || options.pr < 1) throw new Error("the pull request number must be a positive integer");
+    const workflowProblem = workflowPathProblem(options.workflowPath);
+    if (workflowProblem !== null) throw new Error(`the workflow path ${workflowProblem}`);
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
@@ -259,7 +264,7 @@ export class GitHubClient implements PrSource, ReviewPoster {
       const content = await this.rawOrNull(contentsPath(repo, path, baseSha));
       if (content !== null) livingDocs.push({ path, content });
     }
-    const workflowText = await this.rawOrNull(contentsPath(repo, WORKFLOW_PATH, baseSha));
+    const workflowText = await this.rawOrNull(contentsPath(repo, this.options.workflowPath, baseSha));
 
     const checkRuns = await this.fetchCheckRuns(repo, headSha);
 

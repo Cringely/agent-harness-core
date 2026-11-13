@@ -1,0 +1,230 @@
+{
+  "schemaVersion": 1,
+  "deps": [
+    {
+      "name": "bun",
+      "severity": { "kernel": "hard" },
+      "needs": ["npm"],
+      "minVersion": "1.3.14",
+      "failMode": "Without bun, every TypeScript gate fails open, because each one is registered as a bare bun command.",
+      "probe": ["bun", "--version"],
+      "install": {
+        "windows": { "winget": "Oven-sh.Bun", "version": "1.3.14" },
+        "linux": { "npm": "bun", "version": "1.3.14" }
+      }
+    },
+    {
+      "name": "git-bash",
+      "severity": { "kernel": "hard" },
+      "platforms": ["windows"],
+      "resolve": "git-bash",
+      "minVersion": "5.2.0",
+      "failMode": "Without Git Bash, every shell gate fails open, because Claude Code runs each .sh hook through it.",
+      "probe": ["bash", "--version"],
+      "versionPattern": "GNU bash, version (\\d+\\.\\d+(?:\\.\\d+)?)",
+      "install": {
+        "windows": { "winget": "Git.Git", "version": "2.53.0" }
+      }
+    },
+    {
+      "name": "git",
+      "severity": { "kernel": "optional", "code": "hard" },
+      "minVersion": "2.43.0",
+      "failMode": "Without git, the commit and push hooks never run and the installer cannot wire core.hooksPath.",
+      "probe": ["git", "--version"],
+      "install": {
+        "windows": { "winget": "Git.Git", "version": "2.53.0" }
+      }
+    },
+    {
+      "name": "vale",
+      "severity": { "kernel": "optional" },
+      "minVersion": "3.15.1",
+      "failMode": "Without vale, the prose-lint hook skips every file it would have linted.",
+      "probe": ["vale", "--version"],
+      "install": {
+        "windows": { "winget": "errata-ai.Vale", "version": "3.15.1" }
+      }
+    },
+    {
+      "name": "python3",
+      "severity": { "kernel": "optional" },
+      "minVersion": "3.12.3",
+      "failMode": "Without python3, the not-ai gate cannot run, since it is a standard-library Python script.",
+      "probe": ["python3", "--version"],
+      "install": {
+        "linux": { "apt": "python3", "version": "3.12.3-0ubuntu2.1" }
+      }
+    },
+    {
+      "name": "npm",
+      "severity": { "kernel": "optional" },
+      "minVersion": "9.2.0",
+      "failMode": "Without npm, ccstatusline cannot be installed, the statusline falls back to the shipped script, and bun cannot be installed on Linux.",
+      "probe": ["npm", "--version"],
+      "install": {
+        "windows": { "winget": "OpenJS.NodeJS.LTS", "version": "24.13.1" },
+        "linux": { "apt": "npm", "version": "9.2.0~ds1-2" }
+      }
+    },
+    {
+      "name": "node",
+      "severity": { "kernel": "optional" },
+      "minVersion": "14.0.0",
+      "failMode": "Without node, the ccstatusline statusline and its two hook entries, which run node, fail.",
+      "probe": ["node", "--version"],
+      "install": {
+        "windows": { "winget": "OpenJS.NodeJS.LTS", "version": "24.13.1" }
+      }
+    },
+    {
+      "name": "uvx",
+      "severity": { "kernel": "optional" },
+      "minVersion": "0.11.13",
+      "failMode": "Without uvx, every MCP server entry that launches through uvx fails to start.",
+      "probe": ["uvx", "--version"],
+      "install": {
+        "windows": { "winget": "astral-sh.uv", "version": "0.11.13" }
+      }
+    },
+    {
+      "name": "bash",
+      "severity": { "kernel": "optional" },
+      "platforms": ["linux"],
+      "minVersion": "5.2.0",
+      "failMode": "Without bash, the account hooks written for bash fail when Claude Code runs them.",
+      "probe": ["bash", "--version"],
+      "versionPattern": "GNU bash, version (\\d+\\.\\d+(?:\\.\\d+)?)",
+      "install": {
+        "linux": { "apt": "bash", "version": "5.2.21-2ubuntu4" }
+      }
+    },
+    {
+      "name": "ccstatusline",
+      "severity": { "kernel": "optional" },
+      "needs": ["npm"],
+      "minVersion": "2.2.25",
+      "failMode": "Without ccstatusline, the statusline and its two hook entries fall back to the shipped script.",
+      "probe": ["npm", "ls", "-g", "ccstatusline", "--depth=0"],
+      "versionPattern": "ccstatusline@(\\d+\\.\\d+\\.\\d+)",
+      "install": {
+        "linux": { "npm": "ccstatusline", "version": "2.2.25" }
+      }
+    },
+    {
+      "name": "op",
+      "severity": { "kernel": "optional" },
+      "minVersion": "2.34.1",
+      "failMode": "Without op, every command that reads a secret from 1Password fails.",
+      "probe": ["op", "--version"],
+      "install": {
+        "windows": { "winget": "AgileBits.1Password.CLI", "version": "2.34.1" }
+      }
+    },
+    {
+      "name": "jq",
+      "severity": { "kernel": "optional" },
+      "platforms": ["linux"],
+      "onlyWhenAbsent": "npm",
+      "minVersion": "1.7.1",
+      "failMode": "Without jq, the shell statusline that stands in for ccstatusline prints nothing.",
+      "probe": ["jq", "--version"],
+      "install": {
+        "linux": { "apt": "jq", "version": "1.7.1-3ubuntu0.24.04.2" }
+      }
+    },
+    {
+      "name": "gh",
+      "severity": { "code": "optional" },
+      "minVersion": "2.45.0",
+      "failMode": "Without gh, the pull request review tool cannot read or post to GitHub.",
+      "probe": ["gh", "--version"],
+      "install": {
+        "windows": { "winget": "GitHub.cli", "version": "2.89.0" },
+        "linux": { "apt": "gh", "version": "2.45.0-1ubuntu0.3" }
+      }
+    },
+    {
+      "name": "claude",
+      "severity": { "code": "optional" },
+      "needs": ["npm"],
+      "minVersion": "2.1.289",
+      "failMode": "Without the claude CLI, the model-currency check cannot resolve model aliases.",
+      "probe": ["claude", "--version"],
+      "install": {
+        "windows": { "winget": "Anthropic.ClaudeCode", "version": "2.1.289" },
+        "linux": { "npm": "@anthropic-ai/claude-code", "version": "2.1.289" }
+      }
+    },
+    {
+      "kind": "plugin",
+      "name": "superpowers",
+      "plugin": "superpowers@claude-plugins-official",
+      "marketplace": { "name": "claude-plugins-official", "source": { "github": "anthropics/claude-plugins-official" } },
+      "pin": { "firstParty": true, "sha": "bb92a77741419a4ab5f06e711a283343f1ada0c3" },
+      "scope": "user",
+      "severity": { "kernel": "optional" },
+      "failMode": "Without superpowers, brainstorming does not open new work and plans have no execution skill to run through."
+    },
+    {
+      "kind": "plugin",
+      "name": "code-review",
+      "plugin": "code-review@claude-plugins-official",
+      "marketplace": { "name": "claude-plugins-official", "source": { "github": "anthropics/claude-plugins-official" } },
+      "pin": { "firstParty": true },
+      "scope": "project",
+      "severity": { "code": "optional" },
+      "failMode": "Without code-review, the pull request review flow is absent."
+    },
+    {
+      "kind": "plugin",
+      "name": "feature-dev",
+      "plugin": "feature-dev@claude-plugins-official",
+      "marketplace": { "name": "claude-plugins-official", "source": { "github": "anthropics/claude-plugins-official" } },
+      "pin": { "firstParty": true },
+      "scope": "project",
+      "severity": { "code": "optional" },
+      "failMode": "Without feature-dev, the code-architect and code-explorer agents are absent."
+    },
+    {
+      "kind": "plugin",
+      "name": "security-guidance",
+      "plugin": "security-guidance@claude-plugins-official",
+      "marketplace": { "name": "claude-plugins-official", "source": { "github": "anthropics/claude-plugins-official" } },
+      "pin": { "firstParty": true },
+      "scope": "project",
+      "severity": { "code": "optional" },
+      "failMode": "Without security-guidance, edits to code get no security reminders."
+    },
+    {
+      "kind": "plugin",
+      "name": "github",
+      "plugin": "github@claude-plugins-official",
+      "marketplace": { "name": "claude-plugins-official", "source": { "github": "anthropics/claude-plugins-official" } },
+      "pin": { "firstParty": true },
+      "scope": "project",
+      "severity": { "code": "optional" },
+      "failMode": "Without the github plugin, pull request and issue work has no GitHub MCP server."
+    },
+    {
+      "kind": "plugin",
+      "name": "document-skills",
+      "plugin": "document-skills@anthropic-agent-skills",
+      "marketplace": { "name": "anthropic-agent-skills", "source": { "github": "anthropics/skills" } },
+      "pin": { "firstParty": true },
+      "scope": "project",
+      "severity": { "documents": "optional" },
+      "failMode": "Without document-skills, the Office file skills are absent."
+    },
+    {
+      "kind": "plugin",
+      "name": "core-presentations",
+      "plugin": "core-presentations@agent-skills-core",
+      "marketplace": { "name": "agent-skills-core", "source": { "directory": true } },
+      "pin": { "commit": "216cb1435df677bff7280b28860a27ee60ace5b3", "contentHash": "sha256:949545140d77c96b434efe024679968443bc1ac10f31ec87ad01a9f55fbfd119" },
+      "scope": "project",
+      "severity": { "documents": "optional" },
+      "failMode": "Without core-presentations, the deck and briefing skills are absent."
+    }
+  ]
+}

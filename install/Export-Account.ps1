@@ -16,13 +16,15 @@
     A second export with nothing changed produces no content diff, which makes `git diff
     account/claude` after an export a usable review of what changed in the account layer.
 
-    Use `git diff` and not `git status` for that review. On a Windows clone with
-    core.autocrlf=true the checkout filter writes CRLF while this script writes LF, so a
-    no-change re-export leaves the index untouched but flips the working-tree line endings,
-    and `git status` then lists every file it rewrote. Measured 2026-09-05 against a clean
-    tree: `git status --short` reported 203 modified paths where `git diff --exit-code`
-    returned 0. `git ls-files --eol account/claude` shows the same transition as
-    i/lf w/crlf becoming i/lf w/lf.
+    The CRLF-flip symptom still applies to any path outside account/claude without its own eol
+    rule. account/claude is covered by `account/claude/** text=auto eol=lf` in .gitattributes,
+    so in a clone renormalised once (see the Account layer section of harness-core.md) a
+    no-change re-export leaves `git status` clean. In a clone that has not been renormalised,
+    the checkout filter writes CRLF while this script writes LF, the index stays untouched,
+    and `git status` lists every rewritten file. Measured 2026-09-05 against a clean tree:
+    `git status --short` reported 203 modified paths where `git diff --exit-code` returned 0.
+    Use `git diff` for the review there. `git ls-files --eol account/claude` shows the
+    transition as i/lf w/crlf becoming i/lf w/lf.
 
 .PARAMETER ClaudeHome
     The account home to export. Defaults to $HOME/.claude.
@@ -766,7 +768,7 @@ if (-not $SkipSettings) {
             # hazard these @() guard against is a single-match FILTERING pipeline result (a
             # Where-Object or ForEach-Object -First 1) unwrapping to a bare scalar, which would
             # then serialise `"hooks": {...} instead of "hooks": [...]`
-            # (install/Install-Harness.ps1:1616-1618). Nothing in this loop is a pipeline today, so
+            # (install/Install-Harness.ps1:2193-2196). Nothing in this loop is a pipeline today, so
             # removing either @() here currently changes nothing observable. Kept anyway, so a
             # future edit that does introduce a filtering step here does not reintroduce that
             # exact defect silently.

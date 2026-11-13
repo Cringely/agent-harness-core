@@ -505,70 +505,122 @@ identity_json_array() {
             return 1
             ;;
     esac
-    flat=$(printf '%s' "$raw" | tr '\n' ' ') || return 1
+    # Every tool whose output is read below appends a trailing x sentinel to
+    # its input and the sentinel is checked before it is stripped: $(...)
+    # strips trailing newlines, and a tool that exits 0 with empty or
+    # truncated output must refuse, never read as "the key was not there".
+    flat=$(printf '%sx' "$raw" | tr '\n' ' ') || return 1
+    case $flat in
+        *x) flat=${flat%x} ;;
+        *)
+            echo "identity gate: flattening '$identity_file' returned truncated or empty output. Refusing rather than reading what is left as the whole file." >&2
+            return 1
+            ;;
+    esac
 
-    # Issue #91, round-2 review: the sed extraction below is a greedy
-    # `.*` match, so once the key lookup went case-insensitive it also
-    # started treating a shadowing duplicate as "the same key" and
-    # silently taking the LAST occurrence -- a differently-cased key
-    # declared twice at the same level, or the plain lowercase key
-    # nested inside some other object, both read as though only the
-    # trailing one had ever been declared. Measured:
-    # {"names":["Alice Example"],"emails":["a@b.test"],"Names":[]}
-    # drops "Alice Example" for the trailing empty "Names" array, rc 0,
-    # no refusal, and {"names":[...],"meta":{"NAMES":[]}} does the same
-    # to a perfectly ordinary top-level array. Counted here,
-    # case-insensitively via the same bracket-expression key_ci the
-    # extraction below uses, before that extraction ever runs: more than
-    # one occurrence refuses outright rather than guessing which one the
-    # operator meant.
-    identity_arr_key_matches=$(printf '%s' "$flat" | grep -oE "\"${key_ci}\"[[:space:]]*:")
-    identity_arr_key_rc=$?
-    if [ "$identity_arr_key_rc" -gt 1 ]; then
-        echo "identity gate: the '$key' key-count check in '$identity_file' did not run cleanly (grep exited $identity_arr_key_rc). Refusing rather than reading a crashed check as a single declaration." >&2
+    # KEY PRESENCE (issue #91). Decided here in the shell, fail closed, over
+    # one rule rather than a list of spellings: if the key word occurs
+    # anywhere in the text (case-insensitive), it must occur exactly once,
+    # as one double-quoted key followed by optional whitespace, ':',
+    # optional whitespace and '['. Any other occurrence refuses: an unquoted
+    # or single-quoted key, a comment between the key and its ':' or '[', the
+    # word inside a comment or inside another key or value, a duplicate at
+    # any depth, a string where the array belongs. Only a text that never
+    # mentions the word reads as absent. Every earlier round patched one
+    # lenient-JSON spelling that read as absent and the next review found
+    # another. This rule has no list of spellings to fall behind.
+    # Fail-closed false refusals: an entry or another key containing the
+    # word, as in "nicknames" or "names@example.test".
+    #
+    # ESCAPED KEYS. JSON's only escape that yields a letter is backslash-u.
+    # The presence test runs over a copy with backslash-u escapes for the
+    # letters of both key words decoded, so a key spelled with escapes is
+    # seen by the same rule. A key word found in that copy but not in the
+    # raw text is an escaped key and refuses, since this parser does not
+    # decode keys. Skipped without a fork when the text holds no backslash,
+    # the usual case. Over-decoding an escaped backslash before a u can
+    # only add an occurrence, never remove one, so it refuses rather than
+    # reading as absent.
+    case $flat in
+        *'\'*)
+            identity_arr_dec=$(printf '%sx' "$flat" | sed -e 's/\\u00[46]1/a/g' -e 's/\\u00[46]5/e/g' -e 's/\\u00[46]9/i/g' -e 's/\\u00[46][Cc]/l/g' -e 's/\\u00[46][Dd]/m/g' -e 's/\\u00[46][Ee]/n/g' -e 's/\\u00[57]3/s/g') || {
+                echo "identity gate: the escaped-key check in '$identity_file' did not run cleanly. Refusing rather than reading a crashed check as no escaped key." >&2
+                return 1
+            }
+            case $identity_arr_dec in
+                *x) identity_arr_dec=${identity_arr_dec%x} ;;
+                *)
+                    echo "identity gate: the escaped-key check in '$identity_file' returned truncated or empty output. Refusing rather than reading it as no key." >&2
+                    return 1
+                    ;;
+            esac
+            ;;
+        *) identity_arr_dec=$flat ;;
+    esac
+    case $identity_arr_dec in
+        *${key_ci}*) ;;
+        *) return 0 ;;
+    esac
+    identity_arr_before=${identity_arr_dec%%${key_ci}*}
+    identity_arr_after=${identity_arr_dec#*${key_ci}}
+    case $identity_arr_after in
+        *${key_ci}*)
+            echo "identity gate: '$identity_file' mentions \"$key\" (matched case-insensitively) more than once. It declares a key matching \"$key\" twice (a differently-cased key at the same level, or the key nested inside another object), or the word also appears in an entry, another key or a comment. Refusing rather than guessing which occurrence is the declaration. Keep exactly one '$key' key and no other mention of the word." >&2
+            return 1
+            ;;
+    esac
+    case $identity_arr_before in
+        *'"') identity_arr_bad= ;;
+        *) identity_arr_bad=1 ;;
+    esac
+    case $identity_arr_after in
+        '"'*) ;;
+        *) identity_arr_bad=1 ;;
+    esac
+    if [ -n "$identity_arr_bad" ]; then
+        echo "identity gate: '$identity_file' mentions \"$key\" (matched case-insensitively) without double quotes around it as a key: an unquoted or single-quoted key, the word in a comment, or the word inside another key. This parser reads only a double-quoted key. Refusing rather than reading it as absent. Write it as \"$key\": [\"...\"]." >&2
         return 1
     fi
-    identity_arr_key_hits=0
-    if [ "$identity_arr_key_rc" -eq 0 ]; then
-        while IFS= read -r identity_arr_key_hit_line; do
-            [ -n "$identity_arr_key_hit_line" ] || continue
-            identity_arr_key_hits=$((identity_arr_key_hits + 1))
-        done <<EOF
-$identity_arr_key_matches
-EOF
-    fi
-    if [ "$identity_arr_key_hits" -gt 1 ]; then
-        echo "identity gate: '$identity_file' declares a key matching \"$key\" (matched case-insensitively) $identity_arr_key_hits times -- a shadowing duplicate, whether a differently-cased key at the same level or the same key nested inside another object. Refusing rather than silently reading only the last one and dropping whatever the others declared. Keep exactly one '$key' key in the file." >&2
-        return 1
-    fi
+    case $flat in
+        *${key_ci}*) ;;
+        *)
+            echo "identity gate: '$identity_file' has a key written with a JSON escape. This parser does not decode keys, so it cannot tell whether that key is \"names\" or \"emails\". Refusing rather than reading it as absent. Write every key with plain characters." >&2
+            return 1
+            ;;
+    esac
+    identity_ltrim "${identity_arr_after#\"}"
+    case $identity_trimmed in
+        ':'*) identity_ltrim "${identity_trimmed#:}" ;;
+        *)
+            echo "identity gate: '$identity_file' has \"$key\" (matched case-insensitively) not followed directly by ':'. Refusing rather than reading the key as absent." >&2
+            return 1
+            ;;
+    esac
+    case $identity_trimmed in
+        '['*) ;;
+        *)
+            echo "identity gate: the '$key' value in '$identity_file' is not an array -- a string, a comment or other text sits where its '[' belongs. Refusing rather than reading the key as absent. Declare it as \"$key\": [\"...\"]." >&2
+            return 1
+            ;;
+    esac
 
-    # #135's round-2 review (N1): unchecked, a crashed sed here (the exact
-    # 2026-09-05 incident shape this file's header exists to catch, one
-    # tool call in a batch failing silently) reads identically to "the
-    # key was never declared" at the line below -- rc 0, empty $tail --
-    # so this one channel goes silently empty while the other stays
-    # populated and the both-empty refusal never fires. `sed -n` itself
-    # exits 0 on a clean no-match, so checking the exit status here does
-    # not turn an absent key into a false refusal.
-    tail=$(printf '%s' "$flat" | sed -n "s/.*\"${key_ci}\"[[:space:]]*:[[:space:]]*\[/[/p") || {
+    # ONE sed takes the array's contents from the raw text, after the one
+    # strict key the checks above proved is there. It must find it, so no
+    # output (no sentinel) refuses: with the key present, an empty
+    # extraction is a broken tool, not an absent key. #135's round-2 review
+    # (N1): a crashed sed here once read as an absent key, so its status is
+    # checked too.
+    tail=$(printf '%sx' "$flat" | sed -n "s/.*\"${key_ci}\"[[:space:]]*:[[:space:]]*\\[//p") || {
         echo "identity gate: the '$key' key lookup in '$identity_file' did not run cleanly. Refusing rather than reading a crashed extraction as an absent key." >&2
         return 1
     }
-    [ -n "$tail" ] || return 0
-
-    # #135's review (F2): the sed above used to discard the array's own
-    # '[' along with everything before it, so a key that IS declared but
-    # whose array is truncated right after '[' -- a partial write, an
-    # editor that died mid-save -- produced the same empty $tail as a key
-    # that was never declared at all, and the `return 0` above then
-    # reported it as "zero entries", not as the malformed file it is.
-    # Keeping the '[' in the sed's replacement and stripping it here,
-    # after the presence check, means "found but truncated" still reaches
-    # the loop below as an empty $tail -- which then finds no closing ']'
-    # and refuses -- while "key not declared" still returns 0 above,
-    # because a key sed never matched leaves $tail genuinely empty before
-    # this line ever runs.
-    tail=${tail#\[}
+    case $tail in
+        *x) tail=${tail%x} ;;
+        *)
+            echo "identity gate: the '$key' key lookup in '$identity_file' returned truncated or empty output although the key is present. Refusing rather than reading it as absent." >&2
+            return 1
+            ;;
+    esac
 
     while :; do
         identity_ltrim "$tail"
@@ -656,7 +708,7 @@ EOF
 #
 # The hold-off is what a rewrite would put at risk. identity_json_array is
 # the parser #91 and #135 took four review rounds to harden, proved
-# against the 26-row ARRAY_MATRIX in test/identity-gate.test.ts, and
+# against the 43-row ARRAY_MATRIX in test/identity-gate.test.ts, and
 # folding it into one pass means re-proving that matrix byte for byte on
 # new code.
 #
@@ -908,10 +960,11 @@ identity_check_encoding() (
 # needs no special-cased knob to control them.
 identity_load() {
     # Prove the matcher works before ANYTHING trusts it, the parse below
-    # included. identity_json_array uses grep to pull values out of the
-    # identity file, so a grep that answers "no match" to everything makes a
-    # populated file parse as empty -- and every downstream check then reports
-    # accurately on a pattern set that was never built. Found by breaking grep
+    # included. identity_json_array once used grep to pull values out of the
+    # identity file (it uses none since #91's residual fix), and a grep that
+    # answered "no match" to everything made a populated file parse as empty
+    # -- every downstream check then reported accurately on a pattern set
+    # that was never built. Found by breaking grep
     # deliberately: the empty-arrays guard fired first and blamed the file,
     # which is a confident, wrong diagnosis of a broken tool.
     #
@@ -987,6 +1040,24 @@ identity_load() {
     # than re-explain -- fail closed either way.
     names=$(identity_json_array "$raw" names) || return 1
     emails=$(identity_json_array "$raw" emails) || return 1
+
+    # An absent names key refuses (issue #91, operator ruling 2026-11-11). The
+    # name is the channel that leaked, and a file that never mentions the key
+    # reads exactly like a hand-edit that dropped it, so silence cannot be a
+    # choice. An explicit empty list ("names": []) is the deliberate opt-out
+    # and stays accepted. identity_json_array has already refused every
+    # malformed or escaped spelling of the key, so a key word still missing
+    # from the text here means the key was never declared. Bracket classes,
+    # not a case fold, for the same locale reason as identity_json_array.
+    if [ -z "$names" ]; then
+        case $raw in
+            *[Nn][Aa][Mm][Ee][Ss]*) ;;
+            *)
+                echo "identity gate: '$identity_file' has no \"names\" key. The name is the channel this gate exists to protect, so a file that omits it is refused rather than read as declaring none. Add \"names\": [\"...\"], or write \"names\": [] to opt out explicitly." >&2
+                return 1
+                ;;
+        esac
+    fi
 
     # Both empty is fail-closed, and the count check further down does not
     # cover it. That check fires only when the WHOLE pattern set is empty, and

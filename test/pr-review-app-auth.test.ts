@@ -119,28 +119,39 @@ describe("checkPermissions()", () => {
     expect(checkPermissions({ ...APP_PERMISSION_ALLOWLIST })).toBeNull();
   });
 
-  test("the allowlist is exactly #120's three permissions", () => {
+  test("the allowlist is exactly #120's three permissions plus #314's checks: read", () => {
     // 2026-09-14: contents is write on the App (approval counting needs installation push access)
-    // and stays read on every token.
-    expect(APP_PERMISSION_ALLOWLIST).toEqual({ pull_requests: "write", contents: "write", metadata: "read" });
-    expect(TOKEN_PERMISSION_ALLOWLIST).toEqual({ pull_requests: "write", contents: "read", metadata: "read" });
-    expect(TOKEN_PERMISSIONS).toEqual({ pull_requests: "write", contents: "read" });
+    // and stays read on every token. #314: checks is read on both, because listing check runs on a
+    // private repository needs it.
+    expect(APP_PERMISSION_ALLOWLIST).toEqual({ pull_requests: "write", contents: "write", metadata: "read", checks: "read" });
+    expect(TOKEN_PERMISSION_ALLOWLIST).toEqual({ pull_requests: "write", contents: "read", metadata: "read", checks: "read" });
+    expect(TOKEN_PERMISSIONS).toEqual({ pull_requests: "write", contents: "read", checks: "read" });
   });
 
   test("the App holding contents: write is accepted", () => {
     expect(checkPermissions({ pull_requests: "write", contents: "write", metadata: "read" })).toBeNull();
   });
 
+  test("the App holding checks: read is accepted (#314)", () => {
+    expect(checkPermissions({ pull_requests: "write", contents: "write", metadata: "read", checks: "read" })).toBeNull();
+  });
+
+  test("a token holding checks: read is accepted (#314)", () => {
+    expect(checkPermissions({ pull_requests: "write", contents: "read", metadata: "read", checks: "read" }, TOKEN_PERMISSION_ALLOWLIST, "the token")).toBeNull();
+  });
+
   test.each([
     ["contents write", { pull_requests: "write", contents: "write", metadata: "read" }],
     ["metadata write", { pull_requests: "write", contents: "read", metadata: "write" }],
     ["an unlisted write", { ...TOKEN_PERMISSION_ALLOWLIST, workflows: "write" }],
+    ["checks write", { pull_requests: "write", contents: "read", metadata: "read", checks: "write" }],
   ])("the token allowlist refuses %s", (_label, permissions) => {
     expect(checkPermissions(permissions, TOKEN_PERMISSION_ALLOWLIST, "the token")).not.toBeNull();
   });
 
   test.each([
-    ["checks", { ...APP_PERMISSION_ALLOWLIST, checks: "read" }],
+    // #314: checks is allowed at read only, so write still refuses.
+    ["checks write", { ...APP_PERMISSION_ALLOWLIST, checks: "write" }],
     ["issues", { ...APP_PERMISSION_ALLOWLIST, issues: "read" }],
     ["administration", { ...APP_PERMISSION_ALLOWLIST, administration: "read" }],
     ["workflows", { ...APP_PERMISSION_ALLOWLIST, workflows: "write" }],
@@ -172,7 +183,7 @@ describe("checkPermissions()", () => {
 
 describe("AppTokenMinter", () => {
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
-  const GRANTED = { pull_requests: "write", contents: "read", metadata: "read" };
+  const GRANTED = { pull_requests: "write", contents: "read", metadata: "read", checks: "read" };
 
   function fakeFetch(routes: Record<string, (init: RequestInit) => Response>) {
     const calls: Array<{ key: string; init: RequestInit }> = [];
@@ -203,7 +214,7 @@ describe("AppTokenMinter", () => {
   const minter = (impl: typeof fetch, repo = "owner/name", appId = "123456") =>
     new AppTokenMinter({ appId, key: privateKey, repo, fetchImpl: impl, now: () => 1_700_000_000_000 });
 
-  test("mints a token narrowed to one repository and two permissions", async () => {
+  test("mints a token narrowed to one repository and three permissions", async () => {
     const { impl, calls } = fakeFetch(happyRoutes());
     expect(await minter(impl).mint()).toEqual({ token: "ghs_fixture", expiresAt: "2026-09-11T00:00:00Z" });
     expect(calls.map((c) => c.key)).toEqual(["GET /app", "GET /repos/owner/name/installation", "POST /app/installations/42/access_tokens"]);
@@ -211,6 +222,39 @@ describe("AppTokenMinter", () => {
     expect(auth.startsWith("Bearer ")).toBe(true);
     expect(auth.slice("Bearer ".length).split(".").length).toBe(3);
     expect(JSON.parse(String(calls[2]!.init.body))).toEqual({ repositories: ["name"], permissions: TOKEN_PERMISSIONS });
+  });
+
+  test("the token request asks for checks: read, never write (#314)", async () => {
+    // Listing check runs on a private repository returns 403 without it.
+    const { impl, calls } = fakeFetch(happyRoutes());
+    await minter(impl).mint();
+    expect(JSON.parse(String(calls[2]!.init.body)).permissions).toEqual({ pull_requests: "write", contents: "read", checks: "read" });
+  });
+
+  test("an App holding checks: write is refused before any installation lookup (#314)", async () => {
+    const { impl, calls } = fakeFetch(happyRoutes({ "GET /app": () => json({ permissions: { ...GRANTED, checks: "write" } }) }));
+    const attempt = minter(impl).mint();
+    await expect(attempt).rejects.toThrow("checks: write");
+    await expect(attempt).rejects.toBeInstanceOf(RefusalError);
+    expect(calls.length).toBe(1);
+  });
+
+  test("a minted token holding checks: write is refused (#314)", async () => {
+    const { impl } = fakeFetch(
+      happyRoutes({
+        "POST /app/installations/42/access_tokens": () =>
+          json({
+            token: "ghs_fixture",
+            expires_at: "x",
+            permissions: { ...GRANTED, checks: "write" },
+            repository_selection: "selected",
+            repositories: [{ name: "name" }],
+          }),
+      }),
+    );
+    const error = await minter(impl).mint().catch((e: Error) => e);
+    expect(error).toBeInstanceOf(RefusalError);
+    expect((error as Error).message).toContain("checks: write");
   });
 
   test("every GitHub request is made with redirect: error", async () => {

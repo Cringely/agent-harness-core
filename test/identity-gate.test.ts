@@ -258,6 +258,48 @@ describe("identity gate — pre-commit (cheap stage: content, path, pending auth
     expect(result.stderr.toString()).toContain("declares no names and no emails");
   });
 
+  // Issue #91, operator ruling 2026-11-11: a file with no names key refuses, and
+  // an explicit empty names list is the deliberate opt-out and passes.
+  test("gate refuses an identity file with no names key, even when emails are declared", () => {
+    const dir = initPreCommitRepo();
+    const home = makeIdentityHome(JSON.stringify({ emails: ["fixture@example.test"] }));
+    stageClean(dir);
+    const result = runPreCommit(dir, envWith({ USERPROFILE: home, HOME: home }));
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain('no "names" key');
+  });
+
+  test("gate accepts an explicit empty names list when emails are declared", () => {
+    const dir = initPreCommitRepo();
+    const home = makeIdentityHome(JSON.stringify({ names: [], emails: ["fixture@example.test"] }));
+    stageClean(dir);
+    const result = runPreCommit(dir, envWith({ USERPROFILE: home, HOME: home }));
+    expect(result.exitCode).toBe(0);
+  });
+
+  // The word "names" appearing somewhere is not a declared names key. identity_json_array refuses
+  // every spelling below before the absent-key check runs, so none may load with an empty name channel.
+  test.each([
+    ["the word inside an email value", '{"emails": ["names@example.test"]}'],
+    ["the word inside another key", '{"surnames": ["Fictional"], "emails": ["fixture@example.test"]}'],
+    ["a string where the list belongs", '{"names": "Fictional Persona", "emails": ["fixture@example.test"]}'],
+    ["a comment between the colon and the list", '{"names": /* c */ ["Fictional"], "emails": ["fixture@example.test"]}'],
+  ])("gate refuses a file that only mentions the word names: %s", (_label, body) => {
+    const dir = initPreCommitRepo();
+    const home = makeIdentityHome(body);
+    stageClean(dir);
+    const result = runPreCommit(dir, envWith({ USERPROFILE: home, HOME: home }));
+    expect(result.exitCode).not.toBe(0);
+  });
+
+  test("gate accepts a populated names list with no emails key", () => {
+    const dir = initPreCommitRepo();
+    const home = makeIdentityHome(JSON.stringify({ names: ["Fictional Persona"] }));
+    stageClean(dir);
+    const result = runPreCommit(dir, envWith({ USERPROFILE: home, HOME: home }));
+    expect(result.exitCode).toBe(0);
+  });
+
   test("gate exits non-zero when the identity file is not JSON-shaped", () => {
     const dir = initPreCommitRepo();
     const badHome = makeIdentityHome("not even json");
@@ -503,6 +545,22 @@ describe("identity gate — identity-patterns.sh: key-extraction sed residual (i
     expect(result.exitCode).not.toBe(0);
     expect(result.stderr.toString()).toContain("did not run cleanly");
   });
+
+  // Issue #91, round-2 App review: a key-lookup sed that exits 0 but prints
+  // nothing used to read as an absent key, the same silent-empty channel as
+  // the crash above with a clean exit status.
+  test.skipIf(!realSed)("a key-lookup sed for 'names' that exits 0 and prints nothing refuses", () => {
+    const dir = initPreCommitRepo();
+    writeFileSync(join(dir, "notes.txt"), `this document mentions ${NAME} by name\n`);
+    git(["add", "notes.txt"], dir);
+    const stubDir = installNamesKeyCrashingSedStub(0);
+    const result = runPreCommit(
+      dir,
+      envWith({ PATH: pathWithStubFirst(stubDir), REAL_SED: realSed! }),
+    );
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("returned truncated or empty output");
+  });
 });
 
 /** Test double for `sed`: crashes (exit 1, no output) only when invoked with
@@ -515,7 +573,7 @@ describe("identity gate — identity-patterns.sh: key-extraction sed residual (i
  * shell script) for every other invocation. The match substring is itself
  * single-quoted so its own `[`/`]` are literal characters in the stub's
  * case pattern rather than glob bracket expressions. */
-function installNamesKeyCrashingSedStub(): string {
+function installNamesKeyCrashingSedStub(exitCode = 1): string {
   const stubDir = mkdtempSync(join(tmpdir(), "identity-sedshim-"));
   tempDirs.push(stubDir);
   const stubPath = join(stubDir, "sed");
@@ -524,7 +582,7 @@ function installNamesKeyCrashingSedStub(): string {
     [
       "#!/bin/sh",
       'case "$*" in',
-      '    *\'"[Nn][Aa][Mm][Ee][Ss]"\'*) exit 1 ;;',
+      `    *'"[Nn][Aa][Mm][Ee][Ss]"'*) exit ${exitCode} ;;`,
       "esac",
       'exec "$REAL_SED" "$@"',
       "",
@@ -1042,7 +1100,8 @@ function shQuote(value: string): string {
 // [label, input, expected output]. Recorded from the pre-#113
 // `printf '%s' "$1" | sed 's/[].^$(){}?+*|\\[]/\\&/g'`.
 //
-// The shipped matrices are 16 escape rows plus 26 array rows, 42 total.
+// The shipped matrices are 16 escape rows plus 48 array rows, 64 total,
+// pinned by the row-count test below so this line cannot drift silently.
 // The 78 cited in commit 3e9425c's message and in PR #163's merged
 // description cannot be reconciled with either count.
 const ESCAPE_MATRIX: Array<[string, string, string]> = [
@@ -1076,8 +1135,14 @@ const ESCAPE_MATRIX: Array<[string, string, string]> = [
   ],
 ];
 
+// A JSON backslash built from its character code. A typed escape sequence
+// can arrive decoded on the way into this file, so the #91 rows below never
+// spell one out.
+const JSON_BS = String.fromCharCode(92);
+
 // [label, raw JSON text, key, expected stdout, expected rc, expected stderr
-// fragment]. Recorded from the pre-#113 token-extraction sed.
+// fragment]. Recorded from the pre-#113 token-extraction sed, plus the #91
+// residual rows, which record refusals that sed never made.
 const ARRAY_MATRIX: Array<[string, string, string, string, number, string | null]> = [
   ["an empty array", '{"names":[],"emails":[]}', "names", "", 0, null],
   ["an absent key", '{"emails":["a@b.test"]}', "names", "", 0, null],
@@ -1136,6 +1201,51 @@ const ARRAY_MATRIX: Array<[string, string, string, string, number, string | null
     "",
     1,
     "declares a key matching",
+  ],
+  // Issue #91 residuals: a key the parser cannot positively read as an array
+  // of strings refuses. Each of these read as an absent key, rc 0, and the
+  // channel went silently empty while the other stayed populated.
+  [
+    "a key spelled with a backslash-u escape refuses (#91)",
+    `{"${JSON_BS}u006eames":["Alice Example"],"emails":["a@b.test"]}`,
+    "names",
+    "",
+    1,
+    "has a key written with a JSON escape",
+  ],
+  [
+    "an escaped emails key refuses (#91)",
+    `{"names":["Alice Example"],"${JSON_BS}u0065mails":["a@b.test"]}`,
+    "emails",
+    "",
+    1,
+    "has a key written with a JSON escape",
+  ],
+  ["names declared as a string refuses (#91)", '{"names":"Alice Example","emails":["a@b.test"]}', "names", "", 1, "is not an array"],
+  ["emails declared as a string refuses (#91)", '{"names":["Alice Example"],"emails":"a@b.test"}', "emails", "", 1, "is not an array"],
+  [
+    "a comment between the colon and the [ refuses (#91)",
+    '{"names": /* note */ ["Alice Example"],"emails":["a@b.test"]}',
+    "names",
+    "",
+    1,
+    "is not an array",
+  ],
+  [
+    "a comment between the key and its colon refuses (#91)",
+    '{"names" /* note */ : ["Alice Example"],"emails":["a@b.test"]}',
+    "names",
+    "",
+    1,
+    "not followed directly by ':'",
+  ],
+  [
+    "an escape inside an entry or another key's string value is not an escaped key (#91)",
+    `{"names":["O${JSON_BS}u0027Brien"],"emails":["a@b.test"],"note":"x${JSON_BS}u0041"}`,
+    "names",
+    "O'Brien\n",
+    0,
+    null,
   ],
   [
     "several entries",
@@ -1251,6 +1361,89 @@ const ARRAY_MATRIX: Array<[string, string, string, string, number, string | null
     0,
     null,
   ],
+  // Issue #91, round-1 App review: fail-open shapes the earlier rows missed.
+  [
+    "an escaped key followed by a comment holding a comma, bracket and quote refuses",
+    `{"emails":["a@b.test"],"na${JSON_BS}u006des" /* , ] " */ : ["Bob Example"]}`,
+    "names",
+    "",
+    1,
+    "written with a JSON escape",
+  ],
+  [
+    "an unquoted key refuses rather than reading as absent",
+    '{names: ["Bob Example"], "emails": ["a@b.test"]}',
+    "names",
+    "",
+    1,
+    "without double quotes",
+  ],
+  [
+    "a single-quoted key refuses rather than reading as absent",
+    `{'names': ["Bob Example"], "emails": ["a@b.test"]}`,
+    "names",
+    "",
+    1,
+    "without double quotes",
+  ],
+  [
+    "a file truncated right after the key refuses",
+    '{"emails":["a@b.test"],"names"',
+    "names",
+    "",
+    1,
+    "not followed directly by ':'",
+  ],
+  [
+    "an entry with an escaped quote is still read",
+    `{"names":["say ${JSON_BS}"hi${JSON_BS}" now"]}`,
+    "names",
+    'say "hi" now\n',
+    0,
+    null,
+  ],
+  // Issue #91, round-2 App review: any mention of the key word other than
+  // one strict double-quoted key refuses.
+  [
+    "an unquoted key followed by a comment before its colon refuses",
+    '{names /* note */ : ["Bob Example"], "emails": ["a@b.test"]}',
+    "names",
+    "",
+    1,
+    "without double quotes",
+  ],
+  [
+    "a single-quoted key followed by a comment before its colon refuses",
+    `{'names' /* note */ : ["Bob Example"], "emails": ["a@b.test"]}`,
+    "names",
+    "",
+    1,
+    "without double quotes",
+  ],
+  [
+    "a single-quoted escaped key at the start of the file refuses",
+    `{'n${JSON_BS}u0061mes' /* note */ : ["Bob Example"], "emails": ["a@b.test"]}`,
+    "names",
+    "",
+    1,
+    "without double quotes",
+  ],
+  [
+    "a quoted emails key with a comment between it and its colon refuses",
+    '{"names":["Bob Example"],"emails" /* note */ : ["a@b.test"]}',
+    "emails",
+    "",
+    1,
+    "not followed directly by ':'",
+  ],
+  [
+    "the key word inside a comment only refuses rather than reading as absent",
+    '{/* names */ "emails": ["a@b.test"]}',
+    "names",
+    "",
+    1,
+    "without double quotes",
+  ],
 ];
 
 type MatrixResults = {
@@ -1319,6 +1512,10 @@ function runBuilderMatrix(): MatrixResults {
 }
 
 describe("identity gate — the pattern-set builders match the pipelines they replaced, byte for byte (#113)", () => {
+  test("the matrices hold the row counts their header comment states", () => {
+    expect([ESCAPE_MATRIX.length, ARRAY_MATRIX.length]).toEqual([16, 48]);
+  });
+
   test("identity_regex_escape escapes exactly the fourteen ERE metacharacters, on every recorded input", () => {
     const results = runBuilderMatrix();
     const mismatches = ESCAPE_MATRIX.map((entry, i) => [entry[0], entry[2], results.escaped[i]] as const)
@@ -2173,4 +2370,74 @@ describe("identity gate — the identity file must be well-formed UTF-8 (#206)",
     expect(result.rc).toBe(1);
     expect(result.stderr).toContain("NUL byte");
   });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #91 residuals, through the real pre-commit hook under the locale Git
+// for Windows gives a hook. Each identity file declares NAME in a shape the
+// parser used to read as "no names key", and the staged content carries
+// NAME. Before the fix every one of these committed.
+// ---------------------------------------------------------------------------
+function stageDeclaredName(dir: string) {
+  writeFileSync(join(dir, "notes.txt"), `this document mentions ${NAME} by name\n`);
+  git(["add", "notes.txt"], dir);
+}
+
+const UNREADABLE_NAMES_KEYS: Array<[string, string, string]> = [
+  [
+    "a names key spelled with a backslash-u escape",
+    `{"${JSON_BS}u006eames":["${NAME}"],"emails":["${EMAIL}"]}`,
+    "has a key written with a JSON escape",
+  ],
+  ["names declared as a string", `{"names":"${NAME}","emails":["${EMAIL}"]}`, "is not an array"],
+  [
+    "a comment between the names colon and its [",
+    `{"names": /* note */ ["${NAME}"],"emails":["${EMAIL}"]}`,
+    "is not an array",
+  ],
+];
+
+describe("identity gate — a names key the parser cannot read as an array refuses (#91 residuals)", () => {
+  for (const [label, content, fragment] of UNREADABLE_NAMES_KEYS) {
+    test(`${label} refuses rather than committing the name`, () => {
+      const home = makeIdentityHome(content);
+      const dir = initPreCommitRepo();
+      stageDeclaredName(dir);
+      const result = runPreCommit(dir, envWith({ USERPROFILE: home, HOME: home, LC_CTYPE: "C.UTF-8" }));
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr.toString()).toContain(fragment);
+    });
+  }
+
+  // The duplicate-key count used to come from a `grep -oE` whose answer the
+  // extraction sed never cross-checked. A grep answering "no match" over a
+  // shadowing duplicate let the sed take the trailing empty "Names" array,
+  // and the name committed. The count now comes from the extraction sed
+  // itself, so a grep that lies or crashes on that call has nothing to lie
+  // about. The stub hits only an -oE call, which nothing else in the hooks
+  // makes, and execs the real grep for the canary and the scans.
+  const KEY_COUNT_GREP_FAILURES: Array<[string, string]> = [
+    ["answers no match", "exit 1"],
+    ["crashes", "exit 2"],
+  ];
+  for (const [label, failure] of KEY_COUNT_GREP_FAILURES) {
+    test.skipIf(!realGrep)(`a key-count grep that ${label} cannot hide a shadowing duplicate key`, () => {
+      const stubDir = installToolStub("grep", ['case "$*" in', `    *-oE*) ${failure} ;;`, "esac", 'exec "$REAL_GREP" "$@"']);
+      const home = makeIdentityHome(`{"names":["${NAME}"],"emails":["${EMAIL}"],"Names":[]}`);
+      const dir = initPreCommitRepo();
+      stageDeclaredName(dir);
+      const result = runPreCommit(
+        dir,
+        envWith({
+          USERPROFILE: home,
+          HOME: home,
+          LC_CTYPE: "C.UTF-8",
+          PATH: pathWithStubFirst(stubDir),
+          REAL_GREP: realGrep!,
+        }),
+      );
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr.toString()).toContain("declares a key matching");
+    });
+  }
 });

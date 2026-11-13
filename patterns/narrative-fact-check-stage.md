@@ -122,7 +122,7 @@ carry nothing to fact-check. Nor on a doc nobody boots from or decides on, where
 costs nothing because there is no reader. And it runs once. The stage finds what it finds, the
 corrections land, and a second round happens only if the corrections themselves added claims. A
 fact-check that runs until it finds nothing has no stopping point, because a careful reader
-always finds something, and the severity floor that decides what gets fixed now and what gets filed
+always finds something, and the severity floor that decides what gets fixed now and what stays in the review comment
 belongs to this stage as much as to any review.
 
 ## Provenance

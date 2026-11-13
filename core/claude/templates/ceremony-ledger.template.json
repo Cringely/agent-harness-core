@@ -4,10 +4,5 @@
     "cycle_hours": 2,
     "last_run": null,
     "approx": false
-  },
-  "council": {
-    "cycle_hours": 24,
-    "last_run": null,
-    "approx": true
   }
 }

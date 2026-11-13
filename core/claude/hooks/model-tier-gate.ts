@@ -64,7 +64,7 @@
 //
 // WIRE CONTRACT, and where it differs from its siblings. A deny prints its reason on stderr and
 // exits 2, which Claude Code reads as "block and hand the reason back to the model".
-// agent-worktree-gate.ts and review-gate.ts instead exit 0 and emit a `hookSpecificOutput` deny on
+// agent-worktree-gate.ts instead exits 0 and emits a `hookSpecificOutput` deny on
 // stdout. Both forms block; this one is kept because it is the form that was verified live against
 // this gate's own payloads before promotion, and because it is the form test/model-tier-gate.test.ts
 // asserts on. The code shape is otherwise the siblings': a pure exported `decide()` returning a

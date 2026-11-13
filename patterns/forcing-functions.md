@@ -66,23 +66,30 @@ dispatched agent notices the files are missing. A gate's message is prose too, a
 treatment as any other rule: say what the machinery does, not only what to type.
 
 The commit is the second edge, and it is open in a way the clone is not. The worktree tooling
-documents a setting for the base it branches from, `worktree.baseRef`, with two values and a stated
-default: one takes the remote's default branch, the other takes the local HEAD the caller is sitting
-on. Whether that setting reaches a workspace an agent dispatch creates, rather than only one a
-session opens for itself, is unconfirmed. This repo's templates set neither value, and neither of
-the incidents below was checked at the time for the value it came up under, so the base a project
-gets today is documented and never captured. Two incidents, in two different projects, broke in
-opposite directions. In one, the dispatcher sat on a feature branch and the agent came up on the
-default branch, holding code where the file and line anchors in its brief did not exist. In the
-other, the worktree came up on the branch the dispatcher happened to be working on rather than on
-the clean default branch its brief assumed. Both cannot be true of one fixed behavior, so an unset
-two-valued setting is the likeliest reading of the pair, and a reading is all it is until someone
-captures a value. A single capture settles both questions: dispatch an isolated agent from a
-non-default branch and have it report the sha its worktree came up on, once with the setting absent
-and once with each value written in.
+documents a setting for the base it branches from, `worktree.baseRef`, and the documentation says
+subagent worktrees use the same base as `--worktree`. The default, `fresh`, branches from the
+remote's default branch. The other value, `head`, branches from the local HEAD, so the worktree
+carries unpushed commits. The setting takes no branch names. A live probe on 2026-11-05 on Claude
+Code 2.1.318 matches the default: an isolated agent dispatched from a checkout detached at 4f49055
+came up on 3c51915, which equalled origin/master. This repo's templates set neither value, so that
+is the behavior a project gets today.
 
-The rule worth taking from this holds whichever value turns out to be the default, which is the
-reason to write it down now rather than wait for that capture. The dispatch states the sha the work
+Two earlier incidents, in two different projects, broke in opposite directions. In one, the
+dispatcher sat on a feature branch and the agent came up on the default branch, holding code where
+the file and line anchors in its brief did not exist. That is what `fresh` predicts. In the other,
+the worktree came up on the branch the dispatcher happened to be working on rather than on the clean
+default branch its brief assumed. That is what `head` predicts. Neither incident recorded the value
+it ran under, so the probe explains the first and leaves the second unexplained. The probe covered
+only the default, and no capture with `head` written in exists yet.
+
+Two limits remain. A PreToolUse gate cannot see a worktree that does not exist yet, so no check
+before the dispatch can read the base the agent will land on. And setting `head` to fix the first
+incident reintroduces the unpushed-commit risk: an agent that pushes from such a worktree publishes
+the operator's unpushed commits. So briefs that push keep the instruction to branch from
+origin/master and to check commits-ahead against it before the push.
+
+The rule worth taking from this holds under either value, which is the
+reason it does not depend on the default staying put. The dispatch states the sha the work
 is meant to start from, the agent compares that against the worktree's HEAD before it reads or
 writes a file, and a mismatch aborts the task instead of being worked around. Pinning the setting
 fixes one direction and quietly breaks whoever assumed the other; the assertion is correct under
@@ -92,6 +99,15 @@ skipped by the agent that received it, which then rewrote the wrong document at 
 above say where that leaves it: the gate can require the dispatch to carry the sha, because a check
 running before the tool call cannot inspect a worktree that does not exist yet, and only the agent
 inside the worktree can confirm the sha it came up on.
+
+`core/claude/hooks/agent-worktree-gate.ts` now does that. Every isolated (worktree or remote) write
+dispatch whose prompt has no line of the form `BASE-SHA: <7-40 hex digits>` is denied. The line must
+start a prompt line. The gate checks presence only, and the agent does the comparison against its
+worktree HEAD. The gate reads no git state and compares nothing. A first version denied only when the
+dispatcher HEAD differed from origin's default branch, and let an equal pair through, but the local
+origin ref can be stale, so an equal pair proved nothing about the base the worktree would come up
+on. The operator ruled this on 2026-11-11 on the strength of two incidents in two projects, and
+amended the ruling the same day to require the line on every isolated write dispatch.
 
 The third edge is that correlation, and it stays one. Dispatches that gave the agent a name and
 omitted isolation went idle and returned nothing, four times out of four, across three agent types
@@ -119,9 +135,9 @@ its final message; nothing else records that the work happened.
 
 The rule the four silences do support is independent of the cause: a dispatch that returned nothing
 must not read the same as a dispatch that found nothing. This repo's opt-in commit gate,
-`core/claude/hooks/review-gate.ts`, is where they read the same. It clears a staged file once a
-dispatch to a reviewer type appears after that file's last edit and never reads what came back, so a
-reviewer that went idle clears the commit exactly as one that filed findings does. That puts the
+`review-gate.ts` (retired in #37), was where they read the same. It cleared a staged file once a
+dispatch to a reviewer type appeared after that file's last edit and never read what came back, so a
+reviewer that went idle cleared the commit exactly as one that filed findings did. That put the
 silence-as-approval reading into code instead of leaving it to a dispatcher in a hurry. A gate that
 answers "was this reviewed" needs evidence the review returned, not evidence it was requested.
 
