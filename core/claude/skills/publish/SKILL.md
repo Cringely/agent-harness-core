@@ -31,6 +31,8 @@ Commands:
 
 Write every body to a file in your scratchpad first and pass its absolute path. There is no inline body option. Push the head branch before `pr create`, because the tool never pushes.
 
+review-merge serves only agent-harness-core for now. In any other repository the reviewer refuses and nothing merges, so ask the operator how to merge there.
+
 review-merge runs from the dedicated clone at `~/.claude-publish/tool` instead, and refuses unless that clone is clean and at its origin's default branch head, because that code holds the token and makes the merge decision. It can also run for over an hour: up to `--checks-timeout-min` (30 by default) for checks, then up to 45 minutes for the reviewer, past a tool shell's 10-minute foreground limit. So bring the clone up to date, start the run in the background with its output in a log file in your scratchpad, and poll that log with a bounded wait until its `exit=` line appears. In Bash, each line its own command, with `<n>` the pull request number:
 
     git -C "${USERPROFILE:-$HOME}/.claude-publish/tool" fetch --quiet origin master

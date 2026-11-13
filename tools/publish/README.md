@@ -36,6 +36,8 @@ Every field is validated and a missing one refuses. Values are never printed, be
 
 The reviewer checkout's origin must be the repository. The tool fetches it, detaches it at the default branch head, and refuses when it is dirty.
 
+`review-merge` serves only agent-harness-core for now. `tools/pr-review/cli.ts` reviews any other repository only with `--policy` (#318), and a reviewer entry here has no field to name that policy file, so a reviewer configured for another repository refuses there and nothing merges.
+
 ### The key command
 
 The key command fetches its own credential. The config file is plain text, so `keyCommandEnv` carries only non-secret settings, and the tool refuses a variable whose name contains TOKEN, SECRET, KEY or PASSWORD.
