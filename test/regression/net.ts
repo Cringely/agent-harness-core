@@ -18,6 +18,8 @@ export interface Defect {
   id: string;
   defect: string;
   fixedBy: string;
+  /** "ablated" when the fix was reverted and the pinned test shown to fail, else "assumed: <reason>". */
+  verified: string;
   tests: PinnedTest[];
 }
 
@@ -27,6 +29,7 @@ export interface Verdict {
   id: string;
   defect: string;
   fixedBy: string;
+  verified: string;
   caught: boolean;
   reasons: string[];
 }
@@ -60,12 +63,15 @@ export function parseManifest(source: string): Defect[] {
     const defect = text(entry, "defect", where);
     if (/[\r\n]/.test(defect)) fail(`${where}: defect must be one line`);
     const fixedBy = text(entry, "fixedBy", where);
+    const verified = text(entry, "verified", where);
+    if (!/^(?:ablated|assumed: \S.*)$/.test(verified)) fail(`${where}: verified must be "ablated" or "assumed: <reason>"`);
     const tests = entry.tests;
     if (!Array.isArray(tests) || tests.length === 0) fail(`${where} has no pinning test`);
     return {
       id,
       defect,
       fixedBy,
+      verified,
       tests: tests.map((t): PinnedTest => {
         if (typeof t !== "object" || t === null) fail(`${where}: a test entry is not an object`);
         const pinned = t as Record<string, unknown>;
@@ -79,14 +85,46 @@ function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** True when `source` declares a test whose title is exactly `name`: a test()/it() call, with any
- * modifier chain, whose first argument is that string literal. A name in a comment or inside an
- * assertion does not count, and neither does a longer title that merely begins with it. */
+/** `source` with every line and block comment blanked, so a commented-out test() call is not
+ * seen. Strings, template literals and regex literals are skipped whole, so a `//` inside a URL
+ * string does not start a comment. */
+export function stripComments(source: string): string {
+  let out = "";
+  let i = 0;
+  let lastCode = "";
+  while (i < source.length) {
+    const c = source[i];
+    const next = source[i + 1];
+    if (c === "/" && next === "/") {
+      while (i < source.length && source[i] !== "\n") i++;
+    } else if (c === "/" && next === "*") {
+      const end = source.indexOf("*/", i + 2);
+      i = end === -1 ? source.length : end + 2;
+      out += " ";
+    } else if (c === '"' || c === "'" || c === "`" || (c === "/" && /^[(,=:[!&|?{};]?$/.test(lastCode))) {
+      let j = i + 1;
+      while (j < source.length && source[j] !== c) j += source[j] === "\\" ? 2 : 1;
+      out += source.slice(i, j + 1);
+      i = j + 1;
+      lastCode = c;
+    } else {
+      out += c;
+      i++;
+      if (!/\s/.test(c)) lastCode = c;
+    }
+  }
+  return out;
+}
+
+/** True when `source` declares a test whose title is exactly `name`: a bare test()/it() call, in
+ * code rather than a comment, whose first argument is that string literal. Any modifier is refused
+ * (skip, todo, if, failing, only), because each can make a pinned test pass or run without
+ * checking anything, and a pin that cannot be read as plain is not trusted. A name in a comment
+ * or inside an assertion does not count, and neither does a longer title that merely begins
+ * with it. */
 export function sourceDeclaresTest(source: string, name: string): boolean {
-  const call = new RegExp(
-    "\\b(?:test|it)(?:\\.[A-Za-z]+(?:\\([^)]*\\))?)*\\(\\s*([\"'`])" + escapeRegex(name) + "\\1",
-  );
-  return call.test(source);
+  const call = new RegExp("\\b(?:test|it)\\(\\s*([\"'`])" + escapeRegex(name) + "\\1");
+  return call.test(stripComments(source));
 }
 
 /** The `bun test -t` regex selecting exactly these titles. Bun matches it against the describe
@@ -159,7 +197,7 @@ export function judgeDefect(defect: Defect, evidence: Evidence): Verdict {
       else if (matches[0].outcome === "skip") reasons.push(`skipped, so it pins nothing: "${name}"`);
     }
   }
-  return { id: defect.id, defect: defect.defect, fixedBy: defect.fixedBy, caught: reasons.length === 0, reasons };
+  return { id: defect.id, defect: defect.defect, fixedBy: defect.fixedBy, verified: defect.verified, caught: reasons.length === 0, reasons };
 }
 
 export interface NetOptions {
@@ -212,6 +250,37 @@ export async function runNet({ manifest, root, runBun }: NetOptions): Promise<Ve
       );
       reasons.push(...verdict.reasons);
     }
-    return { id: defect.id, defect: defect.defect, fixedBy: defect.fixedBy, caught: reasons.length === 0, reasons };
+    return { id: defect.id, defect: defect.defect, fixedBy: defect.fixedBy, verified: defect.verified, caught: reasons.length === 0, reasons };
   });
+}
+
+/** The printed report and exit code. A static run runs no test, so it never says CAUGHT: its
+ * labels and summary say only that pins resolve. A full run tags each CAUGHT with how far the pin
+ * was verified, so an assumed entry never reads the same as an ablated one. */
+export function renderReport(verdicts: Verdict[], mode: "static" | "run"): { text: string; code: number } {
+  const lines: string[] = [];
+  const isStatic = mode === "static";
+  for (const v of verdicts) {
+    const label = isStatic ? (v.caught ? "RESOLVES  " : "UNRESOLVED") : v.caught ? "CAUGHT    " : "NOT CAUGHT";
+    const tag = isStatic || !v.caught ? "" : `  [${v.verified.startsWith("ablated") ? "ablated" : "assumed"}]`;
+    lines.push(`${label}${tag}  ${v.id}  (${v.fixedBy})  ${v.defect}`);
+    for (const reason of v.reasons) lines.push(`            - ${reason}`);
+  }
+  const missed = verdicts.filter((v) => !v.caught);
+  const ok = verdicts.length - missed.length;
+  lines.push("");
+  if (isStatic) {
+    lines.push(`${ok} of ${verdicts.length} pins resolve to a declared test. No test ran.`);
+    if (missed.length > 0) lines.push(`UNRESOLVED: ${missed.map((v) => v.id).join(", ")}`);
+  } else {
+    const ablated = verdicts.filter((v) => v.caught && v.verified.startsWith("ablated")).length;
+    lines.push(`${ok} of ${verdicts.length} known defects caught (every pinned test run): ${ablated} ablated, ${ok - ablated} assumed.`);
+    lines.push("An assumed entry's test passed, but was not shown to fail when its defect returns.");
+    if (missed.length > 0) {
+      lines.push(`NOT CAUGHT: ${missed.map((v) => v.id).join(", ")}`);
+      lines.push("A harness change stopped catching a defect it used to catch, or a pinned test was renamed or removed.");
+    }
+    lines.push("Green means these known defects stay caught. It does not mean the harness is sound.");
+  }
+  return { text: lines.join("\n"), code: missed.length === 0 ? 0 : 1 };
 }

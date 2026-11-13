@@ -7,11 +7,13 @@ import {
   sourceDeclaresTest,
   parseJunit,
   judgeDefect,
+  renderReport,
   runNet,
   testFilterPattern,
   type Defect,
   type JunitCase,
   type Outcome,
+  type Verdict,
 } from "./regression/net";
 
 // Unit tests for the regression net's own logic (issue #96). They never run the corpus: the
@@ -23,6 +25,7 @@ const defect = (over: Partial<Defect> = {}): Defect => ({
   id: "d1",
   defect: "one line",
   fixedBy: "abc1234",
+  verified: "ablated",
   tests: [{ file: "test/a.test.ts", name: "does the thing" }],
   ...over,
 });
@@ -55,6 +58,18 @@ describe("parseManifest", () => {
     expect(() => parseManifest(JSON.stringify([defect(), defect()]))).toThrow(/duplicate id/);
   });
 
+  test.each([["missing", undefined], ["blank", " "], ["a bare assumed", "assumed"], ["an unknown word", "checked"]])(
+    "refuses a verified field that is %s",
+    (_label, value) => {
+      const entry = { ...defect(), verified: value };
+      expect(() => parseManifest(JSON.stringify([entry]))).toThrow(/verified/);
+    },
+  );
+
+  test("accepts an assumed entry that gives its reason", () => {
+    expect(parseManifest(JSON.stringify([defect({ verified: "assumed: the fix is not revertable" })]))).toHaveLength(1);
+  });
+
   test.each(["id", "defect", "fixedBy"] as const)("refuses a blank %s", (key) => {
     expect(() => parseManifest(JSON.stringify([defect({ [key]: "  " })]))).toThrow(new RegExp(key));
   });
@@ -80,16 +95,36 @@ describe("sourceDeclaresTest", () => {
     expect(sourceDeclaresTest("test(`does the thing`, () => {})", "does the thing")).toBe(true);
   });
 
-  test("finds a name on the line after the open paren, and behind a modifier", () => {
-    expect(
-      sourceDeclaresTest(`test.skipIf(!x)(\n  "does the thing",\n () => {})`, "does the thing"),
-    ).toBe(true);
-    expect(sourceDeclaresTest(`test.only("does the thing", () => {})`, "does the thing")).toBe(true);
+  test("finds a name on the line after the open paren", () => {
+    expect(sourceDeclaresTest(`test(\n  "does the thing",\n () => {})`, "does the thing")).toBe(true);
   });
+
+  // Each modifier can leave a pinned test passing or unrun without checking its fix. `.failing`
+  // reports a test whose body throws as passing, so a regression parked there would read CAUGHT.
+  test.each(["failing", "skip", "todo", "only", "skipIf(!x)", "if(x)", "todoIf(x)", "each([1])"])(
+    "a pin behind the .%s modifier is not a declared test",
+    (modifier) => {
+      expect(sourceDeclaresTest(`test.${modifier}("does the thing", () => {})`, "does the thing")).toBe(false);
+    },
+  );
 
   test("a name that only appears in a comment or an assertion is not a declared test", () => {
     expect(sourceDeclaresTest(`// "does the thing"`, "does the thing")).toBe(false);
     expect(sourceDeclaresTest(`expect(x).toBe("does the thing")`, "does the thing")).toBe(false);
+  });
+
+  test("a test() call inside a line or block comment is not a declared test", () => {
+    expect(sourceDeclaresTest(`// test("does the thing", () => {})`, "does the thing")).toBe(false);
+    expect(sourceDeclaresTest(`/* test("does the thing", () => {}) */`, "does the thing")).toBe(false);
+    expect(sourceDeclaresTest(`/*\n  test("does the thing", () => {})\n*/`, "does the thing")).toBe(false);
+  });
+
+  test("a comment marker inside a string or regex does not hide the real test after it", () => {
+    const url = `const u = "https://x.test/a"; test("does the thing", () => {})`;
+    expect(sourceDeclaresTest(url, "does the thing")).toBe(true);
+    const re = `const r = /a"\\/\/b/; test("does the thing", () => {})`;
+    expect(sourceDeclaresTest(re, "does the thing")).toBe(true);
+    expect(sourceDeclaresTest(`/* c */ test("does the thing", () => {}) // tail`, "does the thing")).toBe(true);
   });
 
   test("a longer name does not stand in for a shorter one", () => {
@@ -202,6 +237,51 @@ describe("judgeDefect", () => {
   test("a longer title ending in the pinned one does not stand in for it", () => {
     const xml = junit(passed("it also does the thing", "s"));
     expect(judgeDefect(defect(), { fileExists, declares, outcomes: parseJunit(xml) }).caught).toBe(false);
+  });
+});
+
+describe("renderReport", () => {
+  const verdict = (over: Partial<Verdict> = {}): Verdict => ({
+    id: "d1",
+    defect: "one line",
+    fixedBy: "abc1234",
+    verified: "ablated",
+    caught: true,
+    reasons: [],
+    ...over,
+  });
+
+  test("a static report never says a defect is caught, and does not claim they stay caught", () => {
+    const { text, code } = renderReport([verdict(), verdict({ id: "d2" })], "static");
+    expect(text).not.toMatch(/caught|stay/i);
+    expect(text).toContain("RESOLVES");
+    expect(text).toContain("No test ran");
+    expect(code).toBe(0);
+  });
+
+  test("a static report names a pin that does not resolve and exits 1", () => {
+    const { text, code } = renderReport([verdict({ id: "gone", caught: false, reasons: ["file not found: x"] })], "static");
+    expect(text).toContain("UNRESOLVED");
+    expect(text).toContain("UNRESOLVED: gone");
+    expect(code).toBe(1);
+  });
+
+  test("a full report tags an assumed catch apart from an ablated one and counts both", () => {
+    const { text, code } = renderReport(
+      [verdict(), verdict({ id: "d2", verified: "assumed: not reverted" })],
+      "run",
+    );
+    expect(text).toMatch(/CAUGHT\s+\[ablated\]\s+d1/);
+    expect(text).toMatch(/CAUGHT\s+\[assumed\]\s+d2/);
+    expect(text).toContain("2 of 2 known defects caught (every pinned test run): 1 ablated, 1 assumed.");
+    expect(code).toBe(0);
+  });
+
+  test("a full report prints no verified tag on a defect that was not caught", () => {
+    const { text, code } = renderReport([verdict({ caught: false, reasons: ["failed: x"] })], "run");
+    expect(text).toMatch(/NOT CAUGHT\s+d1/);
+    expect(text).not.toContain("[ablated]");
+    expect(code).toBe(1);
   });
 });
 

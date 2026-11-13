@@ -1,17 +1,18 @@
 // Regression net runner (issue #96): `bun run regression`.
 //
 //   bun test/regression/run.ts            run every pinned test, report each defect caught or not
-//   bun test/regression/run.ts --static   only check that every pinned file and test name exists
+//   bun test/regression/run.ts --static   only check that every pinned file and test name resolves, runs no test
 //   bun test/regression/run.ts --only ID  restrict to the named defect ids (repeatable)
 //
-// Exit 0 when every defect is caught. Exit 1 when any is not caught, or a pinned file or test name
-// no longer exists. Exit 2 for a manifest that cannot be read or an unknown option or id.
+// Exit 0 when every defect is caught (--static: every pin resolves). Exit 1 when any is not, or a
+// pinned file or test name no longer exists. Exit 2 for a manifest that cannot be read or an unknown
+// option or id.
 
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseManifest, runNet, sourceDeclaresTest, testFilterPattern, type Defect, type Verdict } from "./net";
+import { parseManifest, renderReport, runNet, sourceDeclaresTest, testFilterPattern, type Defect, type Verdict } from "./net";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..", "..");
@@ -51,24 +52,8 @@ function staticVerdicts(manifest: Defect[]): Verdict[] {
       }
       if (!sourceDeclaresTest(source, name)) reasons.push(`no test named "${name}" in ${file}`);
     }
-    return { id: d.id, defect: d.defect, fixedBy: d.fixedBy, caught: reasons.length === 0, reasons };
+    return { id: d.id, defect: d.defect, fixedBy: d.fixedBy, verified: d.verified, caught: reasons.length === 0, reasons };
   });
-}
-
-function report(verdicts: Verdict[], mode: string): number {
-  for (const v of verdicts) {
-    console.log(`${v.caught ? "CAUGHT    " : "NOT CAUGHT"}  ${v.id}  (${v.fixedBy})  ${v.defect}`);
-    for (const reason of v.reasons) console.log(`            - ${reason}`);
-  }
-  const missed = verdicts.filter((v) => !v.caught);
-  console.log("");
-  console.log(`${verdicts.length - missed.length} of ${verdicts.length} known defects caught (${mode}).`);
-  if (missed.length > 0) {
-    console.log(`NOT CAUGHT: ${missed.map((v) => v.id).join(", ")}`);
-    console.log("A harness change stopped catching a defect it used to catch, or a pinned test was renamed or removed.");
-  }
-  console.log("Green means these known defects stay caught. It does not mean the harness is sound.");
-  return missed.length === 0 ? 0 : 1;
 }
 
 async function main(): Promise<number> {
@@ -90,9 +75,10 @@ async function main(): Promise<number> {
   for (const id of only) if (!manifest.some((d) => d.id === id)) usage(`unknown defect id: ${id}`);
   if (only.length > 0) manifest = manifest.filter((d) => only.includes(d.id));
 
-  if (staticOnly) return report(staticVerdicts(manifest), "static check, no tests run");
-  const verdicts = await runNet({ manifest, root: ROOT, runBun: bunFile });
-  return report(verdicts, "every pinned test run");
+  const verdicts = staticOnly ? staticVerdicts(manifest) : await runNet({ manifest, root: ROOT, runBun: bunFile });
+  const { text, code } = renderReport(verdicts, staticOnly ? "static" : "run");
+  console.log(text);
+  return code;
 }
 
 process.exit(await main());

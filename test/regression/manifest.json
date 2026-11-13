@@ -3,6 +3,7 @@
     "id": "identity-git-replace",
     "defect": "a `git replace` ref pointing a pushed commit at a clean stand-in laundered the real commit past the pre-push scan",
     "fixedBy": "5cad0a3",
+    "verified": "assumed: the fix was not reverted to show this pinned test fails",
     "tests": [
       {
         "file": "test/identity-gate.test.ts",
@@ -14,6 +15,7 @@
     "id": "identity-force-push-unfetched-tip",
     "defect": "a force push over a remote tip this clone never fetched made every range check silently scan nothing",
     "fixedBy": "5cad0a3",
+    "verified": "assumed: the fix was not reverted to show this pinned test fails",
     "tests": [
       {
         "file": "test/identity-gate.test.ts",
@@ -25,6 +27,7 @@
     "id": "identity-stray-tracking-ref",
     "defect": "a stray tracking ref under an unrelated remote name emptied the new-branch scan",
     "fixedBy": "5cad0a3",
+    "verified": "assumed: the fix was not reverted to show this pinned test fails",
     "tests": [
       {
         "file": "test/identity-gate.test.ts",
@@ -36,6 +39,7 @@
     "id": "identity-leading-nul",
     "defect": "a leading NUL byte made git treat a text file as binary and hid identifying content from the content scan, at commit and at push",
     "fixedBy": "5cad0a3",
+    "verified": "assumed: the fix was not reverted to show this pinned test fails",
     "tests": [
       {
         "file": "test/identity-gate.test.ts",
@@ -51,6 +55,7 @@
     "id": "identity-diff-attribute",
     "defect": "a -diff attribute, tracked or in the untracked info/attributes file, hid a file's content from the scan",
     "fixedBy": "5cad0a3",
+    "verified": "assumed: the fix was not reverted to show this pinned test fails",
     "tests": [
       {
         "file": "test/identity-gate.test.ts",
@@ -66,6 +71,7 @@
     "id": "identity-big-file-threshold",
     "defect": "a shrunk core.bigFileThreshold made git treat a file as binary and hid its content from the scan",
     "fixedBy": "5cad0a3",
+    "verified": "assumed: the fix was not reverted to show this pinned test fails",
     "tests": [
       {
         "file": "test/identity-gate.test.ts",
@@ -77,6 +83,7 @@
     "id": "identity-typechange",
     "defect": "a typechange (symlink to regular file) escaped the scan's --diff-filter, at commit and at push",
     "fixedBy": "5cad0a3",
+    "verified": "assumed: the fix was not reverted to show this pinned test fails",
     "tests": [
       {
         "file": "test/identity-gate.test.ts",
@@ -92,6 +99,7 @@
     "id": "identity-bracket-filename",
     "defect": "a bracket in one staged filename made the binary check answer for a different file",
     "fixedBy": "5cad0a3",
+    "verified": "assumed: the fix was not reverted to show this pinned test fails",
     "tests": [
       {
         "file": "test/identity-gate.test.ts",
@@ -103,6 +111,7 @@
     "id": "identity-empty-identity-file",
     "defect": "an identity file declaring no names and no emails built a pattern from the environment alone, passed its own canary and allowed a staged name",
     "fixedBy": "cbd822a",
+    "verified": "assumed: the fix was not reverted to show this pinned test fails",
     "tests": [
       {
         "file": "test/identity-gate.test.ts",
@@ -114,6 +123,7 @@
     "id": "identity-no-names-key",
     "defect": "an identity file with no names key was accepted when emails were declared (#91)",
     "fixedBy": "aacb48a",
+    "verified": "assumed: the fix was not reverted to show this pinned test fails",
     "tests": [
       {
         "file": "test/identity-gate.test.ts",
@@ -125,6 +135,7 @@
     "id": "identity-utf16-file",
     "defect": "a UTF-16 identity file was read as UTF-8 and loaded with a broken arm, so the declared name was never matched (#91)",
     "fixedBy": "406711c",
+    "verified": "assumed: the fix was not reverted to show this pinned test fails",
     "tests": [
       {
         "file": "test/identity-gate.test.ts",
@@ -136,6 +147,7 @@
     "id": "identity-invalid-utf8-file",
     "defect": "a Latin-1 identity file declaring a non-ASCII name loaded, so the same name staged as UTF-8 slipped through (#206)",
     "fixedBy": "0b1acf4",
+    "verified": "assumed: the fix was not reverted to show this pinned test fails",
     "tests": [
       {
         "file": "test/identity-gate.test.ts",
@@ -147,6 +159,7 @@
     "id": "identity-escape-sed-crash",
     "defect": "a crashed escape sed left its partial output in identity_escaped and the gate built a pattern from it (#172)",
     "fixedBy": "0e835e7",
+    "verified": "assumed: the fix was not reverted to show this pinned test fails",
     "tests": [
       {
         "file": "test/identity-gate.test.ts",
@@ -158,6 +171,7 @@
     "id": "pre-commit-unscannable-path",
     "defect": "a staged path git quotes could not be read by the content channels and was passed as clean",
     "fixedBy": "7b0ef41",
+    "verified": "assumed: the fix was not reverted to show this pinned test fails",
     "tests": [
       {
         "file": "test/pre-commit.test.ts",
@@ -169,6 +183,7 @@
     "id": "doc-steward-bash-grant",
     "defect": "the doc-steward agent held Bash and treated pre-edit script output as evidence (#86)",
     "fixedBy": "6676801",
+    "verified": "ablated",
     "tests": [
       {
         "file": "test/doc-steward-tools.test.ts",
@@ -180,6 +195,7 @@
     "id": "pr-review-linux-pester-required",
     "defect": "the Linux Pester job was missing from the required checks, so a PR could merge without it (#152)",
     "fixedBy": "e57f59b",
+    "verified": "assumed: the fix was not reverted to show this pinned test fails",
     "tests": [
       {
         "file": "test/pr-review-verdict.test.ts",
@@ -191,6 +207,7 @@
     "id": "pr-review-cancelled-sibling-run",
     "defect": "a cancelled sibling run beside a success hid a failed run, or blocked a pass (#148)",
     "fixedBy": "c8d393d",
+    "verified": "assumed: the fix was not reverted to show this pinned test fails",
     "tests": [
       {
         "file": "test/pr-review-verdict.test.ts",
@@ -202,6 +219,7 @@
     "id": "pr-review-whole-file-cap",
     "defect": "a per-file cap below installer size dropped real files from the review as omitted (#156)",
     "fixedBy": "7246ee1",
+    "verified": "assumed: the fix was not reverted to show this pinned test fails",
     "tests": [
       {
         "file": "test/pr-review-local-source.test.ts",
@@ -213,6 +231,7 @@
     "id": "write-scope-scratch-ancestor",
     "defect": "a project checked out under a scratch-named directory put every file in write scope",
     "fixedBy": "837ac21",
+    "verified": "assumed: the fix was not reverted to show this pinned test fails",
     "tests": [
       {
         "file": "test/agent-write-scope.test.ts",
@@ -224,6 +243,7 @@
     "id": "worktree-gate-tools-key-case",
     "defect": "the worktree gate matched the agent tools key case-insensitively where Claude Code reads it case-sensitively, so a cased line hid or replaced the real grant",
     "fixedBy": "eed7a7d",
+    "verified": "assumed: the fix was not reverted to show this pinned test fails",
     "tests": [
       {
         "file": "test/agent-worktree-gate.test.ts",
@@ -235,6 +255,7 @@
     "id": "model-currency-dotted-version",
     "defect": "a dotted model version pin was truncated at the dot and read as the wrong version",
     "fixedBy": "0990c11",
+    "verified": "assumed: the fix was not reverted to show this pinned test fails",
     "tests": [
       {
         "file": "test/model-currency.test.ts",
@@ -246,6 +267,7 @@
     "id": "pr-review-builtin-plugin-relaunch",
     "defect": "the reviewer accepted a run with CLI built-in plugins learned only at init instead of relaunching without them",
     "fixedBy": "66b340e",
+    "verified": "assumed: the fix was not reverted to show this pinned test fails",
     "tests": [
       {
         "file": "test/pr-review-runner.test.ts",
@@ -257,6 +279,7 @@
     "id": "packs-identity-string-in-payload",
     "defect": "the pack generator wrote a payload containing identifying strings with no gate",
     "fixedBy": "cdece42",
+    "verified": "assumed: the fix was not reverted to show this pinned test fails",
     "tests": [
       {
         "file": "test/pack-generator.test.ts",
@@ -268,6 +291,7 @@
     "id": "pr-review-parent-checkout-cwd",
     "defect": "the reviewer CLI could run from a directory whose bunfig.toml bun would autoload, executing repository code with the App key (#120)",
     "fixedBy": "b108603",
+    "verified": "assumed: the fix was not reverted to show this pinned test fails",
     "tests": [
       {
         "file": "test/pr-review-cli.test.ts",
@@ -279,6 +303,7 @@
     "id": "security-controls-unbackticked-path",
     "defect": "a register row whose path cell lacked backticks was silently left unchecked (#173)",
     "fixedBy": "65f91e1",
+    "verified": "assumed: the fix was not reverted to show this pinned test fails",
     "tests": [
       {
         "file": "test/security-controls.test.ts",
