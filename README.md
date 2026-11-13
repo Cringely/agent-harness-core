@@ -16,7 +16,7 @@ The rule that keeps these from drifting into a mess: core is upstream. Projects 
 | `core/claude/hooks/` | Worktree gate, write-scope gate, model-tier gate, session guardrails, drift check, wave-close handoff, prose-lint-on-write. `core/claude/templates/settings.hooks.json` is the list of Claude Code hooks that actually gets wired. This row goes stale, that file does not. The three git hooks in the same directory, `pre-commit`, `pre-push` and `commit-msg`, are wired a second way, through `core.hooksPath` (see Install) |
 | `core/claude/templates/` | `guardrails.template.md`, a settings fragment, a scratch `.gitignore` and `manifest-local.gitignore`, installed as `.claude/.gitignore` to keep the per-machine sidecar out of a commit, and `project-settings.template.md`, rendered into `.claude/rules/harness/project-settings.md`, all of which the installer applies on every run, a ceremony ledger template it applies only under `-IncludeCeremonies`, plus three reference templates it leaves in core: agent-def authoring, the reviewer-lockout protocol, and the untrusted-content boundary block |
 | `core/claude/rules/` | Layer rule files and layers.json, which assigns each file to the code, documents or physical layer and defines the project settings. The installer copies the layers a project records into its .claude/rules/harness/ |
-| `core/claude/deps.json` | The dependencies the kernel and each layer rely on, tools and Claude Code plugins, each with its severity per layer, a probe, and a pinned install where one exists. Both installers read it on every run (see Install) |
+| `core/claude/deps.json` | The dependencies the kernel and each layer rely on, tools and Claude Code plugins, each with its severity per layer, a probe, and a pinned install where one exists (git on Linux is installed unpinned). Both installers read it on every run (see Install) |
 | `patterns/` | The design docs behind the above, listed in [`patterns/INDEX.md`](patterns/INDEX.md) |
 | `install/` | The installer that copies core into a project's `.claude/`. The `Export-Account.ps1` and `Install-Account.ps1` pair that carries the account layer between machines (see below), with `AccountShared.ps1`, the library both dot-source for the payload tables they have to agree on. `Deps.ps1`, the dependency preflight both installers dot-source. `Restore-ClaudeProject.ps1` for moving a project, its session history and the `~/.claude` global layer to another machine. `Start-CappedCopilot.ps1`, which launches Copilot CLI with a per-session credit cap. And the Pester suites beside them |
 | `tools/pr-review/` | This repository's own pull request reviewer, run by hand: a tool-less model reviews the diff, code computes the verdict, and a GitHub App posts it (#120). Outside the paths `.github/CODEOWNERS` assigns, its approval is what normally supplies the one approving review `master` requires before a merge. On an owned path the operator merges through the recorded administrator bypass alongside the App approval (see Testing and merging). Not part of core, and nothing installs it. [`tools/pr-review/README.md`](tools/pr-review/README.md) covers setup and commands |
@@ -37,18 +37,22 @@ Skills already global in `~/.claude` (prose review, prose linting, council revie
 ## Install
 
 Prerequisites: PowerShell 7 (`pwsh`). Every other tool a layer relies on is declared in
-`core/claude/deps.json`, with a probe, a minimum version and one pinned install command per platform:
-winget on Windows, apt or npm on Linux, each at an exact version. The installer probes them before
-its first write, and a missing hard dependency refuses the install and prints its pinned command.
+`core/claude/deps.json`, with a probe, a minimum version and one install command per platform:
+winget on Windows, apt or npm on Linux, each at an exact version (git on Linux is the one named
+exception, below). The installer probes them before
+its first write, and a missing hard dependency refuses the install and prints its install command.
 The hard ones are `bun`, since every TypeScript gate is registered as a bare `bun` command and fails
 open without it, and Git Bash on Windows, which Claude Code runs the three shell hooks through. Git
 Bash is found under the Git for Windows install, never from PATH, where a bare `bash` can be the WSL
-launcher. The code layer adds `git` as a hard dependency. It has no pinned Linux package, because
-the only Ubuntu build old enough for the 30-day rule is unpatched, so on Linux that refusal tells
-you to install git by hand. A missing optional one, such as `vale` for
+launcher. The code layer adds `git` as a hard dependency. On Linux its install is `sudo apt-get
+install -y git` with no version pin, a deliberate exception to the exact-version rule (operator
+ruling 2026-11-12, #310). Ubuntu's archive keeps only the current patched build, so an exact pin
+either fails once that build is superseded or forces an unpatched one. The manifest marks this with
+an `unpinned` reason in place of `version`, which the validator accepts only on an apt install. A
+missing optional one, such as `vale` for
 the prose-lint hook, `gh` or the `claude` CLI, gets a warning with its command and the install
 carries on. Nothing is installed unless you pass `-InstallDeps`, which runs each missing
-dependency's pinned command and probes it again. `-WhatIf` runs the probes, prints each command
+dependency's install command and probes it again. `-WhatIf` runs the probes, prints each command
 `-InstallDeps` would run, and stops before writing anything.
 
 Claude Code plugins are declared in the same file. This installer handles the project-scope ones a
@@ -439,8 +443,9 @@ source-machine path. Prerequisites are `pwsh` 7 and git. The script runs the pro
 preflight against the kernel entries in `core/claude/deps.json`. `bun`, and Git Bash on Windows, are
 hard and refuse the install before anything is copied. `git`, `vale`, `python3`, `npm`, `node`,
 `uvx`, `ccstatusline`, `op`, `bash` on Linux and, on a Linux box with no `npm`, `jq` each drive one
-feature that fails open without it, so each gets a warning naming its pinned command, or saying to
-install it by hand where none is pinned. Whether `npm` is there for `jq`'s purpose is the answer
+feature that fails open without it, so each gets a warning naming its install command (pinned, except git on Linux, which installs
+unpinned through apt because the archive keeps only the current patched build), or saying to
+install it by hand where it has no install command. Whether `npm` is there for `jq`'s purpose is the answer
 `-NpmGlobal` or `npm root -g` gives, the same one that decides where the statusline points. `-InstallDeps` and `-WhatIf` work as
 they do for the project installer. The kernel's user-scope plugins, `superpowers` among them, are
 this script's to handle, with their content hashes recorded in `state/harness-plugin-hashes.json`
