@@ -337,11 +337,9 @@ harness cannot turn on for a project that installs it, so enable it on any repos
 ### This repo runs the harness on itself
 
 Core installs into this repo's own `.claude/`, so the hooks and agent definitions it distributes
-also govern work done here. That directory stays gitignored except `.claude/rules/`, which is
-committed so isolated worktree agents load the project rules (#310). Those rule files are copies of
-`core/claude/rules/` and the settings template, and `test/installed-rules-match-core.test.ts` keeps
-them in step by failing when a committed copy differs from what the installer would write. A fresh
-clone has no hooks until you install against the repo itself, which also points `core.hooksPath` at `.claude/hooks`, so the three git
+also govern work done here. That directory is gitignored: committing it would put a second copy
+of `core/claude/` beside its source, and the two drift. A fresh clone has no hooks until you install
+against the repo itself, which also points `core.hooksPath` at `.claude/hooks`, so the three git
 hooks fire on every commit and push here.
 
 ```bash
