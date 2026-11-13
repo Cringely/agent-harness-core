@@ -137,7 +137,8 @@ it too).
 
 ### Obsidian + hooks (documented in the skill; behavior unchanged)
 - PostToolUse `Sync-MemoryToObsidian.ps1` copies `~/.claude/projects/<proj>/memory/*` →
-  `Obsidian Vault/Claude Code/<proj>/Memory/`. **Never write the vault directly.**
+  `Obsidian Vault/Claude Code/<leaf>/Memory/`, `<leaf>` being the last folder of the checkout
+  path, so one project shares one vault folder across machines. **Never write the vault directly.**
 - PreToolUse `Scan-MemorySecrets.ps1` guards writes.
 - Portability and graph view come from the vault.
 
