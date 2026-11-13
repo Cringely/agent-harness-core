@@ -40,6 +40,7 @@ Conditions the spec implies that no spec-listed test exercises, most likely firs
 3. The operator saves the hub config from an editor that writes a UTF-8 byte-order mark or CRLF line endings. Expected: it parses. Pinned in Task 2.
 4. An agent spells an allowed merge with short or `=` flags (`-s`, `--match-head-commit=<sha>`, `-R owner/example`) or a pull request URL. Expected: recognized and judged on the live conditions, not denied as unparseable. Pinned in Task 23.
 5. A head branch name carries `/`, `#` or `+`. Expected: the head-ref pulls filter percent-encodes it, so the single-pull-request rule sees every pull request from that branch. Pinned in Task 10.
+6. The Bash tool's working directory has moved since the session started (`cd` carries between calls), or a merge names a remote other than `origin`. Expected: the merge guard resolves the target from the payload's `cwd` and the named remote, never from the project directory's `origin`. Pinned in Task 24.
 
 ---
 
@@ -66,17 +67,19 @@ The coordinator runs these in a scratch public repository the operator approves,
 | C4 | Re-run a completed run | `created_at` and `run_attempt` before and after, and `GET .../runs/{id}/jobs?filter=all` entries with `run_attempt` and `check_run_url` | Tasks 10 and 11 |
 | C5 | A pull request with 305 changed files, read through `compare/{base}...{head}` with `Accept: application/vnd.github.diff` | Count of `diff --git` headers against the file count | Task 8 fixture `compare-305.json` |
 | C6 | Merge a pull request after its base advanced, once by merge commit and once by squash | `base.sha` on the merged pull request against the base tip at merge time, and GraphQL `baseRefOid` | Task 28 base field |
-| C7 | Edit a review body. Force-push the scratch default branch | GraphQL `PullRequestReview.lastEditedAt` and `userContentEdits.totalCount`, and the `GET /repos/{o}/{r}/activity?activity_type=force_push` entry shape | Task 28 fixtures |
+| C7 | Edit a review body. Force-push the scratch default branch | GraphQL `PullRequestReview.lastEditedAt` and `userContentEdits.totalCount`, the `GET /repos/{o}/{r}/activity?activity_type=force_push` entry shape and its timestamp field, and the retention window GitHub's documentation states for that endpoint, with the page it came from (or that none is stated) | Task 28 fixtures and `ACTIVITY_RETENTION_DAYS` |
 | C8 | With an installation token lacking `administration` and `secrets`, call `GET .../actions/permissions/workflow` and `GET .../actions/secrets` | Status codes | Task 25's enroll token profile |
 
 - [ ] **Step 1:** Run C1 to C8 in order and record each in `live-captures.md` and its fixture.
-- [ ] **Step 2:** Check the fixtures carry no login, email or path: run `sh core/claude/hooks/pre-commit` against the staged files (the repository's identity and personal-term gate). Expected: clean.
-- [ ] **Step 3: Commit**
+- [ ] **Step 2:** Stage the files, then check the fixtures carry no login, email or path by running the repository's identity and personal-term gate over the staged set. The hook reads the index, so staging comes first.
 
 ```bash
 git add tools/pr-review/acceptance/live-captures.md test/fixtures/pr-review-live
-git commit -m "docs(pr-review): live API captures for the stage 1 hub (#146)"
+sh core/claude/hooks/pre-commit
 ```
+
+Expected: exit 0, clean.
+- [ ] **Step 3: Commit** `git commit -m "docs(pr-review): live API captures for the stage 1 hub (#146)"`. The commit's own pre-commit run is the binding gate.
 
 ### Task 2: Hub config schema and loader
 
@@ -86,7 +89,10 @@ git commit -m "docs(pr-review): live API captures for the stage 1 hub (#146)"
 - Modify: `tools/pr-review/repo-policy.ts` (keep the field validators, delete `CORE_POLICY`, the file loader and `resolvePolicy`)
 - Modify: `tools/pr-review/cli.ts` (`--policy` becomes `--config <absolute path>` to a hub config, required with `--repo` for `review` and `snapshot`. `DEFAULT_REPO` becomes a literal used by `premerge` only)
 - Modify: `tools/pr-review/premerge.ts:203-221` (use `checkOutsideCheckout`)
-- Modify: `test/pr-review-repo-policy.test.ts`, `test/pr-review-cli.test.ts`, `test/pr-review-verdict.test.ts`
+- Modify: `tools/pr-review/verdict.ts:172` and `tools/pr-review/repo-policy.ts:36,185` (the `pesterCoverage` reads and writes become `powershellSuiteCoverage` in this task, so the type and every reader change together)
+- Modify: `tools/pr-review/acceptance/offline.ts:29,48-49` (its policy comes from the example config's entry through `parseRepoEntry`, filtered to the historical jobs as today, in place of `CORE_POLICY`)
+- Modify: every test that imports `CORE_POLICY` or spells `pesterCoverage`: `test/pr-review-repo-policy.test.ts`, `test/pr-review-cli.test.ts`, `test/pr-review-verdict.test.ts`, `test/pr-review-github.test.ts:11,291`, `test/pr-review-local-source.test.ts:10,66-138`, `test/pr-review-pipeline.test.ts:31`. Each takes its policy from a shared helper that parses `hub-config.example.json` and returns its one entry.
+- Modify: `docs/decision-log.md` (entries for stage 1 rulings 2 and 5 from the plan report: the guard fields in the hub config, and secret delivery over framed stdin. Decided by the operator when the plan is accepted, drafted by the coordinator)
 
 **Interfaces:**
 - Produces in `types.ts`:
@@ -108,7 +114,7 @@ const mutate = (fn: (c: any) => void) => { const c = example(); fn(c); return pa
 
 test("the example config parses", () => expect(parse(example()).ok).toBe(true));
 test("a leading byte-order mark and CRLF line endings parse", () =>
-  expect(parseHubConfig("﻿" + JSON.stringify(example(), null, 2).replace(/\n/g, "\r\n")).ok).toBe(true));
+  expect(parseHubConfig(String.fromCharCode(0xfeff) + JSON.stringify(example(), null, 2).replace(/\n/g, "\r\n")).ok).toBe(true));
 test.each([
   ["an unknown top-level key", (c: any) => { c.extra = 1 }],
   ["an unknown entry key", (c: any) => { c.repos[0].extra = 1 }],
@@ -140,8 +146,8 @@ test.each(["inside a git checkout", "a symbolic link", "larger than 64 KB"])("lo
 ```
 
 - [ ] **Step 2: Run** `bun test test/pr-review-hub-config.test.ts`. Expected: FAIL, `hub-config` not found.
-- [ ] **Step 3: Implement** the files above. `parseHubConfig` strips one leading U+FEFF before `JSON.parse`. Delete the `CORE_POLICY` tests from `test/pr-review-repo-policy.test.ts`, keep its field-validator tests, and point `test/pr-review-cli.test.ts` at a temp hub config built from the example.
-- [ ] **Step 4: Run** `bun test test/pr-review-hub-config.test.ts test/pr-review-repo-policy.test.ts test/pr-review-cli.test.ts test/pr-review-verdict.test.ts test/pr-review-premerge.test.ts`. Expected: PASS.
+- [ ] **Step 3: Implement** the files above. `parseHubConfig` strips one leading U+FEFF (the byte-order mark, built in the test from its code point, never typed as a literal) before `JSON.parse`. Delete the `CORE_POLICY` tests from `test/pr-review-repo-policy.test.ts`, keep its field-validator tests, and point `test/pr-review-cli.test.ts` at a temp hub config built from the example. Rename `pesterCoverage` to `powershellSuiteCoverage` at every site listed above, same strictness (the rule is skipped only on a literal `false`).
+- [ ] **Step 4: Run** `bun test test/pr-review-*.test.ts`, then `bun test`. Expected: PASS, both. A failure in a file this task did not list is a missed `CORE_POLICY` or `pesterCoverage` consumer: fix it in this task, never in the next.
 - [ ] **Step 5: Commit** `feat(pr-review): hub config schema extending the #318 policy file (#146)` with the files above.
 
 ### Task 3: Token profiles and the read-only phase A token
@@ -371,7 +377,7 @@ test("the 305-file capture's shape is handled as C5 recorded it", () => { /* tes
 - Modify: `tools/pr-review/types.ts` (`PrSnapshot.ciPinProblems: string[]`), `tools/pr-review/github.ts`, `tools/pr-review/local-source.ts`
 
 **Interfaces:**
-- Produces: `parseUses(yamlText: string): string[]` (`Bun.YAML.parse`, every `jobs.*.uses`, `jobs.*.steps[].uses` and, for an `action.yml`, `runs.steps[].uses`, throws on unparseable YAML), `pinProblem(uses: string): string | null` (external `owner/repo[/path]@<40 lowercase hex>` and `docker://<image>@sha256:<64 hex>` pass, a local `./` reference returns null), `localTargets(uses: readonly string[]): string[]` (`./.github/workflows/x.yml` as itself, any other `./dir` as `dir/action.yml`), `collectPinProblems(read: (path: string) => Promise<string | null>, workflowPath: string, maxFiles?: number): Promise<string[]>` (breadth-first over the workflow and every local target, default `maxFiles` 20, a missing local target, unparseable YAML or more files than the cap is a problem).
+- Produces: `parseUses(yamlText: string): string[]` (`Bun.YAML.parse`, every `jobs.*.uses`, `jobs.*.steps[].uses` and, for an action metadata file, `runs.steps[].uses`, plus `runs.image` when `runs.using` is `docker` and the image starts with `docker://`, throws on unparseable YAML), `pinProblem(uses: string): string | null` (external `owner/repo[/path]@<40 lowercase hex>` and `docker://<image>@sha256:<64 hex>` pass, a local `./` reference returns null), `localTargets(uses: readonly string[]): string[]` (`./.github/workflows/x.yml` as itself, any other `./dir` as `dir/action.yml`), `collectPinProblems(read: (path: string) => Promise<string | null>, workflowPath: string, maxFiles?: number): Promise<string[]>` (breadth-first over the workflow and every local target, default `maxFiles` 20. For an action target whose `action.yml` reads null it reads `dir/action.yaml` before calling the target missing, the same lookup GitHub makes. A missing local target, unparseable YAML or more files than the cap is a problem).
 
 The snapshot runs `collectPinProblems` at the base SHA and at the head SHA and prefixes each problem with `base: ` or `head: `. Local composite actions are scanned as well as local reusable workflows: the spec names the workflow and the reusable workflows it calls, and an external tag inside a local action runs in the same required job (recorded as a ruling in the stage 1 report).
 
@@ -386,6 +392,8 @@ test("a full-SHA reference and a digest-pinned image pass", () => {
 });
 test("an unpinned reference inside a local reusable workflow is found", async () => { /* ci.yml uses ./.github/workflows/inner.yml, which uses x/y@v1 */ });
 test("an unpinned reference inside a local composite action is found", async () => { /* uses ./.github/actions/setup, whose action.yml uses x/y@v1 */ });
+test("a local action whose metadata file is action.yaml is read, not reported missing", async () => { /* read returns null for action.yml, text for action.yaml */ });
+test("a local docker action whose runs.image is a tagged docker:// image is unpinned", async () => { /* runs: { using: docker, image: "docker://alpine:3.20" } */ });
 test("a workflow pinned at base and loosened to a tag at head reports a head problem", async () => { /* problems start with "head: " */ });
 test("this repository's own test.yml is fully pinned", async () => {
   const read = (p: string) => Promise.resolve(existsSync(join(REPO_ROOT, p)) ? readFileSync(join(REPO_ROOT, p), "utf8") : null);
@@ -403,7 +411,8 @@ test("unparseable YAML is a problem", async () => { /* read returns "jobs: [" */
 
 **Files:**
 - Create: `tools/pr-review/check-binding.ts`, `test/pr-review-check-binding.test.ts`, `test/pr-review-ci-fixtures.ts` (shared builders)
-- Modify: `tools/pr-review/types.ts:41-46` and `PrSnapshot` (`checkRuns` becomes `ci: CiEvidence`), `tools/pr-review/github.ts:138-166` (replace `fetchCheckRuns`), `tools/pr-review/local-source.ts:24-32` (`syntheticCiEvidence` replaces `syntheticCheckRuns`)
+- Modify: `tools/pr-review/types.ts:41-46` and `PrSnapshot` (`checkRuns` becomes `ci: CiEvidence`), `tools/pr-review/github.ts:138-166` (replace `fetchCheckRuns`) and `:269,289` (its call and the snapshot field), `tools/pr-review/local-source.ts:24-32` (`syntheticCiEvidence` replaces `syntheticCheckRuns`) and `:114`, `tools/pr-review/cli.ts:239` (`summarizeSnapshot` reads `checkRuns`), `tools/pr-review/verdict.ts:192` (`verificationOf`)
+- Modify: every test that builds or reads the old field: `test/pr-review-cli.test.ts:26,165,680`, `test/pr-review-local-source.test.ts:9,119,131-138`, `test/pr-review-pipeline.test.ts:9,52,125`, `test/pr-review-github.test.ts:222,289`, `test/pr-review-prompt.test.ts:33`
 
 **Interfaces:**
 - Produces in `types.ts`:
@@ -491,9 +500,9 @@ test.each(["skipped", "neutral", null])("conclusion %p withholds", (c) => { /* i
 
 **Interfaces:**
 - Consumes: `bindRequiredChecks` (Task 11), `ONLY_SUCCESS_CASES` (Task 10).
-- Produces: `FIXED_FLOOR_PREFIXES = [".github/", ".claude/"]`, `FIXED_FLOOR_FILES = [".gitleaks.toml", ".gitleaksignore"]`, `cannotVouchPaths(changedFiles: readonly string[], policy: RepoPolicy): string[]` (the fixed prefixes and files at the repository root, any path whose last segment is `.gitattributes`, every `projectStandards` and `livingDocs` path, every `cannotVouchAdd` prefix), `computeVerification(input: { ci: CiEvidence, changedFiles: readonly string[], changedFilesComplete: boolean, workflowText: string | null, policy: RepoPolicy, missingLivingDocs: readonly string[], uncoveredDiffPaths: readonly string[], ciPinProblems: readonly string[] }): Verification`. `verificationOf(snapshot, policy)` keeps its signature.
+- Produces: `FIXED_FLOOR_PREFIXES = [".github/", ".claude/"]`, `FIXED_FLOOR_FILES = [".gitleaks.toml", ".gitleaksignore"]`, `cannotVouchPaths(changedFiles: readonly string[], policy: RepoPolicy): string[]` (the fixed prefixes and files at the repository root, any path whose last segment is `.gitattributes`, every `projectStandards` and `livingDocs` path, every `cannotVouchAdd` prefix. Every comparison is case-insensitive: both sides are lowercased with `toLowerCase()` before the prefix, file, segment and configured-path tests, and the returned list keeps the changed file's own spelling. On the Windows and macOS clones agents use, `.CLAUDE/settings.json` lands in the existing `.claude/` directory, so a case variant counts as on the floor. Lowercasing can only add floor hits, never remove one), `computeVerification(input: { ci: CiEvidence, changedFiles: readonly string[], changedFilesComplete: boolean, workflowText: string | null, policy: RepoPolicy, missingLivingDocs: readonly string[], uncoveredDiffPaths: readonly string[], ciPinProblems: readonly string[] }): Verification`. `verificationOf(snapshot, policy)` keeps its signature.
 
-Failed: any `bindRequiredChecks` failure, any CI pin problem. Incomplete: no required checks, any binding incompleteness, an incomplete file listing, any cannot-vouch path, a missing living doc, an uncovered diff path, the workflow absent at base, the Pester coverage rule when `powershellSuiteCoverage !== false` (renamed from `pesterCoverage`, same strictness). `workflowDeclaresName` stays. The `.github/workflows/` and `.github/actions/` check and the scanner-file check at `verdict.ts:152-168` fold into `cannotVouchPaths`.
+Failed: any `bindRequiredChecks` failure, any CI pin problem. Incomplete: no required checks, any binding incompleteness, an incomplete file listing, any cannot-vouch path, a missing living doc, an uncovered diff path, the workflow absent at base, the Pester coverage rule when `powershellSuiteCoverage !== false` (the field Task 2 renamed). `workflowDeclaresName` stays. The `.github/workflows/` and `.github/actions/` check and the scanner-file check at `verdict.ts:152-168` fold into `cannotVouchPaths`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -505,6 +514,8 @@ test.each(ONLY_SUCCESS_CASES)("verification is not passed and the event is not A
 });
 test.each([".github/CODEOWNERS", ".claude/settings.json", ".claude/.harness-manifest.json", "CONTRIBUTING.md", "README.md", "deploy/compose.yaml", "sub/.gitattributes"])(
   "a change to %s cannot be vouched for", (path) => expect(computeVerification(input({ changedFiles: [path], policy: withAdd(["deploy/"]) })).state).toBe("incomplete"));
+test.each([".CLAUDE/settings.json", ".Claude/hooks/x.ts", ".GitHub/workflows/x.yml", ".GITATTRIBUTES", "sub/.GitAttributes", ".Gitleaks.toml", "readme.md", "Deploy/compose.yaml"])(
+  "the case variant %s is on the floor", (path) => expect(cannotVouchPaths([path], withAdd(["deploy/"]))).toEqual([path]));
 test("a rename out of .github/ counts through its previous path", () => { /* changedFiles ["x.yml", ".github/workflows/x.yml"] */ });
 test("CI pin problems fail verification", () => expect(computeVerification(input({ ciPinProblems: ["head: x"] })).state).toBe("failed"));
 test("a missing living doc withholds APPROVE", () => expect(computeVerification(input({ missingLivingDocs: ["README.md"] })).state).toBe("incomplete"));
@@ -578,7 +589,10 @@ test("hubIdentity adds the CLI account email, username and hostname even when th
 });
 test.each(['{"terms":[]}', '{"terms":["a"],"staleIds":["XYZ"]}', '{"terms":["a"],"staleIds":[],"x":1}', '{"terms":[" "],"staleIds":[]}'])("parsePublicScan refuses %s", (raw) =>
   expect(parsePublicScan(raw).ok).toBe(false));
-test("a term split by a zero-width joiner still hits", () => expect(findPublicScanHits("Fix​ture", scan(["Fixture"]))).toEqual(["personal term #1"]));
+test("a term split by a zero-width space (U+200B) still hits", () =>
+  expect(findPublicScanHits("Fix" + String.fromCharCode(0x200b) + "ture", scan(["Fixture"]))).toEqual(["personal term #1"]));
+test("a term split by a zero-width joiner (U+200D) still hits", () =>
+  expect(findPublicScanHits("Fix" + String.fromCharCode(0x200d) + "ture", scan(["Fixture"]))).toEqual(["personal term #1"]));
 test("a stale id prefix hits case-insensitively", () => expect(findPublicScanHits("see ABCDEF1", scan([], ["abcdef1"]))).toEqual(["stale commit id #1"]));
 test("a public repository's review whose body carries a listed term refuses, nothing posted", async () => { /* refusalCode public-scan-hit */ });
 test("a private repository skips the public scan", async () => { /* isPublic false, term in summary, status posted */ });
@@ -692,6 +706,9 @@ test("phaseBReport carries no model-written string", () => {
   expect(Object.keys(report).sort()).toEqual(["code", "computedEvent", "counts", "event", "headSha", "reviewId", "status"]);
 });
 test("appReviewExistsOnHead pages and matches the bot by id, not login", async () => { /* page 2 holds it, login same but id differs on page 1 */ });
+test("phase B never runs the model: phase-b.ts imports nothing from runner.ts but constants, and the phase-b command spawns no claude", async () => {
+  /* source text of phase-b.ts holds no ClaudeCliRunner. The CliIo spawn seam records no command during a phase-b run */
+});
 ```
 
 - [ ] **Step 2: Run** `bun test test/pr-review-phase-b.test.ts test/pr-review-github.test.ts`. Expected: FAIL.
@@ -706,7 +723,7 @@ test("appReviewExistsOnHead pages and matches the bot by id, not login", async (
 
 **Interfaces:**
 - Produces in `frames.ts`: `parseSecretFrames(raw: string, expected: readonly string[]): { ok: true, frames: ReadonlyMap<string, string> } | { ok: false, reason: string }`, `frameNames(config: HubConfig): string[]` (`app-id:<name>` and `app-key:<name>` for each app in `config.apps`, then `identity`, then `public-scan`), `frameRefs(config: HubConfig): Array<{ name: string, ref: string }>`.
-- Produces in `hub.ts`: `interface HubIo { cwd: () => string, stdin: { isTTY: boolean, read: () => Promise<string> }, fetch: typeof fetch, spawn: (cmd: string[], opts: { cwd: string, env: Record<string, string>, stdin: string }) => Promise<{ exitCode: number, stdout: string }>, now: () => Date, toolState: () => { revision: string, dirty: boolean }, checkCli: () => string | null, harnessStandards: () => FileText[] }`, `interface Preflight { keys: ReadonlyMap<string, { appId: string, key: KeyObject }>, identity: { names: string[], emails: string[] }, publicScan: PublicScan, store: HubStore }`, `preflight(config: HubConfig, frames: ReadonlyMap<string, string>, stateDir: string, io: HubIo): Preflight`, `hubMain(argv: string[], io?: HubIo): Promise<number>`.
+- Produces in `hub.ts`: `interface HubIo { cwd: () => string, stdin: { isTTY: boolean, read: () => Promise<string> }, fetch: typeof fetch, spawn: (cmd: string[], opts: { cwd: string, env: Record<string, string>, stdin: string }) => Promise<{ exitCode: number, stdout: string }>, now: () => Date, toolState: () => { revision: string, dirty: boolean }, checkCli: () => string | null, harnessStandards: () => FileText[] }`, `interface Preflight { keys: ReadonlyMap<string, { appId: string, key: KeyObject }>, identity: { names: string[], emails: string[] }, publicScan: PublicScan, store: HubStore }`, `preflight(config: HubConfig, frames: ReadonlyMap<string, string>, stateDir: string, io: HubIo): Preflight`, `hubMain(argv: string[], io?: HubIo): Promise<number>`. The real `HubIo.checkCli` runs `claude --version` with `env: allowlistedEnv(process.env)` and a fresh empty working directory, like every other child (Global Constraints).
 - Commands (each refuses first when the working directory is inside a checkout or holds an autoload file, `cli.ts:451`): `refs --config <abs>` prints `<frame name>\t<op reference>` per line and reads no stdin. `init-store --state <abs dir>`. `clear-refusal --state <abs dir> --repo <owner/name> --head <sha40>`. `pass`, `pr`, `guard-config` and `enroll` are filled by Tasks 19, 22 and 25.
 
 Frame format: a line `HUB-FRAME <name>`, the content, a line `HUB-FRAME-END <name>`. Names match `/^[a-z0-9:-]{1,64}$/`. Exactly the expected names, each once, and nothing outside frames but blank lines. The content excludes the newline before the end line. The operator's runner writes these lines around each `op read` it streams in. `preflight` refuses, before any GitHub call, when the tool checkout is not clean at `harness.pin`, a harness standard is missing, the CLI version is wrong, an `app-key` frame is not an RSA PEM (`parsePrivateKey`), an `app-id` frame is not `/^[0-9]{1,12}$/`, the identity frame fails `parseIdentityJson`, the public-scan frame fails `parsePublicScan`, or the store will not open.
@@ -721,6 +738,7 @@ test.each([["tool checkout off pin"], ["dirty checkout"], ["missing harness stan
   ["identity frame without names"], ["public-scan frame with no terms"], ["store missing"]])("preflight refuses on %s with no GitHub call", async () =>
   expect(fetchSpy.calls).toBe(0));
 test("hub commands refuse inside a checkout", async () => { /* io.cwd returns REPO_ROOT */ });
+test("the real checkCli spawns claude --version with the allowlisted environment", async () => { /* spawn seam: env holds no OP_SERVICE_ACCOUNT_TOKEN set in the test */ });
 ```
 
 - [ ] **Step 2: Run** `bun test test/pr-review-frames.test.ts test/pr-review-hub.test.ts`. Expected: FAIL.
@@ -741,7 +759,7 @@ test("hub commands refuse inside a checkout", async () => { /* io.cwd returns RE
 - Produces in `github.ts`: `class CandidateReader { constructor(options: { repo: string, minter: TokenMinter, fetchImpl?: typeof fetch }), listOpenPulls(defaultBranch: string): Promise<number[]>, facts(pr: number, policy: RepoPolicy, botUserId: number): Promise<Omit<CandidateFacts, "recordedRefusal" | "capReached">> }`.
 - Commands: `pass --config <abs> --state <abs dir>` and `pr --config <abs> --state <abs dir> --repo <owner/name> --pr <n> [--expect-head <sha40>]`, frames on stdin. Each prints one `HubLine` per pull request. Exit 0 when every line is posted or skipped, 2 when any is refused, 1 on any error.
 
-Per candidate, strictly one at a time: `store.reserveModelRun(repo, policy.dailyModelRuns)`, mint a `read` token, spawn phase A (`[process.execPath, <REPO_ROOT>/tools/pr-review/cli.ts, "phase-a", ...]`, cwd a new empty directory under `<state>/runs/<UTC stamp>-<random>/`, `env: allowlistedEnv(process.env)`, stdin the `ChildInput` JSON with `publicScan: null`), validate its stdout, mint a `post` token, spawn phase B the same way with `publicScan` set, parse its `PhaseBReport`, record a `DeterministicRefusalCode` in the store, print the line. Child stderr goes to a log file in the run directory and never to stdout. `pass` walks `config.repos` in order: a repository whose mint fails prints `{ status: "error", code: "installation" }` and the pass continues. `pr` with `--expect-head` that differs from the live head prints a refused line with code `"expect-head"` before phase A. A child that exits non-zero or prints anything but its schema gives `{ status: "error", code: "phase-a-failed" }` or `"phase-b-failed"`.
+Per candidate, strictly one at a time: `store.reserveModelRun(repo, policy.dailyModelRuns)`, mint a `read` token, spawn phase A (`[process.execPath, <REPO_ROOT>/tools/pr-review/cli.ts, "phase-a", ...]`, cwd a new empty directory under `<state>/runs/<UTC stamp>-<random>/`, `env: allowlistedEnv(process.env)`, stdin the `ChildInput` JSON with `publicScan: null`), validate its stdout, mint a `post` token, spawn phase B the same way with `publicScan` set, parse its `PhaseBReport`, record a `DeterministicRefusalCode` in the store, print the line. Child stderr goes to a log file in the run directory and never to stdout. `CandidateReader` always mints with the `read` profile. `pass` walks `config.repos` in order. A repository whose installation cannot be read, or whose mint refuses at the App or installation check (`repository_selection` not `selected`, a permission outside the allowlist), prints `{ status: "error", code: "installation" }` and stops the pass with exit 1, reviewing no later repository, as the spec's failure table requires for an unreadable installation (spec "Enumeration" row). `pr` runs the same candidate checks as `pass`: it reads `CandidateReader.facts` on a `read` token, consults the store and calls `decideCandidate` before reserving a model run, and a skip prints a `skipped` line with its code and spawns nothing. `pr` with `--expect-head` that differs from the live head prints a refused line with code `"expect-head"` before phase A. A child that exits non-zero or prints anything but its schema gives `{ status: "error", code: "phase-a-failed" }` or `"phase-b-failed"`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -756,7 +774,9 @@ test("phase A gets a read-profile token, phase B a post-profile token, and neith
 test("children get no OP_SERVICE_ACCOUNT_TOKEN or GH_TOKEN", async () => { /* process.env set in test, spawn env inspected */ });
 test("a deterministic refusal from phase B is recorded and the next pass skips that head", async () => { /* second pass line code recorded-refusal */ });
 test("with dailyModelRuns 1 the second candidate is skipped daily-cap", async () => {});
-test("a repository whose installation cannot be read is reported and the next one still runs", async () => {});
+test("a repository whose installation cannot be read is reported and the pass stops with exit 1", async () => { /* the second repository is never read */ });
+test.each([["draft"], ["ci-failed"]])("pr mode skips a %s pull request and spawns nothing", async (code) => { /* line status skipped, spawnLog empty */ });
+test("CandidateReader mints with the read profile", async () => { /* mintProfiles ["read"] before any spawn */ });
 test("a phase B report with an extra field is an error, and nothing from it is printed", async () => { /* stdout lines parsed, keys exact */ });
 test("a model-written finding title never reaches stdout", async () => {});
 test("pr with a differing --expect-head refuses before phase A", async () => { /* spawnLog empty */ });
@@ -777,7 +797,7 @@ test("pr with a differing --expect-head refuses before phase A", async () => { /
 **Interfaces:**
 - Produces: `cli.ts` commands `phase-a`, `phase-b`, `premerge` and (from Tasks 25 and 27) `reader` and `upload`. `hub.ts` is the only process that reads an App key.
 
-`tools/pr-review/README.md` documents: the hub commands and their exit codes, the frame protocol, the hub config (pointing at `hub-config.example.json`), the two phases and what each holds, the store and `clear-refusal`, the I7 output, and the stage 1 accepted residual in one sentence with a pointer to the spec. The #318 "Other repositories" section goes. `pipeline.ts`'s `runReview` stays as phase B's core and the offline acceptance path.
+`tools/pr-review/README.md` documents: the hub commands and their exit codes, the frame protocol, the hub config (pointing at `hub-config.example.json`), the two phases and what each holds, the store and `clear-refusal`, recovery from a crash that left `hub-store.lock` behind (confirm no hub process is running, delete the lock file, run again), the I7 output, and the stage 1 accepted residual in one sentence with a pointer to the spec. The #318 "Other repositories" section goes. `pipeline.ts`'s `runReview` stays as phase B's core and the offline acceptance path.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -796,7 +816,7 @@ test("help lists phase-a, phase-b and premerge, and no key-holding command", asy
 
 **Files:** none in this repository. The operator's runner directory changes outside it, and nothing from that change enters this repository.
 
-- [ ] **Step 0:** The operator adds `issues: read` and `actions: read` to the App and accepts them on each installation, in the web UI. Until then every mint refuses (Task 3 requests both). Expected: `hub.ts pr` in Step 4 mints without a 422.
+- [ ] **Step 0:** The operator adds `issues: read` and `actions: read` to the App and accepts them on each installation, in the web UI. Until then every Part A mint fails with a 422 (Task 3 requests both). This opens an outage window: the code running before Part A refuses an App holding `issues` or `actions` (`app-auth.ts:123`, the App allowlist check), and the Part A code cannot mint without them. So the order is: merge Part A, make the App change, then run Steps 1 to 4 straight away. No review posts between the App change and Step 4, and pull requests opened in that window wait for Step 4. Expected: `hub.ts pr` in Step 4 mints without a 422.
 - [ ] **Step 1:** Write the operator-only hub config outside every checkout from `tools/pr-review/hub-config.example.json`, with the real references, this repository's bot user id, `harness.pin` set to the merged Part A commit, and this repository's entry at `mode: "comment-only"`. Run `bun <abs>/tools/pr-review/hub.ts refs --config <abs>` from an empty directory. Expected: one line per frame.
 - [ ] **Step 2:** `bun <abs>/tools/pr-review/hub.ts init-store --state <abs dir>`. Expected: exit 0.
 - [ ] **Step 3:** Operator runner change, outside this repository: `run.ps1` reads `hub.ts refs`, runs one `op read` per reference through the service account, streams each into the hub's stdin between `HUB-FRAME <name>` and `HUB-FRAME-END <name>` lines, and starts `hub.ts pr ...` or `hub.ts pass ...` from an empty working directory. The fan-out path retires. The runner's own tests change with it.
@@ -812,13 +832,16 @@ test("help lists phase-a, phase-b and premerge, and no key-holding command", asy
 **Files:**
 - Create: `core/claude/hooks/merge-guard-decide.ts`, `test/merge-guard-decide.test.ts`
 - Modify: `tools/pr-review/hub.ts` (`guard-config` command)
+- Modify: `docs/decision-log.md` (entries for stage 1 rulings 6 and 7 from the plan report, and the guard rulings in its "Review fixes 2026-11-13" section: targets from the payload directory, MCP tool coverage, the hook deadline. Review B4's ruling is logged when the operator makes it)
 - Test: `test/pr-review-hub.test.ts`
 
 **Interfaces:**
 - Produces in `merge-guard-decide.ts`: `GUARD_FILE_NAME = "merge-guard.local.json"`, `guardFilePath(home?: string): string` (`join(home ?? homedir(), ".claude", GUARD_FILE_NAME)`), `type GuardSource = { state: "absent" } | { state: "broken" } | { state: "ok", readAccount: string, repos: ReadonlyMap<string, { enforce: boolean, botUserId: number }> }` (keys lowercased), `loadGuardSource(path: string, fs?: { lstatSync, readFileSync }): GuardSource`, `type ManifestField = { state: "missing" } | { state: "present", value: unknown } | { state: "unreadable" }`, `manifestFieldOf(raw: string | null): ManifestField`, `decideEnforcement(source: GuardSource, field: ManifestField, repo: string | null): "enforce" | "skip" | "deny"`.
 - Command: `hub.ts guard-config --config <abs> [--out <abs>]` writes `{ "version": 1, "readAccount": <guardReadAccount>, "repos": [{ "repo", "enforce": mergeGuard === "on", "botUserId": apps[app].botUserId }] }` atomically, refuses an output path inside a checkout, prints the repository count only.
 
-`loadGuardSource`: `lstat` ENOENT is absent. Any other error, a symbolic link, a non-file, more than 65536 bytes, invalid JSON, an unknown or missing key, `enforce` not a boolean, `botUserId` not a positive integer, or a duplicate repository is broken. `manifestFieldOf`: `null` (no manifest) is missing, invalid JSON is unreadable, an own `enrolled` key is present with its value. `decideEnforcement` follows the spec's enforcement list exactly. A null `repo` (the target could not be resolved) gives `skip` when the source is absent and `deny` otherwise.
+`loadGuardSource`: `lstat` ENOENT is absent. Any other error, a symbolic link, a non-file, more than 65536 bytes, invalid JSON, an unknown or missing key, `enforce` not a boolean, `botUserId` not a positive integer, or a duplicate repository is broken. `manifestFieldOf`: `null` (no manifest) is missing, invalid JSON is unreadable, an own `enrolled` key is present with its value. `decideEnforcement` follows the spec's enforcement list exactly. A null `repo` (the target could not be resolved, Task 24) gives `skip` when the source is absent and `deny` otherwise.
+
+> **OPERATOR RULING NEEDED (review B4, part 1 of 2).** The null-target rule above is left as written. With the source absent it skips, which keeps outsiders able to push (spec line 220) but means a repository whose manifest carries the field is not enforced when its target cannot be resolved (spec line 216 says any field denies when the source is absent). It belongs to the same ruling as the API-read dependency in Task 24, where the options are listed.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -832,6 +855,9 @@ test.each([
   ["list not enforcing, no field", OFF, MISSING, "skip"],
   ["unlisted, no field", ok({}), MISSING, "skip"],
   ["list not enforcing, field false", OFF, present(false), "deny"],
+  ["list not enforcing, field true", OFF, present(true), "deny"],
+  ["unlisted, field true", ok({}), present(true), "deny"],
+  ["unlisted, field false", ok({}), present(false), "deny"],
   ["source absent, field false", ABSENT, present(false), "deny"],
   ["source absent, no field", ABSENT, MISSING, "skip"],
   ["source broken, no field", BROKEN, MISSING, "deny"],
@@ -848,7 +874,7 @@ test("guard-config writes enforce from mergeGuard and the bot id from the app, a
 ```
 
 - [ ] **Step 2: Run** `bun test test/merge-guard-decide.test.ts test/pr-review-hub.test.ts`. Expected: FAIL.
-- [ ] **Step 3: Implement.**
+- [ ] **Step 3: Implement**, and append the decision-log entries named in Files.
 - [ ] **Step 4: Run** the same command. Expected: PASS.
 - [ ] **Step 5: Commit** `feat(hooks): merge guard source and enforcement table (#146)`.
 
@@ -858,29 +884,182 @@ test("guard-config writes enforce from mergeGuard and the bot id from the app, a
 - Create: `core/claude/hooks/merge-guard-parse.ts`, `test/merge-guard-parse.test.ts`
 
 **Interfaces:**
-- Produces: `type MergeForm = { kind: "gh-pr-merge", repo: string | null, pr: number | null, matchHead: string | null, method: "squash" | "merge" | "rebase" | null, auto: boolean, admin: boolean } | { kind: "gh-api-merge", repo: string, pr: number, sha: string | null, method: string | null } | { kind: "gh-graphql-merge" } | { kind: "git-push", remote: string | null, refspecs: string[], all: boolean }`, `recognizeMergeForms(command: string): MergeForm[] | "unparseable"`.
+- Produces:
+  - `type Shell = "bash" | "powershell"`
+  - `parseRepoName(value: string): string | null` (the rules of `parseRepo` at `tools/pr-review/types.ts:214-221`, copied because hooks never import `tools/`, returning `owner/name` or null)
+  - `githubRepoOfUrl(url: string): string | null` (`https://` or `ssh://` with optional user info, or scp-like `user@github.com:`, host `github.com` compared case-insensitively, an optional `.git` and trailing `/` dropped, the rest through `parseRepoName`. Any other host, an SSH host alias included, gives null)
+  - `type PushTarget = { kind: "remote", name: string } | { kind: "url", url: string } | { kind: "unnamed" }`
+  - `type PushRef = { kind: "dest", ref: string, delete: boolean } | { kind: "head" } | { kind: "same-name", src: string } | { kind: "unknown" }`
+  - `type MergeForm = { kind: "gh-pr-merge", cwd: string, repo: string | null, pr: number | null, matchHead: string | null, method: "squash" | "merge" | "rebase" | null, auto: boolean, admin: boolean } | { kind: "gh-api-merge", cwd: string, repo: string, pr: number, sha: string | null, method: string | null } | { kind: "gh-graphql-merge" } | { kind: "git-push", cwd: string, target: PushTarget, refs: PushRef[], all: boolean, noRefspec: boolean } | { kind: "mcp-merge", repo: string | null } | { kind: "mcp-write", repo: string | null, branch: string | null }`
+  - `hasTrigger(text: string): boolean`
+  - `recognizeMergeForms(command: string, shell: Shell, cwd: string): MergeForm[] | "unparseable"`
+  - `recognizeMcpCall(toolName: string, toolInput: unknown): MergeForm[] | "unparseable"`
 
-A command with no trigger (`gh` with `merge`, `mergePullRequest` or `enablePullRequestAutoMerge` anywhere after it, or `git` with `push` after it) returns `[]` without parsing. A triggered command is split into segments on `;`, `&&`, `||`, `|` and newlines (a PowerShell backtick-newline joins lines), then tokenized with single and double quotes. A triggered segment holding `$(`, a bash backtick, `<(`, a `$name` in a value position, `eval`, `iex`, `Invoke-Expression`, an unbalanced quote, or a flag the recognizer does not know returns `"unparseable"`. `gh pr merge` takes `-s/--squash`, `-m/--merge`, `-r/--rebase`, `--auto`, `--admin`, `--match-head-commit <sha>` or `=<sha>`, `-R/--repo <owner/name>` or `=`, `-d/--delete-branch`, `-b/--body`, `-t/--subject`, `-F/--body-file`, `-A/--author-email`, and a positional number or `https://github.com/<owner>/<repo>/pull/<n>` URL (which also sets `repo`). `gh api` takes the path with or without a leading `/`, `-X/--method`, `-f/--raw-field` and `-F/--field` `key=value`, and `--input` is unparseable. A `graphql` call whose text holds either mutation name is `gh-graphql-merge`. `git [-C <dir>] push` takes `--all`, `--mirror`, `--tags`, `-f`, `--force`, `--force-with-lease`, `-u`, `--set-upstream`, `--no-verify`, `-d`, `--delete`, then an optional remote and refspecs.
+The rules below are the whole contract. Each one exists so that the operator's documented command forms parse (security.local.md requires an explicit identity on every gh and git call) and anything the recognizer cannot read for certain is unparseable, which Task 24 denies when the operator-only source exists.
 
+**Trigger.** `hasTrigger` holds when the text, compared case-insensitively, has the word `gh` and either `merge` or `graphql` anywhere, or the word `git` and `push` anywhere, in any order. `merge` also matches `mergePullRequest` and `enablePullRequestAutoMerge`. A word here is `gh` or `git`, optionally followed by `.exe`, with the start or end of the text, whitespace, a quote, a separator, `(`, `/` or a backslash on each side. Order does not matter, so `u=repos/owner/example/pulls/5/merge; gh api -X PUT $u` is triggered. A command with no trigger returns `[]` without parsing.
+
+**Joining and splitting.** Line continuations join first: backslash-newline under bash, backtick-newline under PowerShell. The command then splits into segments on `;`, `&&`, `||`, `|`, a lone `&` and newlines, but only outside quotes and groups. Under bash a group is `$(...)`, `<(...)`, `>(...)`, a subshell `(...)`, a brace group opened by a `{` word, or a backtick pair. Under PowerShell a group is `(...)`, `$(...)`, `@(...)` or a script block `{...}`. Groups nest to any depth. An unbalanced quote or group is unparseable. Each group's text is checked with `hasTrigger`, and a trigger inside any group makes the whole command unparseable. So a merge hidden in a substitution never passes, while `$(gh auth token -u <acct>)` does.
+
+**Tokens.** Under bash, single quotes are literal (a `$` inside is plain text), double quotes keep `$` live, and a backslash outside single quotes escapes one character. Under PowerShell, single quotes are literal with a doubled single quote as an escaped quote, double quotes keep `$` live, and a backtick escapes one character. A token holds an expansion when it carries a `$`, a backtick or a group outside single quotes.
+
+**Triggered segments.** A segment is triggered when `hasTrigger` holds for its own text, and it must parse as one command. Under bash that is any leading `NAME=value` assignments and then the command word. Under PowerShell it is an optional call operator `&` and then the command word. The command word's last path component, lowercased, must be `gh`, `gh.exe`, `git` or `git.exe`. Anything else is unparseable: `bash -c`, `sh`, `pwsh -Command`, `cmd /c`, `env`, `xargs`, `sudo`, `command`, `exec`, `eval`, `iex`, `Invoke-Expression`, `Start-Process`, or an `echo` of the text. A `git` whose subcommand is not `push`, or a `gh` whose command is neither `pr merge` nor `api`, gives no form, so `git commit -m "gh pr merge later"` gives `[]`.
+
+**Target-changing names.** A command that mentions `GH_REPO`, `GH_HOST`, `GIT_DIR`, `GIT_WORK_TREE` or any name starting `GIT_CONFIG`, compared case-insensitively, in any segment and any spelling (an assignment prefix, `export`, `set`, `$env:`), is unparseable. Other leading assignments are allowed and their values may hold expansions, which is what lets `GH_TOKEN=$(gh auth token -u <acct>) gh ...` parse.
+
+**Directory changes.** The effective directory starts at the `cwd` argument. A segment that is `cd`, `chdir`, `pushd`, `Set-Location`, `sl` or `Push-Location` (case-insensitive) with exactly one literal path argument, which PowerShell may name with `-Path` or `-LiteralPath`, moves the effective directory for later segments, resolved with `path.resolve` against the current one. Any other directory change is unparseable: no argument, `-`, a `~`, an expansion, an extra option, `popd` or `Pop-Location`. `git -C <dir>` resolves the same way for its own segment. Each gh and git form carries the effective directory as `cwd`. The recognizer touches no filesystem.
+
+**git push.**
+- Before the subcommand, `git` takes `-C <dir>` and `-c <key>=<value>` (each repeatable) and `--no-pager`. A `-c` key must start with `credential.` or `user.`, and its value may hold anything, so the single-quoted credential helper parses. Any other global option, and any other `-c` key (`remote.origin.pushurl` or `url.<base>.insteadOf`, which move the target), is unparseable.
+- `push` takes `--all`, `--branches`, `--mirror`, `--tags`, `--follow-tags`, `-f`, `--force`, `--force-with-lease` with or without `=<value>`, `--force-if-includes`, `-u`, `--set-upstream`, `--no-verify`, `--verify`, `-d`, `--delete`, `-q`, `--quiet`, `-v`, `--verbose`, `-n`, `--dry-run`, `--atomic`, `--porcelain`, `--progress`, `--no-progress`, `-o <option>` and `--push-option=<option>`. Any other option is unparseable, `--repo`, `--receive-pack` and `--prune` included.
+- The first positional is the remote. A URL (`https://`, `ssh://`, or scp-like `user@host:path`) gives `{ kind: "url" }`, a name matching `/^[A-Za-z0-9._-]+$/` gives `{ kind: "remote" }`, and one holding an expansion is unparseable. No positional gives `{ kind: "unnamed" }`.
+- Each later positional is a refspec, and one holding an expansion is unparseable. One leading `+` is dropped. `<src>:<dst>` gives `dest` with `dst`, or `unknown` when `dst` holds `*`. `:<dst>` gives `dest` with `delete: true`, and under `-d` or `--delete` every refspec does. A `<src>` alone gives `head` for `HEAD` or `@`, `same-name` for a name matching `/^[A-Za-z0-9._/-]+$/` that is not 40 hex characters, and `unknown` for anything else (`HEAD~1`, a SHA, a wildcard).
+- `noRefspec` is true when no refspec follows, whether or not a remote does. `all` is true for `--all`, `--branches` or `--mirror`.
+
+**gh pr merge.** Takes `-s`/`--squash`, `-m`/`--merge`, `-r`/`--rebase`, `--auto`, `--admin`, `--match-head-commit <sha>` or `=<sha>`, `-R`/`--repo <value>` or `=<value>`, `-d`/`--delete-branch`, `-b`/`--body`, `-t`/`--subject`, `-F`/`--body-file`, `-A`/`--author-email`, and at most one positional selector. Any other flag is unparseable. `matchHead` must match `/^[0-9a-f]{40}$/`. The `-R` value is `owner/name` or `github.com/owner/name` (host compared case-insensitively) and must pass `parseRepoName`, and any other host is unparseable. The selector is a positive integer matching `/^[1-9][0-9]{0,9}$/`, or `https://github.com/<owner>/<name>/pull/<n>` whose repository passes `parseRepoName` and whose `n` is such an integer. A URL sets `repo` too, and an `-R` naming another repository beside it is unparseable. A branch-name selector, `0`, and a selector, `matchHead` or `-R` value holding an expansion are unparseable. Body, subject, body-file and author values may hold expansions. No selector gives `pr: null`.
+
+**gh api.** Takes `-X`/`--method`, `-f`/`--raw-field`, `-F`/`--field`, `-H`/`--header`, `-q`/`--jq`, `-t`/`--template`, `--silent`, `-i`/`--include`, `--paginate`, and one path. `--input`, `--hostname` and any other option are unparseable. A path holding an expansion, a `{` or `}`, or a `:owner` or `:repo` segment is unparseable, because gh fills those placeholders from its own working directory, which the hook cannot see. So is a full URL. The path, with or without a leading `/`:
+- `repos/<owner>/<name>/pulls/<n>/merge`, with the repository passing `parseRepoName` and `n` a positive integer, gives `gh-api-merge`, with `sha` and `method` from the `sha` and `merge_method` fields. A `sha` that is not 40 lowercase hex characters, a field value holding an expansion, or an `-F` value starting `@` (read from a file) is unparseable.
+- `graphql` reads the `query` field. A query read from a file or holding an expansion is unparseable. A literal query holding `mergePullRequest` or `enablePullRequestAutoMerge` (case-insensitive) gives `gh-graphql-merge`, and any other literal query gives no form.
+- Any other literal path gives no form.
+
+**MCP calls.** `recognizeMcpCall` reads the part of the tool name after its last `__`.
+- `merge_pull_request` gives `mcp-merge`, with `repo` built from `toolInput.owner` and `toolInput.repo` and checked by `parseRepoName` (null when either is missing, not a string or fails).
+- `push_files`, `create_or_update_file` and `delete_file` give `mcp-write`, with the same `repo` and `branch` from `toolInput.branch` (null when missing or not a string).
+- `start_process` (text in `toolInput.command`) and `interact_with_process` (text in `toolInput.input`) run shell text in a directory and shell the hook cannot see, so text for which `hasTrigger` holds is unparseable, and anything else gives `[]`.
+- Any other tool gives `[]`.
+
+The names and input fields come from the GitHub MCP server's and Desktop Commander's published tool lists. They were not checked live when this plan was revised, because the GitHub MCP server did not connect in that session. Step 0 checks them.
+
+- [ ] **Step 0:** In a session where the GitHub MCP server connects, confirm from its tool list that `merge_pull_request`, `push_files`, `create_or_update_file` and `delete_file` exist with `owner`, `repo` and (for the three writes) `branch` inputs, and that Desktop Commander's `start_process` takes `command` and `interact_with_process` takes `input`. A mismatch stops the task and goes back to the coordinator.
 - [ ] **Step 1: Write the failing tests**
 
 ```ts
 const S = "a".repeat(40);
+const CWD = resolve("/work/proj");
+const BSNL = String.fromCharCode(92, 10); // backslash then newline: a bash continuation
+const BTNL = String.fromCharCode(96, 10); // backtick then newline: a PowerShell continuation
+const bash = (c: string) => recognizeMergeForms(c, "bash", CWD);
+const ps = (c: string) => recognizeMergeForms(c, "powershell", CWD);
+const first = (r: MergeForm[] | "unparseable") => (r as MergeForm[])[0];
+
 test.each([
   [`gh pr merge 12 --squash --match-head-commit ${S}`],
   [`gh pr merge 12 -s --match-head-commit=${S}`],
   [`gh pr merge https://github.com/owner/example/pull/12 -m --match-head-commit ${S}`],
   [`gh pr merge -R owner/example 12 --merge --match-head-commit ${S}`],
-])("recognizes %s with its head and method", (cmd) => expect((recognizeMergeForms(cmd) as MergeForm[])[0]).toMatchObject({ kind: "gh-pr-merge", pr: 12, matchHead: S }));
+  [`gh pr merge --repo=github.com/owner/example 12 -s --match-head-commit ${S}`],
+])("recognizes %s with its head and method", (cmd) => expect(first(bash(cmd))).toMatchObject({ kind: "gh-pr-merge", pr: 12, matchHead: S }));
 test.each([["--auto", { auto: true }], ["--rebase", { method: "rebase" }], ["--admin", { admin: true }]])("%s is parsed as a flag", (flag, want) => {});
-test("a PowerShell variable as the head is unparseable", () => expect(recognizeMergeForms("gh pr merge 12 --squash --match-head-commit $sha")).toBe("unparseable"));
-test("a chained PowerShell command with a backtick continuation is split", () => {});
+
+// The operator's documented identity forms are judged, never unparseable.
+test("GH_TOKEN from a gh auth token substitution, then gh pr merge", () =>
+  expect(first(bash(`GH_TOKEN=$(gh auth token -u fixtureuser) gh pr merge 12 --squash --match-head-commit ${S}`)))
+    .toMatchObject({ kind: "gh-pr-merge", pr: 12, cwd: CWD }));
+test("the credential-helper push form with its single-quoted helper", () =>
+  expect(bash(`TOK=$(gh auth token -u fixtureuser) && export TOK && git -c credential.helper= -c 'credential.helper=!f() { echo username=fixtureuser; echo "password=$TOK"; }; f' push origin feature/x; unset TOK`))
+    .toEqual([{ kind: "git-push", cwd: CWD, target: { kind: "remote", name: "origin" }, refs: [{ kind: "same-name", src: "feature/x" }], all: false, noRefspec: false }]));
+test("the PowerShell form with $env:GH_TOKEN from a subexpression", () =>
+  expect(first(ps(`$env:GH_TOKEN = (gh auth token -u fixtureuser); gh pr merge 12 --squash --match-head-commit ${S}`))).toMatchObject({ kind: "gh-pr-merge", pr: 12 }));
+test("a bash continuation and a PowerShell continuation join", () => {
+  expect(first(bash(`git push${BSNL}  origin feature/x`))).toMatchObject({ kind: "git-push" });
+  expect(first(ps(`git push${BTNL}  origin feature/x`))).toMatchObject({ kind: "git-push" });
+});
+test("common push flags parse", () =>
+  expect(first(bash("git push -q --follow-tags --atomic --force-if-includes --dry-run origin feature/x"))).toMatchObject({ kind: "git-push" }));
+
+test.each([
+  ["cd /work/other && gh pr merge 12", resolve(CWD, "/work/other")],
+  ["cd .. && git push origin HEAD:main", resolve(CWD, "..")],
+  ["git -C sub push origin x", resolve(CWD, "sub")],
+])("bash %s carries its effective directory", (cmd, dir) => expect(first(bash(cmd))).toMatchObject({ cwd: dir }));
+test("PowerShell Set-Location -Path moves the directory", () =>
+  expect(first(ps("Set-Location -Path ../other; gh pr merge 12"))).toMatchObject({ cwd: resolve(CWD, "../other") }));
+
+test.each([
+  "gh pr merge 12 --squash --match-head-commit $sha",
+  `gh api -X PUT repos/{owner}/{repo}/pulls/12/merge -f sha=${S} -f merge_method=squash`,
+  `gh api -X PUT repos/:owner/:repo/pulls/12/merge -f sha=${S}`,
+  "u=repos/owner/example/pulls/5/merge; gh api -X PUT $u",
+  "gh pr merge -R owner/.. 12",
+  "gh pr merge -R ghe.example.test/owner/example 12",
+  "gh pr merge 0",
+  "gh pr merge feature-branch",
+  "GH_REPO=owner/example gh pr merge 12",
+  "export GH_REPO=owner/example; gh pr merge 12",
+  "GH_HOST=ghe.example.test gh pr merge 12",
+  "GIT_DIR=/elsewhere/.git git push origin HEAD:main",
+  "git -c remote.origin.pushurl=https://github.com/owner/other push origin HEAD:main",
+  "git --git-dir=/elsewhere push origin x",
+  "cd $HOME/x && git push origin x",
+  "cd - && git push origin x",
+  "cd && git push origin x",
+  "pushd a; popd; git push origin x",
+  `bash -c "gh pr merge 12 --admin"`,
+  "sh -c 'git push origin HEAD:main'",
+  "x=$(gh pr merge 12 --admin)",
+  "echo gh pr merge 12",
+  "(cd sub && git push origin x)",
+  "git push --repo=elsewhere",
+  "git push $REMOTE main",
+  "git push origin $BRANCH",
+  "gh api graphql -F query=@merge.graphql",
+  "gh api --input body.json -X PUT repos/owner/example/pulls/12/merge",
+])("bash %s is unparseable", (cmd) => expect(bash(cmd)).toBe("unparseable"));
+test.each([
+  "$env:GH_REPO = 'owner/example'; gh pr merge 12",
+  "pwsh -Command 'gh pr merge 12'",
+  "& { git push origin HEAD:main }",
+  "Pop-Location; git push origin x",
+])("PowerShell %s is unparseable", (cmd) => expect(ps(cmd)).toBe("unparseable"));
+
+test.each([
+  ["git push origin HEAD", [{ kind: "head" }]],
+  ["git push origin @", [{ kind: "head" }]],
+  ["git push origin HEAD:refs/heads/main", [{ kind: "dest", ref: "refs/heads/main", delete: false }]],
+  ["git push origin :main", [{ kind: "dest", ref: "main", delete: true }]],
+  ["git push origin --delete main", [{ kind: "dest", ref: "main", delete: true }]],
+  ["git push -f origin +feature:main", [{ kind: "dest", ref: "main", delete: false }]],
+  ["git push origin feature", [{ kind: "same-name", src: "feature" }]],
+  ["git push origin 'refs/heads/*:refs/heads/*'", [{ kind: "unknown" }]],
+  ["git push origin HEAD~1", [{ kind: "unknown" }]],
+])("%s gives its refspecs", (cmd, refs) => expect(first(bash(cmd))).toMatchObject({ kind: "git-push", refs }));
+test.each([
+  ["git push", { target: { kind: "unnamed" }, noRefspec: true }],
+  ["git push origin", { target: { kind: "remote", name: "origin" }, noRefspec: true }],
+  ["git push --all origin", { all: true }],
+  ["git push --mirror origin", { all: true }],
+  ["git push https://github.com/owner/example.git HEAD:main", { target: { kind: "url", url: "https://github.com/owner/example.git" } }],
+])("%s gives its target and flags", (cmd, want) => expect(first(bash(cmd))).toMatchObject(want));
+
 test("gh api REST merge reads sha and merge_method", () =>
-  expect(recognizeMergeForms(`gh api -X PUT repos/owner/example/pulls/12/merge -f sha=${S} -f merge_method=squash`)).toEqual([{ kind: "gh-api-merge", repo: "owner/example", pr: 12, sha: S, method: "squash" }]));
-test("gh api --input is unparseable", () => {});
-test("a graphql mergePullRequest call is recognized", () => {});
-test.each(["git push origin HEAD:master", "git push origin +feature:main", "git push", "git push --all", "git -C sub push origin x"])("%s is a git push form", () => {});
-test.each(["ls", "git status", "gh pr view 12", 'git commit -m "gh pr merge later"'])("%s returns no form", (cmd) => expect(recognizeMergeForms(cmd)).toEqual([]));
+  expect(bash(`gh api -X PUT repos/owner/example/pulls/12/merge -f sha=${S} -f merge_method=squash`))
+    .toEqual([{ kind: "gh-api-merge", cwd: CWD, repo: "owner/example", pr: 12, sha: S, method: "squash" }]));
+test("a literal graphql mergePullRequest call is recognized, a literal query without it is not", () => {
+  expect(bash(`gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: "x"}) { clientMutationId } }'`)).toEqual([{ kind: "gh-graphql-merge" }]);
+  expect(bash(`gh api graphql -f query='query { viewer { login } }'`)).toEqual([]);
+});
+test.each(["ls", "git status", "gh pr view 12", 'git commit -m "gh pr merge later"', "gh pr create --title 'merge the fix'"])("%s returns no form", (cmd) =>
+  expect(bash(cmd)).toEqual([]));
+test("parseRepoName agrees with parseRepo on a shared table", () => { /* imports parseRepo from ../tools/pr-review/types: owner/example, a/b/c, ../x, owner/., "x y/z", "" */ });
+test.each([
+  ["https://github.com/owner/example.git", "owner/example"],
+  ["https://user@GitHub.com/owner/example/", "owner/example"],
+  ["git@github.com:owner/example.git", "owner/example"],
+  ["ssh://git@github.com/owner/example", "owner/example"],
+  ["https://ghe.example.test/owner/example", null],
+  ["git@github-alias:owner/example.git", null],
+  ["https://github.com/owner/../x", null],
+])("githubRepoOfUrl(%s)", (url, want) => expect(githubRepoOfUrl(url)).toBe(want));
+test.each([
+  ["mcp__plugin_github_github__merge_pull_request", { owner: "owner", repo: "example", pullNumber: 12 }, [{ kind: "mcp-merge", repo: "owner/example" }]],
+  ["mcp__github__push_files", { owner: "owner", repo: "example", branch: "main", files: [] }, [{ kind: "mcp-write", repo: "owner/example", branch: "main" }]],
+  ["mcp__github__create_or_update_file", { owner: "owner", repo: "example" }, [{ kind: "mcp-write", repo: "owner/example", branch: null }]],
+  ["mcp__github__merge_pull_request", { owner: "owner/..", repo: "x" }, [{ kind: "mcp-merge", repo: null }]],
+  ["mcp__desktop-commander__start_process", { command: "gh pr merge 12 --admin" }, "unparseable"],
+  ["mcp__desktop-commander__start_process", { command: "ls" }, []],
+  ["mcp__github__get_pull_request", { owner: "owner", repo: "example" }, []],
+])("recognizeMcpCall %s", (name, input, want) => expect(recognizeMcpCall(name, input)).toEqual(want));
 ```
 
 - [ ] **Step 2: Run** `bun test test/merge-guard-parse.test.ts`. Expected: FAIL.
@@ -892,15 +1071,75 @@ test.each(["ls", "git status", "gh pr view 12", 'git commit -m "gh pr merge late
 
 **Files:**
 - Create: `core/claude/hooks/merge-guard.ts`, `test/merge-guard.test.ts`
-- Modify: `core/claude/templates/settings.hooks.json` (PreToolUse entry), `core/claude/hooks/pre-push` (before the final `exit 0`), `README.md` (the `core/claude/hooks/` row)
+- Modify: `core/claude/templates/settings.hooks.json` (PreToolUse entry), `core/claude/hooks/pre-push` (after the ref loop, before the final `exit 0` at `:310`), `README.md` (the `core/claude/hooks/` row and the guard's residuals)
 - Test: `test/merge-guard.test.ts`, `install/Install-Harness.Tests.ps1` (the guard and its two siblings are installed and registered)
 
 **Interfaces:**
 - Consumes: Tasks 22 and 23.
-- Produces: `interface GuardApi { defaultBranch(repo: string): Promise<string>, pull(repo: string, n: number): Promise<{ headSha: string, state: string }>, latestAppReview(repo: string, n: number, botUserId: number): Promise<{ state: string, commitId: string } | null>, behindBy(repo: string, base: string, head: string): Promise<number>, manifestRaw(repo: string, ref: string): Promise<string | null> }`, `ghGuardApi(account: string | null, run?: (args: string[], env: Record<string, string>) => { exitCode: number, stdout: string }): GuardApi`, `evaluateCommand(command: string, ctx: { source: GuardSource, api: GuardApi, originRepo: () => string | null }): Promise<{ decision: "allow" } | { decision: "deny", reason: string }>`, `evaluatePrePush(remoteUrl: string, refLines: string, ctx): Promise<...>` (same result type).
-- Settings entry: `{ "matcher": "Bash|PowerShell", "hooks": [{ "type": "command", "command": "bun \"$CLAUDE_PROJECT_DIR/.claude/hooks/merge-guard.ts\"" }] }`.
+- Produces:
+  - `GUARD_DEADLINE_MS = 15000`, `GUARD_CALL_TIMEOUT_MS = 8000`, `GUARD_HOOK_TIMEOUT_SECONDS = 30`
+  - `type Run = (args: string[], options: { env: Record<string, string>, timeoutMs: number }) => Promise<{ exitCode: number, stdout: string }>` (async through `Bun.spawn`, kills the child at `timeoutMs` and resolves with a non-zero exit)
+  - `interface Budget { remainingMs(): number }` (each child's timeout is `min(GUARD_CALL_TIMEOUT_MS, remainingMs())`, and a call that would start with nothing left throws)
+  - `interface GuardApi { defaultBranch(repo: string): Promise<string>, pull(repo: string, n: number): Promise<{ headSha: string, state: string }>, latestAppReview(repo: string, n: number, botUserId: number): Promise<{ state: string, commitId: string } | null>, behindBy(repo: string, base: string, head: string): Promise<number>, manifestRaw(repo: string, ref: string): Promise<string | null> }`
+  - `interface LocalGit { remotes(dir: string): Promise<Array<{ name: string, fetchUrl: string, pushUrl: string }>>, currentBranch(dir: string): Promise<string | null>, pushConfig(dir: string, remote: string): Promise<string[]> }`
+  - `ghGuardApi(account: string | null, run: Run, budget: Budget): GuardApi`, `localGit(run: Run, budget: Budget): LocalGit`
+  - `resolveTargets(form: MergeForm, git: LocalGit, env: Record<string, string | undefined>): Promise<Array<string | null>>`
+  - `evaluateCommand(input: { toolName: string, toolInput: unknown, cwd: string | null }, ctx: { source: GuardSource, api: GuardApi, git: LocalGit, env: Record<string, string | undefined>, deadlineMs?: number }): Promise<{ decision: "allow" } | { decision: "deny", reason: string }>`
+  - `evaluatePrePush(remoteUrl: string, refLines: string, ctx): Promise<...>` (same result type)
+  - `armDeadline(ms: number, onExpire: () => void): () => void` (returns a cancel)
+- Settings entry: `{ "matcher": "Bash|PowerShell|mcp__.*__(merge_pull_request|push_files|create_or_update_file|delete_file|start_process|interact_with_process)", "hooks": [{ "type": "command", "command": "bun \"$CLAUDE_PROJECT_DIR/.claude/hooks/merge-guard.ts\"", "timeout": 30 }] }`.
 
-For each recognized form, the target repository is the form's own `repo`, else the `origin` remote of `$CLAUDE_PROJECT_DIR` when it is a `github.com` URL, else null. The manifest field is read from the target's default branch through the contents API (`.claude/.harness-manifest.json`, 404 is no manifest), never from disk, so a branch-local edit cannot strip it. `decideEnforcement` runs per form. On `enforce`: `gh pr merge` passes only with an explicit pull request, `matchHead`, `squash` or `merge`, no `--auto`, `--rebase` or `--admin`, and the three live conditions (the SHA the command gives is the head, the latest App review by `botUserId` is `APPROVED` on that head, `behindBy(default, head)` is 0). `gh-api-merge` passes only with `sha` and a `squash` or `merge` method and the same live conditions. `gh-graphql-merge` and a `git-push` that names or may name the default branch (a bare `git push`, `--all`, `--mirror`, a refspec whose destination is the default branch) always deny. `"unparseable"` denies unless the source is absent. Every deny reason is a fixed string naming the rule. `ghGuardApi` takes a token once with `gh auth token --user <account> --hostname github.com` when an account is given, passes it only in each `gh api` child's environment, and times each call out at 20 seconds. Any API error, timeout or exception inside the hook denies, which departs from the fail-open `catch` in `agent-worktree-gate.ts:451` on purpose. The `COPILOT_CLI` stand-down at `agent-worktree-gate.ts:432` stays, so under Copilot only the pre-push layer acts (ruling in the stage 1 report). `pre-push` passes the ref lines it already read into `bun "$hooks_dir/merge-guard.ts" --pre-push "$1" "$2"` and exits 1 when that does, and prints `merge guard skipped: bun is not on PATH` to stderr and continues when `bun` is missing, the same reach the PreToolUse layer has.
+**Payload.** The hook reads the PreToolUse payload's `tool_name`, `tool_input` and `cwd` from stdin. `Bash` reads `tool_input.command` under the bash rules and `PowerShell` under the PowerShell rules, both from the payload's `cwd`, never from `$CLAUDE_PROJECT_DIR`: the Bash tool's working directory persists across calls, so the two differ. A missing or relative `cwd` leaves every gh and git target unresolved. Matched MCP tools go through `recognizeMcpCall`. Any other tool is allowed untouched.
+
+**Targets.** `resolveTargets` gives each form one or more targets:
+- `gh-pr-merge`: its `repo` when set. Otherwise the distinct GitHub repositories (`githubRepoOfUrl`) across every fetch and push URL that `git -C <cwd> remote -v` lists. That listing applies `insteadOf` rewrites and shows push URLs separately (checked on git 2.53). Exactly one repository is the target. None or several give null, since gh's own choice among remotes cannot be seen from outside.
+- When the hook's own environment sets `GH_REPO` or `GH_HOST` to a non-empty value, every gh form's target is null, because the tool's shell may carry the same variable.
+- `gh-api-merge`: the repository in its path.
+- `gh-graphql-merge`: null, since the mutation names a pull request by node id.
+- `git-push`: a `url` target gives `githubRepoOfUrl(url)`. A `remote` target gives each push URL `remote -v` lists for that name, never `origin`'s, and a name it does not list gives null. An `unnamed` target gives the push URLs of every remote, a superset of where git would push. A non-GitHub URL, an SSH host alias included, gives null.
+- `mcp-merge` and `mcp-write`: their `repo`.
+- A failed or timed-out `git` call gives null.
+
+Each target goes through `decideEnforcement(source, field, target)` (Task 22), which gives `skip` for a null target when the source is absent and `deny` otherwise. A form passes only when every one of its targets passes, and a call passes only when every form passes.
+
+**Field read.** The manifest field is read from the target's default branch through the contents API (`.claude/.harness-manifest.json`, 404 is no manifest), never from disk, so a branch-local edit cannot strip it. `decideEnforcement` runs per target.
+
+> **OPERATOR RULING NEEDED (review B4, part 2 of 2, API reads and the outsider rule).** The paragraph above and the rule that any API error denies are left as written. The spec says any API error denies (spec line 233), and also that harness users outside the operator stay able to merge in repositories never enrolled (spec line 220). Here the two conflict, because every recognized form reads `defaultBranch` and `manifestRaw` through the API. A session with no `gh` login, or a repository the read account cannot see (a work-account repository), then denies every default-branch push and merge, and a broken source denies feature-branch pushes too. Options:
+> - **A, as written.** Every recognized form reads the API, and any error denies. Cost: outsiders without a `gh` login, and repositories the read account cannot see, are blocked on every recognized form.
+> - **B, classify first, read locally where it can only add denials.** A git-push form whose every destination resolves (by local refs, `refs/remotes/<remote>/HEAD` for the default name) as not the default branch is no merge form and reads nothing. The manifest field of an unlisted repository is read from the local `refs/remotes/<remote>/<default>` ref instead of the API. Cost: a stale local ref can miss a field added upstream since the last fetch, and a missing local default-name ref falls back to the API.
+> - **C, read nothing when the source is absent.** Skip every form with the source absent. Cost: a manifest field is not enforced where the operator-only source is absent, contrary to spec line 216.
+>
+> Flips toward A if outsiders are expected to hold a `gh` login wherever the harness is installed. Part 1 of this ruling is the null-target rule in Task 22.
+
+**Under `enforce`:**
+- `gh pr merge` passes only with an explicit pull request, `matchHead`, `squash` or `merge`, no `--auto`, `--rebase` or `--admin`, and the three live conditions: the SHA the command gives is the head, the latest App review by `botUserId` is `APPROVED` on that head, and `behindBy(default, head)` is 0.
+- `gh-api-merge` passes only with `sha` and a `squash` or `merge` method and the same live conditions.
+- `gh-graphql-merge` and `mcp-merge` always deny. An MCP merge carries no head SHA to match.
+- A `git-push` denies when it names or may name the default branch. Names compare case-insensitively after `refs/heads/` or `heads/` is stripped from a destination. It denies on any of these:
+  - `noRefspec` or `all`
+  - a `dest` equal to the default, a delete included
+  - `head`, when `git -C <cwd> symbolic-ref --quiet --short HEAD` gives the default, gives nothing (a detached head) or fails
+  - `same-name`, when its name is the default
+  - `head` or `same-name`, whenever `git -C <cwd> config --get-all remote.<name>.push` lists a mapping for the remote (for `unnamed`, for any remote), since that mapping can rename the destination
+  - `unknown`, always
+
+  A `dest` under `refs/` but outside `refs/heads/`, such as a tag, does not name it. Every other push passes without live conditions.
+- An `mcp-write` denies when `branch` is null or names the default branch by the same comparison.
+
+`"unparseable"` denies unless the source is absent. Every deny reason is a fixed string naming the rule.
+
+**Deadline.** The settings entry sets `"timeout": 30` (`GUARD_HOOK_TIMEOUT_SECONDS`), so the plan does not rely on Claude Code's default hook timeout. A hook Claude Code kills at its timeout is treated as a non-blocking error and the tool runs, so a hook killed before it prints its deny reads as allow (the review's reading of the hooks documentation, not checked live on the pinned CLI). The design does not depend on it either way, because the hook answers first. It arms `armDeadline(GUARD_DEADLINE_MS)` before reading stdin, and on expiry prints the deny JSON and exits 0 (in pre-push mode it prints the reason to stderr and exits 1). Every git and gh child is async and killed at `min(GUARD_CALL_TIMEOUT_MS, remaining budget)`, so a hung child can neither block the timer nor outlive the budget, and nothing after stdin is read synchronously. A timed-out call throws, which denies. The 15 second budget leaves 15 seconds of the hook timeout for bun's start-up and the output.
+
+**gh reads.** `ghGuardApi` runs `gh auth token --user <account> --hostname github.com` once when an account is given, and passes the token only as `GH_TOKEN` in each `gh api --hostname github.com` child. Each child's environment is the hook's minus `GH_HOST`, `GH_REPO`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `GH_TOKEN` and `GITHUB_TOKEN`, with the token set back only as above. `latestAppReview` reads every page of `/pulls/{n}/reviews` (`per_page=100`, pages from 1, stopping on a short page, at most 10 pages, and more is an error) and takes the latest review whose `user.id` is `botUserId`.
+
+**Errors.** Any API error, timeout or exception inside the hook denies. That departs on purpose from the fail-open `catch` in `agent-worktree-gate.ts:453-456`. The deny JSON has the `hookSpecificOutput` shape of `agent-worktree-gate.ts:443-452`. The `COPILOT_CLI` stand-down at `agent-worktree-gate.ts:432` stays, so under Copilot only the pre-push layer acts (ruling in the stage 1 report).
+
+**Pre-push.** `pre-push` pipes the ref lines it already read (`$identity_stdin`, `pre-push:130`) into `bun "$hook_dir/merge-guard.ts" --pre-push "$1" "$2"` and exits 1 when that does. When `bun` is missing it prints `merge guard skipped: bun is not on PATH` to stderr and continues, the same reach the PreToolUse layer has. The target is `githubRepoOfUrl($2)`. A ref line whose remote ref is `refs/heads/<default>`, compared case-insensitively, is a default-branch push, and so is a delete of it (an all-zero local object id). The same deadline applies.
+
+**Residuals.** The README's hook row states these:
+- A git or gh alias (`git config alias.p push`, `gh alias set`) hides the trigger word from the PreToolUse layer. The pre-push layer still catches an aliased git push unless `--no-verify` is used too. Nothing catches an aliased gh merge.
+- An MCP server or tool outside the matcher that can run a shell or call the API is not covered.
+- With the source present, a push to a non-GitHub remote or an SSH host alias, and a gh form in a checkout whose remotes name more than one repository, deny. These follow from failing closed.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -910,22 +1149,77 @@ test.each(["defaultBranch", "pull", "latestAppReview", "behindBy", "manifestRaw"
 test.each([["the named SHA is not the head", { headSha: OTHER }], ["the latest App review is not APPROVED", { review: { state: "COMMENTED", commitId: S } }],
   ["the App approved another commit", { review: { state: "APPROVED", commitId: OTHER } }], ["the head is behind", { behindBy: 1 }]])("%s denies", async (_n, o) => {});
 test("an APPROVED review by the bot's login under another id does not count", async () => {});
-test("an older App approval followed by a newer App change request denies", async () => {});
+test("an older App approval followed by a newer App change request on page 2 of the reviews denies", async () => {});
 test.each(["--auto", "--rebase", "--admin"])("%s denies under enforcement", async () => {});
-test("a graphql merge and a push to the default branch deny, a push to a feature branch passes", async () => {});
 test("with the source absent and no manifest field everything passes, --admin included", async () => {});
 test("a deny reason never carries text from the pull request", async () => { /* fake PR title holds a marker string, absent from reason */ });
+
+// documented identity forms
+test("the GH_TOKEN substitution form passes when every live condition holds", async () => {});
+test("the credential-helper push to a feature branch passes under enforcement", async () => {});
+
+// targets
+test("the target comes from the payload cwd, not CLAUDE_PROJECT_DIR", async () => { /* payload cwd's remote is the enforcing owner/example, the project dir's is an unlisted repository: gh pr merge 5 --admin denies */ });
+test("cd into an enforcing checkout, then gh pr merge 5 --admin, denies", async () => {});
+test("GH_REPO in the hook's environment denies a gh form with the source present and passes it with the source absent", async () => {});
+test("git push --no-verify other HEAD:main denies when the remote other points at an enforcing repository and origin does not", async () => {});
+test("a gh form in a checkout whose remotes name two repositories denies with the source present", async () => {});
+test("a push to a non-GitHub remote denies with the source present and passes with the source absent", async () => {});
+test("a gh api placeholder path denies with the source present", async () => {});
+
+// deadline
+test("a slow API denies when the budget runs out, well before the deadline would kill the hook", async () => {
+  const t0 = Date.now();
+  const r = await evaluateCommand(MERGE_OK_INPUT, ctx({ apiDelayMs: 1000, deadlineMs: 200 }));
+  expect([r.decision, Date.now() - t0 < 600]).toEqual(["deny", true]);
+});
+test("armDeadline fires its callback, and the cancel stops it", async () => {});
+test("a hung child is killed at its call timeout", async () => { /* Run against a child that sleeps 5 s, timeoutMs 100 */ });
+test("settings.hooks.json gives the guard timeout 30, and GUARD_DEADLINE_MS is at most half of it", () => {});
+
+// MCP tools
+test("an MCP merge_pull_request in an enforcing repository denies, and in an unlisted one with no field passes", async () => {});
+test("an MCP push_files to the default branch denies under enforcement, to a feature branch passes, and with no branch denies", async () => {});
+test("a Desktop Commander start_process carrying gh pr merge denies with the source present", async () => {});
+test("settings.hooks.json registers merge-guard.ts on Bash, PowerShell and the MCP merge, write and shell tools", () => {});
+
+// default-branch pushes, enforcing repository whose default is main
+test.each([
+  ["git push origin HEAD", { branch: "main" }, "deny"],
+  ["git push origin HEAD", { branch: "feature" }, "allow"],
+  ["git push origin HEAD", { branch: null }, "deny"],
+  ["git push origin @", { branch: "main" }, "deny"],
+  ["git push origin HEAD:refs/heads/main", {}, "deny"],
+  ["git push origin HEAD:refs/heads/MAIN", {}, "deny"],
+  ["git push origin :main", {}, "deny"],
+  ["git push origin --delete main", {}, "deny"],
+  ["git push -f origin +feature:main", {}, "deny"],
+  ["git push origin main", {}, "deny"],
+  ["git push origin feature", {}, "allow"],
+  ["git push origin feature", { pushConfig: ["refs/heads/*:refs/heads/main"] }, "deny"],
+  ["git push origin 'refs/heads/*:refs/heads/*'", {}, "deny"],
+  ["git push", {}, "deny"],
+  ["git push origin", {}, "deny"],
+  ["git push --all origin", {}, "deny"],
+  ["git push --mirror origin", {}, "deny"],
+  ["git push origin HEAD:feature", {}, "allow"],
+  ["git push origin feature:refs/tags/v1", {}, "allow"],
+])("%s with local git %o: %s", async (cmd, git, want) => {});
+test.each([
+  ["refs/heads/main", "1".repeat(40), "deny"],
+  ["refs/heads/MAIN", "1".repeat(40), "deny"],
+  ["refs/heads/main", "0".repeat(40), "deny"],
+  ["refs/heads/feature", "1".repeat(40), "allow"],
+])("pre-push to %s from local object %s: %s", async (remoteRef, localOid, want) => {});
 test("the hook reads a PowerShell tool payload and a Bash payload, and ignores other tools", async () => { /* spawn the hook with stdin payloads */ });
-test("pre-push mode refuses refs/heads/master under enforcement and passes a feature ref", async () => {});
-test("settings.hooks.json registers merge-guard.ts on Bash|PowerShell", () => {});
 ```
 
-Add a Pester case to `install/Install-Harness.Tests.ps1`: a fresh install into a fixture target holds `.claude/hooks/merge-guard.ts`, `merge-guard-parse.ts` and `merge-guard-decide.ts`, and its `settings.json` has the `Bash|PowerShell` entry.
+Add a Pester case to `install/Install-Harness.Tests.ps1`: a fresh install into a fixture target holds `.claude/hooks/merge-guard.ts`, `merge-guard-parse.ts` and `merge-guard-decide.ts`, and its `settings.json` has the merge-guard entry with the matcher and `timeout` above.
 
 - [ ] **Step 2: Run** `bun test test/merge-guard.test.ts` and `pwsh -NoProfile -File install/Install-Harness.Tests.ps1`. Expected: FAIL.
-- [ ] **Step 3: Implement.**
+- [ ] **Step 3: Implement**, and add the residuals to the README's hook row.
 - [ ] **Step 4: Run** `bun test` and `pwsh -NoProfile -File install/Install-Harness.Tests.ps1`. Expected: PASS.
-- [ ] **Step 5: Commit** `feat(hooks): harness merge guard on Bash and PowerShell, with a pre-push layer (#146)`.
+- [ ] **Step 5: Commit** `feat(hooks): harness merge guard on Bash, PowerShell and MCP tools, with a pre-push layer (#146)`.
 
 ---
 
@@ -939,7 +1233,13 @@ Add a Pester case to `install/Install-Harness.Tests.ps1`: a fresh install into a
 
 **Interfaces:**
 - Produces in `app-auth.ts`: `APP_PERMISSION_ALLOWLIST` gains `administration: "read"` and `secrets: "read"`. `TOKEN_PROFILES.enroll = { contents: "read", pull_requests: "read", actions: "read", administration: "read", secrets: "read" }`. `TokenProfile` gains `"enroll"`. The read and post profiles never carry these two. The operator adds both to the App in the web UI before the first enrollment, because capture C8 showed steps 3 and 4 cannot be read without them (ruling in the stage 1 report, since the spec's step 1 names only `actions` and `issues`).
-- Produces in `readers.ts`: `READER_TEXT_RE = /^[A-Za-z0-9 ._\/()+,:-]{1,100}$/`, `type ReaderStep = "installation" | "actions-settings" | "secrets" | "ci-workflow" | "stage-files" | "stage-enroll-field" | "review-readback"`, `type ReaderCode = "ok" | "workflow-permissions-not-read" | "reviews-approvable" | "reviewer-secret-present" | "workflow-missing" | "unpinned-uses" | "no-pr-run" | "not-github-actions" | "path-missing-or-empty" | "text-not-allowed" | "api-error" | "tree-truncated" | "symlink" | "too-large" | "installer-failed" | "manifest-invalid" | "manifest-has-field" | "review-missing" | "wrong-head" | "wrong-author" | "identity-hit"`, `interface ReaderResult { step: ReaderStep, ok: boolean, code: ReaderCode, counts: Record<string, number>, names: string[], paths: Array<{ path: string, exists?: boolean, bytes?: number, sha256?: string }>, ids: number[], shas: string[] }`, `validateReaderResult(raw: unknown): { ok: true, value: ReaderResult } | { ok: false, reason: string }`, `REVIEWER_SECRET_NAMES = ["PR_REVIEW_APP_KEY", "PR_REVIEW_APP_ID", "PR_REVIEW_IDENTITY", "PR_REVIEW_ACCOUNT_EMAIL", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "OP_SERVICE_ACCOUNT_TOKEN"]`, `interface ReaderInput { token: string, identity: { names: string[], emails: string[] } | null, botUserId: number | null }`, `readReaderInput(stdin, options?)`, `readActionsSettings(api: ReaderApi): Promise<ReaderResult>`, `readSecrets(api: ReaderApi): Promise<ReaderResult>`, `readCiWorkflow(api: ReaderApi, args: { workflowPath: string, livingDocs: string[], projectStandards: string[] }): Promise<ReaderResult>`, and `ReaderApi` (a thin `GET` over the token with `redirect: "error"`).
+
+> **OPERATOR RULING NEEDED (review B9, App permission widening).** The bullet above is left as written pending the ruling. Its reason clause states the result C8 is expected to show, not a recorded one. Options:
+> - **A, widen the App.** `administration: read` and `secrets: read` are added to the App and held only by the `enroll` profile, as written. Cost: both permissions sit on every installation of the App, beyond spec step 1. Order: this task's allowlist change must be merged and running before the operator adds either permission in the web UI, or every read and post mint refuses at the App-level check (`app-auth.ts:110-130`).
+> - **B, attest instead.** The App keeps its permissions, and steps 3 and 4 become operator attestations in the web UI (the repository's Actions general settings and its Actions secrets page, recorded as pass or fail). `readActionsSettings`, `readSecrets` and the `enroll` profile are not built.
+>
+> Flips: C8 showing both reads succeed without the two permissions makes the question moot. The executor stops at this task until the ruling is recorded in `docs/decision-log.md`, then writes the entry for stage 1 ruling 4 to match it.
+- Produces in `readers.ts`: `READER_TEXT_RE = /^[A-Za-z0-9 ._\/()+,:-]{1,100}$/`, `type ReaderStep = "installation" | "actions-settings" | "secrets" | "ci-workflow" | "stage-files" | "stage-enroll-field" | "review-readback"`, `type ReaderCode = "ok" | "workflow-permissions-not-read" | "reviews-approvable" | "reviewer-secret-present" | "workflow-missing" | "unpinned-uses" | "no-pr-run" | "not-github-actions" | "path-missing-or-empty" | "text-not-allowed" | "api-error" | "tree-truncated" | "symlink" | "too-large" | "installer-failed" | "manifest-invalid" | "manifest-has-field" | "review-missing" | "wrong-head" | "wrong-author" | "identity-hit" | "public-scan-hit" | "public-scan-unavailable"`, `interface ReaderResult { step: ReaderStep, ok: boolean, code: ReaderCode, counts: Record<string, number>, names: string[], paths: Array<{ path: string, exists?: boolean, bytes?: number, sha256?: string }>, ids: number[], shas: string[] }`, `validateReaderResult(raw: unknown): { ok: true, value: ReaderResult } | { ok: false, reason: string }`, `REVIEWER_SECRET_NAMES = ["PR_REVIEW_APP_KEY", "PR_REVIEW_APP_ID", "PR_REVIEW_IDENTITY", "PR_REVIEW_ACCOUNT_EMAIL", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "OP_SERVICE_ACCOUNT_TOKEN"]`, `interface ReaderInput { token: string, identity: { names: string[], emails: string[] } | null, botUserId: number | null }`, `readReaderInput(stdin, options?)`, `readActionsSettings(api: ReaderApi): Promise<ReaderResult>`, `readSecrets(api: ReaderApi): Promise<ReaderResult>`, `readCiWorkflow(api: ReaderApi, args: { workflowPath: string, livingDocs: string[], projectStandards: string[] }): Promise<ReaderResult>`, and `ReaderApi` (a thin `GET` over the token with `redirect: "error"`).
 - Commands: `cli.ts reader <step> --repo <owner/name> [step arguments]` (a code-only child, `ReaderInput` on stdin, prints a `ReaderResult`). `hub.ts enroll <step> --config <abs> --app <name> --repo <owner/name> [step arguments]` (frames on stdin, mints the profile the step needs, spawns the reader with the allowlisted environment, prints only the validated result, exit 2 on a result that fails validation or is not ok).
 
 Step 2 is `enroll installation`: the mint is the check, and it prints `{ step: "installation", ok, code }`. Step 3 `actions-settings` (`enroll` profile) reads `GET /repos/{r}/actions/permissions/workflow` and requires `default_workflow_permissions: "read"` and `can_approve_pull_request_reviews: false`. Step 4 `secrets` (`enroll` profile) lists every page of `GET /repos/{r}/actions/secrets` and returns `counts: { total, matches }`, never a name. Step 5 `ci-workflow` (`read` profile) reads the workflow at the default branch, runs `collectPinProblems` (count only), takes job names from the newest completed `pull_request` run of that workflow (`GET /repos/{r}/actions/workflows/{file}/runs?event=pull_request&status=completed&per_page=1`, then its jobs) and their app from each job's check run, which must be `github-actions`, and checks each proposed living doc and standards path exists at the default branch and is not empty or whitespace only. Any name or path failing `READER_TEXT_RE` (and, for a path, `repoPathProblem`) refuses the whole result with `"text-not-allowed"`.
@@ -972,6 +1272,7 @@ test("the reader child gets no gh or 1Password variable, and an enroll token onl
 - Create: `core/claude/templates/merge-rule.template.md`
 - Modify: `install/Install-Harness.ps1` (params at `:226-258`, `ConvertTo-ManifestV3` at `:762`, every `git` call site)
 - Test: `install/Install-Harness.Tests.ps1` (a new `Describe 'EmitOnly'`)
+- Modify: `docs/decision-log.md` (the entry for stage 1 ruling 9, the merge text as `.claude/rules/merge-rule.md`)
 
 **Interfaces:**
 - Produces: `Install-Harness.ps1 -Target <mirror dir> -EmitOnly -StagingDir <absolute empty dir>`. With `-EmitOnly`, `-Target` is a mirror holding the target's `.claude/` and `.mcp.json` as data, and every file a normal run would write lands under `-StagingDir` at the same relative path instead. It makes no `git` call, skips the sidecar, the `core.hooksPath` wiring and `-InstallDeps`, and stages `.claude/rules/merge-rule.md` from the template as well.
@@ -1005,11 +1306,11 @@ Describe 'EmitOnly' {
 - Test: `test/pr-review-readers.test.ts`
 
 **Interfaces:**
-- Produces in `readers.ts`: `readStageFiles(api: ReaderApi, io: { workDir: string, runInstaller: (mirrorDir: string, stagingDir: string) => Promise<number> }): Promise<ReaderResult>`, `readStageEnrollField(api: ReaderApi, stagingDir: string): Promise<ReaderResult>`, `readReviewReadback(api: ReaderApi, args: { reviewId: number, head: string, botUserId: number, identity: IdentityDecl }): Promise<ReaderResult>`.
+- Produces in `readers.ts`: `readStageFiles(api: ReaderApi, io: { workDir: string, runInstaller: (mirrorDir: string, stagingDir: string) => Promise<number> }): Promise<ReaderResult>`, `readStageEnrollField(api: ReaderApi, stagingDir: string): Promise<ReaderResult>`, `readReviewReadback(api: ReaderApi, args: { reviewId: number, head: string, botUserId: number, identity: IdentityDecl, isPublic: boolean, publicScan: PublicScan | null }): Promise<ReaderResult>`.
 - Produces in `upload.ts`: `uploadStaged(api: UploadApi, args: { repo: string, stagingDir: string, branch: string, expected: Array<{ path: string, sha256: string }> }): Promise<{ prNumber: number, files: Array<{ path: string, sha256: string }> }>`.
 - Command: `cli.ts upload --repo <owner/name> --staging <abs dir> --branch <enroll/name> --expected <abs json>`, `{"token": "..."}` on stdin (the actor's own token). Prints `{ prNumber, files }` only.
 
-`stage-files`: `GET /repos/{r}/git/trees/{default}?recursive=1` (`truncated: true` refuses `"tree-truncated"`), keeps blobs under `.claude/` and the root `.mcp.json`, refuses a mode `120000` entry (`"symlink"`), more than 500 entries or 5 MB (`"too-large"`), writes each blob from `GET git/blobs/{sha}` into a mirror under `workDir`, runs the installer as a child (`pwsh -NoProfile -File <REPO_ROOT>/install/Install-Harness.ps1 -Target <mirror> -EmitOnly -StagingDir <dir>`, allowlisted environment, an empty working directory), and returns each staged path with its size and SHA-256. `stage-enroll-field`: reads the manifest at the default branch, refuses invalid JSON and an existing `enrolled` key, stages the manifest with `"enrolled": true` added as `JSON.stringify(obj, null, 2) + "\n"`, returns its path, size and hash. `review-readback`: the review's `commit_id` must equal `head`, its `user.id` the bot id with `user.type === "Bot"`, and its body must give no `findIdentityHits`. `uploadStaged` re-hashes every staged file and refuses before any API call when one differs from `expected`, requires `branch` to match `/^enroll\/[a-z0-9-]{1,40}$/` and not exist, creates it from the default branch head, writes each file with `PUT /repos/{r}/contents/{path}` (the existing blob SHA comes from the tree listing, never from reading the file), and opens the pull request with a fixed title, `chore(harness): enroll in the App reviewer`, and a fixed body.
+`stage-files`: `GET /repos/{r}/git/trees/{default}?recursive=1` (`truncated: true` refuses `"tree-truncated"`), keeps blobs under `.claude/` and the root `.mcp.json`, refuses a mode `120000` entry (`"symlink"`), more than 500 entries or 5 MB (`"too-large"`), writes each blob from `GET git/blobs/{sha}` into a mirror under `workDir`, runs the installer as a child (`pwsh -NoProfile -File <REPO_ROOT>/install/Install-Harness.ps1 -Target <mirror> -EmitOnly -StagingDir <dir>`, allowlisted environment, an empty working directory), and returns each staged path with its size and SHA-256. `stage-enroll-field`: reads the manifest at the default branch, refuses invalid JSON and an existing `enrolled` key, stages the manifest with `"enrolled": true` added as `JSON.stringify(obj, null, 2) + "\n"`, returns its path, size and hash. `review-readback`: the review's `commit_id` must equal `head`, its `user.id` the bot id with `user.type === "Bot"`, and its body must give no `findIdentityHits`. For a public repository the body must also give no `findPublicScanHits`, and a null `publicScan` fails with `"public-scan-unavailable"` (spec step 8 names the identity scans, plural). `uploadStaged` re-hashes every staged file and refuses before any API call when one differs from `expected`, requires `branch` to match `/^enroll\/[a-z0-9-]{1,40}$/` and not exist, creates it from the default branch head, writes each file with `PUT /repos/{r}/contents/{path}` (the existing blob SHA comes from the tree listing, never from reading the file), and opens the pull request with a fixed title, `chore(harness): enroll in the App reviewer`, and a fixed body.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1021,7 +1322,9 @@ test("a .claude/ file holding instruction-shaped text reaches the result only as
   expect(JSON.stringify(r)).not.toContain("Ignore prior rules");
 });
 test("stage-enroll-field adds enrolled true, and refuses an existing field of any value", async () => {});
-test.each([["another head", "wrong-head"], ["the bot's login under another id", "wrong-author"], ["a listed term in the body", "identity-hit"]])("readback with %s fails", async (_n, code) => {});
+test.each([["another head", "wrong-head"], ["the bot's login under another id", "wrong-author"], ["a listed term in the body", "identity-hit"],
+  ["a public-scan term in a public repository's body", "public-scan-hit"], ["a public repository with no public scan", "public-scan-unavailable"]])("readback with %s fails", async (_n, code) => {});
+test("a private repository's readback skips the public scan", async () => {});
 test("the readback result never carries the review body", async () => {});
 test("upload refuses a hash mismatch before any API call", async () => expect(api.calls).toBe(0));
 test("upload refuses an existing branch", async () => {});
@@ -1045,10 +1348,10 @@ test("upload writes each staged file byte for byte and prints only paths, hashes
 
 **Interfaces:**
 - Consumes: `parseProvenance` (Task 13), `checkOutsideCheckout` (Task 2), captures C6 and C7 (Task 1).
-- Produces: `MAX_WALK = 500`, `interface VRecord { version: 1, repo: string, defaultBranch: string, v: string, recordedAt: string, how: "attested" | "verified" }`, `readVRecord(path: string): VRecord`, `writeVRecord(path: string, record: VRecord): void` (atomic, outside every checkout), `interface DeployerApi { commit(sha: string): Promise<{ tree: string, parents: string[] }>, pullsForCommit(sha: string): Promise<Array<{ number: number, mergeCommitSha: string | null, merged: boolean, baseRef: string }>>, pull(n: number): Promise<{ merged: boolean, mergeCommitSha: string | null, baseRef: string, baseSha: string, headSha: string }>, reviews(n: number): Promise<Array<{ nodeId: string, userId: number, userType: string, state: string, commitId: string, submittedAt: string, body: string }>>, reviewEdits(nodeId: string): Promise<{ lastEditedAt: string | null, editCount: number }>, pullOids(n: number): Promise<{ mergeCommitOid: string, headRefOid: string, baseRefOid: string }>, forcePushesSince(branch: string, since: string): Promise<number> }`, `type DeployRefusalCode = "v-not-reached" | "walk-limit" | "no-single-pr" | "tree-mismatch" | "no-app-approval" | "review-edited" | "provenance-unparseable" | "provenance-base-mismatch" | "pr-record-mismatch" | "force-push-since-v" | "api-error"`, `verifyChain(api: DeployerApi, args: { c: string, vRecord: VRecord, botUserId: number }): Promise<{ ok: true, walked: number } | { ok: false, code: DeployRefusalCode, at: string | null }>`.
+- Produces: `MAX_WALK = 500`, `interface VRecord { version: 1, repo: string, defaultBranch: string, v: string, recordedAt: string, how: "attested" | "verified" }`, `readVRecord(path: string): VRecord`, `writeVRecord(path: string, record: VRecord): void` (atomic, outside every checkout), `interface DeployerApi { commit(sha: string): Promise<{ tree: string, parents: string[] }>, pullsForCommit(sha: string): Promise<Array<{ number: number, mergeCommitSha: string | null, merged: boolean, baseRef: string }>>, pull(n: number): Promise<{ merged: boolean, mergeCommitSha: string | null, baseRef: string, baseSha: string, headSha: string }>, reviews(n: number): Promise<Array<{ nodeId: string, userId: number, userType: string, state: string, commitId: string, submittedAt: string, body: string }>>, reviewEdits(nodeId: string): Promise<{ lastEditedAt: string | null, editCount: number }>, pullOids(n: number): Promise<{ mergeCommitOid: string, headRefOid: string, baseRefOid: string }>, forcePushesSince(branch: string, since: string): Promise<number> }`, `type DeployRefusalCode = "v-not-reached" | "walk-limit" | "no-single-pr" | "tree-mismatch" | "no-app-approval" | "review-edited" | "provenance-unparseable" | "provenance-base-mismatch" | "pr-record-mismatch" | "force-push-since-v" | "v-outside-activity-window" | "api-error"`, `verifyChain(api: DeployerApi, args: { c: string, vRecord: VRecord, botUserId: number }): Promise<{ ok: true, walked: number } | { ok: false, code: DeployRefusalCode, at: string | null }>`.
 - Commands: `bun <abs>/tools/pr-review/deployer.ts verify --repo <owner/name> --commit <sha40> --state <abs file> --bot-user-id <n>` with `{"token": "..."}` on stdin (the deployer's own read-only credential). Exit 0 records C as the new V (`how: "verified"`). Exit 2 prints `{"ok":false,"code":...,"at":<sha or null>}`. `deployer.ts attest --repo <owner/name> --default-branch <name> --commit <sha40> --state <abs file>` writes V with `how: "attested"`. The README says only the operator runs `attest`.
 
-`verifyChain` is the spec's recipe, step for step. The base leg compares the provenance base against X's first parent and against the pull request field C6 showed holds the base tip at merge (`base.sha` or the GraphQL `baseRefOid`). If C6 showed neither does, that leg refuses with `"pr-record-mismatch"` rather than being skipped. `forcePushesSince` reads `GET /repos/{r}/activity?ref=refs/heads/<branch>&activity_type=force_push` over every page and counts entries at or after `vRecord.recordedAt`. Any thrown error is `"api-error"`.
+`verifyChain` is the spec's recipe, step for step. The base leg compares the provenance base against X's first parent and against the pull request field C6 showed holds the base tip at merge (`base.sha` or the GraphQL `baseRefOid`). If C6 showed neither does, that leg refuses with `"pr-record-mismatch"` rather than being skipped. `forcePushesSince` reads `GET /repos/{r}/activity?ref=refs/heads/<branch>&activity_type=force_push` over every page and counts entries whose timestamp (the field C7 recorded) is at or after `vRecord.recordedAt` minus `CLOCK_SKEW_MS = 600000`. `recordedAt` comes from the local clock as a UTC ISO string, and the ten-minute margin keeps a workstation clock running up to that far ahead of GitHub's from hiding a force push. Because of the margin, a force push in the ten minutes before V also refuses, and the operator re-attests, which fails closed. `ACTIVITY_RETENTION_DAYS` is the retention window C7 recorded from GitHub's documentation, and a V whose `recordedAt` is older than that window refuses with `"v-outside-activity-window"` before the walk, because the listing can no longer prove that no force push happened. If C7 found no documented retention, this task stops and asks the coordinator. Any thrown error is `"api-error"`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1069,6 +1372,8 @@ test.each([
   ["an unparseable provenance line", { body: "no provenance" }, "provenance-unparseable"],
 ])("%s refuses", async (_n, o, code) => expect(await verifyChain(api(chain(1, o)), args())).toMatchObject({ ok: false, code }));
 test("a Bot review under another id is ignored", async () => {});
+test("a force push five minutes before recordedAt refuses, inside the skew margin", async () => {});
+test("a V older than ACTIVITY_RETENTION_DAYS refuses with v-outside-activity-window", async () => {});
 test("reaching the root without V refuses, and so does the walk limit", async () => {});
 test("an API error refuses", async () => {});
 test("verify records C as the new V only on success", async () => {});
