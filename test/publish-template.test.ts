@@ -66,6 +66,16 @@ describe("unfilledSections()", () => {
     expect(unfilledSections(TEMPLATE, body)).toEqual([1]);
   });
 
+  test("ends a section at the next template heading even when the body heading is shallower", () => {
+    expect(unfilledSections("## A\n\n## B\n", "# A\n\n## B\n\ntext\n")).toEqual([1]);
+    expect(unfilledSections("## Summary\n\n## Testing\n", "# Summary\n\n## Testing\n\nRan it.\n")).toEqual([1]);
+  });
+
+  test("one body section does not fill two template sections with the same heading", () => {
+    expect(unfilledSections("## A\n\n## A\n", "## A\n\ntext\n")).toEqual([2]);
+    expect(unfilledSections("## A\n\n## A\n", "## A\n\none\n\n## A\n\ntwo\n")).toEqual([]);
+  });
+
   // Review Focus 1 and 2: bodies written on Windows.
   test("reads a body saved with a byte-order mark and CRLF line endings", () => {
     const body = "\uFEFF## Source\r\n\r\npath\r\n\r\n## Why it transfers\r\n\r\nYes.\r\n\r\n### Detail\r\n\r\nMore.\r\n";
