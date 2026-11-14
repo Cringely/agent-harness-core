@@ -72,6 +72,8 @@
 //     that names a linked-out folder by its own target path (the dotfiles folder the
 //     `skills` link points at) or reaches a file through a hard link never mentions the
 //     account folder, so it is judged as an ordinary path outside the project.
+//     When the home folder cannot be looked up, the account folder could be anywhere, so
+//     no path is scratch and every write by a scoped agent is denied.
 //
 // The project root is CLAUDE_PROJECT_DIR when set and the session cwd otherwise. A
 // relative filePath resolves against the session cwd, which arrives on stdin as
@@ -174,23 +176,42 @@ function segmentsOf(p: string): string[] {
 const startsWith = (a: string[], b: string[]): boolean => a.length >= b.length && b.every((s, i) => a[i] === s);
 
 /**
+ * This host's home folder, or null when it cannot be known. `os.homedir()` throws when the lookup
+ * fails (HOME unset and no password entry on POSIX, a failed profile lookup on Windows), and an
+ * uncaught throw here would reach the hook's outer handler, which exits with no opinion and so
+ * allows every write the gate would have denied. An empty or relative answer is unknown too, since
+ * resolving it would make the session cwd the home folder. `lookup` is injectable for tests.
+ */
+export function accountHome(lookup: () => string = homedir): string | null {
+  try {
+    const home = lookup();
+    return typeof home === "string" && home !== "" && isAbsolute(home) ? home : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The account Claude folders, `<home>/.claude` and CLAUDE_CONFIG_DIR when set, each under the
  * spelling it was given and under its canonical one. Every session loads rules, skills, agent
  * definitions and hooks from there, so no path at or under one is scratch, whatever its segments
  * are named. Both spellings are kept because a linked folder (`.claude` itself, or `skills` inside
  * it, kept in a dotfiles repo) puts the given and the resolved path in different trees, and either
  * one starting inside a root is enough to deny. Home comes from `os.homedir()`, not `$HOME`, which
- * Git Bash on Windows can point at another folder. An empty or relative home adds nothing, since
- * resolving it would make the session cwd a root. A relative CLAUDE_CONFIG_DIR resolves against
- * this process's cwd. A folder that cannot be canonicalised keeps only its given spelling. `env`
- * and `home` are injectable for tests.
+ * Git Bash on Windows can point at another folder. A relative CLAUDE_CONFIG_DIR resolves against
+ * this process's cwd. A folder that cannot be canonicalised keeps only its given spelling.
+ *
+ * Null means the account folder is unknown: the home lookup failed or gave an empty or relative
+ * answer (see accountHome). It is never an empty list, because an empty list means "no account
+ * folder exists" and would let a scratch-named folder inside the real one count as scratch.
+ * inScratch() reads null as "no path is scratch". `env` and `home` are injectable for tests.
  */
 export function claudeConfigRoots(
   env: Record<string, string | undefined> = process.env,
-  home: string = homedir(),
-): string[] {
-  const given: string[] = [];
-  if (typeof home === "string" && home !== "" && isAbsolute(home)) given.push(join(home, ".claude"));
+  home: string | null = accountHome(),
+): string[] | null {
+  if (typeof home !== "string" || home === "" || !isAbsolute(home)) return null;
+  const given: string[] = [join(home, ".claude")];
   const configDir = env.CLAUDE_CONFIG_DIR;
   if (typeof configDir === "string" && configDir !== "") given.push(resolve(configDir));
   const roots: string[] = [...given];
@@ -224,14 +245,16 @@ export function claudeConfigRoots(
  *     of that tree is still denied when written through it. That holds inside the project too, so
  *     a project rooted at the home folder has no drop box, since its `.claude` is the account one.
  * Compared lowercased on every platform: case-insensitive containment can only add denies.
- * `configRoots` is injectable for tests and defaults to this host's account folders.
+ * `configRoots` is injectable for tests and defaults to this host's account folders. When those are
+ * unknown (null), no path is scratch, since any path could sit inside the account folder.
  */
 export function inScratch(
   filePath: string,
   cwd: string,
   projectDir: string,
-  configRoots: string[] = claudeConfigRoots(),
+  configRoots: string[] | null = claudeConfigRoots(),
 ): boolean {
+  if (configRoots === null) return false;
   const abs = isAbsolute(filePath) ? resolve(filePath) : resolve(cwd, filePath);
   // Long-path and UNC spellings alias a path the segment comparison below cannot match. Checked on
   // the raw input and on the resolved form, since a relative path can inherit a UNC cwd.
@@ -323,17 +346,19 @@ export function readSessionCwd(payload: unknown): string {
 /**
  * Deny a write that a scratch-scoped agent aims outside its scratch directory.
  * Every other combination allows: unscoped agents, the main session (no
- * agent_type), and in-scope writes.
+ * agent_type), and in-scope writes. `configRoots` is passed to inScratch() and left undefined
+ * outside tests, so the account folders are looked up only for a scoped write.
  */
 export function decide(
   scope: string | null,
   filePath: string | undefined,
   cwd: string,
   projectDir: string,
+  configRoots?: string[] | null,
 ): Decision {
   if (scope !== "scratch") return { action: "allow" };
   if (!filePath) return { action: "allow" };
-  if (inScratch(filePath, cwd, projectDir)) return { action: "allow" };
+  if (inScratch(filePath, cwd, projectDir, configRoots)) return { action: "allow" };
   return {
     action: "deny",
     reason:

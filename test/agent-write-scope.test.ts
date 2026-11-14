@@ -9,6 +9,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import {
   WRITE_SCOPE_GATE_VERSION,
+  accountHome,
   claudeConfigRoots,
   decide,
   inScratch,
@@ -532,9 +533,47 @@ describe("inScratch(): nothing at or under the account Claude folder is scratch"
     expect(claudeConfigRoots({ CLAUDE_CONFIG_DIR: "" }, home)).toEqual(claudeConfigRoots({}, home));
   });
 
-  test("an empty or relative home adds no root", () => {
-    expect(claudeConfigRoots({}, "")).toEqual([]);
-    expect(claudeConfigRoots({}, "relative-home")).toEqual([]);
+  // An unknown home means the account folder could be anywhere, so the roots are unknown (null)
+  // rather than empty. Empty would let a scratch-named folder inside that account folder pass.
+  test("an empty or relative home leaves the roots unknown", () => {
+    expect(claudeConfigRoots({}, "")).toBeNull();
+    expect(claudeConfigRoots({}, "relative-home")).toBeNull();
+    expect(claudeConfigRoots({}, null)).toBeNull();
+    expect(claudeConfigRoots({ CLAUDE_CONFIG_DIR: join(homeRoot, "cfg") }, null)).toBeNull();
+  });
+
+  test("a home lookup that throws, or answers empty or relative, is unknown, not a throw", () => {
+    const throwing = () => {
+      throw new Error("no home for this user");
+    };
+    expect(accountHome(throwing)).toBeNull();
+    expect(accountHome(() => "")).toBeNull();
+    expect(accountHome(() => "relative-home")).toBeNull();
+    expect(accountHome(() => home)).toBe(home);
+  });
+
+  test("with the account folder unknown, no path is scratch", () => {
+    for (const target of [
+      join(homeRoot, "tmp", "claude", "sess", "scratchpad", "r.md"),
+      join(claudeDir, "scratch", "r.md"),
+      join(proj, ".claude", "scratch", "r.md"),
+    ]) {
+      expect(inScratch(target, proj, proj, null)).toBe(false);
+    }
+  });
+
+  test("decide() denies every scoped write when the home lookup fails", () => {
+    const unknown = claudeConfigRoots({}, accountHome(() => {
+      throw new Error("no home for this user");
+    }));
+    for (const target of [
+      join(homeRoot, "tmp", "claude", "sess", "scratchpad", "r.md"),
+      join(claudeDir, "skills", "scratch", "SKILL.md"),
+      join(proj, "src", "index.ts"),
+    ]) {
+      expect(decide("scratch", target, proj, proj, unknown).action).toBe("deny");
+    }
+    expect(decide(null, join(proj, "src", "index.ts"), proj, proj, unknown)).toEqual({ action: "allow" });
   });
 
   test("ordinary scratch folders stay scratch", () => {
