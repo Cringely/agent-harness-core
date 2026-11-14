@@ -46,7 +46,7 @@ Plan C additions:
 ## Review Focus
 
 1. A directory under `core/claude/skills/` that `layers.json` lists in neither `skills` nor `kernelSkills`: `Get-LayerRegistry` must throw before any write, so a domain skill dropped into core never installs into every project by default. Test in Task 5.
-2. A project that records `documents` and then drops it, holding a project-edited file under `.claude/skills/not-ai/`: the installer leaves the whole skill folder in place, warns once for that skill, and `-Audit` counts each of its files as `installed (layer not selected)`. It never deletes. Test in Task 5.
+2. A project that records `documents` and then switches to `physical`, which drops both layers that carry not-ai (`code` and `documents`), holding a project-edited file under `.claude/skills/not-ai/`: the installer leaves the whole skill folder in place, warns once for that skill, and `-Audit` counts each of its files as `installed (layer not selected)`. It never deletes. Test in Task 5.
 3. A retire-list entry that names a file deeper inside a skill (`skills/old/reference/a.md`) rather than its `SKILL.md`: `Install-Account.ps1` must throw before renaming anything. Today it renames that file and leaves the skill loading with a missing reference, while its `SKILL.md`, the file Claude Code discovers, stays live. Test in Task 6.
 4. An office tool probe whose output carries text beyond a version: the sidecar `toolchain` record holds only `present`, `version` and `probedAt`, and the committed manifest never gains a `toolchain` key. Test in Task 3.
 5. The window between copying skills into core (Task 4) and removing the account copies (Task 8): an edit to an account skill in that window must turn the copy test red, so nothing written to `~/.claude` during the move is lost. An edit already exported to `account/claude/` is caught by the copy case, ablated in Task 4. An edit made in the live `~/.claude` and never exported is caught by Task 8 Step 3's "Live sources match core" check, which exports with the pre-Task-7 exporter, proves the export overwrote a planted marker in the check worktree, and runs the copy case on that export before Step 4 moves anything.
@@ -262,6 +262,7 @@ PR C1 body: `Docs: README still accurate: the core/claude/rules row describes la
     - The mock answers `harness-fake-office --version` with exit 0 and output `harness-fake-office 2.3.4 build SECRET-<guid>`, and `harness-fake-absent` with 127.
     - After `-Layers documents`, the sidecar's `toolchain.'harness-fake-office'` has `present` `$true` and `version` `2.3.4`, and `toolchain.'harness-fake-absent'` has `present` `$false` and `version` `$null`.
     - Each `probedAt` matches `^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z$`.
+    - Each `toolchain` entry's property names, sorted, are exactly `present`, `probedAt`, `version`.
     - The raw sidecar text does not contain `SECRET-`, and the raw `.harness-manifest.json` text does not contain `toolchain`.
     - The output names `harness-fake-absent` in a warning, as Plan A's optional-dependency path already does.
   - "a code-only install writes no toolchain, and dropping documents removes it": `-Layers code` leaves no `toolchain` key. Then `-Layers documents` writes it, and a re-run with `-Layers code` removes it.
@@ -288,9 +289,9 @@ PR C1 body: `Docs: README still accurate: the core/claude/rules row describes la
     In `deps.json` each probe is a JSON argv array, so the backslashes in the two registry paths are written doubled. Before committing, run each probe by hand on this machine and record its exit code and first output line in the PR body (versions only). If `pdftoppm -v` exits non-zero, switch its probe to `pdftoppm -h` with the same pattern. The two registry probes read the registry and never start Word or Edge.
 
     Each `failMode` is one sentence naming what the session falls back to, for example "Without pandoc, markdown-to-docx conversion falls back to Word through COM on Windows or is unavailable." `soffice`'s also says that a LibreOffice installed without its program folder on PATH reads as absent. The Python package entries' say that `python3` itself is a kernel dependency and that the package installs with `python3 -m pip install <name>==<version>`, which the installer never runs.
-  - **`Invoke-DepsPreflight`.** After the probe loop, build `ToolResults` from the probe cache for every entry without `kind`, in manifest order. `Version` is `$cache[$name].Version` formatted with `ToString()`, or `$null`. Nothing from the probe's `Output` is carried. Add `ToolResults` to the returned object.
+  - **`Invoke-DepsPreflight`.** After the probe loop, build `ToolResults` from the probe cache for every entry without `kind`, in manifest order. `Version` is `$cache[$name].Version` formatted with `ToString()`, or `$null`. The cache holds `Test-Dep` results, which carry the parsed `[version]` and never the probe's `Output`, so nothing from the raw output can reach a row. Add `ToolResults` to the returned object.
   - **`Install-Harness.ps1`.** After the preflight returns and before the sidecar is written:
-    - When `$projectLayers -contains 'documents'`, set `$sidecar['toolchain']` to an ordered map built from the `ToolResults` rows whose `Layers` contains `documents`, each with `probedAt = (Get-Date -AsUTC).ToString('o')`.
+    - When `$projectLayers -contains 'documents'`, set `$sidecar['toolchain']` to an ordered map built from the `ToolResults` rows whose `Layers` contains `documents`. Each entry is a new ordered map of exactly three named fields, `present = $row.Present`, `version = $row.Version` and `probedAt = (Get-Date -AsUTC).ToString('o')`, never the row itself.
     - Otherwise remove the key when present.
     - The write goes through the existing sidecar path, so a sidecar the ignore-rule gate refuses records no toolchain, and the existing warning covers it.
     - `-Audit`, `-Accept`, `-Unaccept` and `-Prune` never reach this code, since the preflight does not run for them.
@@ -305,7 +306,8 @@ The installer probes the office toolchain (pandoc, LibreOffice, poppler's `pdfto
   - **README.** The Install section gains two sentences: a project that records `documents` gets its office toolchain probed on every install, with the result written to the sidecar's `toolchain` key, and a missing office tool only warns.
 
 - [ ] **Step 4: Run to verify they pass.** Both Pester suites and `bun test`. Expected: all PASS. Then:
-  - Delete the line that strips `Output` from `ToolResults` (carry `Output` into the row instead) and confirm the `SECRET-` case fails, then restore.
+  - In `Test-Dep`'s last line in `install/Deps.ps1`, `return New-DepResult $name $true $version $true ''`, pass `(Get-DepsOutputText $r.Output)` in place of `$version`, so the raw probe output becomes the version. Confirm the `SECRET-` assertion fails, then restore.
+  - In the `Install-Harness.ps1` toolchain write, store the `ToolResults` row itself as the entry in place of the three-field map. Confirm the property-name assertion fails (the row carries `Name` and `Layers`), then restore.
   - Delete the `else` branch that removes `toolchain` and confirm the drop case fails, then restore.
 
 - [ ] **Step 5: Commit.**
@@ -443,9 +445,9 @@ Between this commit and Task 5's, #341's ungated loop would install every one of
   - "-Layers physical installs no layer skill": `.claude/skills/` holds `publish` and nothing else.
   - "-Layers none installs only kernel skills": `.claude/skills/` holds `publish` and nothing else.
   - Review Focus 2, "a dropped layer's skill folder is left in place, warned once, and counted by the audit":
-    - Install `-Layers documents`, append `PROJECT EDIT` to `.claude/skills/not-ai/reference/profile.md`, and re-run `-Layers code`. The appended line survives, and so does every other not-ai file.
-    - Re-run `-Layers physical`. Every not-ai and prose-lint file is still on disk.
-    - The output carries exactly one warning matching `'skills/not-ai/' belongs to a layer`.
+    - Install `-Layers documents`, append `PROJECT EDIT` to `.claude/skills/not-ai/reference/profile.md`, and re-run `-Layers physical`. `physical` shares no layer with not-ai's `["code", "documents"]`, so this run takes the left-in-place path rather than the modified-file skip. A re-run with `-Layers code` would keep not-ai selected and prove nothing here.
+    - After the `-Layers physical` run, `profile.md` still ends with the `PROJECT EDIT` line, and every not-ai and prose-lint file is still on disk.
+    - The output of the `-Layers physical` run carries exactly one warning matching `'skills/not-ai/' belongs to a layer`.
     - `-Audit` reports `installed (layer not selected)` for every not-ai file key and prints the attention count.
     - Delete `.claude/skills/not-ai` and re-run. No `skills/not-ai/` key is left in the manifest's `files`, and the output carries `record-dropped (layer not selected)` rows for them.
   - Review Focus 1, "an unregistered core skill directory refuses before any write": build a fake repo the way the suite's "throws instead of reporting every installed agent as orphaned" case does (copy `install/Install-Harness.ps1`, `install/Deps.ps1` and `core/` into a temp folder, since `$repoRoot` comes from `$PSScriptRoot` and has no parameter), add `core/claude/skills/stray/SKILL.md` there, and run the copied installer with `@script:dep`. It throws a message naming `stray` and `layers.json`, and the target has no `.claude`.
@@ -503,15 +505,16 @@ Most of what Task 7 needs from the retire list already exists at the Plan C base
 - Produces: the rule that an entry whose first segment is `skills` must match `^skills/[A-Za-z0-9._-]+/SKILL\.md\z`.
 
 - [ ] **Step 1: Write the failing tests** with the suite's sandbox pattern.
-  - Review Focus 3, "refuses a path deeper than a skill's SKILL.md before renaming anything": the home holds `rules/keep.md`, `skills/old/SKILL.md` and `skills/old/reference/a.md`, and the list names `rules/keep.md` then `skills/old/reference/a.md`. It throws a message matching `*retired-paths list*skills/old/reference/a.md*SKILL.md*`. Afterwards `skills/old/reference/a.md` and `rules/keep.md` still exist, and `Get-RetiredCopies` finds no copy of either.
-  - "refuses a skill directory entry the receiver does not have": the home has no `skills/` folder, and the list names `skills/absent`. It throws a message matching `*retired-paths list*skills/absent*SKILL.md*`, and `rules/security.md` is absent from the home, so nothing was copied.
-  - The existing directory, link-to-directory and payload cases stay as written. Place the new check after the directory check so they keep their messages: the directory and link cases still expect `*is a directory*`, and "refuses when the payload carries a file inside a retired directory" (`skills/prose-lint`) expects only `*skills/prose-lint*`, which the new message also carries.
+  - Review Focus 3, "refuses a path deeper than a skill's SKILL.md before renaming anything": the home holds `rules/keep.md`, `skills/old/SKILL.md` and `skills/old/reference/a.md`, and the list names `rules/keep.md` then `skills/old/reference/a.md`. It throws a message matching `*retired-paths list*skills/old/reference/a.md*names a skill by something other than its SKILL.md*`, the new check's own wording, which the directory message does not carry. Afterwards `skills/old/reference/a.md` and `rules/keep.md` still exist, and `Get-RetiredCopies` finds no copy of either.
+  - "refuses a skill directory entry the receiver does not have": the home has no `skills/` folder, and the list names `skills/absent`. It throws a message matching `*retired-paths list*skills/absent*names a skill by something other than its SKILL.md*`, and `rules/security.md` is absent from the home, so nothing was copied.
+  - The existing directory and link-to-directory cases stay as written. Place the new check after the directory check so they keep their messages: both still expect `*is a directory*`.
+  - The existing case "refuses when the payload carries a file inside a retired directory" lists `skills/prose-lint`. Under the new check that bare folder is refused before the payload check runs, and the case's `*skills/prose-lint*` expectation still matches, so it would pass while no longer reaching the payload branch it is named for. Rewrite it as "refuses when the payload carries a retired skill's SKILL.md": the list names `skills/prose-lint/SKILL.md`, which `New-StandInPayload` writes, and the expected message becomes `*payload still carries*skills/prose-lint/SKILL.md*`. `rules/security.md` stays absent from the home, as the case asserts today.
 
-- [ ] **Step 2: Run to verify they fail.** `pwsh -NoProfile -File install/Install-Account.Tests.ps1`. Expected: the two new cases FAIL (the deeper file is renamed, and the absent directory is accepted), and every existing case PASSES.
+- [ ] **Step 2: Run to verify they fail.** `pwsh -NoProfile -File install/Install-Account.Tests.ps1`. Expected: the two new cases FAIL (the deeper file is renamed, and the absent directory is accepted), and every other case, the rewritten payload case included, PASSES, since the payload check already refuses a listed file the payload carries.
 
 - [ ] **Step 3: Implement.** In the validation loop of `Invoke-AccountRetirement`, directly after the `$present.PSIsContainer` throw and before the payload check, add: when `$segments[0] -ceq 'skills'` and `$path -cnotmatch '^skills/[A-Za-z0-9._-]+/SKILL\.md\z'`, throw `"${label}: '$path' names a skill by something other than its SKILL.md. A skill is retired by renaming its SKILL.md, the file Claude Code discovers, so list skills/<name>/SKILL.md. Nothing was renamed."` Entries under `rules/`, `agents/` and `hooks/` keep today's rule. In `docs/security-controls.md`, the "Account retire-list path check" row's invariant gains one sentence after the directory clause: "An entry under skills must name a skill's SKILL.md, so a deeper file or a bare skill folder is refused whether or not the receiver has it." `README.md` already states the rule and is not edited.
 
-- [ ] **Step 4: Run to verify they pass.** `pwsh -NoProfile -File install/Install-Account.Tests.ps1` and `bun test test/security-controls.test.ts`. Expected: all PASS. Remove the new pattern check, confirm both new cases fail (Review Focus 3 renames `a.md`), and restore it.
+- [ ] **Step 4: Run to verify they pass.** `pwsh -NoProfile -File install/Install-Account.Tests.ps1` and `bun test test/security-controls.test.ts`. Expected: all PASS. Remove the new pattern check, confirm both new cases fail (Review Focus 3 renames `a.md`), and restore it. Then remove the payload check, confirm the rewritten payload case fails, and restore it.
 
 - [ ] **Step 5: Commit.**
 
@@ -556,9 +559,49 @@ In the main clone, on `feat/310-layer-skills` at Task 7's commit. Nothing leaves
 
 - [ ] **Step 1: Ask the operator once which projects take which layers.** Take the project list from Plan A Task 11 Step 2. The question carries each project's current `Layers:` line and asks which ones record `documents` or `physical` as well as, or instead of, `code`. Default taken if the operator says nothing: every project keeps `code`, which carries `not-ai` and `prose-lint`, so no project loses a skill it loads today. On C3 gate ruling A, `code` also carries the security skills, and only `wiring-diagram` leaves projects that record no `physical` layer. Log the item to the session's `needs-you.md` when asked.
 - [ ] **Step 2: Reinstall.** `pwsh -NoProfile -File install/Install-Harness.ps1 -Target <project> -Layers <answer>` for each project, this repo included. Expected per project: `.claude/skills/<name>/SKILL.md` for every skill its layers select. Collect each `git status --short` for the operator, as Plan A Task 11 Step 3 did.
-- [ ] **Step 3: Live checks, before anything is removed.** Run from Git Bash. Print only the verdicts, because headless output can carry the account email.
-  - **Project skill loads.** In a temp folder installed with `-Layers documents`, temporarily set `~/.claude/skills/not-ai/SKILL.md` aside by renaming it to `SKILL.md.check`, so only the project copy can answer. Run `claude -p --model haiku "Without using any tool, is a skill named not-ai available to you? Reply YES or NO."`. Then restore the name. Expected: `YES`.
-  - **Gate path resolves.** In the same folder with a two-sentence `draft.txt`, run `claude -p --model haiku --output-format stream-json --verbose "Use the not-ai skill's gate on draft.txt with --genre technical --json."` to a scratch file, with the account `SKILL.md` set aside again. A `bun -e` one-liner finds the first Bash `tool_use` whose command contains `gate.py` and prints `GATE PATH RESOLVED` when that command contains `.claude/skills/not-ai/scripts/gate.py` and its `tool_result` exit code is 0 or 1, `GATE PATH UNRESOLVED` when the command still contains the literal `${CLAUDE_SKILL_DIR}` or the result reports a missing file, and `GATE NOT RUN` when there is no such call. Restore the name and delete the scratch file.
+- [ ] **Step 3: Live checks, before anything is removed.** Run from Git Bash. Print only the verdicts, because headless output can carry the account email. The two skill checks read the session's own event stream and never take the model's word for what loaded. At this step `~/.claude/tools/not-ai/gate.py` still exists, so a model that cannot find the project gate can still reach the account one, and the checks treat that as a failure, not a pass.
+  - **Run the session.** Make a temp folder whose path has no spaces, install it with `-Layers documents`, and write a two-sentence `draft.txt` into it. Rename `~/.claude/skills/not-ai/SKILL.md` to `SKILL.md.check`, so the account copy cannot load. From the temp folder, run `claude -p "Load the not-ai skill with the Skill tool, then run its gate command on draft.txt with --genre technical --json." --model haiku --output-format stream-json --verbose --allowedTools Skill "Bash(python3 -B:*)" < /dev/null > <scratch>/skill-check.jsonl 2>/dev/null`. The prompt goes first because `--allowedTools` takes every following word as a tool name, and a prompt placed after it is read as one. Restore the name as the very next command, whatever `claude` exited with.
+  - **Read the stream.** Write the script below to `<scratch>/skill-check.ts` and run `bun <scratch>/skill-check.ts <scratch>/skill-check.jsonl <temp folder>`. It prints four verdict lines and nothing from the stream. The event shapes it reads were captured live on Claude Code 2.1.325 on 2026-11-14 with a throwaway project skill. The `system`/`init` event lists skills by name in `skills`, the `Skill` tool's own result is only `Launching skill: <name>`, and the skill text arrives in the next `user` event, starting `Base directory for this skill: <dir>`. On Windows that line uses backslashes while the expanded `${CLAUDE_SKILL_DIR}` uses forward slashes, so the script compares paths after turning `\` into `/`, ignoring case on Windows. A stream without those shapes prints `SHAPE UNKNOWN` and exits 1.
+
+```ts
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
+const [jsonl, root] = process.argv.slice(2);
+const win = process.platform === "win32";
+const norm = (p: string) => { const s = resolve(root, p).replace(/\\/g, "/"); return win ? s.toLowerCase() : s; };
+const skillDir = norm(".claude/skills/not-ai");
+const gatePath = skillDir + "/scripts/gate.py";
+const ev: any[] = readFileSync(jsonl, "utf8").split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l));
+const blocks = (e: any): any[] => (Array.isArray(e?.message?.content) ? e.message.content : []);
+const textOf = (e: any) => blocks(e).filter((b) => b.type === "text").map((b) => b.text).join("\n");
+const init = ev.find((e) => e.type === "system" && e.subtype === "init");
+if (!init || !Array.isArray(init.skills)) { console.log("SHAPE UNKNOWN"); process.exit(1); }
+const out: string[] = [init.skills.includes("not-ai") ? "SKILL LISTED" : "SKILL NOT LISTED"];
+const BASE = "Base directory for this skill: ";
+const use = ev.findIndex((e) => blocks(e).some((b) => b.type === "tool_use" && b.name === "Skill" && JSON.stringify(b.input).includes("not-ai")));
+const loaded = use < 0 ? undefined : ev.slice(use + 1).find((e) => e.type === "user" && textOf(e).startsWith(BASE));
+if (!loaded) out.push("SKILL NOT LOADED", "GATE PATH UNCHECKED");
+else {
+  const text = textOf(loaded);
+  out.push(norm(text.split(/\r?\n/)[0].slice(BASE.length).trim()) === skillDir ? "SKILL LOADED FROM PROJECT" : "SKILL LOADED ELSEWHERE");
+  const cmds = [...text.matchAll(/python3 -B "([^"]+)"/g)].map((m) => m[1]);
+  if (text.includes("${CLAUDE_SKILL_DIR}")) out.push("GATE PATH UNSUBSTITUTED");
+  else if (cmds.length === 4 && cmds.every((p) => norm(p) === gatePath && existsSync(resolve(root, p)))) out.push("GATE PATH SUBSTITUTED");
+  else out.push("GATE PATH WRONG");
+}
+const runs = ev.flatMap((e) => (e.type === "assistant" ? blocks(e) : [])).filter((b) => b.type === "tool_use" && b.name === "Bash" && String(b.input?.command ?? "").includes("gate.py"));
+if (runs.length === 0) out.push("GATE NOT RUN");
+else {
+  const named = runs.flatMap((b) => [...String(b.input.command).matchAll(/"([^"]*gate\.py)"|(\S*gate\.py)/g)].map((m) => norm(m[1] ?? m[2])));
+  const res = ev.flatMap((e) => (e.type === "user" ? blocks(e) : [])).find((b) => b.type === "tool_result" && b.tool_use_id === runs[0].id);
+  const ok = res && (!res.is_error || /Exit code 1(?!\d)/.test(JSON.stringify(res.content ?? "")));
+  out.push(!named.every((p) => p === gatePath) ? "GATE RAN ELSEWHERE" : ok ? "GATE RAN FROM PROJECT" : "GATE FAILED IN PROJECT");
+}
+console.log(out.join("\n"));
+```
+
+  - What each verdict proves. `SKILL LISTED` and `SKILL LOADED FROM PROJECT` together show the session discovered not-ai and loaded the project copy, not the account copy or a plugin's namespaced skill. `GATE PATH SUBSTITUTED` shows Claude Code expanded `${CLAUDE_SKILL_DIR}` in all four gate commands to the project's own `scripts/gate.py` and that the file exists there. `GATE RAN FROM PROJECT` shows every `gate.py` the model ran was that file, and that the gate exited 0 or 1. Any command naming another `gate.py`, the account one included, prints `GATE RAN ELSEWHERE`.
+  - Delete `<scratch>/skill-check.jsonl` after reading the verdicts. Keep `<scratch>/skill-check.ts` for any re-run.
   - **Live sources match core.** An edit made in `~/.claude` after the last export reaches `account/claude/` only through an export, so the copy case cannot see it yet. Task 7 stopped the exporter shipping `tools/not-ai` and templating the two `SKILL.md` files, so this check exports with the exporter from Task 7's parent commit, into a throwaway worktree, and runs the copy case there. With `<task7>` the Task 7 sha and `<scratch>` the session scratchpad:
     - `git worktree add --detach <scratch>/live-skill-check HEAD`, then `git -C <scratch>/live-skill-check checkout <task7>~1 -- install/AccountShared.ps1 install/Export-Account.ps1`. The worktree keeps HEAD's `core/claude/skills/` and `MOVED_SKILLS`, including any Step 3 fallback commit.
     - Plant a marker the export must overwrite: `printf '\nLIVE-EXPORT-MARKER\n' >> <scratch>/live-skill-check/account/claude/skills/prose-lint/SKILL.md`. The live `~/.claude/skills/prose-lint/SKILL.md` never carries that line, so an export that reached this worktree removes it.
@@ -567,11 +610,10 @@ In the main clone, on `feat/310-layer-skills` at Task 7's commit. Nothing leaves
     - From the check worktree's root, `bun test test/layer-rules.test.ts > <scratch>/live-skill-test.log 2>&1`, and print only the pass and fail counts and the names of failing cases.
     - Expected: export exit 0, a marker count of `0`, and the copy case passing. On any failure, stop. Nothing has been moved yet. The failing paths name a live edit that core lacks. Copy each such file from the check worktree's `account/claude/` to its core path on the branch (a `SKILL.md` with its `MOVED_SKILLS` rewrites applied), commit, and re-run this check.
     - Remove the check worktree with `git worktree remove --force <scratch>/live-skill-check` and delete both logs. Step 4 follows this check directly, with no edit to a moved skill in between.
-  - **Gate.**
-    - `YES`, `GATE PATH RESOLVED` and live sources matching core: continue to Step 4.
-    - `NO`: stop. Project skills under `.claude/skills/` do not load, so Tasks 4 to 7 do not merge, and the coordinator raises a Needs-you item with this result.
-    - `YES` and `GATE PATH UNRESOLVED`: stop. Change the not-ai rewrite's replacement in `MOVED_SKILLS` and the core `SKILL.md` to the project-relative `python3 -B ".claude/skills/not-ai/scripts/gate.py"`, add a sentence that the command runs from the project root, commit that on the branch, reinstall the temp folder, and re-run this step.
-    - `GATE NOT RUN`: one retry, then treat as `GATE PATH UNRESOLVED`.
+  - **Gate.** Step 4 runs only when the script printed exactly `SKILL LISTED`, `SKILL LOADED FROM PROJECT`, `GATE PATH SUBSTITUTED` and `GATE RAN FROM PROJECT`, and the live sources matched core. Every other result stops the task here with nothing in `~/.claude` moved:
+    - `SHAPE UNKNOWN`, `SKILL NOT LISTED`, `SKILL NOT LOADED` or `SKILL LOADED ELSEWHERE`: stop. Either the installed Claude Code emits a stream this script cannot read, or project skills under `.claude/skills/` do not load in place of the account copy. First confirm the account `SKILL.md` was renamed during the run. Tasks 4 to 7 do not merge, and the coordinator raises a Needs-you item with the verdicts.
+    - `GATE PATH UNSUBSTITUTED` or `GATE PATH WRONG`: stop. Change the not-ai rewrite's replacement in `MOVED_SKILLS` and the core `SKILL.md` to the project-relative `python3 -B ".claude/skills/not-ai/scripts/gate.py"`, add a sentence that the command runs from the project root, commit that on the branch, reinstall the temp folder, and re-run this step. The script resolves a relative command path against the temp folder, so the same four verdicts decide the re-run.
+    - `GATE RAN ELSEWHERE`, `GATE FAILED IN PROJECT` or `GATE NOT RUN`: one re-run of this step. A second result other than `GATE RAN FROM PROJECT` stops the task, and the coordinator raises a Needs-you item with the verdicts.
 - [ ] **Step 4: Move the sources out of `~/.claude`.** Create `~/.claude-backups/skills-<yyyyMMddTHHmmssZ>/` (UTC) and move each moved skill's folder there, plus `~/.claude/tools/not-ai`. On C3 gate ruling A, `wiring-diagram/examples/` goes with its skill and stays in the backup, and the operator decides whether to copy it into a physical project.
 - [ ] **Step 5: Kernel pointer.** In `~/.claude/rules/writing-style.md`, the Surface Routing row 1 cell "not-ai skill for editing existing prose" becomes "the not-ai skill (code and documents layers) for editing existing prose".
 - [ ] **Step 6: Export and check.**
@@ -589,6 +631,13 @@ git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit
 ```
 
 Before the first `git add`, confirm `git diff --stat --cached` prints nothing. Before the commit, confirm it lists only those paths and the test files Step 6 repointed.
+
+The commit-time payload check. This commit stages `account/claude/` paths on the exporting workstation, so when `git config --local --get harness.preCommitChain` prints `check-account-payload.sh`, the `pre-commit` chain runs `check-account-payload.sh` on it. That check runs the exporter installed beside it in the main checkout's `.claude/hooks/`, never the one on this branch. The installed copy was taken from a reviewed commit before Task 7, so it still lists `tools/not-ai` in `$script:AccountTreeDirs` and templates the two moved `SKILL.md` files, while Step 4 has already moved their sources out of `~/.claude`.
+- Before the commit, compare the installed copy with the branch: `cmp .claude/hooks/Export-Account.ps1 install/Export-Account.ps1` and `cmp .claude/hooks/AccountShared.ps1 install/AccountShared.ps1`. A difference means the commit is checked by the pre-Task-7 tables.
+- Commit as above. If the check passes, nothing more is needed.
+- If it refuses and names a moved path (`account/claude/skills/not-ai/`, `account/claude/skills/prose-lint/` or `account/claude/tools/not-ai/`), the installed exporter is stale. Refresh the four files in `.claude/hooks/` from Task 7's commit, using the copy command in README's "The payload check at commit" section, and only once that commit has been reviewed: the C3 pull request's review at Task 7's head, or the operator reading those four files' diff from `master`. Then commit again. Until that review exists, the commit waits.
+- If it refuses and names any other path, a live source and the staged payload disagree. Fix the source under `~/.claude`, re-run Step 6's export, re-stage, and commit again.
+- Never pass `--no-verify`, unset `harness.preCommitChain` or edit a staged payload file to get past the check.
 
 PR C3 body: `Docs: README updated: core/claude/rules row, skills install sentence. docs/security-controls.md: new core skill bytecode row, retire-list row extended`. After the merge, the coordinator re-runs Step 2's reinstall once more on each project, and tells the operator that a second machine needs `git pull`, then `Install-Harness.ps1` on each project, then `Install-Account.ps1`, in that order.
 
