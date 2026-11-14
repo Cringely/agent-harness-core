@@ -132,6 +132,7 @@ function scenario(
     commits?: string[];
     extra?: Responder[];
     merged?: string;
+    closing?: unknown;
     files?: string[];
     fileCount?: number;
     reviews?: object[];
@@ -161,8 +162,8 @@ function scenario(
     views(...(opts.views ?? [VIEW])),
     premergeSays({ stdout: PREMERGE_OK }),
     on(["gh", "pr", "merge"], {}),
-    on(["gh", "pr", "view", "9", `--repo=${REPO}`, "--json=state,mergeCommit"], {
-      stdout: JSON.stringify({ state: opts.merged ?? "MERGED", mergeCommit: { oid: MERGE_SHA } }),
+    on(["gh", "pr", "view", "9", `--repo=${REPO}`, "--json=state,mergeCommit,closingIssuesReferences"], {
+      stdout: JSON.stringify({ state: opts.merged ?? "MERGED", mergeCommit: { oid: MERGE_SHA }, closingIssuesReferences: "closing" in opts ? opts.closing : [] }),
     }),
     on(["gh", "api", `repos/${TOOL_REPO}`, "--jq", ".default_branch"], { stdout: "main\n" }),
     on(["gh", "api", `repos/${TOOL_REPO}/branches/main`], { stdout: `${TOOL_HEAD}\n` }),
@@ -217,7 +218,18 @@ describe("review-merge: merges", () => {
   test("merges on APPROVE with the reviewed head pinned", async () => {
     const runner = withReviewer(scenario(), reviewerSays(APPROVE_OUTPUT));
     expect(await reviewMerge(ctx(runner), ARGS)).toBe(`merged #9 at ${MERGE_SHA.slice(0, 7)} (App approval)`);
-    expect(runner.publishing()).toEqual([["gh", "pr", "merge", "9", `--repo=${REPO}`, "--merge", `--match-head-commit=${HEAD}`]]);
+    expect(runner.publishing()).toEqual([
+      ["gh", "pr", "merge", "9", `--repo=${REPO}`, "--merge", `--match-head-commit=${HEAD}`, "--subject=Merge pull request #9", "--body-file=-"],
+    ]);
+  });
+
+  test("writes the merge commit message from the audited title and body, never GitHub's default", async () => {
+    const runner = withReviewer(scenario(), reviewerSays(APPROVE_OUTPUT));
+    await reviewMerge(ctx(runner), ARGS);
+    const merge = runner.calls.find((call) => call.argv[1] === "pr" && call.argv[2] === "merge")!;
+    expect(merge.argv).toContain("--subject=Merge pull request #9");
+    expect(merge.argv).toContain("--body-file=-");
+    expect(merge.options.stdin).toBe(`${VIEW.title}\n\n${VIEW.body}`);
   });
 
   test("runs the reviewer from the work directory with the key piped, the head pinned and no inherited token", async () => {
@@ -294,7 +306,8 @@ describe("review-merge: merges", () => {
   });
 
   test("runs premerge on the reviewed head, under the configured account, before it merges", async () => {
-    const runner = withReviewer(scenario({ views: [{ ...VIEW, body: `${VIEW.body}\nCloses #12\nCloses #3\n` }] }), reviewerSays(APPROVE_OUTPUT));
+    const linked = [12, 3].map((number) => ({ number, repository: { name: "fixture-repo", owner: { login: "fixture-owner" } } }));
+    const runner = withReviewer(scenario({ views: [{ ...VIEW, body: `${VIEW.body}\nCloses #12\nCloses #3\n` }], closing: linked }), reviewerSays(APPROVE_OUTPUT));
     await reviewMerge(ctx(runner), { ...ARGS, closes: [12, 3] });
     const at = runner.calls.findIndex((call) => isPremerge(call.argv));
     expect(at).toBeGreaterThan(-1);
@@ -666,6 +679,46 @@ describe("review-merge: refuses after the reviewer runs", () => {
   test("a closing keyword added to the body after the review", async () => {
     const runner = withReviewer(scenario({ views: [VIEW, VIEW, { ...VIEW, body: "Closes #8" }] }), reviewerSays(APPROVE_OUTPUT));
     await refusal(reviewMerge(ctx(runner), ARGS), runner, "undeclared: 1", true);
+  });
+
+  test("a body edited between the audit and the merge", async () => {
+    const runner = withReviewer(scenario({ views: [VIEW, VIEW, VIEW, { ...VIEW, body: "## Why\n\nEdited after the audit.\n" }] }), reviewerSays(APPROVE_OUTPUT));
+    await refusal(reviewMerge(ctx(runner), ARGS), runner, "changed after the closing-keyword audit", true);
+  });
+
+  test("a title edited between the audit and the merge", async () => {
+    const runner = withReviewer(scenario({ views: [VIEW, VIEW, VIEW, { ...VIEW, title: "fix: something else" }] }), reviewerSays(APPROVE_OUTPUT));
+    await refusal(reviewMerge(ctx(runner), ARGS), runner, "changed after the closing-keyword audit", true);
+  });
+
+  test("a merged pull request GitHub links to close an undeclared issue is an error naming the merge", async () => {
+    const ref = { number: 8, repository: { name: "fixture-repo", owner: { login: "fixture-owner" } } };
+    const runner = withReviewer(scenario({ closing: [ref] }), reviewerSays(APPROVE_OUTPUT));
+    const error = await reviewMerge(ctx(runner), ARGS).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(PublishError);
+    expect((error as Error).message).toContain(`merged #9 at ${MERGE_SHA.slice(0, 7)}`);
+    expect((error as Error).message).toContain(`${REPO}#8`);
+    expect(runner.publishing().map((argv) => argv[2])).toEqual(["merge"]);
+  });
+
+  test("a merged pull request missing a declared closing link is an error", async () => {
+    const runner = withReviewer(scenario({ views: [{ ...VIEW, body: "Closes #8" }] }), reviewerSays(APPROVE_OUTPUT));
+    const error = await reviewMerge(ctx(runner), { ...ARGS, closes: [8] }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(PublishError);
+    expect((error as Error).message).toContain("close none where --closes named #8");
+  });
+
+  test("closing links GitHub returns unreadable after the merge are an error", async () => {
+    const runner = withReviewer(scenario({ closing: undefined }), reviewerSays(APPROVE_OUTPUT));
+    const error = await reviewMerge(ctx(runner), ARGS).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(PublishError);
+    expect((error as Error).message).toContain("could not be read");
+  });
+
+  test("closing links that match --closes merge cleanly", async () => {
+    const ref = { number: 8, repository: { name: "fixture-repo", owner: { login: "fixture-owner" } } };
+    const runner = withReviewer(scenario({ closing: [ref], views: [{ ...VIEW, body: "Closes #8" }] }), reviewerSays(APPROVE_OUTPUT));
+    expect(await reviewMerge(ctx(runner), { ...ARGS, closes: [8] })).toContain("merged #9");
   });
 
   test("a merge gh accepted that did not land is an error, not a success", async () => {
