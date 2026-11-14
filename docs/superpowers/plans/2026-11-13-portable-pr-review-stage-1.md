@@ -41,6 +41,7 @@ Conditions the spec implies that no spec-listed test exercises, most likely firs
 4. An agent spells an allowed merge with short or `=` flags (`-s`, `--match-head-commit=<sha>`, `-R owner/example`) or a pull request URL. Expected: recognized and judged on the live conditions, not denied as unparseable. Pinned in Task 23.
 5. A head branch name carries `/`, `#` or `+`. Expected: the head-ref pulls filter percent-encodes it, so the single-pull-request rule sees every pull request from that branch. Pinned in Task 10.
 6. The Bash tool's working directory has moved since the session started (`cd` carries between calls), or a merge names a remote other than `origin`. Expected: the merge guard resolves the target from the payload's `cwd` and the named remote, never from the project directory's `origin`. Pinned in Task 24.
+7. A harness user outside the operator, with no `gh` login, pushes a feature branch, or pushes the default branch of a repository never enrolled. Expected: both pass with no API call, from the checkout's remote-tracking refs. Pinned in Task 24.
 
 ---
 
@@ -832,16 +833,25 @@ test("help lists phase-a, phase-b and premerge, and no key-holding command", asy
 **Files:**
 - Create: `core/claude/hooks/merge-guard-decide.ts`, `test/merge-guard-decide.test.ts`
 - Modify: `tools/pr-review/hub.ts` (`guard-config` command)
-- Modify: `docs/decision-log.md` (entries for stage 1 rulings 6 and 7 from the plan report, and the guard rulings in its "Review fixes 2026-11-13" section: targets from the payload directory, MCP tool coverage, the hook deadline. Review B4's ruling is logged when the operator makes it)
+- Modify: `docs/decision-log.md` (entries for stage 1 rulings 6 and 7 from the plan report, and the guard rulings in its "Review fixes 2026-11-13" section: targets from the payload directory, MCP tool coverage, the hook deadline. Also the operator's ruling of 2026-11-14 on the guard's reads, with the entry text given below)
 - Test: `test/pr-review-hub.test.ts`
 
 **Interfaces:**
 - Produces in `merge-guard-decide.ts`: `GUARD_FILE_NAME = "merge-guard.local.json"`, `guardFilePath(home?: string): string` (`join(home ?? homedir(), ".claude", GUARD_FILE_NAME)`), `type GuardSource = { state: "absent" } | { state: "broken" } | { state: "ok", readAccount: string, repos: ReadonlyMap<string, { enforce: boolean, botUserId: number }> }` (keys lowercased), `loadGuardSource(path: string, fs?: { lstatSync, readFileSync }): GuardSource`, `type ManifestField = { state: "missing" } | { state: "present", value: unknown } | { state: "unreadable" }`, `manifestFieldOf(raw: string | null): ManifestField`, `decideEnforcement(source: GuardSource, field: ManifestField, repo: string | null): "enforce" | "skip" | "deny"`.
 - Command: `hub.ts guard-config --config <abs> [--out <abs>]` writes `{ "version": 1, "readAccount": <guardReadAccount>, "repos": [{ "repo", "enforce": mergeGuard === "on", "botUserId": apps[app].botUserId }] }` atomically, refuses an output path inside a checkout, prints the repository count only.
 
-`loadGuardSource`: `lstat` ENOENT is absent. Any other error, a symbolic link, a non-file, more than 65536 bytes, invalid JSON, an unknown or missing key, `enforce` not a boolean, `botUserId` not a positive integer, or a duplicate repository is broken. `manifestFieldOf`: `null` (no manifest) is missing, invalid JSON is unreadable, an own `enrolled` key is present with its value. `decideEnforcement` follows the spec's enforcement list exactly. A null `repo` (the target could not be resolved, Task 24) gives `skip` when the source is absent and `deny` otherwise.
+`loadGuardSource`: `lstat` ENOENT is absent. Any other error, a symbolic link, a non-file, more than 65536 bytes, invalid JSON, an unknown or missing key, `enforce` not a boolean, `botUserId` not a positive integer, or a duplicate repository is broken. `manifestFieldOf`: `null` (no manifest) is missing, invalid JSON is unreadable, an own `enrolled` key is present with its value. `decideEnforcement` follows the spec's enforcement list exactly. A null `repo` (the target could not be resolved, Task 24) gives `deny` when the source is `ok` or `broken`. With the source absent, `repo` plays no part and the field decides, as for any other target: `present` or `unreadable` denies and `missing` skips. For a null target the caller passes the field it read from the checkout's remote-tracking refs, or `missing` when it could read none (Task 24), so a field found locally still denies where the source is absent (spec line 216), and a repository with no field stays open to harness users outside the operator (spec line 220).
 
-> **OPERATOR RULING NEEDED (review B4, part 1 of 2).** The null-target rule above is left as written. With the source absent it skips, which keeps outsiders able to push (spec line 220) but means a repository whose manifest carries the field is not enforced when its target cannot be resolved (spec line 216 says any field denies when the source is absent). It belongs to the same ruling as the API-read dependency in Task 24, where the options are listed.
+Decision-log entry for the operator's ruling of 2026-11-14, appended in Step 3 with this text:
+
+```markdown
+## 2026-11-14: the merge guard classifies a push before it reads, and reads an unlisted repository's field from local refs (#146)
+
+- Choice: the merge guard first decides whether a push could name the default branch, and a push that cannot is no merge form and reads nothing more. For a repository the operator-only list names, the default branch name and the manifest's enrolled field come from the API. For any other repository they come from the checkout's remote-tracking refs, with the API as the fallback when no local ref exists. A field found locally can only add a denial.
+- Rejected: reading both through the API for every recognized form, because a session with no `gh` login, or a repository the read account cannot see, then has every default-branch push and merge denied, and a broken source denies feature-branch pushes too. Reading nothing while the operator-only source is absent, because a manifest field then goes unenforced wherever the source is absent.
+- Accepted: in a repository the list does not name, a remote-tracking ref fetched before the field was added, or before the default branch was renamed, lets a default-branch push or merge through until the next fetch or `git remote set-head <remote> --auto`.
+- Drafted by: coordinator. Decided by: operator.
+```
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -865,8 +875,14 @@ test.each([
   ["manifest unreadable, list not enforcing", OFF, UNREADABLE, "deny"],
   ["manifest unreadable, source absent", ABSENT, UNREADABLE, "deny"],
 ])("%s", (_n, s, f, want) => expect(decideEnforcement(s, f, "owner/example")).toBe(want));
-test.each([["absent", ABSENT, "skip"], ["ok", ON, "deny"], ["broken", BROKEN, "deny"]])("an unresolved target with the source %s", (_n, s, want) =>
-  expect(decideEnforcement(s, MISSING, null)).toBe(want));
+test.each([
+  ["absent, no field", ABSENT, MISSING, "skip"],
+  ["absent, a field read locally", ABSENT, present(true), "deny"],
+  ["absent, a false field read locally", ABSENT, present(false), "deny"],
+  ["absent, an unreadable local manifest", ABSENT, UNREADABLE, "deny"],
+  ["ok, no field", ON, MISSING, "deny"],
+  ["broken, no field", BROKEN, MISSING, "deny"],
+])("an unresolved target with the source %s", (_n, s, f, want) => expect(decideEnforcement(s, f, null)).toBe(want));
 test.each(["EACCES on lstat", "malformed JSON", "an extra key", "enforce given as yes", "a symbolic link"])("loadGuardSource reads %s as broken", () => {});
 test("a manifest naming a different bot user id has no effect", () =>
   expect(manifestFieldOf('{"enrolled":true,"botUserId":999}')).toEqual({ state: "present", value: true }));
@@ -1081,50 +1097,65 @@ test.each([
   - `type Run = (args: string[], options: { env: Record<string, string>, timeoutMs: number }) => Promise<{ exitCode: number, stdout: string }>` (async through `Bun.spawn`, kills the child at `timeoutMs` and resolves with a non-zero exit)
   - `interface Budget { remainingMs(): number }` (each child's timeout is `min(GUARD_CALL_TIMEOUT_MS, remainingMs())`, and a call that would start with nothing left throws)
   - `interface GuardApi { defaultBranch(repo: string): Promise<string>, pull(repo: string, n: number): Promise<{ headSha: string, state: string }>, latestAppReview(repo: string, n: number, botUserId: number): Promise<{ state: string, commitId: string } | null>, behindBy(repo: string, base: string, head: string): Promise<number>, manifestRaw(repo: string, ref: string): Promise<string | null> }`
-  - `interface LocalGit { remotes(dir: string): Promise<Array<{ name: string, fetchUrl: string, pushUrl: string }>>, currentBranch(dir: string): Promise<string | null>, pushConfig(dir: string, remote: string): Promise<string[]> }`
+  - `interface LocalGit { remotes(dir: string): Promise<Array<{ name: string, fetchUrl: string, pushUrl: string }>>, currentBranch(dir: string): Promise<string | null>, pushConfig(dir: string, remote: string): Promise<string[]>, remoteHead(dir: string, remote: string): Promise<string | null>, manifestAt(dir: string, ref: string): Promise<{ found: false } | { found: true, raw: string | null }> }`
   - `ghGuardApi(account: string | null, run: Run, budget: Budget): GuardApi`, `localGit(run: Run, budget: Budget): LocalGit`
-  - `resolveTargets(form: MergeForm, git: LocalGit, env: Record<string, string | undefined>): Promise<Array<string | null>>`
-  - `evaluateCommand(input: { toolName: string, toolInput: unknown, cwd: string | null }, ctx: { source: GuardSource, api: GuardApi, git: LocalGit, env: Record<string, string | undefined>, deadlineMs?: number }): Promise<{ decision: "allow" } | { decision: "deny", reason: string }>`
-  - `evaluatePrePush(remoteUrl: string, refLines: string, ctx): Promise<...>` (same result type)
+  - `type GuardCtx = { source: GuardSource, api: GuardApi, git: LocalGit, env: Record<string, string | undefined>, deadlineMs?: number }`
+  - `type Target = { repo: string | null, dir: string | null, remotes: string[] }`
+  - `type DefaultNames = { via: "api", name: string } | { via: "local", pairs: Array<{ remote: string, name: string }> } | { via: "none" }`
+  - `resolveTargets(form: MergeForm, git: LocalGit, env: Record<string, string | undefined>, payloadCwd: string | null): Promise<Target[]>`
+  - `isListed(source: GuardSource, repo: string | null): boolean` (true only for an `ok` source whose `repos` has `repo`)
+  - `defaultNamesFor(target: Target, ctx: GuardCtx): Promise<DefaultNames>`
+  - `mayNameDefault(form: MergeForm, names: string[], local: { currentBranch: string | null, hasPushMapping: boolean }): boolean` (pure)
+  - `fieldFor(target: Target, names: DefaultNames, ctx: GuardCtx): Promise<ManifestField>`
+  - `evaluateCommand(input: { toolName: string, toolInput: unknown, cwd: string | null }, ctx: GuardCtx): Promise<{ decision: "allow" } | { decision: "deny", reason: string }>`
+  - `evaluatePrePush(args: { remoteName: string, remoteUrl: string, refLines: string, dir: string }, ctx: GuardCtx): Promise<{ decision: "allow" } | { decision: "deny", reason: string }>`
   - `armDeadline(ms: number, onExpire: () => void): () => void` (returns a cancel)
 - Settings entry: `{ "matcher": "Bash|PowerShell|mcp__.*__(merge_pull_request|push_files|create_or_update_file|delete_file|start_process|interact_with_process)", "hooks": [{ "type": "command", "command": "bun \"$CLAUDE_PROJECT_DIR/.claude/hooks/merge-guard.ts\"", "timeout": 30 }] }`.
 
 **Payload.** The hook reads the PreToolUse payload's `tool_name`, `tool_input` and `cwd` from stdin. `Bash` reads `tool_input.command` under the bash rules and `PowerShell` under the PowerShell rules, both from the payload's `cwd`, never from `$CLAUDE_PROJECT_DIR`: the Bash tool's working directory persists across calls, so the two differ. A missing or relative `cwd` leaves every gh and git target unresolved. Matched MCP tools go through `recognizeMcpCall`. Any other tool is allowed untouched.
 
-**Targets.** `resolveTargets` gives each form one or more targets:
-- `gh-pr-merge`: its `repo` when set. Otherwise the distinct GitHub repositories (`githubRepoOfUrl`) across every fetch and push URL that `git -C <cwd> remote -v` lists. That listing applies `insteadOf` rewrites and shows push URLs separately (checked on git 2.53). Exactly one repository is the target. None or several give null, since gh's own choice among remotes cannot be seen from outside.
-- When the hook's own environment sets `GH_REPO` or `GH_HOST` to a non-empty value, every gh form's target is null, because the tool's shell may carry the same variable.
-- `gh-api-merge`: the repository in its path.
-- `gh-graphql-merge`: null, since the mutation names a pull request by node id.
-- `git-push`: a `url` target gives `githubRepoOfUrl(url)`. A `remote` target gives each push URL `remote -v` lists for that name, never `origin`'s, and a name it does not list gives null. An `unnamed` target gives the push URLs of every remote, a superset of where git would push. A non-GitHub URL, an SSH host alias included, gives null.
-- `mcp-merge` and `mcp-write`: their `repo`.
-- A failed or timed-out `git` call gives null.
+**Targets.** `resolveTargets` gives each form one or more targets. A target's `repo` is the GitHub repository (`owner/name`) or null, its `dir` is the effective directory for gh and git forms and the payload `cwd` for MCP forms (null when that is missing or relative), and its `remotes` are the local remote names whose remote-tracking refs may be read for it:
+- `gh-pr-merge`: its `repo` when set, with `remotes` every remote of `dir` whose fetch URL names that repository. Otherwise the distinct GitHub repositories (`githubRepoOfUrl`) across every fetch and push URL that `git -C <dir> remote -v` lists. That listing applies `insteadOf` rewrites and shows push URLs separately (checked on git 2.53). Exactly one repository is the target, with `remotes` the remotes naming it. None or several give a null `repo` with `remotes` every remote of `dir`, since gh's own choice among remotes cannot be seen from outside.
+- When the hook's own environment sets `GH_REPO` or `GH_HOST` to a non-empty value, every gh form's `repo` is null and its `remotes` are every remote of `dir`, because the tool's shell may carry the same variable.
+- `gh-api-merge`: the repository in its path, with `remotes` every remote of `dir` whose fetch URL names it.
+- `gh-graphql-merge`: a null `repo`, since the mutation names a pull request by node id, with `remotes` every remote of `dir`.
+- `git-push`: a `url` target gives `githubRepoOfUrl(url)` with no `remotes`. A `remote` target gives each push URL `remote -v` lists for that name, never `origin`'s, with `remotes` that one name, and a name it does not list gives a null `repo` with no `remotes`. An `unnamed` target gives one target per remote, from that remote's push URLs and with that remote's name, a superset of where git would push. A non-GitHub URL, an SSH host alias included, gives a null `repo` and keeps the remote's name, so its remote-tracking refs are still read.
+- `mcp-merge` and `mcp-write`: their `repo`, with `remotes` every remote of the payload `cwd` whose fetch URL names it, and none when `repo` is null.
+- A failed or timed-out `remote -v` gives a null `repo` with no `remotes`.
 
-Each target goes through `decideEnforcement(source, field, target)` (Task 22), which gives `skip` for a null target when the source is absent and `deny` otherwise. A form passes only when every one of its targets passes, and a call passes only when every form passes.
+**Classification first.** Each target is classified before anything else is read for it, so a push that cannot reach the default branch is no merge form and reads nothing more (operator ruling 2026-11-14). The steps run in this order, per target:
 
-**Field read.** The manifest field is read from the target's default branch through the contents API (`.claude/.harness-manifest.json`, 404 is no manifest), never from disk, so a branch-local edit cannot strip it. `decideEnforcement` runs per target.
+1. Default names, `defaultNamesFor`. For a target `isListed` holds for, the API's `defaultBranch(repo)` gives `{ via: "api" }`, and local refs are never consulted. For any other target (an unlisted repository, a null `repo`, a source that is absent or broken), each name in `remotes` is read with `remoteHead(dir, remote)`, and the non-null results give `{ via: "local" }`. When none gives a name, a non-null `repo` falls back to the API's `defaultBranch(repo)` (`{ via: "api" }`), and a null `repo` gives `{ via: "none" }`.
+2. Classification, `mayNameDefault(form, names, local)`, with `names` the distinct default names from step 1 (empty for `via: "none"`). `gh-pr-merge`, `gh-api-merge`, `gh-graphql-merge` and `mcp-merge` are merge forms and always give true. An empty `names` gives true for every form, since nothing rules the default out. Names compare case-insensitively after `refs/heads/` or `heads/` is stripped from a destination, and a destination equal to any name in `names` names the default. A `git-push` gives true on any of these:
+   - `noRefspec` or `all`
+   - a `dest` naming the default, a delete included
+   - `head`, when `local.currentBranch` names the default or is null (a detached head, or `git -C <dir> symbolic-ref --quiet --short HEAD` failed)
+   - `same-name`, when its name is the default
+   - `head` or `same-name`, whenever `local.hasPushMapping` holds, meaning `git -C <dir> config --get-all remote.<name>.push` lists a mapping for the remote (for `unnamed`, for any remote), since that mapping can rename the destination
+   - `unknown`, always
 
-> **OPERATOR RULING NEEDED (review B4, part 2 of 2, API reads and the outsider rule).** The paragraph above and the rule that any API error denies are left as written. The spec says any API error denies (spec line 233), and also that harness users outside the operator stay able to merge in repositories never enrolled (spec line 220). Here the two conflict, because every recognized form reads `defaultBranch` and `manifestRaw` through the API. A session with no `gh` login, or a repository the read account cannot see (a work-account repository), then denies every default-branch push and merge, and a broken source denies feature-branch pushes too. Options:
-> - **A, as written.** Every recognized form reads the API, and any error denies. Cost: outsiders without a `gh` login, and repositories the read account cannot see, are blocked on every recognized form.
-> - **B, classify first, read locally where it can only add denials.** A git-push form whose every destination resolves (by local refs, `refs/remotes/<remote>/HEAD` for the default name) as not the default branch is no merge form and reads nothing. The manifest field of an unlisted repository is read from the local `refs/remotes/<remote>/<default>` ref instead of the API. Cost: a stale local ref can miss a field added upstream since the last fetch, and a missing local default-name ref falls back to the API.
-> - **C, read nothing when the source is absent.** Skip every form with the source absent. Cost: a manifest field is not enforced where the operator-only source is absent, contrary to spec line 216.
->
-> Flips toward A if outsiders are expected to hold a `gh` login wherever the harness is installed. Part 1 of this ruling is the null-target rule in Task 22.
+   A `dest` under `refs/` but outside `refs/heads/`, such as a tag, does not name it. An `mcp-write` gives true when `branch` is null or names the default. The caller reads `currentBranch` and `pushConfig` only for a push carrying a `head` or `same-name` refspec.
+3. A target for which step 2 gives false passes, with nothing more read. This holds whatever the source state, so a broken source does not deny a feature-branch push.
+4. The manifest field, `fieldFor`. With a broken source nothing is read, because `decideEnforcement` denies whatever the field says. For `{ via: "api" }` the field comes from `manifestFieldOf(await api.manifestRaw(repo, name))` (the contents API at the default branch, 404 is no manifest). For `{ via: "local" }` it comes from `manifestAt(dir, "refs/remotes/<remote>/<name>")` for each pair. A pair that is `found: false` is skipped. Among the found pairs, any unreadable manifest gives `unreadable`, else any manifest carrying the field gives `present` with the first such value, else `missing`. When every pair is `found: false`, a non-null `repo` falls back to the API read above, after `defaultBranch(repo)`, and a null `repo` gives `missing`. For `{ via: "none" }` the field is `missing`.
+5. `decideEnforcement(source, field, repo)` (Task 22). `skip` passes and `deny` denies. `enforce` (a listed target only) applies the rules below.
+
+A form passes only when every one of its targets passes, and a call passes only when every form passes.
+
+The field is never read from the working tree. Remote-tracking refs move only on a fetch, or on a deliberate `update-ref` by someone who could as easily delete the hook, so a branch-local edit cannot strip the field. A field found locally can only add a denial, never lift one: a listed target never reads it locally, and for any other target a present field only turns `skip` into `deny`.
+
+**Where the local reads fail open.** The guard reads local refs only for a target the operator-only list does not name, so every repository with enforcement on, or listed with it off, reads its default name and its field from the API, and a stale local ref there cannot open anything. For an unlisted target, a stale ref fails open in two ways, and the ruling of 2026-11-14 accepts both:
+- A remote-tracking ref fetched before enrollment step 10 merged the field lets a default-branch push or merge through while the source is absent (an outsider's session, or an operator session without the config). For a push, git's own fast-forward check still refuses it unless it is forced, because the field's merge moved the remote branch past the local ref. A `--force-with-lease` with no expected value is refused the same way.
+- A `refs/remotes/<remote>/HEAD` naming a default branch that has since been renamed upstream makes a push to the new name look like a feature push, so it passes without the field being read. Git sets that ref at clone time and a plain fetch does not update it (checked on git 2.53, after renaming the upstream default). `git remote set-head <remote> --auto` does. A `fetch --prune` deletes the old branch's ref and leaves `HEAD` dangling, which `remoteHead` reads as null, so the guard then falls back to the API.
+
+Both are accepted because the field is a tripwire for agents, not a barrier (spec, Approval enforcement), and reading the API instead brings back the denial of every default-branch push for a session with no `gh` login or a repository the read account cannot see. The opposite staleness, a local ref still carrying a field that has since been removed upstream, denies, which fails closed. Task 24's tests pin all three.
 
 **Under `enforce`:**
 - `gh pr merge` passes only with an explicit pull request, `matchHead`, `squash` or `merge`, no `--auto`, `--rebase` or `--admin`, and the three live conditions: the SHA the command gives is the head, the latest App review by `botUserId` is `APPROVED` on that head, and `behindBy(default, head)` is 0.
 - `gh-api-merge` passes only with `sha` and a `squash` or `merge` method and the same live conditions.
 - `gh-graphql-merge` and `mcp-merge` always deny. An MCP merge carries no head SHA to match.
-- A `git-push` denies when it names or may name the default branch. Names compare case-insensitively after `refs/heads/` or `heads/` is stripped from a destination. It denies on any of these:
-  - `noRefspec` or `all`
-  - a `dest` equal to the default, a delete included
-  - `head`, when `git -C <cwd> symbolic-ref --quiet --short HEAD` gives the default, gives nothing (a detached head) or fails
-  - `same-name`, when its name is the default
-  - `head` or `same-name`, whenever `git -C <cwd> config --get-all remote.<name>.push` lists a mapping for the remote (for `unnamed`, for any remote), since that mapping can rename the destination
-  - `unknown`, always
+- A `git-push` or `mcp-write` that reaches this point denies, since step 2 found it may name the default branch.
 
-  A `dest` under `refs/` but outside `refs/heads/`, such as a tag, does not name it. Every other push passes without live conditions.
-- An `mcp-write` denies when `branch` is null or names the default branch by the same comparison.
+**Local reads.** `remoteHead(dir, remote)` runs `git -C <dir> symbolic-ref --quiet refs/remotes/<remote>/HEAD`. Exit 0 with output `refs/remotes/<remote>/<name>` and a non-empty `<name>` gives `<name>`, after `git -C <dir> rev-parse --verify --quiet refs/remotes/<remote>/<name>^{commit}` exits 0. Exit 1 with no output from either command gives null, which covers a missing ref and a symbolic ref left pointing at a deleted branch (both checked on git 2.53: exit 1, no output). `manifestAt(dir, ref)` runs `git -C <dir> rev-parse --verify --quiet <ref>^{commit}`, and exit 1 with no output gives `{ found: false }`. It then runs `git -C <dir> ls-tree -z <sha> -- .claude/.harness-manifest.json`. Empty output gives `{ found: true, raw: null }`. One entry with mode `100644` or `100755` and type `blob` is read with `git -C <dir> cat-file blob <oid>`, refused above 65536 bytes, and gives `{ found: true, raw }`. Any other mode (a symbolic link, a submodule or a tree) gives `{ found: true, raw: "" }`, which `manifestFieldOf` reads as unreadable. Every other exit code or output throws, and a throw denies.
 
 `"unparseable"` denies unless the source is absent. Every deny reason is a fixed string naming the rule.
 
@@ -1134,16 +1165,19 @@ Each target goes through `decideEnforcement(source, field, target)` (Task 22), w
 
 **Errors.** Any API error, timeout or exception inside the hook denies. That departs on purpose from the fail-open `catch` in `agent-worktree-gate.ts:453-456`. The deny JSON has the `hookSpecificOutput` shape of `agent-worktree-gate.ts:443-452`. The `COPILOT_CLI` stand-down at `agent-worktree-gate.ts:432` stays, so under Copilot only the pre-push layer acts (ruling in the stage 1 report).
 
-**Pre-push.** `pre-push` pipes the ref lines it already read (`$identity_stdin`, `pre-push:130`) into `bun "$hook_dir/merge-guard.ts" --pre-push "$1" "$2"` and exits 1 when that does. When `bun` is missing it prints `merge guard skipped: bun is not on PATH` to stderr and continues, the same reach the PreToolUse layer has. The target is `githubRepoOfUrl($2)`. A ref line whose remote ref is `refs/heads/<default>`, compared case-insensitively, is a default-branch push, and so is a delete of it (an all-zero local object id). The same deadline applies.
+**Pre-push.** `pre-push` pipes the ref lines it already read (`$identity_stdin`, `pre-push:130`) into `bun "$hook_dir/merge-guard.ts" --pre-push "$1" "$2"` and exits 1 when that does. When `bun` is missing it prints `merge guard skipped: bun is not on PATH` to stderr and continues, the same reach the PreToolUse layer has. `evaluatePrePush` takes `remoteName` from `$1`, `remoteUrl` from `$2` and `dir` from the hook's working directory, which git sets to the top of the worktree. The target is `{ repo: githubRepoOfUrl(remoteUrl), dir, remotes: remoteName === remoteUrl ? [] : [remoteName] }` (git passes the URL as both arguments when no remote is named). It goes through the same five steps. In step 2 a ref line whose remote ref is `refs/heads/<name>` for any default name, compared case-insensitively, names the default, and so does a delete of it (an all-zero local object id). An empty `names` makes every ref line name it. When no ref line names it, the push passes with nothing more read. Under `enforce` it denies. The same deadline applies.
 
 **Residuals.** The README's hook row states these:
 - A git or gh alias (`git config alias.p push`, `gh alias set`) hides the trigger word from the PreToolUse layer. The pre-push layer still catches an aliased git push unless `--no-verify` is used too. Nothing catches an aliased gh merge.
 - An MCP server or tool outside the matcher that can run a shell or call the API is not covered.
-- With the source present, a push to a non-GitHub remote or an SSH host alias, and a gh form in a checkout whose remotes name more than one repository, deny. These follow from failing closed.
+- With the source present, a gh form in a checkout whose remotes name more than one repository denies, and so does a push to a non-GitHub remote or an SSH host alias that may name the default branch. A feature push to such a remote passes when its `refs/remotes/<remote>/HEAD` names another branch. These follow from failing closed.
+- In a repository the operator-only list does not name, the default branch name and the manifest field come from remote-tracking refs. A ref fetched before the field was added, or a `refs/remotes/<remote>/HEAD` left naming a renamed default, lets a default-branch push or merge through until the next fetch or `git remote set-head <remote> --auto` (operator ruling 2026-11-14). Listed repositories read both from the API.
+- Where a remote has no `refs/remotes/<remote>/HEAD`, the guard asks the API for the default branch, so a session with no `gh` login denies every push to that remote, feature pushes included. `git remote set-head <remote> --auto` fixes it.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```ts
+// MERGE_OK is a gh pr merge on owner/example, which the source lists with enforcement on.
 test.each(["defaultBranch", "pull", "latestAppReview", "behindBy", "manifestRaw"])("an error from %s denies", async (m) =>
   expect((await evaluateCommand(MERGE_OK, ctx({ throwOn: m }))).decision).toBe("deny"));
 test.each([["the named SHA is not the head", { headSha: OTHER }], ["the latest App review is not APPROVED", { review: { state: "COMMENTED", commitId: S } }],
@@ -1164,8 +1198,59 @@ test("cd into an enforcing checkout, then gh pr merge 5 --admin, denies", async 
 test("GH_REPO in the hook's environment denies a gh form with the source present and passes it with the source absent", async () => {});
 test("git push --no-verify other HEAD:main denies when the remote other points at an enforcing repository and origin does not", async () => {});
 test("a gh form in a checkout whose remotes name two repositories denies with the source present", async () => {});
-test("a push to a non-GitHub remote denies with the source present and passes with the source absent", async () => {});
+test("a default-branch push to a non-GitHub remote denies with the source present, and passes with the source absent when that remote's local default branch has no field", async () => {});
 test("a gh api placeholder path denies with the source present", async () => {});
+
+// classification first, then local reads for unlisted targets
+// API_DOWN(upstream?): a GuardApi whose every method throws and records the call. Its argument only documents what the upstream holds.
+// API(values): a GuardApi answering with those values. LOCAL(remotes): a LocalGit fake with remoteHead and manifestAt per remote, counting calls.
+test.each([["absent", ABSENT], ["broken", BROKEN], ["ok, listing another repository", ok({ "owner/other": { enforce: true, botUserId: 1001 } })]])(
+  "with the source %s, git push origin feature to an unlisted repository whose local HEAD names main passes with no API call", async (_n, source) => {
+    const api = API_DOWN();
+    const r = await evaluateCommand(push("git push origin feature"), ctx({ source, api, git: LOCAL({ origin: { head: "main", manifest: null } }) }));
+    expect([r.decision, api.calls]).toEqual(["allow", []]);
+  });
+test("a listed repository reads its default name from the API and never calls remoteHead", async () => {});
+test("with the source absent and every API call failing, git push origin main passes when the local default branch has no manifest, and denies when it carries the field", async () => {});
+test("a repository the read account cannot see: source ok and unlisted, every API call failing, a gh pr merge passes on a local manifest without the field and denies on one with it", async () => {});
+test("an unreadable local manifest denies, and a field found in any one of two remotes naming the target denies", async () => {});
+test("a remote with no local HEAD ref falls back to the API's default branch and manifest, and an API error then denies a feature push too", async () => {});
+test("a remote HEAD left pointing at a pruned branch reads as no local ref and falls back to the API", async () => {});
+test("a feature push to an SSH host-alias remote passes with the source present when that remote's local HEAD names another branch", async () => {});
+test("an SSH host-alias remote whose local default branch carries the field denies a default-branch push with the source absent", async () => {});
+test("gh api graphql mergePullRequest with the source absent reads every remote of the directory, and denies when any carries the field", async () => {});
+
+// stale remote-tracking refs: one case fails closed, two are the accepted fail-open
+test("a stale local ref still carrying a field the upstream has since removed denies, with no API call", async () => {
+  const api = API_DOWN({ manifestRaw: null });
+  const r = await evaluateCommand(push("git push origin main"), ctx({ source: ABSENT, api, git: LOCAL({ origin: { head: "main", manifest: '{"enrolled":true}' } }) }));
+  expect([r.decision, api.calls]).toEqual(["deny", []]);
+});
+test("a stale local default name on a listed repository fails closed: local HEAD master, API default main, git push origin main denies", async () => {
+  const git = LOCAL({ origin: { head: "master", manifest: null } });
+  const r = await evaluateCommand(push("git push origin main"), ctx({ source: ON, api: API({ defaultBranch: "main", manifestRaw: '{"enrolled":true}' }), git }));
+  expect([r.decision, git.calls.remoteHead]).toEqual(["deny", 0]);
+});
+test("accepted fail-open: with the source absent, a local ref fetched before the field was added lets git push origin main through, with no API call", async () => {
+  const api = API_DOWN({ manifestRaw: '{"enrolled":true}' });
+  const r = await evaluateCommand(push("git push origin main"), ctx({ source: ABSENT, api, git: LOCAL({ origin: { head: "main", manifest: null } }) }));
+  expect([r.decision, api.calls]).toEqual(["allow", []]);
+});
+test("accepted fail-open: in an unlisted repository, a local HEAD still naming master lets git push origin main through as a feature push", async () => {
+  const api = API_DOWN({ defaultBranch: "main" });
+  const r = await evaluateCommand(push("git push origin main"), ctx({ source: ABSENT, api, git: LOCAL({ origin: { head: "master", manifest: '{"enrolled":true}' } }) }));
+  expect([r.decision, api.calls]).toEqual(["allow", []]);
+});
+
+// local reads against a real clone built under mkdtempSync
+test("localGit.remoteHead gives the default name, null for a missing remote, and null for a HEAD pointing at a pruned branch", async () => {});
+test("localGit.manifestAt gives found false for a missing ref, raw null for no manifest, the text for a blob, and empty text for a symbolic link", async () => {});
+test.each([
+  ["refs/heads/feature", null, "allow"],
+  ["refs/heads/main", null, "allow"],
+  ["refs/heads/MAIN", '{"enrolled":true}', "deny"],
+  ["refs/heads/feature", '{"enrolled":true}', "allow"],
+])("pre-push, source absent, API down, local HEAD main: to %s with local manifest %s gives %s and calls no API", async (remoteRef, manifest, want) => {});
 
 // deadline
 test("a slow API denies when the budget runs out, well before the deadline would kill the hook", async () => {
@@ -1230,20 +1315,31 @@ Add a Pester case to `install/Install-Harness.Tests.ps1`: a fresh install into a
 **Files:**
 - Create: `tools/pr-review/readers.ts`, `test/pr-review-readers.test.ts`
 - Modify: `tools/pr-review/app-auth.ts` (`enroll` profile), `tools/pr-review/cli.ts` (`reader` command), `tools/pr-review/hub.ts` (`enroll` command)
+- Modify: `docs/decision-log.md` (the operator's ruling of 2026-11-14 on the App's permissions, which also settles stage 1 ruling 4 from the plan report, with the entry text below)
+- Test: `test/pr-review-readers.test.ts`, `test/pr-review-app-auth.test.ts`
 
 **Interfaces:**
-- Produces in `app-auth.ts`: `APP_PERMISSION_ALLOWLIST` gains `administration: "read"` and `secrets: "read"`. `TOKEN_PROFILES.enroll = { contents: "read", pull_requests: "read", actions: "read", administration: "read", secrets: "read" }`. `TokenProfile` gains `"enroll"`. The read and post profiles never carry these two. The operator adds both to the App in the web UI before the first enrollment, because capture C8 showed steps 3 and 4 cannot be read without them (ruling in the stage 1 report, since the spec's step 1 names only `actions` and `issues`).
+- Produces in `app-auth.ts`: `APP_PERMISSION_ALLOWLIST` gains `administration: "read"` and `secrets: "read"`. `TOKEN_PROFILES.enroll = { contents: "read", pull_requests: "read", actions: "read", administration: "read", secrets: "read" }`. `TokenProfile` gains `"enroll"`. Only the enroll token requests these two, and the read and post profiles never carry them (operator ruling 2026-11-14, which widens the App beyond the spec's step 1, where only `actions` and `issues` are named). The App-level `checkPermissions` passes an App with or without them, so the same code runs before and after the App change. Why the two are needed is reference-tier until C8: GitHub's REST reference lists Administration read for `GET /repos/{owner}/{repo}/actions/permissions/workflow` and Secrets read for `GET /repos/{owner}/{repo}/actions/secrets`. C8 records the live status codes without them.
 
-> **OPERATOR RULING NEEDED (review B9, App permission widening).** The bullet above is left as written pending the ruling. Its reason clause states the result C8 is expected to show, not a recorded one. Options:
-> - **A, widen the App.** `administration: read` and `secrets: read` are added to the App and held only by the `enroll` profile, as written. Cost: both permissions sit on every installation of the App, beyond spec step 1. Order: this task's allowlist change must be merged and running before the operator adds either permission in the web UI, or every read and post mint refuses at the App-level check (`app-auth.ts:110-130`).
-> - **B, attest instead.** The App keeps its permissions, and steps 3 and 4 become operator attestations in the web UI (the repository's Actions general settings and its Actions secrets page, recorded as pass or fail). `readActionsSettings`, `readSecrets` and the `enroll` profile are not built.
->
-> Flips: C8 showing both reads succeed without the two permissions makes the question moot. The executor stops at this task until the ruling is recorded in `docs/decision-log.md`, then writes the entry for stage 1 ruling 4 to match it.
+**Order.** The App-level check in the code that runs before this task (`app-auth.ts:110-130`, with Task 3's allowlist) refuses an App holding `administration` or `secrets`, so adding either in the web UI first would make every read and post mint refuse. The code change goes live first: Steps 6 and 7 run after this task's pull request merges and the hub runs that commit, and Step 8, the web-UI change, runs only after Step 7 passes.
+
+Decision-log entry, appended in Step 3 with this text:
+
+```markdown
+## 2026-11-14: the App gains administration read and secrets read, held only by the enroll token (#146)
+
+- Choice: the reviewer App's permissions gain `administration: read` and `secrets: read`, so that enrollment step 3 (the repository's Actions workflow permissions) and step 4 (its Actions secret names) are read by a code-only reader. Only the `enroll` token profile requests them. The read and post tokens never do. The code that accepts both at the App-level check is merged and running before the operator adds them in the web UI.
+- Rejected: manual checks, where the operator inspects the repository's Actions settings and secrets pages in the web UI and records pass or fail, with no reader and no `enroll` profile.
+- Cost: both permissions sit on every installation of the App, beyond the spec's step 1.
+- This entry also settles stage 1 ruling 4 from the plan report, which asked the same question.
+- Drafted by: coordinator. Decided by: operator.
+```
 - Produces in `readers.ts`: `READER_TEXT_RE = /^[A-Za-z0-9 ._\/()+,:-]{1,100}$/`, `type ReaderStep = "installation" | "actions-settings" | "secrets" | "ci-workflow" | "stage-files" | "stage-enroll-field" | "review-readback"`, `type ReaderCode = "ok" | "workflow-permissions-not-read" | "reviews-approvable" | "reviewer-secret-present" | "workflow-missing" | "unpinned-uses" | "no-pr-run" | "not-github-actions" | "path-missing-or-empty" | "text-not-allowed" | "api-error" | "tree-truncated" | "symlink" | "too-large" | "installer-failed" | "manifest-invalid" | "manifest-has-field" | "review-missing" | "wrong-head" | "wrong-author" | "identity-hit" | "public-scan-hit" | "public-scan-unavailable"`, `interface ReaderResult { step: ReaderStep, ok: boolean, code: ReaderCode, counts: Record<string, number>, names: string[], paths: Array<{ path: string, exists?: boolean, bytes?: number, sha256?: string }>, ids: number[], shas: string[] }`, `validateReaderResult(raw: unknown): { ok: true, value: ReaderResult } | { ok: false, reason: string }`, `REVIEWER_SECRET_NAMES = ["PR_REVIEW_APP_KEY", "PR_REVIEW_APP_ID", "PR_REVIEW_IDENTITY", "PR_REVIEW_ACCOUNT_EMAIL", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "OP_SERVICE_ACCOUNT_TOKEN"]`, `interface ReaderInput { token: string, identity: { names: string[], emails: string[] } | null, botUserId: number | null }`, `readReaderInput(stdin, options?)`, `readActionsSettings(api: ReaderApi): Promise<ReaderResult>`, `readSecrets(api: ReaderApi): Promise<ReaderResult>`, `readCiWorkflow(api: ReaderApi, args: { workflowPath: string, livingDocs: string[], projectStandards: string[] }): Promise<ReaderResult>`, and `ReaderApi` (a thin `GET` over the token with `redirect: "error"`).
 - Commands: `cli.ts reader <step> --repo <owner/name> [step arguments]` (a code-only child, `ReaderInput` on stdin, prints a `ReaderResult`). `hub.ts enroll <step> --config <abs> --app <name> --repo <owner/name> [step arguments]` (frames on stdin, mints the profile the step needs, spawns the reader with the allowlisted environment, prints only the validated result, exit 2 on a result that fails validation or is not ok).
 
 Step 2 is `enroll installation`: the mint is the check, and it prints `{ step: "installation", ok, code }`. Step 3 `actions-settings` (`enroll` profile) reads `GET /repos/{r}/actions/permissions/workflow` and requires `default_workflow_permissions: "read"` and `can_approve_pull_request_reviews: false`. Step 4 `secrets` (`enroll` profile) lists every page of `GET /repos/{r}/actions/secrets` and returns `counts: { total, matches }`, never a name. Step 5 `ci-workflow` (`read` profile) reads the workflow at the default branch, runs `collectPinProblems` (count only), takes job names from the newest completed `pull_request` run of that workflow (`GET /repos/{r}/actions/workflows/{file}/runs?event=pull_request&status=completed&per_page=1`, then its jobs) and their app from each job's check run, which must be `github-actions`, and checks each proposed living doc and standards path exists at the default branch and is not empty or whitespace only. Any name or path failing `READER_TEXT_RE` (and, for a path, `repoPathProblem`) refuses the whole result with `"text-not-allowed"`.
 
+- [ ] **Step 0:** Read C8 in `tools/pr-review/acceptance/live-captures.md`. Expected: both calls refused (403 or 404) for a token lacking `administration` and `secrets`. If either returned 200, stop and report to the coordinator, because that read does not need its permission and the ruling's premise goes back to the operator.
 - [ ] **Step 1: Write the failing tests**
 
 ```ts
@@ -1261,10 +1357,30 @@ test("hub enroll prints only the validated result, and a reader result with a te
 test("the reader child gets no gh or 1Password variable, and an enroll token only for steps 3 and 4", async () => {});
 ```
 
-- [ ] **Step 2: Run** `bun test test/pr-review-readers.test.ts`. Expected: FAIL.
-- [ ] **Step 3: Implement.**
+In `test/pr-review-app-auth.test.ts`:
+
+```ts
+const APP_NOW = { contents: "read", pull_requests: "write", checks: "read", issues: "read", actions: "read", metadata: "read" };
+test("the App-level check passes the App before and after administration and secrets are added at read", () => {
+  expect(checkPermissions(APP_NOW)).toBeNull();
+  expect(checkPermissions({ ...APP_NOW, administration: "read", secrets: "read" })).toBeNull();
+});
+test.each(["administration", "secrets"])("the App-level check refuses %s at write", (name) =>
+  expect(checkPermissions({ ...APP_NOW, [name]: "write" })).not.toBeNull());
+test.each(["read", "post"] as const)("the %s profile requests neither administration nor secrets", (profile) =>
+  expect([Object.hasOwn(TOKEN_PROFILES[profile], "administration"), Object.hasOwn(TOKEN_PROFILES[profile], "secrets")]).toEqual([false, false]));
+test("an enroll mint refuses a granted set that adds anything to the enroll profile", async () =>
+  expect(fakeMint({ profile: "enroll", granted: { ...TOKEN_PROFILES.enroll, issues: "read" } }).minter.mint()).rejects.toBeInstanceOf(RefusalError));
+```
+
+- [ ] **Step 2: Run** `bun test test/pr-review-readers.test.ts test/pr-review-app-auth.test.ts`. Expected: FAIL.
+- [ ] **Step 3: Implement**, and append the decision-log entry above to `docs/decision-log.md`.
 - [ ] **Step 4: Run** `bun test test/pr-review-*.test.ts`. Expected: PASS.
 - [ ] **Step 5: Commit** `feat(pr-review): code-only enrollment readers for steps 2 to 5 (#146)`.
+- [ ] **Step 6 (coordinator-run, after the pull request carrying this task merges):** Bring the harness checkout the operator's runner starts `hub.ts` from (`<abs>` in Task 21) up to the merge, then confirm it: `git -C <abs> merge-base --is-ancestor <merge commit> HEAD`. Expected: exit 0. The App is not changed yet.
+- [ ] **Step 7 (coordinator-run, live):** Through the operator's runner, run `bun <abs>/tools/pr-review/hub.ts enroll installation --config <abs> --app <name> --repo <this repository>`. Expected: `{ step: "installation", ok: true, code: "ok" }`, which shows the new code mints with the App's current permissions. Any other result stops here, and the App is left unchanged.
+- [ ] **Step 8 (operator, web UI):** Only after Step 7 passes, the operator adds `administration: read` and `secrets: read` to the App and accepts them on each installation. The App-level check reads `GET /app` (`app-auth.ts:150`), which shows the new permissions at once. Read and post mints are unaffected, and an enroll mint for a repository whose installation has not accepted them yet fails with a 422.
+- [ ] **Step 9 (coordinator-run, live):** Run Step 7's command again, then `bun <abs>/tools/pr-review/hub.ts enroll actions-settings --config <abs> --app <name> --repo <this repository>`. Expected: the first gives `ok: true`, and the second prints a validated result whose `code` is not `"api-error"`. Report both result lines to the operator, and write neither into a file in this repository.
 
 ### Task 26: Emit-only installer mode
 
