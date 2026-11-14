@@ -141,7 +141,8 @@
     Report-only drift check; writes nothing. Three-way compare (core source vs
     manifest hash vs installed file) classifies every managed file:
       in-sync            installed file matches current core
-      core-updated       core changed since install, project didn't — re-run installer
+      core-updated       core changed since install, project didn't — re-run installer.
+                         Also an LF file core ships that the project copy has converted to CRLF
       project-modified   project changed it, core didn't — promotion candidate for core
       conflict           both sides changed — reconcile by hand
       missing            in manifest but deleted from the project
@@ -359,9 +360,101 @@ $optInKeys = @($optInHookNames | ForEach-Object { "hooks/$_" })
 # that could name a different set after one of them is edited.
 $gitHookNames = @('pre-commit', 'pre-push', 'commit-msg')
 
+# Manifest hashes are taken over LF text. A Windows checkout with core.autocrlf turns a file that
+# is LF in the index into CRLF on disk, and a project that commits the same content as LF would
+# otherwise read as modified with no content difference. Text is decided by the absence of a NUL
+# byte, and a binary file is hashed as it is. Only a CRLF pair is rewritten, so a lone CR stays.
+# [System.IO.File] resolves a relative path against the process working directory, which
+# Set-Location does not move, so every byte read goes through the PowerShell location first.
+# The array is returned with the unary comma. A bare byte[] is unrolled onto the pipeline, which
+# hands the caller $null for an empty file and a lone [byte] for a one-byte file, and
+# [System.Array]::IndexOf throws on the first.
+function Read-FileBytes {
+    param([string]$Path)
+    return , [System.IO.File]::ReadAllBytes($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path))
+}
+
+function Get-NormalizedBytes {
+    param([byte[]]$Bytes)
+    if ([System.Array]::IndexOf($Bytes, [byte]0) -ge 0) { return , $Bytes }
+    $out = [System.Collections.Generic.List[byte]]::new($Bytes.Length)
+    for ($i = 0; $i -lt $Bytes.Length; $i++) {
+        if ($Bytes[$i] -eq 13 -and ($i + 1) -lt $Bytes.Length -and $Bytes[$i + 1] -eq 10) { continue }
+        $out.Add($Bytes[$i])
+    }
+    return , $out.ToArray()
+}
+
 function Get-FileHashHex {
     param([string]$Path)
+    $bytes = Read-FileBytes -Path $Path
+    $norm = Get-NormalizedBytes -Bytes $bytes
+    [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($norm))
+}
+
+# The hash a manifest written before line-ending normalisation recorded: raw bytes. Recorded
+# values are still compared against it, so an existing manifest does not report every CRLF file
+# as modified. A fresh write always records the normalised value.
+function Get-RawFileHashHex {
+    param([string]$Path)
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+}
+
+# The raw hash a CRLF checkout of this file would have recorded: the LF text with every LF
+# expanded to CRLF. An older install on a CRLF working tree recorded that value, and the same
+# content now sits in the project as LF, so neither the normalised hash nor the raw hash of the
+# LF bytes equals it. Binary files are never expanded, matching Get-NormalizedBytes. Expanding
+# from the normalised bytes means an existing CRLF pair is not doubled.
+function Get-CrlfExpandedHashHex {
+    param([string]$Path)
+    $bytes = Read-FileBytes -Path $Path
+    if ([System.Array]::IndexOf($bytes, [byte]0) -ge 0) { return $null }
+    $norm = Get-NormalizedBytes -Bytes $bytes
+    $out = [System.Collections.Generic.List[byte]]::new($norm.Length + 16)
+    foreach ($b in $norm) {
+        if ($b -eq 10) { $out.Add(13) }
+        $out.Add($b)
+    }
+    [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($out.ToArray()))
+}
+
+# True when $Recorded is this file's normalised hash, its legacy raw hash, or the legacy raw hash
+# of the same text with CRLF line endings.
+function Test-RecordedHashMatch {
+    param([string]$Path, [string]$Recorded)
+    if (-not $Recorded) { return $false }
+    if ((Get-FileHashHex -Path $Path) -eq $Recorded) { return $true }
+    if ((Get-RawFileHashHex -Path $Path) -eq $Recorded) { return $true }
+    return ((Get-CrlfExpandedHashHex -Path $Path) -eq $Recorded)
+}
+
+# True when the project copy carries a CR and core's file carries none: an LF file that was
+# converted to CRLF. The reverse (core CRLF from a Windows checkout, project LF) is not a
+# difference worth a copy, since rewriting it would reintroduce the churn normalised hashing
+# removes. -Audit and Install-ManagedFile both ask this one question, so a file the install would
+# rewrite never reads in-sync.
+function Test-CrAddedToLfFile {
+    param([string]$SourcePath, [string]$DestPath)
+    $src = Read-FileBytes -Path $SourcePath
+    $dst = Read-FileBytes -Path $DestPath
+    return ([System.Array]::IndexOf($dst, [byte]13) -ge 0) -and ([System.Array]::IndexOf($src, [byte]13) -lt 0)
+}
+
+# True when a pinned overlay is still what was pinned. A normalised pin cannot tell LF from CRLF,
+# so an overlay of a core file that gained CRs core's LF file does not have is not intact: the
+# same byte change Test-CrAddedToLfFile reports on a managed file, and a CR after a shebang breaks
+# an sh hook. A pin recorded over the exact bytes (a legacy raw pin, or -Accept on an overlay
+# that already carried the CRs) still matches, so an accepted CRLF fork is not flagged forever.
+# An overlay core does not ship has no core file to compare with, so no CR can be called ordinary
+# for it. -Accept pins such an overlay over its exact bytes and only those bytes are intact. A
+# normalised pin, which cannot tell the CRLF copy from the LF one it was taken on, is never enough
+# there: the same conversion that breaks an sh hook would otherwise read as accepted.
+function Test-PinnedOverlayIntact {
+    param([string]$DestPath, [string]$SourcePath, [string]$Pinned)
+    if (-not $SourcePath) { return ((Get-RawFileHashHex -Path $DestPath) -eq $Pinned) }
+    if (-not (Test-RecordedHashMatch -Path $DestPath -Recorded $Pinned)) { return $false }
+    if (-not (Test-CrAddedToLfFile -SourcePath $SourcePath -DestPath $DestPath)) { return $true }
+    return ((Get-RawFileHashHex -Path $DestPath) -eq $Pinned)
 }
 
 # One resolver for -Accept and -Unaccept rather than the obvious copy of the block into the second
@@ -1597,7 +1690,16 @@ if ($Accept) {
     # Decided before the manifest write, so an R2-2 refusal leaves the manifest untouched and a
     # retry once git answers still has its pin to make (round-4 B). See Get-SidecarPlan.
     $sidecarPlan = Get-SidecarPlan -TargetDir $Target
-    $manifest['accepted'][$acceptKey] = Get-FileHashHex -Path $acceptPath
+    # A normalised pin cannot tell LF from CRLF. An overlay core does not ship, and an overlay of a
+    # core LF file that already carries CRs, are pinned by their raw bytes instead, so the audit
+    # can tell that fork from the same text converted to CRLF later (Test-PinnedOverlayIntact).
+    $acceptCoreSrc = (Get-CoreFilesMap)[$acceptKey]
+    $manifest['accepted'][$acceptKey] = if (-not $acceptCoreSrc -or (Test-CrAddedToLfFile -SourcePath $acceptCoreSrc -DestPath $acceptPath)) {
+        Get-RawFileHashHex -Path $acceptPath
+    }
+    else {
+        Get-FileHashHex -Path $acceptPath
+    }
     (ConvertTo-SortedMap -Map $manifest) | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
     $null = Invoke-SidecarPlan -Plan $sidecarPlan -Sidecar $sidecar
     Write-Host "Accepted overlay '$acceptKey' pinned at $($manifest['accepted'][$acceptKey])."
@@ -1770,8 +1872,7 @@ if ($Audit) {
                 continue
             }
             $pinnedHash = $acceptedMap[$key]
-            $dstHash = Get-FileHashHex -Path $dstPath
-            $status = if ($dstHash -eq $pinnedHash) { 'overlay (accepted)' } else { 'overlay (changed)' }
+            $status = if (Test-PinnedOverlayIntact -DestPath $dstPath -SourcePath $srcPath -Pinned $pinnedHash) { 'overlay (accepted)' } else { 'overlay (changed)' }
             $results.Add([pscustomobject]@{ File = $key; Status = $status })
             continue
         }
@@ -1787,9 +1888,8 @@ if ($Audit) {
                 $results.Add([pscustomobject]@{ File = $key; Status = 'orphaned (already removed)' })
                 continue
             }
-            $dstHash = Get-FileHashHex -Path $dstPath
             $recHash = $manifest['files'][$key]
-            $status = if ($dstHash -eq $recHash) { 'orphaned (unmodified)' } else { 'orphaned (modified)' }
+            $status = if (Test-RecordedHashMatch -Path $dstPath -Recorded $recHash) { 'orphaned (unmodified)' } else { 'orphaned (modified)' }
             $results.Add([pscustomobject]@{ File = $key; Status = $status })
             continue
         }
@@ -1833,9 +1933,12 @@ if ($Audit) {
         }
 
         $recHash = $manifest['files'][$key]
-        $status = if ($dstHash -eq $srcHash) { 'in-sync' }
-        elseif ($dstHash -eq $recHash) { 'core-updated' }
-        elseif ($srcHash -eq $recHash) { 'project-modified' }
+        $status = if ($dstHash -eq $srcHash) {
+            # Same text as core, but a CR core's LF file does not have: the install rewrites it.
+            if (Test-CrAddedToLfFile -SourcePath $srcPath -DestPath $dstPath) { 'core-updated' } else { 'in-sync' }
+        }
+        elseif (Test-RecordedHashMatch -Path $dstPath -Recorded $recHash) { 'core-updated' }
+        elseif (Test-RecordedHashMatch -Path $srcPath -Recorded $recHash) { 'project-modified' }
         else { 'conflict' }
         $results.Add([pscustomobject]@{ File = $key; Status = $status })
     }
@@ -2086,7 +2189,25 @@ function Install-ManagedFile {
         return
     }
 
-    if ($recordedHash -and $currentHash -eq $recordedHash) {
+    # Identical to core under line-ending normalisation, so nothing is modified whatever the
+    # recorded value is. A manifest written before normalisation holds a raw hash, which this
+    # rewrites in its normalised form. The bytes can still differ from core's, and a line ending
+    # is content for a script (CRLF after a shebang breaks a sh hook), so a copy that gained CRs
+    # that core's LF file does not have is rewritten from core. Any other ending difference is
+    # left alone.
+    if ($recordedHash -and $currentHash -eq $sourceHash) {
+        $script:manifest['files'][$ManifestKey] = $sourceHash
+        if (Test-CrAddedToLfFile -SourcePath $SourcePath -DestPath $DestPath) {
+            Copy-Item -LiteralPath $SourcePath -Destination $DestPath -Force
+            $script:results.Add([pscustomobject]@{ File = $ManifestKey; Action = 'updated' })
+        }
+        else {
+            $script:results.Add([pscustomobject]@{ File = $ManifestKey; Action = 'unchanged' })
+        }
+        return
+    }
+
+    if ($recordedHash -and (Test-RecordedHashMatch -Path $DestPath -Recorded $recordedHash)) {
         if ($currentHash -ne $sourceHash) {
             Copy-Item -LiteralPath $SourcePath -Destination $DestPath -Force
             $script:manifest['files'][$ManifestKey] = $sourceHash
@@ -2111,7 +2232,7 @@ function Install-ManagedFile {
     # file skipped after a prior install is.
     $acceptedHash = $script:manifest['accepted'][$ManifestKey]
 
-    if ($acceptedHash -and $acceptedHash -eq $currentHash) {
+    if ($acceptedHash -and (Test-PinnedOverlayIntact -DestPath $DestPath -SourcePath $SourcePath -Pinned $acceptedHash)) {
         # Already pinned, and still at the hash it was pinned at. The operator settled this file
         # once; core's version is deliberately not copied over it and there is nothing to act on,
         # which is why this is the one branch on the normal stream rather than a warning.

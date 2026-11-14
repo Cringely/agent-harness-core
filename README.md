@@ -252,7 +252,14 @@ each installed path to the SHA256 it had at install time, which is what makes a 
 detectable. `accepted` maps a path to the hash of the project's own fork, pinned deliberately, and
 says the divergence is the intended state. `coreCommit` is the third field, recording which core
 commit the layer was installed from. A manifest written before this shape existed, a flat
-path-to-hash map, is migrated on the next run with every hash preserved under `files`. The
+path-to-hash map, is migrated on the next run with every hash preserved under `files`. Hashes
+are taken over text with CRLF folded to LF, so a checkout with `core.autocrlf` and a project that
+commits the same content as LF read as the same file. A file holding a NUL byte is hashed as it is.
+A hash recorded as raw bytes by an earlier install still matches, and a re-install replaces it
+with the normalised form for each file it installs or finds identical to core, including a raw hash of
+CRLF bytes recorded for what is now an LF copy. A line-ending difference alone is not a modification,
+and the one case it still rewrites is a copy that gained CRs where core's file has none, such as an
+LF shell hook converted to CRLF. The
 current shape adds `schemaVersion` (3), `layers` and `settings`, described with the install flags
 above, without dropping any of those fields. Every write sorts each map's keys, so a re-install that
 changes nothing leaves the committed file byte-identical. Lists keep their order. A `layers` or
@@ -296,7 +303,13 @@ a fresh scan's would be, until the ignore rule is fixed and the installer runs a
 
 `-Accept <relpath>` writes the second kind of entry. Point it at a path relative to the project's
 `.claude` and it pins that file's current hash, which turns a permanent audit warning into a silent
-`overlay (accepted)` row. It touches the manifest and the shared sidecar step described above, and
+`overlay (accepted)` row. The pin is the hash of the fork's exact bytes, with one exception: a fork of
+a file core itself ships with CRLF endings (a Windows checkout) is pinned over LF-folded text, so
+line endings alone never move it. For every other overlay a line-ending change is a change, and
+it reads `overlay (changed)`. That covers a fork of a file core ships with LF endings that gains
+CRs after it was pinned, the same conversion `core-updated` reports on an installed file, and any
+overlay of a file core does not ship, such as a project-only hook, where there is no core file to
+compare with and any byte difference from the pin counts. It touches the manifest and the shared sidecar step described above, and
 nothing else. Run it again after reviewing a
 change to the fork to re-pin at the new hash. A path resolving outside `.claude` is refused rather
 than pinned, and so is one already tracked in `files`, which is an installed file rather than an
@@ -331,8 +344,10 @@ pruned-file logic and never touches the pruned file.)
 `-Audit` writes nothing and reports drift in both directions, using a three-way compare of core
 source, the manifest hash, and the installed file: `project-modified` and `untracked (differs from
 core)` files are candidates to promote upstream, `core-updated` and `not-installed` mean the project
-should re-run the installer, and `overlay (changed)` means a pinned fork has moved since it was
-pinned and wants re-reviewing. `missing` splits: a tracked file that was deleted comes back with a
+should re-run the installer (`core-updated` also covers an LF file that the project copy has converted
+to CRLF, which the install rewrites), and `overlay (changed)` means a pinned fork has moved since it was
+pinned (or an LF fork of an LF core file, or any overlay of a file core does not ship, has been
+converted to CRLF) and wants re-reviewing. `missing` splits: a tracked file that was deleted comes back with a
 re-run, while a deleted overlay exists only in the project's own history, so it is restored from
 there or the pin goes with `-Unaccept`. Nothing automatic ever recreates the second kind. `orphaned`
 splits three ways instead: a key core no longer ships whose file already left the project reads
