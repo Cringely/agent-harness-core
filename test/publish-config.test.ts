@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  KEY_COMMAND_ENV_NAMES,
   loadPublishConfig,
   ownerIdentity,
   parsePublishConfig,
@@ -18,7 +19,7 @@ const OWNER = { gitName: "fixture-owner", gitEmail: "fixture-owner@users.noreply
 const REVIEWER = {
   appId: "1",
   keyCommand: ["fixture-key-cmd", "--print"],
-  keyCommandEnv: { FIXTURE_FLAG: "false" },
+  keyCommandEnv: { OP_BIOMETRIC_UNLOCK_ENABLED: "false" },
   checkout: join(tmpdir(), "fixture-checkout"),
   termsFile: join(tmpdir(), "fixture-terms.json"),
 };
@@ -100,11 +101,34 @@ describe("parsePublishConfig()", () => {
     );
   });
 
-  test("refuses a keyCommandEnv variable named like a secret, without echoing its value", () => {
-    for (const name of ["OP_SERVICE_ACCOUNT_TOKEN", "CLIENT_SECRET", "API_KEY", "DB_PASSWORD"]) {
+  // The config file is plain text, so keyCommandEnv is an allowlist: a name nobody classified,
+  // a session or passphrase variable among them, is refused rather than passed through.
+  test("refuses a keyCommandEnv variable outside the permitted names, without echoing its name or value", () => {
+    for (const name of [
+      "OP_SERVICE_ACCOUNT_TOKEN",
+      "CLIENT_SECRET",
+      "API_KEY",
+      "DB_PASSWORD",
+      "BW_SESSION",
+      "OP_SESSION_MYACCOUNT",
+      "GPG_PASSPHRASE",
+      "AWS_CREDENTIALS",
+      "GH_PAT",
+      "NPM_AUTH",
+      "FIXTURE_FLAG",
+    ]) {
       const message = refusal(config({ reviewers: { "fixture-owner/fixture-repo": { ...REVIEWER, keyCommandEnv: { [name]: "zzsecret9" } } } }));
-      expect(message).toContain("marks a secret");
+      expect(message).toContain("keyCommandEnv");
+      expect(message).toContain("permitted");
       expect(message).not.toContain("zzsecret9");
+      expect(message).not.toContain(name);
+    }
+  });
+
+  test("accepts each permitted keyCommandEnv name", () => {
+    for (const name of KEY_COMMAND_ENV_NAMES) {
+      const parsed = parsePublishConfig(config({ reviewers: { "fixture-owner/fixture-repo": { ...REVIEWER, keyCommandEnv: { [name]: "false" } } } }));
+      expect(parsed.reviewers["fixture-owner/fixture-repo"]!.keyCommandEnv).toEqual({ [name]: "false" });
     }
   });
 
