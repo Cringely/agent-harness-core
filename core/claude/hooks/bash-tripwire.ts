@@ -1,8 +1,9 @@
 // PreToolUse hook (matcher: Bash) — the opt-in Bash tripwire (#266).
 //
 // A short list of command shapes that are rarely what the operator meant and expensive when they
-// are wrong. The hook can only add friction. It returns "ask" (Claude Code prompts, and the prompt
-// still appears in bypassPermissions mode), "deny" for the few commands nobody wants run, or no
+// are wrong. The hook can only add friction. It returns "ask" (Claude Code prompts. That an ask
+// still stops a command in bypassPermissions mode was observed only in a headless probe), "deny"
+// for the few commands nobody wants run, or no
 // decision at all. It never returns "allow", so it cannot widen what a session may do. The whole
 // input is also always read as flat text, so any listed pattern anywhere in it asks at least, even
 // one inside quotes, a comment or a heredoc body (see FAIL CONTRACT).
@@ -56,7 +57,14 @@
 // prompts at least, and a deny from a structured read still outranks it. This read replaced
 // chasing the input shapes that mislead both structured reads at once. The cost is a prompt on a
 // command that only quotes a listed pattern, such as `echo "git push --force"` or a commit message
-// that mentions one mid-sentence. A command with nothing flagged in its raw text is no decision.
+// that mentions one mid-sentence. The flat read joins a pipe or list operator (`|`, `|&`, `&&`,
+// `||`) to the line after it, through blank space and comments, because bash continues the command
+// there. A command with nothing flagged in its raw text is no decision.
+//
+// Before any read, every backslash-newline continuation (LF or CRLF) is joined as bash joins it, so
+// the word after the continuation is the one judged. An exception anywhere in the scan, not only
+// inside one part's read, keeps every finding made before it and adds an ask, so a deny already
+// found stays a deny and a command the hook failed to read never ends in no decision.
 
 export type Decision =
   | { action: "none" }
@@ -486,6 +494,32 @@ function scan(text: string, depth: number, out: Finding[], st: ScanState): void 
   for (const inner of extractSubstitutions(text)) scan(inner, depth + 1, out, st);
 }
 
+/**
+ * Joins every backslash-newline line continuation, as bash does before it splits words, so the word
+ * after a continuation is the one judged and a lone backslash never reaches a check. A backslash
+ * before CRLF counts as a continuation too, so a command with Windows line endings reads like the
+ * same command with LF. A backslash that is itself escaped (an even run) is not a continuation. Bash
+ * keeps a continuation inside single quotes and in a quoted-delimiter heredoc body, so there the join
+ * can change text the structured reads treat as data, or run a body past its terminator. Both only
+ * move text into a part that is still scanned.
+ */
+export function joinContinuations(src: string): string {
+  return src.replace(/(?<!\\)((?:\\\\)*)\\\r?\n/g, "$1");
+}
+
+/**
+ * For the flat read only. A pipe or list operator (`|`, `|&`, `&&`, `||`) carries the command onto the
+ * next line in bash, so the whitespace, line breaks and comments after one collapse to a single space
+ * before the text is split into chunks, and `|&` reads as `|`. Without this a download piped into a
+ * shell across a line break lands in two chunks and the pipe goes unseen.
+ */
+function joinPipeGaps(src: string): string {
+  return src
+    .replace(/(\|\||&&|\|&?)(?:\s|#[^\n]*)*/g, (_m, op: string) => (op === "|&" ? "| " : `${op} `))
+    // The `&` of a redirection (`2>&1`, `&>`, `<&`) is not a separator, so it must not split a chunk.
+    .replace(/&(?=>)|(?<=[<>])&/g, " ");
+}
+
 /** A shell interpreter's name as a word, for rawScan's check of a download in a substitution. */
 const RAW_SHELL_WORD = /(?:^|[^\w.-])(?:sh|bash|zsh|dash|ksh|csh|tcsh|fish|ash|pwsh|powershell|iex|invoke-expression)(?:\.exe)?(?![\w.-])/i;
 const RAW_DOWNLOAD_IN_SUBSTITUTION = /(\$\(|<\(|`)\s*(curl|wget|iwr|irm)\b/gi;
@@ -501,7 +535,7 @@ const RAW_WINDOW = 64;
  */
 function rawScan(src: string): string[] {
   const found: Finding[] = [];
-  const text = src.replace(/\\+(?=["'])/g, "").replace(/["']/g, " ");
+  const text = joinPipeGaps(joinContinuations(src)).replace(/\\+(?=["'])/g, "").replace(/["']/g, " ");
 
   for (const chunk of text.split(/[\n;&()`]/)) {
     let fetchedBefore = false;
@@ -618,7 +652,8 @@ function scanSegment(text: string, out: Finding[], unread: boolean): void {
  * body), and chasing each shape that does it was not converging. The flat read only ever asks, so
  * any listed pattern anywhere in the input prompts at least, and a structured deny still outranks it.
  */
-function scanCommand(command: string, out: Finding[]): void {
+function scanCommand(input: string, out: Finding[]): void {
+  const command = joinContinuations(input);
   const flat = rawScan(command);
   if (flat.length > 0) out.push({ severity: "ask", reason: `its raw text matches: ${flat.join(", ")}` });
   scanSegment(command, out, false);
@@ -632,7 +667,8 @@ function scanCommand(command: string, out: Finding[]): void {
     }
     const parts = splitHeredocs(seg);
     budget -= parts.lines;
-    queue.push(...parts.bodies);
+    // A loop, not a spread: a spread of one body per heredoc operator has an argument-count ceiling.
+    for (const body of parts.bodies) queue.push(body);
     scanSegment(parts.command, out, false);
   }
 }
@@ -648,7 +684,13 @@ export function decide(payload: unknown): Decision {
   if (typeof command !== "string" || command.trim() === "") return NONE;
 
   const findings: Finding[] = [];
-  scanCommand(command, findings);
+  try {
+    scanCommand(command, findings);
+  } catch {
+    // An exception anywhere in the scan keeps every finding made before it, so a deny already found
+    // stays a deny, and adds an ask. A command the hook failed to read is never waved through.
+    findings.push({ severity: "ask", reason: "the scanner failed partway through this command, so it was not read in full" });
+  }
   if (findings.length === 0) return NONE;
 
   const severity = findings.some((f) => f.severity === "deny") ? "deny" : "ask";

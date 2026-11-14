@@ -135,8 +135,9 @@ runs standup/wave ceremonies. `-Force` overwrites files the project has modified
 default is to skip a modified file and warn.
 
 `-IncludeBashTripwire` installs the Bash tripwire, a PreToolUse hook on Bash that is off unless you
-ask for it. It asks, or denies the clearest cases, and never allows, so it can only add friction. A
-prompt it raises still appears in `bypassPermissions` mode. It matches four kinds of command: a
+ask for it. It asks, or denies the clearest cases, and never allows, so it can only add friction.
+That an ask from it still stops a command in `bypassPermissions` mode was observed only in a
+headless probe. It matches four kinds of command: a
 recursive delete of `/`, `~`, a home directory or a drive root (denied) or a recursive force delete
 of a `.git` directory or a bare variable (asked), `git push` with `--force`, `-f`, `--force-with-lease` or a `+refspec`, a
 `curl` or `wget` download piped into a shell, and a read of credential material (`gh auth token`,
@@ -339,10 +340,11 @@ splits three ways instead: a key core no longer ships whose file already left th
 reads `orphaned (unmodified)`, and one the project edited since reads `orphaned (modified)`. All
 three are `-Prune`'s job, the last of them followed by `-Accept` to pin the fork.
 
+`not-installed (opt-in)` is the Bash tripwire on a project that never passed `-IncludeBashTripwire`.
+Like `not-installed (ceremony-gated)`, it is listed but not counted.
+
 Layers add six statuses. `not-installed (layer not selected)` is a rule file for a layer the
 project does not record, and like `not-installed (ceremony-gated)` it is listed but not counted.
-`not-installed (opt-in)` is the Bash tripwire on a project that never passed `-IncludeBashTripwire`,
-listed and not counted for the same reason.
 `installed (layer not selected)` is one still on disk after its layer was dropped. Delete it by
 hand, and the next install drops its record. `settings-missing` and `settings-stale` mean
 `project-settings.md` is absent, or is as the installer wrote it but differs, line endings aside,
