@@ -57,12 +57,17 @@
 // prompts at least, and a deny from a structured read still outranks it. This read replaced
 // chasing the input shapes that mislead both structured reads at once. The cost is a prompt on a
 // command that only quotes a listed pattern, such as `echo "git push --force"` or a commit message
-// that mentions one mid-sentence. The flat read joins a pipe or list operator (`|`, `|&`, `&&`,
-// `||`) to the line after it, through blank space and comments, because bash continues the command
-// there. A command with nothing flagged in its raw text is no decision.
+// that mentions one mid-sentence. The flat read also joins a pipe or list operator (`|`, `|&`, `&&`,
+// `||`) to the line after it, through blank space and, in a second pass, comments, because bash
+// continues the command there. A command with nothing flagged in its raw text is no decision.
 //
-// Before any read, every backslash-newline continuation (LF or CRLF) is joined as bash joins it, so
-// the word after the continuation is the one judged. An exception anywhere in the scan, not only
+// UNION RULE. Every read runs on the input as given and again on each normalized form of it, and
+// the decision is the most severe finding from any of them. The normalized forms are the input with
+// every backslash-newline continuation (LF or CRLF) joined, so the word after a continuation is the
+// one judged, and for the flat read the pipe-gap joins above. Each normalization is blind to quotes
+// and comments and can erase text bash runs: the join merges the line after a comment ending in a
+// backslash into that comment, and a `#` after a pipe may sit inside quotes. Reading the input as
+// given as well means a normalization can only add findings. An exception anywhere in the scan, not only
 // inside one part's read, keeps every finding made before it and adds an ask, so a deny already
 // found stays a deny and a command the hook failed to read never ends in no decision.
 
@@ -188,6 +193,10 @@ function tokenize(src: string, st: ScanState): Cmd[] {
     } else if (c === "\\") {
       if (next === "\n") {
         i += 2;
+      } else if (next === "\r" && src[i + 2] === "\n") {
+        // A continuation before CRLF, as joinContinuations treats it, so the read of the unjoined
+        // input never takes the backslash for a root path.
+        i += 3;
       } else if (next !== undefined && " \t\"'$\\`;&|<>()".includes(next)) {
         tok += next;
         inTok = true;
@@ -496,12 +505,12 @@ function scan(text: string, depth: number, out: Finding[], st: ScanState): void 
 
 /**
  * Joins every backslash-newline line continuation, as bash does before it splits words, so the word
- * after a continuation is the one judged and a lone backslash never reaches a check. A backslash
- * before CRLF counts as a continuation too, so a command with Windows line endings reads like the
- * same command with LF. A backslash that is itself escaped (an even run) is not a continuation. Bash
- * keeps a continuation inside single quotes and in a quoted-delimiter heredoc body, so there the join
- * can change text the structured reads treat as data, or run a body past its terminator. Both only
- * move text into a part that is still scanned.
+ * after a continuation is the one judged. A backslash before CRLF counts as a continuation too, so a
+ * command with Windows line endings reads like the same command with LF. A backslash that is itself
+ * escaped (an even run) is not a continuation. The join is blind to quoting, and bash does not join
+ * inside single quotes, a comment or a quoted-delimiter heredoc body, so here it can merge a command
+ * line into a comment and erase it. That is why every read also runs on the unjoined input
+ * (scanCommand), and the join can only add findings.
  */
 export function joinContinuations(src: string): string {
   return src.replace(/(?<!\\)((?:\\\\)*)\\\r?\n/g, "$1");
@@ -509,15 +518,15 @@ export function joinContinuations(src: string): string {
 
 /**
  * For the flat read only. A pipe or list operator (`|`, `|&`, `&&`, `||`) carries the command onto the
- * next line in bash, so the whitespace, line breaks and comments after one collapse to a single space
- * before the text is split into chunks, and `|&` reads as `|`. Without this a download piped into a
- * shell across a line break lands in two chunks and the pipe goes unseen.
+ * next line in bash, so the whitespace and line breaks after one collapse to a single space before the
+ * text is split into chunks, and `|&` reads as `|`. Without this a download piped into a shell across
+ * a line break lands in two chunks and the pipe goes unseen. With `comments`, a comment after the
+ * operator collapses too, as bash skips it. The `#` may sit inside quotes, so that collapse can delete
+ * real text, which is why rawScan also reads the text with no collapse and with the blank-space one.
  */
-function joinPipeGaps(src: string): string {
-  return src
-    .replace(/(\|\||&&|\|&?)(?:\s|#[^\n]*)*/g, (_m, op: string) => (op === "|&" ? "| " : `${op} `))
-    // The `&` of a redirection (`2>&1`, `&>`, `<&`) is not a separator, so it must not split a chunk.
-    .replace(/&(?=>)|(?<=[<>])&/g, " ");
+function joinPipeGaps(src: string, comments: boolean): string {
+  const gap = comments ? /(\|\||&&|\|&?)(?:\s|#[^\n]*)*/g : /(\|\||&&|\|&?)\s*/g;
+  return src.replace(gap, (_m, op: string) => (op === "|&" ? "| " : `${op} `));
 }
 
 /** A shell interpreter's name as a word, for rawScan's check of a download in a substitution. */
@@ -532,15 +541,29 @@ const RAW_WINDOW = 64;
  * into one word and nothing recurses. Each check runs from every word that names a command it
  * covers, not only from the start of a command, because the structure that says where a command
  * starts is what failed to parse. Returns the reason for each pattern that matched.
+ *
+ * The text is read three times, with no pipe-gap collapse, with blank space collapsed and with
+ * comments collapsed as well (joinPipeGaps), and every match from any of them counts. Each collapse
+ * can delete or move real text, so it can only add matches to the read without it.
  */
 function rawScan(src: string): string[] {
   const found: Finding[] = [];
-  const text = joinPipeGaps(joinContinuations(src)).replace(/\\+(?=["'])/g, "").replace(/["']/g, " ");
+  // The `&` of a redirection (`2>&1`, `&>`, `<&`) is not a separator, so it must not split a chunk.
+  const base = src.replace(/&(?=>)|(?<=[<>])&/g, " ");
+  const variants = new Set([base, joinPipeGaps(base, false), joinPipeGaps(base, true)]);
+  for (const variant of variants) rawRead(variant, found);
+  return [...new Set(found.map((f) => f.reason))];
+}
+
+function rawRead(src: string, found: Finding[]): void {
+  const text = src.replace(/\\+(?=["'])/g, "").replace(/["']/g, " ");
 
   for (const chunk of text.split(/[\n;&()`]/)) {
     let fetchedBefore = false;
     for (const stage of chunk.split("|")) {
-      const words = stage.split(/\s+/).filter((w) => w !== "");
+      // A word that is only backslashes is an escape in bash, never a path. On unjoined input it is
+      // the continuation backslash at a line end, which a delete check would otherwise take for `/`.
+      const words = stage.split(/\s+/).filter((w) => w !== "" && !/^\\+$/.test(w));
       const names = words.map(baseName);
       if (fetchedBefore && names.some((n) => SHELLS.has(n))) {
         found.push({ severity: "ask", reason: "pipes a download (curl, wget) into a shell interpreter" });
@@ -566,8 +589,6 @@ function rawScan(src: string): string[] {
       }
     }
   }
-
-  return [...new Set(found.map((f) => f.reason))];
 }
 
 // ---------------------------------------------------------------------------
@@ -651,9 +672,18 @@ function scanSegment(text: string, out: Finding[], unread: boolean): void {
  * it. Both structured reads can be misled at once (a false `<<` match plus a quote pairing across a
  * body), and chasing each shape that does it was not converging. The flat read only ever asks, so
  * any listed pattern anywhere in the input prompts at least, and a structured deny still outranks it.
+ *
+ * All three reads run on the input as given and again on it with its line continuations joined
+ * (joinContinuations), and the decision is the most severe finding from any of them. The join is
+ * blind to quotes and comments, so it can erase text bash runs, and the read of the input as given
+ * is the one that still sees it. A normalization can then only add findings, never remove one.
  */
 function scanCommand(input: string, out: Finding[]): void {
-  const command = joinContinuations(input);
+  for (const form of new Set([input, joinContinuations(input)])) scanForm(form, out);
+}
+
+/** The flat, uncut and segmented reads of one form of the input, each under its own line budget. */
+function scanForm(command: string, out: Finding[]): void {
   const flat = rawScan(command);
   if (flat.length > 0) out.push({ severity: "ask", reason: `its raw text matches: ${flat.join(", ")}` });
   scanSegment(command, out, false);
