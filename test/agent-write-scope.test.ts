@@ -477,6 +477,44 @@ describe("inScratch(): nothing at or under the account Claude folder is scratch"
     }
   });
 
+  // A subfolder linked out of the tree (skills kept in a dotfiles repo) resolves outside every
+  // canonical root, so the spelling the write was given has to decide as well.
+  let linkedOut = true;
+  const dotfiles = join(homeRoot, "dotfiles");
+  const homeB = join(homeRoot, "home-b");
+  const claudeB = join(homeB, ".claude");
+  const homeC = join(homeRoot, "home-c");
+  const claudeC = join(homeC, ".claude");
+  try {
+    mkdirSync(join(dotfiles, "skills-b"), { recursive: true });
+    mkdirSync(join(dotfiles, "claude-c"), { recursive: true });
+    mkdirSync(join(dotfiles, "skills-c"), { recursive: true });
+    mkdirSync(claudeB, { recursive: true });
+    mkdirSync(homeC, { recursive: true });
+    symlinkSync(join(dotfiles, "skills-b"), join(claudeB, "skills"), "junction");
+    symlinkSync(join(dotfiles, "claude-c"), claudeC, "junction");
+    symlinkSync(join(dotfiles, "skills-c"), join(dotfiles, "claude-c", "skills"), "junction");
+  } catch {
+    linkedOut = false;
+  }
+
+  test.skipIf(!linkedOut)("a subfolder junctioned out of it is denied by the path as given", () => {
+    const target = join(claudeB, "skills", "scratch", "SKILL.md");
+    expect(inScratch(target, proj, proj, [])).toBe(true);
+    expect(inScratch(target, proj, proj, claudeConfigRoots({}, homeB))).toBe(false);
+  });
+
+  test.skipIf(!linkedOut)("a linked account folder is a root under the spelling it was given", () => {
+    const target = join(claudeC, "skills", "scratch", "SKILL.md");
+    expect(inScratch(target, proj, proj, [])).toBe(true);
+    expect(inScratch(target, proj, proj, claudeConfigRoots({}, homeC))).toBe(false);
+  });
+
+  test.skipIf(!linkedOut)("the link target's own spelling is not denied (stated residual)", () => {
+    const target = join(dotfiles, "skills-b", "scratch", "SKILL.md");
+    expect(inScratch(target, proj, proj, claudeConfigRoots({}, homeB))).toBe(true);
+  });
+
   test.skipIf(!linked)("a config root given through a link is canonicalised", () => {
     const linkRoots = claudeConfigRoots({ CLAUDE_CONFIG_DIR: viaLink }, join(homeRoot, "elsewhere"));
     expect(inScratch(join(claudeDir, "scratch", "r.md"), proj, proj, linkRoots)).toBe(false);

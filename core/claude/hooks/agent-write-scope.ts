@@ -64,10 +64,14 @@
 //     that does not match the project's own segments, which would let a scratch
 //     ancestor count again, so a scoped agent is denied them outright.
 //   - Nothing at or under the account Claude folder (`os.homedir()` plus `.claude`, and
-//     CLAUDE_CONFIG_DIR when set) is scratch, judged on the resolved paths. Every session
-//     loads rules, skills, agent definitions and hooks from there, so a scratch-named
-//     folder in that tree (`~/.claude/skills/scratch/SKILL.md`) is denied like any
-//     other file in it. A session scratchpad under the temp folder is unaffected.
+//     CLAUDE_CONFIG_DIR when set) is scratch, judged on the resolved paths and on the
+//     paths as given. Every session loads rules, skills, agent definitions and hooks from
+//     there, so a scratch-named folder in that tree (`~/.claude/skills/scratch/SKILL.md`)
+//     is denied like any other file in it, including when `skills` is a link out of the
+//     tree. A session scratchpad under the temp folder is unaffected. Residual: a write
+//     that names a linked-out folder by its own target path (the dotfiles folder the
+//     `skills` link points at) or reaches a file through a hard link never mentions the
+//     account folder, so it is judged as an ordinary path outside the project.
 //
 // The project root is CLAUDE_PROJECT_DIR when set and the session cwd otherwise. A
 // relative filePath resolves against the session cwd, which arrives on stdin as
@@ -170,14 +174,16 @@ function segmentsOf(p: string): string[] {
 const startsWith = (a: string[], b: string[]): boolean => a.length >= b.length && b.every((s, i) => a[i] === s);
 
 /**
- * The canonical account Claude folders: `<home>/.claude` and CLAUDE_CONFIG_DIR when set. Every
- * session loads rules, skills, agent definitions and hooks from there, so no path at or under one
- * is scratch, whatever its segments are named. Home comes from `os.homedir()`, not `$HOME`, which
+ * The account Claude folders, `<home>/.claude` and CLAUDE_CONFIG_DIR when set, each under the
+ * spelling it was given and under its canonical one. Every session loads rules, skills, agent
+ * definitions and hooks from there, so no path at or under one is scratch, whatever its segments
+ * are named. Both spellings are kept because a linked folder (`.claude` itself, or `skills` inside
+ * it, kept in a dotfiles repo) puts the given and the resolved path in different trees, and either
+ * one starting inside a root is enough to deny. Home comes from `os.homedir()`, not `$HOME`, which
  * Git Bash on Windows can point at another folder. An empty or relative home adds nothing, since
  * resolving it would make the session cwd a root. A relative CLAUDE_CONFIG_DIR resolves against
- * this process's cwd. A folder that cannot be canonicalised is skipped: a target under it cannot be
- * canonicalised either, and inScratch() already calls that not scratch. `env` and `home` are
- * injectable for tests.
+ * this process's cwd. A folder that cannot be canonicalised keeps only its given spelling. `env`
+ * and `home` are injectable for tests.
  */
 export function claudeConfigRoots(
   env: Record<string, string | undefined> = process.env,
@@ -187,12 +193,12 @@ export function claudeConfigRoots(
   if (typeof home === "string" && home !== "" && isAbsolute(home)) given.push(join(home, ".claude"));
   const configDir = env.CLAUDE_CONFIG_DIR;
   if (typeof configDir === "string" && configDir !== "") given.push(resolve(configDir));
-  const roots: string[] = [];
+  const roots: string[] = [...given];
   for (const dir of given) {
     try {
       roots.push(canonicalize(dir));
     } catch {
-      // Skipped, see above.
+      // Given spelling only, see above.
     }
   }
   return roots;
@@ -214,8 +220,9 @@ export function claudeConfigRoots(
  *     scratchpad under a linked temp directory (macOS `/var` to `/private/var`) is still scratch,
  *     and a scratch-named link to a folder that is not scratch is not.
  *   - Before either rule, nothing at or under an account Claude folder (claudeConfigRoots) is
- *     scratch. That holds inside the project too, so a project rooted at the home folder has no
- *     drop box, since its `.claude` is the account one.
+ *     scratch, judged on the canonical path and on the path as given, so a subfolder linked out
+ *     of that tree is still denied when written through it. That holds inside the project too, so
+ *     a project rooted at the home folder has no drop box, since its `.claude` is the account one.
  * Compared lowercased on every platform: case-insensitive containment can only add denies.
  * `configRoots` is injectable for tests and defaults to this host's account folders.
  */
@@ -240,7 +247,9 @@ export function inScratch(
   const raw = segmentsOf(abs);
   const real = segmentsOf(canonicalAbs);
   const project = segmentsOf(canonicalProject);
-  if (configRoots.some((root) => startsWith(real, segmentsOf(root)))) return false;
+  if (configRoots.some((root) => startsWith(real, segmentsOf(root)) || startsWith(raw, segmentsOf(root)))) {
+    return false;
+  }
   if (startsWith(real, project)) {
     // Inside the project the route taken must be the project's own, either resolved or as the
     // project was given. A link standing in for an ancestor of the project matches neither.
