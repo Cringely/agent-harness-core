@@ -25,12 +25,18 @@
 // commit that adds this file describes these cases in prose instead of
 // quoting them.
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const HOOK_SRC = join(import.meta.dir, "..", "core", "claude", "hooks", "commit-msg");
+// Each case runs a real git commit and so a real hook, which is slow where process spawns are slow.
+setDefaultTimeout(60_000);
+
+/** A rationale line the hook accepts: "Why:" plus at least three words. */
+const WHY = "Why: the first backoff was too short.\n";
+
+const HOOK_SRC =join(import.meta.dir, "..", "core", "claude", "hooks", "commit-msg");
 
 const tempDirs: string[] = [];
 afterEach(() => {
@@ -90,22 +96,24 @@ describe("commit-msg hook — refuses each AI-attribution channel it documents",
   const cases: Array<[string, string]> = [
     [
       "Co-Authored-By trailer naming Claude",
-      "fix: correct the retry backoff\n\nCo-authored-by: Claude Helper <helper@example.test>\n",
+      `fix: correct the retry backoff\n\n${WHY}\nCo-authored-by: Claude Helper <helper@example.test>\n`,
     ],
     [
       "Claude-Session trailer",
-      "fix: correct the retry backoff\n\nClaude-Session: opaque-token-not-a-url\n",
+      `fix: correct the retry backoff\n\n${WHY}\nClaude-Session: opaque-token-not-a-url\n`,
     ],
     [
       "'Generated with Claude Code' attribution line",
-      "fix: correct the retry backoff\n\nGenerated with Claude Code\n",
+      `fix: correct the retry backoff\n\n${WHY}\nGenerated with Claude Code\n`,
     ],
     [
       "an anthropic.com address",
-      "fix: correct the retry backoff\n\nContact noreply@anthropic.com for details.\n",
+      `fix: correct the retry backoff\n\n${WHY}\nContact noreply@anthropic.com for details.\n`,
     ],
   ];
 
+  // Each fixture carries a qualifying Why line, so only the attribution check
+  // can be what refuses it.
   test.each(cases)("%s: git commit is refused, no commit is created", (_label, message) => {
     const dir = initRepo();
     installHook(dir);
@@ -114,6 +122,20 @@ describe("commit-msg hook — refuses each AI-attribution channel it documents",
     const result = commitWith(dir, message);
 
     expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("commit-msg: refused");
+    expect(result.stderr.toString()).not.toContain("Why:");
+    expect(headExists(dir)).toBe(false);
+  });
+
+  test("attribution refuses a message that has no Why line too, for the attribution reason", () => {
+    const dir = initRepo();
+    installHook(dir);
+    stageSomething(dir);
+
+    const result = commitWith(dir, "fix: correct the retry backoff\n\nClaude-Session: opaque-token-not-a-url\n");
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("Claude-Session trailer");
     expect(headExists(dir)).toBe(false);
   });
 });
@@ -126,7 +148,7 @@ describe("commit-msg hook — accepts a clean message", () => {
 
     const result = commitWith(
       dir,
-      "fix: correct the retry backoff\n\nNo attribution here, just a normal commit describing the change.\n",
+      `fix: correct the retry backoff\n\n${WHY}\nNo attribution here, just a normal commit describing the change.\n`,
     );
 
     expect(result.exitCode).toBe(0);
@@ -145,6 +167,7 @@ describe("commit-msg hook — the two-space prose escape hatch", () => {
     // documents the rule, for instance) without tripping the gate.
     const message =
       "docs: describe the commit-msg escape hatch\n\n" +
+      `${WHY}\n` +
       "The hook refuses any line starting with this trailer:\n" +
       "  Co-authored-by: Claude <noreply@anthropic.com>\n" +
       "Indenting by two spaces is how to write it in prose instead.\n";
@@ -153,5 +176,221 @@ describe("commit-msg hook — the two-space prose escape hatch", () => {
 
     expect(result.exitCode).toBe(0);
     expect(headExists(dir)).toBe(true);
+  });
+});
+
+describe("commit-msg hook — requires a Why line", () => {
+  const WHY_REASON = "No 'Why:' line";
+
+  function expectRefusedForWhy(message: string) {
+    const dir = initRepo();
+    installHook(dir);
+    stageSomething(dir);
+
+    const result = commitWith(dir, message);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain(WHY_REASON);
+    expect(headExists(dir)).toBe(false);
+  }
+
+  function expectAccepted(message: string) {
+    const dir = initRepo();
+    installHook(dir);
+    stageSomething(dir);
+
+    const result = commitWith(dir, message);
+
+    expect(result.stderr.toString()).not.toContain("commit-msg: refused");
+    expect(result.exitCode).toBe(0);
+    expect(headExists(dir)).toBe(true);
+  }
+
+  const refused: Array<[string, string]> = [
+    ["a body with no Why line", "fix: correct the retry backoff\n\nThe first attempt waited zero seconds.\n"],
+    ["a subject-only fix commit", "fix: correct the retry backoff\n"],
+    ["a subject-only commit with no conventional type", "Correct the retry backoff\n"],
+    ["a docs commit that has a body but no Why line", "docs: explain the backoff\n\nAdds a paragraph.\n"],
+    ["an empty Why line", "fix: correct the retry backoff\n\nWhy:\n"],
+    ["a Why line holding only whitespace", "fix: correct the retry backoff\n\nWhy:    \n"],
+    ["a Why line with fewer than three words", "fix: correct the retry backoff\n\nWhy: too short\n"],
+    ["a Why line that does not start the line", "fix: correct the retry backoff\n\nNote Why: the first backoff was too short.\n"],
+    ["a Why line only inside a comment line", "fix: correct the retry backoff\n\n# Why: the first backoff was too short.\nBody text.\n"],
+  ];
+
+  test.each(refused)("%s: refused with a one-line reason", (_label, message) => {
+    expectRefusedForWhy(message);
+  });
+
+  test("the refusal prints exactly one line", () => {
+    const dir = initRepo();
+    installHook(dir);
+    stageSomething(dir);
+
+    const result = commitWith(dir, "fix: correct the retry backoff\n\nBody only.\n");
+
+    const lines = result.stderr.toString().split(/\r?\n/).filter((l) => l.includes("commit-msg: refused"));
+    expect(lines).toHaveLength(1);
+  });
+
+  const accepted: Array<[string, string]> = [
+    ["a Why line with three words", "fix: correct the retry backoff\n\nWhy: backoff was missing.\n"],
+    ["a lowercase why line", "fix: correct the retry backoff\n\nwhy: the first backoff was too short.\n"],
+    ["an uppercase WHY line", "fix: correct the retry backoff\n\nWHY: the first backoff was too short.\n"],
+    ["a Why line directly under the subject", "fix: correct the retry backoff\nWhy: the first backoff was too short.\n"],
+    ["a Why line below other body text", "fix: correct the retry backoff\n\nThe first attempt waited zero seconds.\n\nWhy: the first backoff was too short.\n"],
+    ["a second Why line when the first is empty", "fix: correct the retry backoff\n\nWhy:\nWhy: the first backoff was too short.\n"],
+  ];
+
+  test.each(accepted)("%s: accepted", (_label, message) => {
+    expectAccepted(message);
+  });
+
+  test("a CRLF message file with a Why line is accepted", () => {
+    const dir = initRepo();
+    installHook(dir);
+    stageSomething(dir);
+    const file = join(dir, "msg.txt");
+    writeFileSync(file, "fix: correct the retry backoff\r\n\r\nWhy: the first backoff was too short.\r\n");
+
+    const result = git(["commit", "--cleanup=verbatim", "-F", file], dir);
+
+    expect(result.stderr.toString()).not.toContain("commit-msg: refused");
+    expect(result.exitCode).toBe(0);
+  });
+
+  test("a CRLF message file with an empty Why line is refused", () => {
+    const dir = initRepo();
+    installHook(dir);
+    stageSomething(dir);
+    const file = join(dir, "msg.txt");
+    writeFileSync(file, "fix: correct the retry backoff\r\n\r\nWhy:\r\n");
+
+    const result = git(["commit", "--cleanup=verbatim", "-F", file], dir);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain(WHY_REASON);
+  });
+
+  test("a CRLF Why line is not padded to three words by its carriage return", () => {
+    const dir = initRepo();
+    installHook(dir);
+    stageSomething(dir);
+    const file = join(dir, "msg.txt");
+    // Two real words, a space, then CR: an unstripped CR would count as a third word.
+    writeFileSync(file, "fix: correct the retry backoff\r\n\r\nWhy: too short \r\n");
+
+    const result = git(["commit", "--cleanup=verbatim", "-F", file], dir);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain(WHY_REASON);
+  });
+
+  test("a CRLF message file with attribution is still refused for attribution", () => {
+    const dir = initRepo();
+    installHook(dir);
+    stageSomething(dir);
+    const file = join(dir, "msg.txt");
+    writeFileSync(
+      file,
+      "fix: correct the retry backoff\r\n\r\nWhy: the first backoff was too short.\r\nClaude-Session: opaque\r\n",
+    );
+
+    const result = git(["commit", "--cleanup=verbatim", "-F", file], dir);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("Claude-Session trailer");
+  });
+
+  describe("exemptions", () => {
+    test.each([
+      ["docs", "docs: explain the backoff\n"],
+      ["docs with a scope", "docs(readme): explain the backoff\n"],
+      ["chore", "chore: bump the lockfile\n"],
+      ["style", "style: reformat the retry loop\n"],
+      ["a breaking-change docs marker", "docs!: rename the backoff section\n"],
+    ])("a subject-only %s commit is accepted", (_label, message) => {
+      expectAccepted(message);
+    });
+
+    test("a subject-only feat commit is not exempt", () => {
+      expectRefusedForWhy("feat: add a retry backoff\n");
+    });
+
+    test.each([
+      ["fixup!", "fixup! fix: correct the retry backoff\n"],
+      ["squash!", "squash! fix: correct the retry backoff\n"],
+      ["amend!", "amend! fix: correct the retry backoff\n"],
+    ])("a %s subject is accepted", (_label, message) => {
+      expectAccepted(message);
+    });
+
+    test("a fixup! mention is exempt only at the start of the subject", () => {
+      expectRefusedForWhy("fix: handle fixup! subjects\n");
+    });
+
+    test("a merge commit is accepted without a Why line", () => {
+      const dir = initRepo();
+      installHook(dir);
+      stageSomething(dir);
+      expect(commitWith(dir, `fix: base commit\n\n${WHY}`).exitCode).toBe(0);
+      git(["branch", "-M", "main"], dir);
+      git(["checkout", "-q", "-b", "side"], dir);
+      stageSomething(dir, "side.txt");
+      expect(commitWith(dir, `feat: side work\n\n${WHY}`).exitCode).toBe(0);
+      git(["checkout", "-q", "main"], dir);
+      stageSomething(dir, "main.txt");
+      expect(commitWith(dir, `feat: main work\n\n${WHY}`).exitCode).toBe(0);
+
+      // The subject does not start with "Merge ", so this passes on MERGE_HEAD alone.
+      const merged = git(["merge", "--no-ff", "-m", "combine the two lines of work", "side"], dir);
+
+      expect(merged.stderr.toString()).not.toContain("commit-msg: refused");
+      expect(merged.exitCode).toBe(0);
+      expect(git(["rev-parse", "--verify", "HEAD^2"], dir).exitCode).toBe(0);
+    });
+
+    test("a merge-style subject is accepted without a Why line", () => {
+      expectAccepted("Merge branch 'side' into main\n");
+    });
+
+    test("a conflicted git revert, finished with git commit, is accepted without a Why line", () => {
+      // git revert runs no commit-msg hook when it commits cleanly. It does when a
+      // conflict is resolved by hand and finished with git commit, which is the
+      // only way the generated Revert subject reaches the hook.
+      const dir = initRepo();
+      installHook(dir);
+      const write = (content: string) => writeFileSync(join(dir, "f.txt"), content);
+      const commitAll = (subject: string) => {
+        git(["add", "f.txt"], dir);
+        expect(commitWith(dir, `${subject}\n\n${WHY}`).exitCode).toBe(0);
+      };
+      write("a\n");
+      commitAll("fix: first version");
+      write("b\n");
+      commitAll("fix: second version");
+      write("c\n");
+      commitAll("fix: third version");
+
+      const env = { ...process.env, GIT_EDITOR: "true" };
+      const run = (args: string[]) =>
+        Bun.spawnSync(["git", ...args], { cwd: dir, stdout: "pipe", stderr: "pipe", env });
+      expect(run(["revert", "--no-edit", "HEAD~1"]).exitCode).not.toBe(0);
+      write("resolved\n");
+      git(["add", "f.txt"], dir);
+      const finished = run(["commit"]);
+
+      expect(finished.stderr.toString()).not.toContain("commit-msg: refused");
+      expect(finished.exitCode).toBe(0);
+      expect(git(["log", "-1", "--format=%s"], dir).stdout.toString()).toContain('Revert "fix: second version"');
+    });
+
+    test("a Reapply subject, which git revert writes when it reverts a revert, is accepted", () => {
+      expectAccepted('Reapply "fix: second version"');
+    });
+
+    test("a hand-written message that only mentions revert is not exempt", () => {
+      expectRefusedForWhy("fix: revert the backoff change\n");
+    });
   });
 });

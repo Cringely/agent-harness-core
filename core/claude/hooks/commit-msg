@@ -1,5 +1,6 @@
 #!/bin/sh
-# Git commit-msg hook. Refuses any commit message carrying AI attribution.
+# Git commit-msg hook. Refuses any commit message carrying AI attribution,
+# and any commit message without a rationale line (see "WHY LINE" below).
 #
 # WHY THIS EXISTS
 # change-management.md: "All commits must use the user's GitHub identity only.
@@ -22,6 +23,19 @@
 # The trailer checks are anchored to the start of a line, because that is
 # where git trailers live. To write one of these strings in prose (a commit
 # that documents this rule, for instance), indent it by two spaces.
+
+# WHY LINE
+# change-management-code.md asks every commit message to say why the change was
+# needed. Asked in prose only, that held for the commits whose author remembered
+# and lapsed for the rest, so the hook now requires one line starting with
+# "Why:" (any case) followed by at least three words. Exempt, because git or a
+# convention writes the message and there is nothing to add:
+#   - merge commits (a MERGE_HEAD exists, or the subject starts "Merge ")
+#   - reverts made by git revert (subject starts: Revert " or Reapply ")
+#   - fixup!, squash! and amend! subjects
+#   - subject-only commits typed docs, chore or style
+# Only the refusal reason is printed. A message that fails both this check and
+# an attribution check is refused for attribution first.
 
 msg_file="$1"
 [ -f "$msg_file" ] || exit 0
@@ -55,4 +69,49 @@ printf '%s\n' "$scan" | grep -qiE 'generated with .{0,4}\[?claude code' &&
 printf '%s\n' "$scan" | grep -qiE '(noreply@anthropic\.com|claude\.ai/code/session)' &&
     fail "Anthropic address or Claude session URL."
 
-exit 0
+
+# --- Why line -------------------------------------------------------------
+# Plain shell with no external process on the common path: a commit runs this
+# hook every time, and process spawns are what make a hook slow on Windows.
+
+cr=$(printf '\r')
+subject=
+has_body=0
+has_why=0
+set -f
+while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%"$cr"}
+    case "$line" in '#'*) continue ;; esac
+    case "$line" in *[![:space:]]*) ;; *) continue ;; esac
+    if [ -z "$subject" ]; then
+        subject=$line
+        continue
+    fi
+    has_body=1
+    case "$line" in
+        [Ww][Hh][Yy]:*)
+            # Unquoted on purpose: word splitting counts the words after the colon.
+            set -- ${line#*:}
+            [ "$#" -ge 3 ] && has_why=1
+            ;;
+    esac
+done < "$msg_file"
+set +f
+
+[ "$has_why" -eq 1 ] && exit 0
+
+# Exemptions.
+case "$subject" in
+    "Merge "* | 'Revert "'* | 'Reapply "'* | "fixup! "* | "squash! "* | "amend! "*) exit 0 ;;
+esac
+if [ "$has_body" -eq 0 ]; then
+    case "$subject" in
+        docs:* | docs!:* | docs\(*\):* | docs\(*\)!:* | \
+        chore:* | chore!:* | chore\(*\):* | chore\(*\)!:* | \
+        style:* | style!:* | style\(*\):* | style\(*\)!:*) exit 0 ;;
+    esac
+fi
+git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1 && exit 0
+
+echo "commit-msg: refused. No 'Why:' line with at least three words. Add one, e.g. 'Why: the retry loop spun without backoff.'" >&2
+exit 1

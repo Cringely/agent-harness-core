@@ -5,7 +5,7 @@ The code-repo half of `change-management.md`. The confirmation list, backups, co
 ## Decision Documentation
 
 **In commit messages:**
-- Why this change was needed (not just what changed)
+- Why this change was needed (not just what changed). Put it on a line starting with `Why:` followed by at least three words. The `commit-msg` hook refuses a commit without one, except merge commits, reverts git generates, `fixup!`, `squash!` and `amend!` subjects, and subject-only `docs`, `chore` and `style` commits
 - What was considered and rejected
 - Any trade-offs made
 
