@@ -208,8 +208,7 @@ describe("commit-msg hook — requires a Why line", () => {
 
   const refused: Array<[string, string]> = [
     ["a body with no Why line", "fix: correct the retry backoff\n\nThe first attempt waited zero seconds.\n"],
-    ["a subject-only fix commit", "fix: correct the retry backoff\n"],
-    ["a subject-only commit with no conventional type", "Correct the retry backoff\n"],
+    ["a hand-typed Merge subject with a body and no Why line", "Merge stuff\n\nCombined two lines of work.\n"],
     ["a docs commit that has a body but no Why line", "docs: explain the backoff\n\nAdds a paragraph.\n"],
     ["an empty Why line", "fix: correct the retry backoff\n\nWhy:\n"],
     ["a Why line holding only whitespace", "fix: correct the retry backoff\n\nWhy:    \n"],
@@ -313,8 +312,12 @@ describe("commit-msg hook — requires a Why line", () => {
       expectAccepted(message);
     });
 
-    test("a subject-only feat commit is not exempt", () => {
-      expectRefusedForWhy("feat: add a retry backoff\n");
+    test.each([
+      ["feat", "feat: add a retry backoff\n"],
+      ["fix", "fix: correct the retry backoff\n"],
+      ["untyped", "Correct the retry backoff\n"],
+    ])("a subject-only %s commit is accepted", (_label, message) => {
+      expectAccepted(message);
     });
 
     test.each([
@@ -326,7 +329,7 @@ describe("commit-msg hook — requires a Why line", () => {
     });
 
     test("a fixup! mention is exempt only at the start of the subject", () => {
-      expectRefusedForWhy("fix: handle fixup! subjects\n");
+      expectRefusedForWhy("fix: handle fixup! subjects\n\nBody text.\n");
     });
 
     test("a merge commit is accepted without a Why line", () => {
@@ -350,8 +353,14 @@ describe("commit-msg hook — requires a Why line", () => {
       expect(git(["rev-parse", "--verify", "HEAD^2"], dir).exitCode).toBe(0);
     });
 
-    test("a merge-style subject is accepted without a Why line", () => {
-      expectAccepted("Merge branch 'side' into main\n");
+    test.each([
+      ["branch", "Merge branch 'side' into main\n\nBody text here.\n"],
+      ["remote-tracking branch", "Merge remote-tracking branch 'origin/main'\n\nBody text here.\n"],
+      ["pull request", "Merge pull request #1 from a/b\n\nBody text here.\n"],
+      ["tag", "Merge tag 'v1' into main\n\nBody text here.\n"],
+      ["commit", "Merge commit 'abc123' into main\n\nBody text here.\n"],
+    ])("a git-written Merge %s subject with a body is accepted without a Why line", (_label, message) => {
+      expectAccepted(message);
     });
 
     test("a conflicted git revert, finished with git commit, is accepted without a Why line", () => {
@@ -390,7 +399,7 @@ describe("commit-msg hook — requires a Why line", () => {
     });
 
     test("a hand-written message that only mentions revert is not exempt", () => {
-      expectRefusedForWhy("fix: revert the backoff change\n");
+      expectRefusedForWhy("fix: revert the backoff change\n\nUndoes the change.\n");
     });
   });
 });

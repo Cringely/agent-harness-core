@@ -28,12 +28,14 @@
 # change-management-code.md asks every commit message to say why the change was
 # needed. Asked in prose only, that held for the commits whose author remembered
 # and lapsed for the rest, so the hook now requires one line starting with
-# "Why:" (any case) followed by at least three words. Exempt, because git or a
-# convention writes the message and there is nothing to add:
-#   - merge commits (a MERGE_HEAD exists, or the subject starts "Merge ")
+# "Why:" (any case) followed by at least three words. The requirement covers
+# messages that have a body. Exempt:
+#   - subject-only commits of any type (no non-comment, non-blank line after the subject)
+#   - merge commits (a MERGE_HEAD exists, or the subject is one git writes:
+#     "Merge branch ", "Merge remote-tracking branch ", "Merge pull request ",
+#     "Merge tag ", "Merge commit ")
 #   - reverts made by git revert (subject starts: Revert " or Reapply ")
 #   - fixup!, squash! and amend! subjects
-#   - subject-only commits typed docs, chore or style
 # Only the refusal reason is printed. A message that fails both this check and
 # an attribution check is refused for attribution first.
 
@@ -101,16 +103,12 @@ set +f
 [ "$has_why" -eq 1 ] && exit 0
 
 # Exemptions.
+[ "$has_body" -eq 0 ] && exit 0
 case "$subject" in
-    "Merge "* | 'Revert "'* | 'Reapply "'* | "fixup! "* | "squash! "* | "amend! "*) exit 0 ;;
+    "Merge branch "* | "Merge remote-tracking branch "* | "Merge pull request "* | \
+    "Merge tag "* | "Merge commit "* | \
+    'Revert "'* | 'Reapply "'* | "fixup! "* | "squash! "* | "amend! "*) exit 0 ;;
 esac
-if [ "$has_body" -eq 0 ]; then
-    case "$subject" in
-        docs:* | docs!:* | docs\(*\):* | docs\(*\)!:* | \
-        chore:* | chore!:* | chore\(*\):* | chore\(*\)!:* | \
-        style:* | style!:* | style\(*\):* | style\(*\)!:*) exit 0 ;;
-    esac
-fi
 git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1 && exit 0
 
 echo "commit-msg: refused. No 'Why:' line with at least three words. Add one, e.g. 'Why: the retry loop spun without backoff.'" >&2
