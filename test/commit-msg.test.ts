@@ -36,7 +36,7 @@ setDefaultTimeout(60_000);
 /** A rationale line the hook accepts: "Why:" plus at least three words. */
 const WHY = "Why: the first backoff was too short.\n";
 
-const HOOK_SRC =join(import.meta.dir, "..", "core", "claude", "hooks", "commit-msg");
+const HOOK_SRC = join(import.meta.dir, "..", "core", "claude", "hooks", "commit-msg");
 
 const tempDirs: string[] = [];
 afterEach(() => {
@@ -321,9 +321,9 @@ describe("commit-msg hook — requires a Why line", () => {
     });
 
     test.each([
-      ["fixup!", "fixup! fix: correct the retry backoff\n"],
-      ["squash!", "squash! fix: correct the retry backoff\n"],
-      ["amend!", "amend! fix: correct the retry backoff\n"],
+      ["fixup!", "fixup! fix: correct the retry backoff\n\nBody text with no rationale line.\n"],
+      ["squash!", "squash! fix: correct the retry backoff\n\nBody text with no rationale line.\n"],
+      ["amend!", "amend! fix: correct the retry backoff\n\nBody text with no rationale line.\n"],
     ])("a %s subject is accepted", (_label, message) => {
       expectAccepted(message);
     });
@@ -346,7 +346,7 @@ describe("commit-msg hook — requires a Why line", () => {
       expect(commitWith(dir, `feat: main work\n\n${WHY}`).exitCode).toBe(0);
 
       // The subject does not start with "Merge ", so this passes on MERGE_HEAD alone.
-      const merged = git(["merge", "--no-ff", "-m", "combine the two lines of work", "side"], dir);
+      const merged = git(["merge", "--no-ff", "-m", "combine the two lines of work\n\nBody text with no rationale line.", "side"], dir);
 
       expect(merged.stderr.toString()).not.toContain("commit-msg: refused");
       expect(merged.exitCode).toBe(0);
@@ -395,7 +395,7 @@ describe("commit-msg hook — requires a Why line", () => {
     });
 
     test("a Reapply subject, which git revert writes when it reverts a revert, is accepted", () => {
-      expectAccepted('Reapply "fix: second version"');
+      expectAccepted('Reapply "fix: second version"\n\nBody text with no rationale line.\n');
     });
 
     test("a hand-written message that only mentions revert is not exempt", () => {
