@@ -3,8 +3,8 @@
 // A short list of command shapes that are rarely what the operator meant and expensive when they
 // are wrong. The hook can only add friction. It returns "ask" (Claude Code prompts, and the prompt
 // still appears in bypassPermissions mode), "deny" for the few commands nobody wants run, or no
-// decision at all. It never returns "allow", so it cannot widen what a session may do, and an
-// error anywhere ends in no decision rather than an allow.
+// decision at all. It never returns "allow", so it cannot widen what a session may do. A command
+// it cannot read in full is read again as raw text rather than passed (see FAIL CONTRACT).
 //
 // Everything is local and deterministic: no network, no API key, no model. Nothing about a command
 // leaves the machine. A design that sent each command to a hosted classifier was considered and
@@ -24,8 +24,9 @@
 //
 // WHAT THIS IS NOT. It is a tripwire, not a sandbox. It reads the command text with a small shell
 // tokenizer, so it sees `bash -c "..."`, `eval`, `sudo`, `env` and `$(...)` wrappers. It skips
-// single-quoted strings, which are data, and heredoc bodies unless the heredoc feeds a shell or
-// goes over ssh, where the body is a script. It does not expand variables, follow aliases or
+// single-quoted strings, which are data, and heredoc bodies unless the command that owns the
+// heredoc, or a later stage of its pipeline, is a shell or ssh, where the body is a script. A `<<`
+// inside a quoted string on its line is not a heredoc. It does not expand variables, follow aliases or
 // functions, resolve a path, or read a script a command runs. A command built to evade it will.
 // Its job is the accident and the habitual shortcut, where one prompt is the whole value.
 // Readers it does not know (grep, sed, awk, cp, scp) are not covered.
@@ -37,10 +38,14 @@
 // agent-worktree-gate.ts uses. No decision is exit 0 with nothing on stdout. The code shape is the
 // siblings': a pure exported `decide()`, with the process entrypoint behind `import.meta.main`.
 //
-// FAIL CONTRACT. Malformed stdin, a payload that is not a Bash call, a missing or non-string
-// command, an unbalanced quote or parenthesis, and an exception in the scanner all end in no
-// decision. A scanner that fails partway still reports what it found before it failed. Nesting
-// deeper than MAX_DEPTH (shells inside shells inside substitutions) is not unwrapped further.
+// FAIL CONTRACT. Malformed stdin, a payload that is not a Bash call, and a missing or non-string
+// command end in no decision. A command the scanner cannot read in full is different, because it
+// is a real command: an unclosed single or double quote, nesting deeper than MAX_DEPTH (shells
+// inside shells inside substitutions), or an exception in the scanner. For those the hook keeps
+// what it found before it stopped, then reads the raw text with no quoting or nesting at all
+// (rawScan) and asks on any flagged pattern anywhere in it. That over-matches, which for a command
+// it could not read is the safe direction. An unreadable command with nothing flagged in its text
+// is still no decision.
 
 export type Decision =
   | { action: "none" }
@@ -69,29 +74,73 @@ interface Resolved {
   pipeline: number;
 }
 
+/** Set when any part of the command was not read: an unclosed quote, the depth cap, an exception. */
+interface ScanState {
+  unread: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Tokenizer
 // ---------------------------------------------------------------------------
 
+/** Stands in for the `<<WORD` operator so the command that owns it can be found after tokenizing. */
+const HEREDOC_MARK = "__bash_tripwire_heredoc__";
+
 /**
- * A shell interpreter, or ssh (whose remote login shell reads stdin), named anywhere on a line.
- * A heredoc on such a line feeds a script to that interpreter, so its body is code, not data.
- * Matching the whole line over-matches (a `bash` in a commit message line), which only means a
- * body gets scanned: the safe direction.
+ * Whether the heredoc whose `<<` starts at `at` on `line` is code rather than data. It is code
+ * when the command that owns the `<<`, or any stage of the same pipeline, is a shell interpreter
+ * or ssh (whose remote login shell reads stdin). The owner is found by tokenizing the line from
+ * the start of the innermost `$(`, backtick or subshell that holds the `<<`, so a shell named in an
+ * earlier command or a quoted argument does not count. A `<<` inside a quoted string is not a
+ * heredoc at all: the stand-in lands inside a quoted word, no command owns it, and the answer is
+ * true. Anything else this cannot settle also answers true, which keeps the body in place to be
+ * scanned.
  */
-const INTERPRETER_ON_LINE = new RegExp(
-  "(^|[\\s|;&(`'\"])(sh|bash|zsh|dash|ksh|csh|tcsh|fish|ash|pwsh|powershell|ssh)(\\.exe)?(?=[\\s|;&)`'\"]|$)",
-  "i",
-);
+function heredocIsCode(line: string, at: number, opLen: number): boolean {
+  const frames = [{ start: 0, dq: false, tick: false }];
+  for (let i = 0; i < at; i++) {
+    const f = frames[frames.length - 1];
+    const c = line[i];
+    if (c === "\\") { i++; continue; }
+    if (c === "'" && !f.dq) {
+      const e = line.indexOf("'", i + 1);
+      if (e < 0) return true;
+      i = e;
+      continue;
+    }
+    if (c === '"') { f.dq = !f.dq; continue; }
+    if (c === "`") {
+      if (f.tick) frames.pop();
+      else frames.push({ start: i + 1, dq: false, tick: true });
+      continue;
+    }
+    if (c === "$" && line[i + 1] === "(") {
+      frames.push({ start: i + 2, dq: false, tick: false });
+      i++;
+      continue;
+    }
+    if (f.dq) continue;
+    if (c === "(") frames.push({ start: i + 1, dq: false, tick: false });
+    else if (c === ")" && frames.length > 1 && !f.tick) frames.pop();
+  }
+  const top = frames[frames.length - 1];
+  const text = `${line.slice(top.start, at)} ${HEREDOC_MARK} ${line.slice(at + opLen)}`;
+  const cmds = tokenize(text, { unread: false });
+  const owner = cmds.find((c) => c.argv.includes(HEREDOC_MARK));
+  if (!owner) return true;
+  return cmds.some((c) => {
+    if (c.pipeline !== owner.pipeline) return false;
+    const r = resolve(c.argv.filter((w) => w !== HEREDOC_MARK), c.pipeline);
+    return r !== null && (SHELLS.has(r.name) || r.name === "ssh");
+  });
+}
 
 /**
  * Remove heredoc bodies, keeping the `<<WORD` operator and the closing line. The body is data (a
  * commit message, a generated file), and scanning it would flag prose that merely mentions a
- * dangerous command. A body fed to a shell interpreter or sent over ssh is a script, so it stays
+ * dangerous command. A body that heredocIsCode says feeds a shell or ssh is a script, so it stays
  * in place and is scanned. A heredoc with no terminator line is left in place: scanning too much
- * is the safe direction. A `<<` inside a quoted string is not told apart from a real one, which can hide
- * the lines that follow it up to a line equal to the word. That is the same class of gap as every
- * other evasion in this file, accepted for the same reason.
+ * is the safe direction.
  */
 function stripHeredocBodies(src: string): string {
   if (!src.includes("<<")) return src;
@@ -104,7 +153,7 @@ function stripHeredocBodies(src: string): string {
     i++;
     const m = /(?<!<)<<(-?)\s*(['"]?)([A-Za-z_][A-Za-z0-9_-]*)\2(?!<)/.exec(line);
     if (!m) continue;
-    if (INTERPRETER_ON_LINE.test(line)) continue;
+    if (heredocIsCode(line, m.index, m[0].length)) continue;
     const word = m[3];
     const dash = m[1] === "-";
     let end = -1;
@@ -154,7 +203,7 @@ function matchParen(src: string, open: number): number {
 }
 
 /** Split a command line into commands and words. Quotes are removed, substitutions are kept raw. */
-function tokenize(src: string): Cmd[] {
+function tokenize(src: string, st: ScanState): Cmd[] {
   const cmds: Cmd[] = [];
   let argv: string[] = [];
   let tok = "";
@@ -180,6 +229,8 @@ function tokenize(src: string): Cmd[] {
 
     if (c === "'") {
       const e = src.indexOf("'", i + 1);
+      // An unclosed quote folds the rest of the command into one word, so the rest went unread.
+      if (e < 0) st.unread = true;
       const stop = e < 0 ? src.length : e;
       tok += src.slice(i + 1, stop);
       inTok = true;
@@ -201,6 +252,7 @@ function tokenize(src: string): Cmd[] {
           i++;
         }
       }
+      if (i >= src.length) st.unread = true;
       i++;
     } else if (c === "\\") {
       if (next === "\n") {
@@ -466,11 +518,14 @@ function isShellFlagC(name: string, a: string): boolean {
   return /^-[A-Za-z]*c[A-Za-z]*$/.test(a);
 }
 
-function scan(src: string, depth: number, out: Finding[]): void {
-  if (depth > MAX_DEPTH) return;
+function scan(src: string, depth: number, out: Finding[], st: ScanState): void {
+  if (depth > MAX_DEPTH) {
+    st.unread = true;
+    return;
+  }
   const text = stripHeredocBodies(src);
   const resolved: Resolved[] = [];
-  for (const cmd of tokenize(text)) {
+  for (const cmd of tokenize(text, st)) {
     const r = resolve(cmd.argv, cmd.pipeline);
     if (r) resolved.push(r);
   }
@@ -485,9 +540,9 @@ function scan(src: string, depth: number, out: Finding[]): void {
         out.push({ severity: "ask", reason: "runs a downloaded script through a shell interpreter" });
       }
       const at = r.args.findIndex((a) => isShellFlagC(r.name, a));
-      if (at >= 0 && at + 1 < r.args.length) scan(r.args[at + 1], depth + 1, out);
+      if (at >= 0 && at + 1 < r.args.length) scan(r.args[at + 1], depth + 1, out, st);
     } else if (r.name === "eval" && r.args.length > 0) {
-      scan(r.args.join(" "), depth + 1, out);
+      scan(r.args.join(" "), depth + 1, out, st);
     }
   }
 
@@ -506,7 +561,57 @@ function scan(src: string, depth: number, out: Finding[]): void {
     }
   }
 
-  for (const inner of extractSubstitutions(text)) scan(inner, depth + 1, out);
+  for (const inner of extractSubstitutions(text)) scan(inner, depth + 1, out, st);
+}
+
+/** A shell interpreter's name as a word, for rawScan's check of a download in a substitution. */
+const RAW_SHELL_WORD = /(?:^|[^\w.-])(?:sh|bash|zsh|dash|ksh|csh|tcsh|fish|ash|pwsh|powershell|iex|invoke-expression)(?:\.exe)?(?![\w.-])/i;
+const RAW_DOWNLOAD_IN_SUBSTITUTION = /(\$\(|<\(|`)\s*(curl|wget|iwr|irm)\b/gi;
+/** How many words after a command name rawScan hands to a check. Keeps a huge command linear. */
+const RAW_WINDOW = 64;
+
+/**
+ * Read a command the scanner could not read in full as flat text. Quotes are dropped, and every
+ * separator, parenthesis and backtick splits the text, so nothing can fold the rest of the command
+ * into one word and nothing recurses. Each check runs from every word that names a command it
+ * covers, not only from the start of a command, because the structure that says where a command
+ * starts is what failed to parse. Returns the reason for each pattern that matched.
+ */
+function rawScan(src: string): string[] {
+  const found: Finding[] = [];
+  const text = src.replace(/\\+(?=["'])/g, "").replace(/["']/g, " ");
+
+  for (const chunk of text.split(/[\n;&()`]/)) {
+    let fetchedBefore = false;
+    for (const stage of chunk.split("|")) {
+      const words = stage.split(/\s+/).filter((w) => w !== "");
+      const names = words.map(baseName);
+      if (fetchedBefore && names.some((n) => SHELLS.has(n))) {
+        found.push({ severity: "ask", reason: "pipes a download (curl, wget) into a shell interpreter" });
+      }
+      if (names.some((n) => FETCHERS.has(n))) fetchedBefore = true;
+      for (let k = 0; k < words.length; k++) {
+        const name = names[k];
+        const args = words.slice(k + 1, k + 1 + RAW_WINDOW);
+        if (name === "rm") checkRm(args, found);
+        else if (name === "git") checkGit(args, found);
+        else if (name === "gh" || name === "op" || READERS.has(name)) checkCredentials(name, args, found);
+      }
+    }
+  }
+
+  for (const line of text.split("\n")) {
+    const shell = RAW_SHELL_WORD.exec(line);
+    if (!shell) continue;
+    for (const m of line.matchAll(RAW_DOWNLOAD_IN_SUBSTITUTION)) {
+      if (m.index > shell.index) {
+        found.push({ severity: "ask", reason: "runs a downloaded script through a shell interpreter" });
+        break;
+      }
+    }
+  }
+
+  return [...new Set(found.map((f) => f.reason))];
 }
 
 /** Decide on a PreToolUse payload. Never returns an allow. */
@@ -520,10 +625,19 @@ export function decide(payload: unknown): Decision {
   if (typeof command !== "string" || command.trim() === "") return NONE;
 
   const findings: Finding[] = [];
+  const st: ScanState = { unread: false };
   try {
-    scan(command, 0, findings);
+    scan(command, 0, findings, st);
   } catch {
-    // Report what was found before the failure. Otherwise this is no decision.
+    // Keep what was found before the failure, and read the rest as raw text below.
+    st.unread = true;
+  }
+  if (st.unread) {
+    // Raw-text matches only ask: without the structure, a match may be an argument or prose.
+    const raw = rawScan(command);
+    if (raw.length > 0) {
+      findings.push({ severity: "ask", reason: `could not read the whole command, and its raw text matches: ${raw.join(", ")}` });
+    }
   }
   if (findings.length === 0) return NONE;
 

@@ -137,7 +137,9 @@ a bare variable (asked), `git push` with `--force`, `-f`, `--force-with-lease` o
 `op read`, an ssh private key, a `.env` file or anything under `secrets/`). It runs locally with
 bun, needs no API key, and sends nothing off the machine. It reads command text with a small
 tokenizer and does not expand variables or follow aliases, so it catches the accident and the
-habitual shortcut, not a command written to evade it. A hosted-classifier design was rejected
+habitual shortcut, not a command written to evade it. A command it cannot read in full, such as one
+with an unclosed quote, is read again as flat text and prompts if any of those patterns appears in
+it. A hosted-classifier design was rejected
 because command text can carry inline secrets and the vendor's retention terms set no limit.
 Without the switch, neither the script nor its settings entry is installed. Re-running without it
 leaves an installed copy in place.

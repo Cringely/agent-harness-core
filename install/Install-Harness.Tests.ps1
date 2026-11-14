@@ -527,7 +527,8 @@ Describe "Install-Harness" {
         New-Item -ItemType Directory -Path $script:target | Out-Null
         & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -IncludeCeremonies
         Test-Path "$script:target/.claude/hooks/bash-tripwire.ts" | Should -BeFalse
-        @(Get-HookCommands $script:target | Where-Object { $_ -match "bash-tripwire\.ts" }).Count | Should -Be 0
+        $ceremony = Get-HookCommands $script:target
+        @($ceremony | Where-Object { $_ -match "bash-tripwire\.ts" }).Count | Should -Be 0
 
         Remove-Item -Recurse -Force $script:target
         New-Item -ItemType Directory -Path $script:target | Out-Null
@@ -545,11 +546,17 @@ Describe "Install-Harness" {
         Test-Path "$script:target/.claude/hooks/wave-close-handoff.sh" | Should -BeFalse
 
         # A second run with the switch adds nothing, and a run without it leaves the install alone.
+        # Assign before filtering: Get-HookCommands returns its array as one pipeline object, so
+        # piping it straight into Where-Object counts one match however many entries there are.
         & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -IncludeBashTripwire
-        @(Get-HookCommands $script:target | Where-Object { $_ -match "bash-tripwire\.ts" }).Count | Should -Be 1
+        $rerun = Get-HookCommands $script:target
+        @($rerun | Where-Object { $_ -match "bash-tripwire\.ts" }).Count | Should -Be 1
+        $cfg = Get-Content "$script:target/.claude/settings.json" -Raw | ConvertFrom-Json
+        @(@($cfg.hooks.PreToolUse | Where-Object { $_.matcher -ceq 'Bash' }) | ForEach-Object { @($_.hooks) }).Count | Should -Be 1
         & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
         Test-Path "$script:target/.claude/hooks/bash-tripwire.ts" | Should -BeTrue
-        @(Get-HookCommands $script:target | Where-Object { $_ -match "bash-tripwire\.ts" }).Count | Should -Be 1
+        $plain = Get-HookCommands $script:target
+        @($plain | Where-Object { $_ -match "bash-tripwire\.ts" }).Count | Should -Be 1
     }
 
     It "audit reports in-sync after a clean install and writes nothing" {
