@@ -27,6 +27,6 @@ It reads no files. For each of `fable`, `opus`, `sonnet` and `haiku` it runs `cl
 - `not-served`: no single model of that family came back, because the tier is unavailable to this account, the call failed, or a fallback answered in its place.
 - `unknown`: the resolved model is above the expected latest or unlisted, or no latest is known.
 
-The expected latest comes only from the Models API (set `ANTHROPIC_API_KEY`) or a `--latest` JSON file, for example `{"sonnet": "claude-sonnet-5-5"}`. Aliases are never used to judge themselves, so with neither source every row is `unknown`. Exit 1 when any alias is `stale-alias`, 2 when any other row is not `current`, 0 when all four are `current`. `--aliases` cannot be combined with `--root`, `--exclude` or `--no-resolve`.
+The expected latest comes only from the Models API (set `ANTHROPIC_API_KEY`) or a `--latest` JSON file shaped like `{"sonnet": "claude-sonnet-5-5"}`. Aliases are never used to judge themselves, so with neither source every row is `unknown`. Exit 1 when any alias is `stale-alias`, 2 when any other row is not `current`, 0 when all four are `current`. `--aliases` cannot be combined with `--root`, `--exclude` or `--no-resolve`.
 
 Each probe is a real model call on the logged-in account. Only the model names are read from its output. Nothing else is printed or kept. The tests inject the probe and never spawn `claude` or touch the network.
