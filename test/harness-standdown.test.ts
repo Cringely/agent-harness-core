@@ -142,6 +142,19 @@ const rows: Row[] = [
     },
   },
   {
+    hook: "bash-tripwire.ts",
+    run(mode) {
+      const dir = tempDir("standdown-bt-");
+      const payload = JSON.stringify({ tool_name: "Bash", tool_input: { command: "git push --force" } });
+      const r = spawn(bunHook(this.hook), dir, childEnv(mode, { CLAUDE_PROJECT_DIR: dir }), payload);
+      return { ...r, effect: false };
+    },
+    acted(r) {
+      expect(r.exitCode).toBe(0);
+      expect(JSON.parse(r.stdout).hookSpecificOutput.permissionDecision).toBe("ask");
+    },
+  },
+  {
     hook: "agent-write-scope.ts",
     run(mode) {
       const dir = tempDir("standdown-ws-");

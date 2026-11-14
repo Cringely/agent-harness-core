@@ -13,7 +13,7 @@ The rule that keeps these from drifting into a mess: core is upstream. Projects 
 | Path | Contents |
 |---|---|
 | `core/claude/agents/` | Self-contained process roles `adversarial-reviewer`, `doc-steward`, `research-scout`, `soc-monitor`, `task-reviewer`. See `patterns/agent-def-shape.md` on why none point at a charter yet |
-| `core/claude/hooks/` | Worktree gate, write-scope gate, model-tier gate, session guardrails, drift check, wave-close handoff, prose-lint-on-write. `core/claude/templates/settings.hooks.json` is the list of Claude Code hooks that actually gets wired. This row goes stale, that file does not. The three git hooks in the same directory, `pre-commit`, `pre-push` and `commit-msg`, are wired a second way, through `core.hooksPath` (see Install) |
+| `core/claude/hooks/` | Worktree gate, write-scope gate, model-tier gate, Bash tripwire (opt-in), session guardrails, drift check, wave-close handoff, prose-lint-on-write. `core/claude/templates/settings.hooks.json` is the list of Claude Code hooks that actually gets wired. This row goes stale, that file does not. The three git hooks in the same directory, `pre-commit`, `pre-push` and `commit-msg`, are wired a second way, through `core.hooksPath` (see Install) |
 | `core/claude/templates/` | `guardrails.template.md`, a settings fragment, a scratch `.gitignore` and `manifest-local.gitignore`, installed as `.claude/.gitignore` to keep the per-machine sidecar out of a commit, and `project-settings.template.md`, rendered into `.claude/rules/harness/project-settings.md`, all of which the installer applies on every run, a ceremony ledger template it applies only under `-IncludeCeremonies`, plus three reference templates it leaves in core: agent-def authoring, the reviewer-lockout protocol, and the untrusted-content boundary block |
 | `core/claude/rules/` | Layer rule files and layers.json, which assigns each file to the code, documents or physical layer and defines the project settings. The installer copies the layers a project records into its .claude/rules/harness/ |
 | `core/claude/agent-frontmatter-keys.json` | Every frontmatter key Claude Code accepts in an agent definition, plus core's own `writeScope`, with the docs page it was checked against. `-Audit` and `test/agent-frontmatter-keys.test.ts` both read it. It is never copied into a project |
@@ -127,6 +127,20 @@ pwsh install/Install-Harness.ps1 -Target <project-root>
 `wave-close-handoff` hook, and the ceremony ledger), opt-in because they assume a project already
 runs standup/wave ceremonies. `-Force` overwrites files the project has modified since install. The
 default is to skip a modified file and warn.
+
+`-IncludeBashTripwire` installs the Bash tripwire, a PreToolUse hook on Bash that is off unless you
+ask for it. It asks, or denies the clearest cases, and never allows, so it can only add friction. A
+prompt it raises still appears in `bypassPermissions` mode. It matches four kinds of command: a
+recursive delete of `/`, `~`, a home directory or a drive root (denied) or of a `.git` directory or
+a bare variable (asked), `git push` with `--force`, `-f`, `--force-with-lease` or a `+refspec`, a
+`curl` or `wget` download piped into a shell, and a read of credential material (`gh auth token`,
+`op read`, an ssh private key, a `.env` file or anything under `secrets/`). It runs locally with
+bun, needs no API key, and sends nothing off the machine. It reads command text with a small
+tokenizer and does not expand variables or follow aliases, so it catches the accident and the
+habitual shortcut, not a command written to evade it. A hosted-classifier design was rejected
+because command text can carry inline secrets and the vendor's retention terms set no limit.
+Without the switch, neither the script nor its settings entry is installed. Re-running without it
+leaves an installed copy in place.
 
 `-Layers` names the project layers: `code`, `documents`, `physical`, or `none` for no project
 layers. It takes a list (`-Layers code,documents`) or one comma-separated string. The kernel is
@@ -314,6 +328,8 @@ three are `-Prune`'s job, the last of them followed by `-Accept` to pin the fork
 
 Layers add six statuses. `not-installed (layer not selected)` is a rule file for a layer the
 project does not record, and like `not-installed (ceremony-gated)` it is listed but not counted.
+`not-installed (opt-in)` is the Bash tripwire on a project that never passed `-IncludeBashTripwire`,
+listed and not counted for the same reason.
 `installed (layer not selected)` is one still on disk after its layer was dropped. Delete it by
 hand, and the next install drops its record. `settings-missing` and `settings-stale` mean
 `project-settings.md` is absent, or is as the installer wrote it but differs, line endings aside,
