@@ -30,10 +30,12 @@
 # and lapsed for the rest, so the hook now requires one line starting with
 # "Why:" (any case) followed by at least three words. The requirement covers
 # messages that have a body. Exempt:
-#   - subject-only commits of any type (no non-comment, non-blank line after the subject)
+#   - subject-only commits of any type: nothing after the subject but blank
+#     lines, comment lines git will strip, and trailers whose key holds a hyphen
+#     (Signed-off-by:, Reviewed-by:)
 #   - merge commits (a MERGE_HEAD exists, or the subject is one git writes:
-#     "Merge branch ", "Merge remote-tracking branch ", "Merge pull request ",
-#     "Merge tag ", "Merge commit ")
+#     "Merge branch ", "Merge branches ", "Merge remote-tracking branch ",
+#     "Merge pull request ", "Merge tag ", "Merge commit ")
 #   - reverts made by git revert (subject starts: Revert " or Reapply ")
 #   - fixup!, squash! and amend! subjects
 # Only the refusal reason is printed. A message that fails both this check and
@@ -42,11 +44,85 @@
 msg_file="$1"
 [ -f "$msg_file" ] || exit 0
 
-# Strip comment lines git will discard anyway, so a commented-out template
-# cannot trip the gate. Then drop lines indented two or more spaces: that is
-# the documented way to write one of these strings as prose, and dropping them
-# once here is what lets the checks below stay simple.
-scan=$(grep -v '^#' "$msg_file" | grep -v '^  ')
+# --- The message git will store ---------------------------------------------
+# git runs this hook before its own cleanup, so both checks below judge the
+# message after applying that cleanup here. Judging the raw file fails both
+# ways: a verbose diff below the scissors line reads as body, and a #-led line
+# that git keeps gets skipped as a comment.
+#
+# Cleanup mode: commit.cleanup when set. Otherwise git's default, which strips
+# comments when an editor ran and keeps them when none did. git tells the hook
+# no editor ran by setting GIT_EDITOR to ":". Only "strip" drops comment lines.
+# "scissors", "whitespace" and "verbatim" keep them. A --cleanup flag on the
+# command line is not visible to a hook, so it cannot be honoured here.
+# When an editor ran, everything from git's scissors line down is cut, as git
+# does for commit -v and for scissors mode.
+cleanup=default
+comment='#'
+cfg=$(git config --get-regexp '^(commit\.cleanup|core\.comment(char|string))$' 2>/dev/null)
+while IFS= read -r kv; do
+    case "${kv%% *}" in
+        commit.cleanup) cleanup=${kv#* } ;;
+        core.commentchar | core.commentstring) comment=${kv#* } ;;
+    esac
+done <<EOF
+$cfg
+EOF
+# core.commentChar=auto picks a character git does not report. git picks # unless
+# the message already has a #-led line, so # is the best guess.
+[ "$comment" = auto ] && comment='#'
+
+edited=1
+[ "${GIT_EDITOR-}" = ":" ] && edited=0
+strip=0
+case "$cleanup" in
+    strip) strip=1 ;;
+    default) strip=$edited ;;
+esac
+scissors="$comment ------------------------ >8 ------------------------"
+
+# One pass over the file, with no external process: a commit runs this hook
+# every time, and process spawns are what make a hook slow on Windows.
+cr=$(printf '\r')
+clean=
+subject=
+has_body=0
+has_why=0
+set -f
+while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%"$cr"}
+    [ "$edited" -eq 1 ] && [ "$line" = "$scissors" ] && break
+    if [ "$strip" -eq 1 ]; then
+        case "$line" in "$comment"*) continue ;; esac
+    fi
+    clean="$clean$line
+"
+    case "$line" in *[![:space:]]*) ;; *) continue ;; esac
+    if [ -z "$subject" ]; then
+        subject=$line
+        continue
+    fi
+    # A trailer whose key holds a hyphen (Signed-off-by:) is not a body.
+    key=${line%%: *}
+    case "$key" in
+        "$line" | -* | *[!A-Za-z0-9-]*) has_body=1 ;;
+        *-*) ;;
+        *) has_body=1 ;;
+    esac
+    case "$line" in
+        [Ww][Hh][Yy]:*)
+            # Unquoted on purpose: word splitting counts the words after the colon.
+            set -- ${line#*:}
+            [ "$#" -ge 3 ] && has_why=1
+            ;;
+    esac
+done < "$msg_file"
+set +f
+
+# Drop lines indented two or more spaces: that is the documented way to write
+# one of these strings as prose, and dropping them once here is what lets the
+# checks below stay simple.
+scan=$(printf '%s' "$clean" | grep -v '^  ')
 
 fail() {
     echo "commit-msg: refused. $1" >&2
@@ -73,39 +149,14 @@ printf '%s\n' "$scan" | grep -qiE '(noreply@anthropic\.com|claude\.ai/code/sessi
 
 
 # --- Why line -------------------------------------------------------------
-# Plain shell with no external process on the common path: a commit runs this
-# hook every time, and process spawns are what make a hook slow on Windows.
-
-cr=$(printf '\r')
-subject=
-has_body=0
-has_why=0
-set -f
-while IFS= read -r line || [ -n "$line" ]; do
-    line=${line%"$cr"}
-    case "$line" in '#'*) continue ;; esac
-    case "$line" in *[![:space:]]*) ;; *) continue ;; esac
-    if [ -z "$subject" ]; then
-        subject=$line
-        continue
-    fi
-    has_body=1
-    case "$line" in
-        [Ww][Hh][Yy]:*)
-            # Unquoted on purpose: word splitting counts the words after the colon.
-            set -- ${line#*:}
-            [ "$#" -ge 3 ] && has_why=1
-            ;;
-    esac
-done < "$msg_file"
-set +f
+# has_why, has_body and subject come from the cleanup pass above.
 
 [ "$has_why" -eq 1 ] && exit 0
 
 # Exemptions.
 [ "$has_body" -eq 0 ] && exit 0
 case "$subject" in
-    "Merge branch "* | "Merge remote-tracking branch "* | "Merge pull request "* | \
+    "Merge branch "* | "Merge branches "* | "Merge remote-tracking branch "* | "Merge pull request "* | \
     "Merge tag "* | "Merge commit "* | \
     'Revert "'* | 'Reapply "'* | "fixup! "* | "squash! "* | "amend! "*) exit 0 ;;
 esac

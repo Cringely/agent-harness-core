@@ -359,6 +359,7 @@ describe("commit-msg hook — requires a Why line", () => {
       ["pull request", "Merge pull request #1 from a/b\n\nBody text here.\n"],
       ["tag", "Merge tag 'v1' into main\n\nBody text here.\n"],
       ["commit", "Merge commit 'abc123' into main\n\nBody text here.\n"],
+      ["branches (octopus)", "Merge branches 'a' and 'b'\n\nBody text here.\n"],
     ])("a git-written Merge %s subject with a body is accepted without a Why line", (_label, message) => {
       expectAccepted(message);
     });
@@ -401,5 +402,108 @@ describe("commit-msg hook — requires a Why line", () => {
     test("a hand-written message that only mentions revert is not exempt", () => {
       expectRefusedForWhy("fix: revert the backoff change\n\nUndoes the change.\n");
     });
+
+    test.each([
+      ["one sign-off", "fix: correct the retry backoff\n\nSigned-off-by: A Person <a@example.test>\n"],
+      ["two trailers", "fix: correct the retry backoff\n\nSigned-off-by: A Person <a@example.test>\nReviewed-by: B Person <b@example.test>\n"],
+    ])("a subject-only commit with %s and nothing else is accepted", (_label, message) => {
+      expectAccepted(message);
+    });
+
+    test.each([
+      ["a trailer plus a prose line", "fix: correct the retry backoff\n\nThe first attempt waited zero seconds.\n\nSigned-off-by: A Person <a@example.test>\n"],
+      ["a colon line whose key has no hyphen", "fix: correct the retry backoff\n\nNote: the first attempt waited zero seconds.\n"],
+    ])("%s still counts as a body and needs a Why line", (_label, message) => {
+      expectRefusedForWhy(message);
+    });
+  });
+});
+
+describe("commit-msg hook — judges the message git will store", () => {
+  // git runs commit-msg before its own cleanup, so the hook has to apply the
+  // same cleanup itself: cut at the scissors line when an editor ran, and drop
+  // comment lines only when the effective cleanup mode strips them.
+
+  /** Commits through a real editor: the editor script prepends `text` to the
+   * template git wrote, as a person typing above the comment block would. */
+  function commitViaEditor(dir: string, text: string, args: string[] = []) {
+    const script = join(dir, ".git", "prepend-editor.sh");
+    writeFileSync(script, '#!/bin/sh\n{ printf \'%s\\n\' "$PREPEND"; cat "$1"; } > "$1.tmp" && mv "$1.tmp" "$1"\n');
+    const env = { ...process.env, GIT_EDITOR: `sh "${script.replace(/\\/g, "/")}"`, PREPEND: text };
+    return Bun.spawnSync(["git", "commit", ...args], { cwd: dir, stdout: "pipe", stderr: "pipe", env });
+  }
+
+  function setup(config: Array<[string, string]> = []): string {
+    const dir = initRepo();
+    for (const [key, value] of config) git(["config", key, value], dir);
+    installHook(dir);
+    stageSomething(dir);
+    return dir;
+  }
+
+  function accepted(result: ReturnType<typeof git>, dir: string) {
+    expect(result.stderr.toString()).not.toContain("commit-msg: refused");
+    expect(result.exitCode).toBe(0);
+    expect(headExists(dir)).toBe(true);
+  }
+
+  function refusedForWhy(result: ReturnType<typeof git>, dir: string) {
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("No 'Why:' line");
+    expect(headExists(dir)).toBe(false);
+  }
+
+  test("a subject-only git commit -v is accepted: the diff below the scissors line is not body", () => {
+    const dir = setup();
+    const result = commitViaEditor(dir, "fix: correct the retry backoff", ["-v"]);
+    accepted(result, dir);
+    expect(git(["log", "-1", "--format=%B"], dir).stdout.toString().trim()).toBe("fix: correct the retry backoff");
+  });
+
+  test("an attribution string inside a verbose diff does not trip the attribution scan", () => {
+    const dir = setup();
+    writeFileSync(join(dir, "notes.txt"), "Contact noreply@anthropic.com for details.\n");
+    git(["add", "notes.txt"], dir);
+    accepted(commitViaEditor(dir, "docs: add the contact note", ["-v"]), dir);
+  });
+
+  test("a subject-only commit through the editor with a non-default comment character is accepted", () => {
+    const dir = setup([["core.commentChar", ";"]]);
+    accepted(commitViaEditor(dir, "fix: correct the retry backoff"), dir);
+  });
+
+  test("with a non-default comment character a #-led body line is content", () => {
+    const dir = setup([["core.commentChar", ";"]]);
+    refusedForWhy(commitViaEditor(dir, "fix: correct the retry backoff\n\n#263 adds the backoff"), dir);
+  });
+
+  test("an editor commit under the default cleanup drops #-led lines, so a #-only body passes", () => {
+    const dir = setup();
+    accepted(commitViaEditor(dir, "fix: correct the retry backoff\n\n# a note git strips"), dir);
+  });
+
+  test("commit.cleanup=scissors keeps a #-led line above the cut, so it needs a Why line", () => {
+    const dir = setup([["commit.cleanup", "scissors"]]);
+    refusedForWhy(commitViaEditor(dir, "fix: correct the retry backoff\n\n#263 adds the backoff"), dir);
+  });
+
+  test("commit.cleanup=scissors with a subject-only edit is accepted", () => {
+    const dir = setup([["commit.cleanup", "scissors"]]);
+    accepted(commitViaEditor(dir, "fix: correct the retry backoff"), dir);
+  });
+
+  test.each([
+    ["no cleanup config (git keeps # lines when no editor runs)", []],
+    ["commit.cleanup=verbatim", [["commit.cleanup", "verbatim"]]],
+    ["commit.cleanup=whitespace", [["commit.cleanup", "whitespace"]]],
+  ] as Array<[string, Array<[string, string]>]>)("-m with a #-led body line and %s: refused", (_label, config) => {
+    const dir = setup(config);
+    refusedForWhy(git(["commit", "-m", "fix: retry", "-m", "#263 adds the backoff"], dir), dir);
+  });
+
+  test("-m with only #-led body lines under commit.cleanup=strip is accepted", () => {
+    const dir = setup([["commit.cleanup", "strip"]]);
+    accepted(git(["commit", "-m", "fix: retry", "-m", "# a note git strips"], dir), dir);
+    expect(git(["log", "-1", "--format=%B"], dir).stdout.toString().trim()).toBe("fix: retry");
   });
 });
