@@ -147,8 +147,9 @@ tokenizer and does not expand variables or follow aliases, so it catches the acc
 habitual shortcut, not a command written to evade it. Besides its structured reads, it always reads
 the whole input as flat text, ignoring quotes, comments and heredoc boundaries, so any listed
 pattern anywhere in the input prompts at least. The cost is a prompt on a command that only
-mentions a pattern, such as `echo "git push --force"` or a commit message that names one. The flat
-read only ever asks. A deny comes from the structured reads, which read heredoc bodies as commands
+mentions a pattern, such as `echo "git push --force"` or a commit message that names one, and on a
+recursive delete split across lines with a trailing backslash, which the flat read takes for `/`.
+The flat read only ever asks. A deny comes from the structured reads, which read heredoc bodies as commands
 whatever command they feed, so a commit message or note written through a heredoc is denied when
 one of its lines is a root delete. A hosted-classifier
 design was rejected

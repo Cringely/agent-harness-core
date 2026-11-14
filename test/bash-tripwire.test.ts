@@ -491,17 +491,25 @@ describe("a pipe carries the command across a line break", () => {
 });
 
 describe("a line continuation joins the next line, as bash does", () => {
-  // A backslash before a line break is removed with the break before any read, so the argument on
-  // the next line is the one judged and a lone backslash is never taken for a root.
+  // Every read runs twice, once on the input as given and once with each backslash-newline joined,
+  // and every finding from either counts. On the joined input the argument on the next line is the
+  // one judged. On the input as given the structured reads treat a backslash-newline as a
+  // continuation, but the flat read keeps the line-end backslash as a word and takes it for a root.
   const CR = String.fromCharCode(13);
   const LF = String.fromCharCode(10);
   for (const [label, eol] of [["LF", LF], ["CRLF", CR + LF]] as const) {
+    // The accepted cost: the flat read of the input as given reads the line-end backslash as `/`, so
+    // a routine multi-line delete prompts. It is only an ask, never a deny, because no structured
+    // read takes the continuation for a target. Dropping backslash-only words from that read would
+    // also drop a real backslash target behind a command the structured reads do not unwrap.
     test.each([
       `rm -rf ${BS}${eol}node_modules`,
       `rm -rf dist ${BS}${eol}build`,
       `rm -rf ${BS}${eol}  dist ${BS}${eol}  coverage`,
-    ])(`a routine multi-line delete is no decision (${label}): %s`, (cmd) => {
-      expect(action(cmd)).toBe("none");
+    ])(`a routine multi-line delete asks through the flat read only, the accepted cost (${label}): %s`, (cmd) => {
+      const d = decide(bash(cmd));
+      expect(d.action).toBe("ask");
+      if (d.action === "ask") expect(d.reason).toMatch(/its raw text matches: recursive delete of a root/);
     });
 
     test(`a root delete split by a continuation is still denied (${label})`, () => {
@@ -513,6 +521,31 @@ describe("a line continuation joins the next line, as bash does", () => {
   test("an escaped backslash before a line break is not a continuation", () => {
     // `foo\\` is a word ending in a backslash, and `/` on the next line is a command of its own.
     expect(action(nl(`rm -rf foo${BS}${BS}`, "/"))).toBe("none");
+  });
+});
+
+describe("the flat read never drops a word", () => {
+  // Bash reads two backslashes as the argument `\`, which the delete check takes for a root. Behind a
+  // command the structured reads do not unwrap, the flat read is the only one that sees the delete,
+  // so a filter that drops backslash-only words from it turns a prompt into no decision.
+  test.each([
+    `timeout 5 rm -rf ${BS}${BS}`,
+    `timeout 5 rm -rf ${BS}`,
+    `echo x | xargs rm -rf ${BS}${BS}`,
+    `echo "x; rm -rf ${BS}${BS}`,
+  ])("a backslash delete target the structured reads miss still asks: %s", (cmd) => {
+    expect(action(cmd)).toBe("ask");
+  });
+
+  test("the structured read still denies a backslash target it parses", () => {
+    expect(action(`rm -rf ${BS}${BS}`)).toBe("deny");
+  });
+
+  // The read with backslash-only words dropped runs as one more variant, and its findings are added
+  // to the others. Here it is the only read that sees a push: the backslash sits between `git` and
+  // `push`, so every other read takes it for the subcommand.
+  test("the read with backslash-only words dropped still adds what it finds", () => {
+    expect(action(`git ${BS} push --force`)).toBe("ask");
   });
 });
 

@@ -64,10 +64,13 @@
 // UNION RULE. Every read runs on the input as given and again on each normalized form of it, and
 // the decision is the most severe finding from any of them. The normalized forms are the input with
 // every backslash-newline continuation (LF or CRLF) joined, so the word after a continuation is the
-// one judged, and for the flat read the pipe-gap joins above. Each normalization is blind to quotes
-// and comments and can erase text bash runs: the join merges the line after a comment ending in a
-// backslash into that comment, and a `#` after a pipe may sit inside quotes. Reading the input as
-// given as well means a normalization can only add findings. An exception anywhere in the scan, not only
+// one judged, and for the flat read the pipe-gap joins above and the text with its backslash-only
+// words dropped. Each normalization is blind to quotes and comments and can erase text bash runs:
+// the join merges the line after a comment ending in a backslash into that comment, a `#` after a
+// pipe may sit inside quotes, and two backslashes are the real argument `\`. Reading the input as
+// given as well means a normalization can only add findings. The cost on the flat read of the input
+// as given is a prompt on a recursive delete split across lines by a continuation, because the
+// line-end backslash reads as `/`. It is only an ask. An exception anywhere in the scan, not only
 // inside one part's read, keeps every finding made before it and adds an ask, so a deny already
 // found stays a deny and a command the hook failed to read never ends in no decision.
 
@@ -542,17 +545,30 @@ const RAW_WINDOW = 64;
  * covers, not only from the start of a command, because the structure that says where a command
  * starts is what failed to parse. Returns the reason for each pattern that matched.
  *
- * The text is read three times, with no pipe-gap collapse, with blank space collapsed and with
- * comments collapsed as well (joinPipeGaps), and every match from any of them counts. Each collapse
- * can delete or move real text, so it can only add matches to the read without it.
+ * The text is read with no pipe-gap collapse, with blank space collapsed and with comments collapsed
+ * as well (joinPipeGaps), and each of those again with its backslash-only words dropped
+ * (dropBackslashWords). Every match from any of them counts. Each variant can delete or move real
+ * text, so it can only add matches to the read without it. No read filters words of its own: a
+ * backslash-only word is the continuation at a line end on unjoined input, and it is also the real
+ * delete target `\` that bash reads from two backslashes.
  */
 function rawScan(src: string): string[] {
   const found: Finding[] = [];
   // The `&` of a redirection (`2>&1`, `&>`, `<&`) is not a separator, so it must not split a chunk.
   const base = src.replace(/&(?=>)|(?<=[<>])&/g, " ");
-  const variants = new Set([base, joinPipeGaps(base, false), joinPipeGaps(base, true)]);
+  const collapsed = [base, joinPipeGaps(base, false), joinPipeGaps(base, true)];
+  const variants = new Set([...collapsed, ...collapsed.map(dropBackslashWords)]);
   for (const variant of variants) rawRead(variant, found);
   return [...new Set(found.map((f) => f.reason))];
+}
+
+/**
+ * For the flat read only. Blanks every word made only of backslashes, with words bounded as rawRead
+ * bounds them, so a backslash between a command name and its subcommand does not hide the
+ * subcommand. Text without such a word comes back unchanged, and the Set in rawScan drops the copy.
+ */
+function dropBackslashWords(src: string): string {
+  return src.replace(/(?<=^|[\s;&()`|])\\+(?=$|[\s;&()`|])/g, " ");
 }
 
 function rawRead(src: string, found: Finding[]): void {
@@ -561,9 +577,7 @@ function rawRead(src: string, found: Finding[]): void {
   for (const chunk of text.split(/[\n;&()`]/)) {
     let fetchedBefore = false;
     for (const stage of chunk.split("|")) {
-      // A word that is only backslashes is an escape in bash, never a path. On unjoined input it is
-      // the continuation backslash at a line end, which a delete check would otherwise take for `/`.
-      const words = stage.split(/\s+/).filter((w) => w !== "" && !/^\\+$/.test(w));
+      const words = stage.split(/\s+/).filter((w) => w !== "");
       const names = words.map(baseName);
       if (fetchedBefore && names.some((n) => SHELLS.has(n))) {
         found.push({ severity: "ask", reason: "pipes a download (curl, wget) into a shell interpreter" });
