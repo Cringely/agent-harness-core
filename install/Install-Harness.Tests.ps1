@@ -728,13 +728,17 @@ Describe "Install-Harness" {
     It "reads an installed copy as in-sync and unchanged whichever line ending it carries" {
         & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
         $dst = "$script:target/.claude/agents/task-reviewer.md"
+        $src = [System.IO.File]::ReadAllBytes("$PSScriptRoot/../core/claude/agents/task-reviewer.md")
         $lf = ([System.IO.File]::ReadAllText($dst) -replace "`r`n", "`n")
         foreach ($variant in @($lf, ($lf -replace "`n", "`r`n"))) {
-            [System.IO.File]::WriteAllBytes($dst, [System.Text.UTF8Encoding]::new($false).GetBytes($variant))
+            $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($variant)
+            [System.IO.File]::WriteAllBytes($dst, $bytes)
+            # Same text either way. The only rewrite is a copy that gained CRs core's file lacks.
+            $rewritten = ([System.Array]::IndexOf($bytes, [byte]13) -ge 0) -and ([System.Array]::IndexOf($src, [byte]13) -lt 0)
             $audit = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
             $audit | Should -Match 'agents/task-reviewer\.md\s+in-sync'
             $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target *>&1 | Out-String -Width 500
-            $out | Should -Match 'agents/task-reviewer\.md\s+unchanged'
+            $out | Should -Match ('agents/task-reviewer\.md\s+' + $(if ($rewritten) { 'updated' } else { 'unchanged' }))
             $out | Should -Not -Match "Skipping 'agents/task-reviewer\.md'"
         }
     }
@@ -751,10 +755,60 @@ Describe "Install-Harness" {
         $m['files']['agents/task-reviewer.md'] = $rawCrlf
         $m | ConvertTo-Json -Depth 20 | Set-Content "$script:target/.claude/.harness-manifest.json"
         $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target *>&1 | Out-String -Width 500
-        $out | Should -Match 'agents/task-reviewer\.md\s+unchanged'
+        $out | Should -Match 'agents/task-reviewer\.md\s+(unchanged|updated)'
         $out | Should -Not -Match "Skipping 'agents/task-reviewer\.md'"
         $after = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
         $after['files']['agents/task-reviewer.md'] | Should -Be (Get-LfHash -Path $dst)
+    }
+
+    It "replaces an LF copy whose manifest holds the legacy CRLF raw hash when core has also changed" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $dst = "$script:target/.claude/agents/task-reviewer.md"
+        $enc = [System.Text.UTF8Encoding]::new($false)
+        # An older install on a CRLF working tree recorded the raw hash of CRLF bytes. The copy in
+        # the project is now LF with the same text, and core's file differs from that text.
+        $oldLf = "OLD CORE VERSION`nsecond line`n"
+        $rawCrlf = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($enc.GetBytes(($oldLf -replace "`n", "`r`n"))))
+        [System.IO.File]::WriteAllBytes($dst, $enc.GetBytes($oldLf))
+        $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+        $m['files']['agents/task-reviewer.md'] = $rawCrlf
+        $m | ConvertTo-Json -Depth 20 | Set-Content "$script:target/.claude/.harness-manifest.json"
+
+        $audit = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $audit | Should -Match 'agents/task-reviewer\.md\s+core-updated'
+        $audit | Should -Not -Match 'agents/task-reviewer\.md\s+(project-modified|conflict)'
+        $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target *>&1 | Out-String -Width 500
+        $out | Should -Match 'agents/task-reviewer\.md\s+updated'
+        $out | Should -Not -Match "Skipping 'agents/task-reviewer\.md'"
+        (Get-LfHash -Path $dst) | Should -Be (Get-LfHash -Path "$PSScriptRoot/../core/claude/agents/task-reviewer.md")
+    }
+
+    It "leaves an LF project copy untouched when core's file is CRLF" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $dst = "$script:target/.claude/agents/task-reviewer.md"
+        $lfBytes = [System.Text.UTF8Encoding]::new($false).GetBytes(([System.IO.File]::ReadAllText($dst) -replace "`r`n", "`n"))
+        [System.IO.File]::WriteAllBytes($dst, $lfBytes)
+        # A CRLF core (a Windows checkout under core.autocrlf) is what this guards. On an LF host
+        # the assertion holds trivially.
+        $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target *>&1 | Out-String -Width 500
+        $out | Should -Match 'agents/task-reviewer\.md\s+unchanged'
+        [System.Linq.Enumerable]::SequenceEqual([byte[]][System.IO.File]::ReadAllBytes($dst), [byte[]]$lfBytes) | Should -BeTrue
+    }
+
+    It "rewrites an installed hook that gained CRLF when core's file is LF, so CRLF never survives in a shebang line" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $src = "$PSScriptRoot/../core/claude/hooks/commit-msg"
+        $dst = "$script:target/.claude/hooks/commit-msg"
+        $coreBytes = [System.IO.File]::ReadAllBytes($src)
+        # commit-msg is pinned to LF by .gitattributes, so core's bytes carry no CR on any host.
+        [System.Array]::IndexOf($coreBytes, [byte]13) | Should -Be -1
+        $text = [System.Text.UTF8Encoding]::new($false).GetString($coreBytes)
+        [System.IO.File]::WriteAllBytes($dst, [System.Text.UTF8Encoding]::new($false).GetBytes(($text -replace "`n", "`r`n")))
+        $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target *>&1 | Out-String -Width 500
+        $out | Should -Match 'hooks/commit-msg\s+updated'
+        [System.Linq.Enumerable]::SequenceEqual([byte[]][System.IO.File]::ReadAllBytes($dst), [byte[]]$coreBytes) | Should -BeTrue
+        $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+        $m['files']['hooks/commit-msg'] | Should -Be (Get-LfHash -Path $dst)
     }
 
     It "still reports a real content change as modified, with an LF or CRLF edit" {

@@ -228,7 +228,10 @@ path-to-hash map, is migrated on the next run with every hash preserved under `f
 are taken over text with CRLF folded to LF, so a checkout with `core.autocrlf` and a project that
 commits the same content as LF read as the same file. A file holding a NUL byte is hashed as it is.
 A hash recorded as raw bytes by an earlier install still matches, and a re-install replaces it
-with the normalised form for each file it installs or finds identical to core. The
+with the normalised form for each file it installs or finds identical to core, including a raw hash of
+CRLF bytes recorded for what is now an LF copy. A line-ending difference alone is not a modification,
+and the one case it still rewrites is a copy that gained CRs where core's file has none, such as an
+LF shell hook converted to CRLF. The
 current shape adds `schemaVersion` (3), `layers` and `settings`, described with the install flags
 above, without dropping any of those fields. Every write sorts each map's keys, so a re-install that
 changes nothing leaves the committed file byte-identical. Lists keep their order. A `layers` or

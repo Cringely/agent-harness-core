@@ -366,12 +366,43 @@ function Get-RawFileHashHex {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
 }
 
-# True when $Recorded is this file's normalised hash or its legacy raw hash.
+# The raw hash a CRLF checkout of this file would have recorded: the LF text with every LF
+# expanded to CRLF. An older install on a CRLF working tree recorded that value, and the same
+# content now sits in the project as LF, so neither the normalised hash nor the raw hash of the
+# LF bytes equals it. Binary files are never expanded, matching Get-NormalizedBytes. Expanding
+# from the normalised bytes means an existing CRLF pair is not doubled.
+function Get-CrlfExpandedHashHex {
+    param([string]$Path)
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    if ([System.Array]::IndexOf($bytes, [byte]0) -ge 0) { return $null }
+    $norm = Get-NormalizedBytes -Bytes $bytes
+    $out = [System.Collections.Generic.List[byte]]::new($norm.Length + 16)
+    foreach ($b in $norm) {
+        if ($b -eq 10) { $out.Add(13) }
+        $out.Add($b)
+    }
+    [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($out.ToArray()))
+}
+
+# True when $Recorded is this file's normalised hash, its legacy raw hash, or the legacy raw hash
+# of the same text with CRLF line endings.
 function Test-RecordedHashMatch {
     param([string]$Path, [string]$Recorded)
     if (-not $Recorded) { return $false }
     if ((Get-FileHashHex -Path $Path) -eq $Recorded) { return $true }
-    return ((Get-RawFileHashHex -Path $Path) -eq $Recorded)
+    if ((Get-RawFileHashHex -Path $Path) -eq $Recorded) { return $true }
+    return ((Get-CrlfExpandedHashHex -Path $Path) -eq $Recorded)
+}
+
+# True when the project copy carries a CR and core's file carries none: an LF file that was
+# converted to CRLF. The reverse (core CRLF from a Windows checkout, project LF) is not a
+# difference worth a copy, since rewriting it would reintroduce the churn normalised hashing
+# removes.
+function Test-CrAddedToLfFile {
+    param([string]$SourcePath, [string]$DestPath)
+    $src = [System.IO.File]::ReadAllBytes($SourcePath)
+    $dst = [System.IO.File]::ReadAllBytes($DestPath)
+    return ([System.Array]::IndexOf($dst, [byte]13) -ge 0) -and ([System.Array]::IndexOf($src, [byte]13) -lt 0)
 }
 
 # One resolver for -Accept and -Unaccept rather than the obvious copy of the block into the second
@@ -2092,12 +2123,21 @@ function Install-ManagedFile {
         return
     }
 
-    # Identical to core under line-ending normalisation: nothing to copy and nothing modified,
-    # whatever the recorded value is. A manifest written before normalisation holds a raw hash,
-    # which this rewrites in its normalised form.
+    # Identical to core under line-ending normalisation, so nothing is modified whatever the
+    # recorded value is. A manifest written before normalisation holds a raw hash, which this
+    # rewrites in its normalised form. The bytes can still differ from core's, and a line ending
+    # is content for a script (CRLF after a shebang breaks a sh hook), so a copy that gained CRs
+    # that core's LF file does not have is rewritten from core. Any other ending difference is
+    # left alone.
     if ($recordedHash -and $currentHash -eq $sourceHash) {
         $script:manifest['files'][$ManifestKey] = $sourceHash
-        $script:results.Add([pscustomobject]@{ File = $ManifestKey; Action = 'unchanged' })
+        if (Test-CrAddedToLfFile -SourcePath $SourcePath -DestPath $DestPath) {
+            Copy-Item -LiteralPath $SourcePath -Destination $DestPath -Force
+            $script:results.Add([pscustomobject]@{ File = $ManifestKey; Action = 'updated' })
+        }
+        else {
+            $script:results.Add([pscustomobject]@{ File = $ManifestKey; Action = 'unchanged' })
+        }
         return
     }
 

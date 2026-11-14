@@ -672,7 +672,7 @@ function Convert-SettingsForTarget {
             #
             # Also wraps the pipeline OUTPUT: a single surviving hook unwraps to a bare scalar
             # and would serialise `"hooks": {...} instead of "hooks": [...]`
-            # (install/Install-Harness.ps1:2360-2363).
+            # (install/Install-Harness.ps1:2400-2403).
             $kept = @(@($group.hooks) | Where-Object {
                     $_ -and ($NpmPresent -or ($_.command -notmatch 'ccstatusline'))
                 })
@@ -741,8 +741,8 @@ function Convert-SettingsForTarget {
 
 # A hook entry's identity is its event, its matcher and its expanded command. A present entry
 # is replaced in place, a missing one is appended, and a receiver-only one is left alone.
-# Install-Harness.ps1's merge keys on the command string alone (L808-866) and knows nothing
-# about matchers or events, so it is not reusable here.
+# The settings hook merge in Install-Harness.ps1 (the block that builds $existingCommands) keys on
+# the command string alone and knows nothing about matchers or events, so it is not reusable here.
 function Merge-HookEvent {
     param([object[]]$PayloadGroups, [object[]]$ExistingGroups)
     $result = New-Object System.Collections.Generic.List[pscustomobject]
