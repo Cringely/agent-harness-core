@@ -33,7 +33,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bun \"$CLAUDE_PROJECT_DIR/.claude/hooks/bash-tripwire.ts\""
+            "command": "sh -c 'exec bun \"$CLAUDE_PROJECT_DIR/.claude/hooks/bash-tripwire.ts\"'"
           }
         ]
       }

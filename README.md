@@ -131,8 +131,8 @@ default is to skip a modified file and warn.
 `-IncludeBashTripwire` installs the Bash tripwire, a PreToolUse hook on Bash that is off unless you
 ask for it. It asks, or denies the clearest cases, and never allows, so it can only add friction. A
 prompt it raises still appears in `bypassPermissions` mode. It matches four kinds of command: a
-recursive delete of `/`, `~`, a home directory or a drive root (denied) or of a `.git` directory or
-a bare variable (asked), `git push` with `--force`, `-f`, `--force-with-lease` or a `+refspec`, a
+recursive delete of `/`, `~`, a home directory or a drive root (denied) or a recursive force delete
+of a `.git` directory or a bare variable (asked), `git push` with `--force`, `-f`, `--force-with-lease` or a `+refspec`, a
 `curl` or `wget` download piped into a shell, and a read of credential material (`gh auth token`,
 `op read`, an ssh private key, a `.env` file or anything under `secrets/`). It runs locally with
 bun, needs no API key, and sends nothing off the machine. It reads command text with a small
@@ -141,7 +141,8 @@ habitual shortcut, not a command written to evade it. A command it cannot read i
 with an unclosed quote, is read again as flat text and prompts if any of those patterns appears in
 it. Heredoc bodies are always scanned, whatever command they feed, each as a script of its own,
 so quoting in a body cannot hide the command around it. A commit message or note written through a
-heredoc prompts when one of its lines is a listed command. A hosted-classifier
+heredoc prompts when one of its lines is a listed command, or is denied when a line is a root
+delete. A hosted-classifier
 design was rejected
 because command text can carry inline secrets and the vendor's retention terms set no limit.
 Without the switch, neither the script nor its settings entry is installed. Re-running without it
