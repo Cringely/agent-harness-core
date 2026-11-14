@@ -1,5 +1,6 @@
 #!/bin/sh
-# Git commit-msg hook. Refuses any commit message carrying AI attribution.
+# Git commit-msg hook. Refuses any commit message carrying AI attribution,
+# and any commit message without a rationale line (see "WHY LINE" below).
 #
 # WHY THIS EXISTS
 # change-management.md: "All commits must use the user's GitHub identity only.
@@ -23,14 +24,56 @@
 # where git trailers live. To write one of these strings in prose (a commit
 # that documents this rule, for instance), indent it by two spaces.
 
+# WHY LINE
+# change-management-code.md asks every commit message to say why the change was
+# needed. Asked in prose only, that held for the commits whose author remembered
+# and lapsed for the rest, so the hook requires one line starting with "Why:"
+# (any case) followed by at least three words, on a message that has a body.
+# It enforces this only when no editor ran (git commit -m, -F, --no-edit), and
+# judges the raw message file as given. An editor commit skips the check: what
+# the editor leaves behind depends on cleanup rules a hook cannot see. Exempt:
+#   - subject-only commits of any type: nothing after the subject but blank
+#     lines and, in the final paragraph only, trailers whose key holds a hyphen
+#     (Signed-off-by:, Reviewed-by:)
+#   - merge commits: a MERGE_HEAD exists, or the subject starts "Merge branch ",
+#     "Merge branches ", "Merge remote-tracking branch ", "Merge pull request ",
+#     "Merge tag " or "Merge commit " and HEAD is a merge with that same subject
+#     (git commit --amend of a merge)
+#   - reverts: the subject starts Revert " or Reapply " and either REVERT_HEAD
+#     exists in the git dir or the body carries git's "This reverts commit
+#     <hex>." line
+#   - fixup! and squash! subjects (amend! is not exempt: its body replaces the
+#     target's message under rebase --autosquash, which runs no commit-msg hook)
+# A look-alike subject with no such evidence is checked like any other.
+# Only the refusal reason is printed. A message that fails both this check and
+# an attribution check is refused for attribution first.
+
 msg_file="$1"
 [ -f "$msg_file" ] || exit 0
 
-# Strip comment lines git will discard anyway, so a commented-out template
-# cannot trip the gate. Then drop lines indented two or more spaces: that is
-# the documented way to write one of these strings as prose, and dropping them
-# once here is what lets the checks below stay simple.
-scan=$(grep -v '^#' "$msg_file" | grep -v '^  ')
+# --- Binary input -----------------------------------------------------------
+# grep drops to binary mode on a NUL byte or on bytes invalid in the locale and
+# prints "Binary file ... matches" in place of the lines, so the scans below
+# would read the wrong text. Every grep here runs as LC_ALL=C grep -a, which
+# treats the file as plain bytes. A NUL byte cannot be held in a shell variable
+# at all, and git cannot store one in a commit message cleanly, so refuse it.
+if ! tr -d '\000' < "$msg_file" | cmp -s - "$msg_file"; then
+    echo "commit-msg: refused. The message holds a NUL byte, which git cannot store in a commit message." >&2
+    exit 1
+fi
+
+# --- Attribution ------------------------------------------------------------
+# Scanned over the whole raw file: comment lines, the scissors line and
+# everything below it included. Which of those lines git keeps depends on
+# flags a hook cannot see (-v, --cleanup), and cutting where git does not
+# would let a trailer below a hand-typed scissors line through. Scanning the
+# lines git throws away as well costs only a false refusal: a verbose diff
+# (git commit -v) whose staged content carries one of these strings is
+# refused. Commit without -v in that case.
+#
+# Lines indented two or more spaces are dropped first: that is the documented
+# way to write one of these strings as prose.
+scan=$(LC_ALL=C grep -a -v '^  ' "$msg_file")
 
 fail() {
     echo "commit-msg: refused. $1" >&2
@@ -43,16 +86,122 @@ fail() {
     exit 1
 }
 
-printf '%s\n' "$scan" | grep -qiE '^Co-authored-by:.*(claude|anthropic)' &&
+printf '%s\n' "$scan" | LC_ALL=C grep -aqiE '^Co-authored-by:.*(claude|anthropic)' &&
     fail "Co-Authored-By trailer naming Claude or Anthropic."
 
-printf '%s\n' "$scan" | grep -qiE '^Claude-Session:' &&
+printf '%s\n' "$scan" | LC_ALL=C grep -aqiE '^Claude-Session:' &&
     fail "Claude-Session trailer."
 
-printf '%s\n' "$scan" | grep -qiE 'generated with .{0,4}\[?claude code' &&
+printf '%s\n' "$scan" | LC_ALL=C grep -aqiE 'generated with .{0,4}\[?claude code' &&
     fail "'Generated with Claude Code' attribution line."
 
-printf '%s\n' "$scan" | grep -qiE '(noreply@anthropic\.com|claude\.ai/code/session)' &&
+printf '%s\n' "$scan" | LC_ALL=C grep -aqiE '(noreply@anthropic\.com|claude\.ai/code/session)' &&
     fail "Anthropic address or Claude session URL."
 
-exit 0
+# --- Why line: no-editor commits only -------------------------------------
+# git sets GIT_EDITOR to ":" for the hook when it used no editor. Any other value
+# means an editor ran, and the Why line is expected there but not enforced.
+#
+# The raw file is judged with no model of git's cleanup: every non-blank line
+# after the subject is body, comment lines and a typed scissors line included,
+# except a trailer whose key holds a hyphen. Without an editor git keeps
+# comment lines unless commit.cleanup=strip is set, so the raw file is close to
+# what git stores. One exception: a Why line below a scissors line does not
+# count, because -v or commit.verbose cuts the message there. Under commit.cleanup=strip a #-led body line still needs a
+# Why line, and a caller who sets GIT_EDITOR=: for an editor-mode commit (git
+# commit --amend) has the template's comment lines read as body. Use --no-edit
+# there.
+[ "${GIT_EDITOR-}" = ":" ] || exit 0
+cr=$(printf '\r')
+
+# needs_why: returns 0 when the message has a body, no qualifying Why line, and
+# no fixup! or squash! subject. One pass over the file, with no external process: a commit
+# runs this hook every time, and process spawns are what make a hook slow on
+# Windows.
+needs_why() {
+    subject=
+    has_body=0
+    has_why=0
+    has_revert_line=0
+    para_trailer=0
+    cut=0
+    while IFS= read -r line || [ -n "$line" ]; do
+        line=${line%"$cr"}
+        case "$line" in
+            *[![:space:]]*) ;;
+            *)
+                # A paragraph ends. Trailer-shaped lines in it were not in the
+                # final paragraph, where git keeps trailers, so they are body.
+                [ "$para_trailer" -eq 1 ] && has_body=1
+                para_trailer=0
+                continue
+                ;;
+        esac
+        if [ -z "$subject" ]; then
+            subject=$line
+            continue
+        fi
+        # A trailer whose key holds a hyphen (Signed-off-by:) is not a body,
+        # provided it sits in the final paragraph.
+        key=${line%%: *}
+        case "$key" in
+            "$line" | -* | *[!A-Za-z0-9-]*) has_body=1 ;;
+            *-*) para_trailer=1 ;;
+            *) has_body=1 ;;
+        esac
+        # git commit -v (or commit.verbose=true) cuts the message at the
+        # scissors line even with -m, so a Why line below it is never stored.
+        # Body lines below it still count, since without -v git keeps them.
+        # Any comment prefix matches, as the hook cannot see core.commentChar.
+        case "$line" in
+            *" ------------------------ >8 ------------------------") cut=1 ;;
+        esac
+        [ "$cut" -eq 1 ] && continue
+        case "$line" in
+            [Ww][Hh][Yy]:*)
+                # Unquoted on purpose: word splitting counts the words after the colon.
+                set -- ${line#*:}
+                [ "$#" -ge 3 ] && has_why=1
+                ;;
+            "This reverts commit "*)
+                # git revert writes "This reverts commit <hex>." (or
+                # "<hex>, reversing" for a merge).
+                rest=${line#This reverts commit }
+                hex=${rest%%[.,]*}
+                case "$hex" in
+                    "" | *[!0-9a-f]*) ;;
+                    *) [ "${#hex}" -ge 7 ] && [ "$rest" != "$hex" ] && has_revert_line=1 ;;
+                esac
+                ;;
+        esac
+    done < "$msg_file"
+    [ "$has_why" -eq 1 ] && return 1
+    [ "$has_body" -eq 0 ] && return 1
+    case "$subject" in
+        "fixup! "* | "squash! "*) return 1 ;;
+    esac
+    return 0
+}
+
+set -f
+needs_why || exit 0
+set +f
+git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1 && exit 0
+
+# A subject that looks git-generated is exempt only on evidence the hook can
+# check, since a hand-typed one looks the same.
+case "$subject" in
+    'Revert "'* | 'Reapply "'*)
+        [ "$has_revert_line" -eq 1 ] && exit 0
+        git_dir=$(git rev-parse --git-dir 2>/dev/null) &&
+            [ -f "$git_dir/REVERT_HEAD" ] && exit 0
+        ;;
+    "Merge branch "* | "Merge branches "* | "Merge remote-tracking branch "* | "Merge pull request "* | "Merge tag "* | "Merge commit "*)
+        # git commit --amend of a merge: HEAD is a merge with this same subject.
+        git rev-parse -q --verify HEAD^2 >/dev/null 2>&1 &&
+            [ "$(git log -1 --format=%s HEAD 2>/dev/null)" = "$subject" ] && exit 0
+        ;;
+esac
+
+echo "commit-msg: refused. No 'Why:' line with at least three words. Add one, e.g. 'Why: the retry loop spun without backoff.'" >&2
+exit 1

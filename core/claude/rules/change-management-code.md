@@ -5,7 +5,7 @@ The code-repo half of `change-management.md`. The confirmation list, backups, co
 ## Decision Documentation
 
 **In commit messages:**
-- Why this change was needed (not just what changed)
+- Why this change was needed (not just what changed). Put it on a line starting with `Why:` followed by at least three words. The `commit-msg` hook refuses a commit without one when the message has a body and is given with `-m` or `-F` without an editor. In a commit made through an editor the line is expected but not enforced. Subject-only commits of any type (trailers whose key holds a hyphen, such as `Signed-off-by:`, are not a body on their own), merge commits (a `MERGE_HEAD`, or a `Merge ` subject when HEAD is a merge with that same subject), reverts (a `Revert "` or `Reapply "` subject with `REVERT_HEAD` present or git's `This reverts commit <hex>.` line in the body), and `fixup!` and `squash!` subjects are exempt
 - What was considered and rejected
 - Any trade-offs made
 
