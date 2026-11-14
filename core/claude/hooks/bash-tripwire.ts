@@ -28,7 +28,8 @@
 // the heredoc, because telling a data heredoc from one a shell runs needs a parser that agrees with
 // bash grammar, and the attempts at one each disagreed with it in a new way. The cost is a prompt on
 // a body that only quotes a listed pattern, such as a commit message or note with a line reading
-// `git push --force`. It does not expand variables, follow aliases or functions, resolve a path, or
+// `git push --force`. Each body is cut out by its line and terminator and read as a script of its
+// own, so a quote in a body cannot pair with a quote outside it. It does not expand variables, follow aliases or functions, resolve a path, or
 // read a script a command runs. A command built to evade it will.
 // Its job is the accident and the habitual shortcut, where one prompt is the whole value.
 // Readers it does not know (grep, sed, awk, cp, scp) are not covered.
@@ -45,8 +46,10 @@
 // is a real command: an unclosed single or double quote, nesting deeper than MAX_DEPTH (shells
 // inside shells inside substitutions), or an exception in the scanner. For those the hook keeps
 // what it found before it stopped, then reads the raw text with no quoting or nesting at all
-// (rawScan) and asks on any flagged pattern anywhere in it. That over-matches, which for a command
-// it could not read is the safe direction. An unreadable command with nothing flagged in its text
+// (rawScan) and asks on any flagged pattern anywhere in it. This is decided per part: the command
+// text and each heredoc body are read on their own, so an apostrophe in a prose body sends only
+// that body to rawScan. That over-matches, which for a command it could not read is the safe
+// direction. An unreadable command with nothing flagged in its text
 // is still no decision.
 
 export type Decision =
@@ -527,6 +530,93 @@ function rawScan(src: string): string[] {
   return [...new Set(found.map((f) => f.reason))];
 }
 
+// ---------------------------------------------------------------------------
+// Heredoc segments
+// ---------------------------------------------------------------------------
+
+/**
+ * A heredoc operator: `<<` or `<<-`, then a delimiter word that may be quoted or start with a
+ * backslash. Purely lexical. It does not know whether the `<<` sits inside a quoted string, and
+ * need not: a false match only moves text into a segment of its own, which is still scanned.
+ */
+const HEREDOC_OP = /(?<!<)<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|[\x5c]?([^\s;&|<>()'"`\x5c]+))/g;
+
+function isTerminator(line: string, word: string, dash: boolean): boolean {
+  const l = line.replace(/\r$/, "");
+  return (dash ? l.replace(/^\t+/, "") : l) === word;
+}
+
+/**
+ * Splits a script into its command text and its heredoc bodies. A body runs from the line after
+ * its operator's line to the line before its terminator, or to the end of the text when there is
+ * no terminator. Several operators on one line take their bodies in order. Operator and terminator
+ * lines stay in the command text, so every line of the input lands in exactly one part.
+ */
+function splitHeredocs(text: string): { command: string; bodies: string[]; lines: number } {
+  const lines = text.split("\n");
+  const command: string[] = [];
+  const bodies: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i++];
+    command.push(line);
+    for (const m of line.matchAll(HEREDOC_OP)) {
+      const word = m[2] ?? m[3] ?? m[4];
+      const dash = m[1] === "-";
+      const start = i;
+      while (i < lines.length && !isTerminator(lines[i], word, dash)) i++;
+      bodies.push(lines.slice(start, i).join("\n"));
+      if (i < lines.length) command.push(lines[i++]);
+    }
+  }
+  return { command: command.join("\n"), bodies, lines: lines.length };
+}
+
+/**
+ * Scans one segment as a script of its own, with its own unread state, so an unclosed quote in a
+ * prose body sends only that body to the raw-text fallback.
+ */
+function scanSegment(text: string, out: Finding[], unread: boolean): void {
+  if (text.trim() === "") return;
+  const st: ScanState = { unread };
+  try {
+    scan(text, 0, out, st);
+  } catch {
+    // Keep what was found before the failure, and read the rest as raw text below.
+    st.unread = true;
+  }
+  if (st.unread) {
+    // Raw-text matches only ask: without the structure, a match may be an argument or prose.
+    const raw = rawScan(text);
+    if (raw.length > 0) {
+      out.push({ severity: "ask", reason: `could not read the whole command, and its raw text matches: ${raw.join(", ")}` });
+    }
+  }
+}
+
+/**
+ * Cuts every heredoc body out of the command and scans each body, and the command text left
+ * behind, as separate scripts. A body is a script of its own because a quote inside it would
+ * otherwise pair with a quote outside it and hide the commands between them in one quoted word.
+ * Bodies are split again for heredocs of their own. Nested bodies are re-read at each level, so
+ * past a line budget the remaining segments are scanned whole and read as raw text as well.
+ */
+function scanCommand(command: string, out: Finding[]): void {
+  const queue = [command];
+  let budget = 4 * command.split("\n").length + 256;
+  while (queue.length > 0) {
+    const seg = queue.pop()!;
+    if (budget <= 0) {
+      scanSegment(seg, out, true);
+      continue;
+    }
+    const parts = splitHeredocs(seg);
+    budget -= parts.lines;
+    queue.push(...parts.bodies);
+    scanSegment(parts.command, out, false);
+  }
+}
+
 /** Decide on a PreToolUse payload. Never returns an allow. */
 export function decide(payload: unknown): Decision {
   if (typeof payload !== "object" || payload === null) return NONE;
@@ -538,20 +628,7 @@ export function decide(payload: unknown): Decision {
   if (typeof command !== "string" || command.trim() === "") return NONE;
 
   const findings: Finding[] = [];
-  const st: ScanState = { unread: false };
-  try {
-    scan(command, 0, findings, st);
-  } catch {
-    // Keep what was found before the failure, and read the rest as raw text below.
-    st.unread = true;
-  }
-  if (st.unread) {
-    // Raw-text matches only ask: without the structure, a match may be an argument or prose.
-    const raw = rawScan(command);
-    if (raw.length > 0) {
-      findings.push({ severity: "ask", reason: `could not read the whole command, and its raw text matches: ${raw.join(", ")}` });
-    }
-  }
+  scanCommand(command, findings);
   if (findings.length === 0) return NONE;
 
   const severity = findings.some((f) => f.severity === "deny") ? "deny" : "ask";

@@ -139,8 +139,9 @@ bun, needs no API key, and sends nothing off the machine. It reads command text 
 tokenizer and does not expand variables or follow aliases, so it catches the accident and the
 habitual shortcut, not a command written to evade it. A command it cannot read in full, such as one
 with an unclosed quote, is read again as flat text and prompts if any of those patterns appears in
-it. Heredoc bodies are always scanned, whatever command they feed, so a commit message or note
-written through a heredoc prompts when one of its lines is a listed command. A hosted-classifier
+it. Heredoc bodies are always scanned, whatever command they feed, each as a script of its own,
+so quoting in a body cannot hide the command around it. A commit message or note written through a
+heredoc prompts when one of its lines is a listed command. A hosted-classifier
 design was rejected
 because command text can carry inline secrets and the vendor's retention terms set no limit.
 Without the switch, neither the script nor its settings entry is installed. Re-running without it

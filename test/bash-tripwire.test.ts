@@ -283,8 +283,7 @@ describe("quoting, heredocs and substitutions", () => {
     const prose = (first: string, after: string) => nl(first, "Don't merge yet", "EOF", `)" && ${after}`);
     expect(action(prose(`bash -n x.sh && git commit -m "$(cat <<'EOF'`, "git push --force"))).toBe("ask");
     expect(action(prose(`gh pr create --title "Fix Bash quoting" --body "$(cat <<'EOF'`, "git push --force"))).toBe("ask");
-    // The apostrophe leaves the command unreadable, so the raw-text fallback asks rather than denies.
-    expect(action(prose(`bash -n x.sh && git commit -m "$(cat <<'EOF'`, "rm -rf /"))).toBe("ask");
+    expect(action(prose(`bash -n x.sh && git commit -m "$(cat <<'EOF'`, "rm -rf /"))).toBe("deny");
   });
 
   test("a single-quoted string is data, not a command", () => {
@@ -334,6 +333,54 @@ describe("quoting, heredocs and substitutions", () => {
     // raw-text fallback decides it, and it must not throw.
     expect(action(wrap(MAX_DEPTH + 1))).toBe("ask");
     expect(action(wrap(MAX_DEPTH + 1).replace("git push -f", "ls -la"))).toBe("none");
+  });
+
+  test("a quote in a heredoc body does not pair with a quote outside it", () => {
+    // Read as one script, the apostrophe in the body and the escaped one after it would make a
+    // single quoted word of everything between, the delete included.
+    expect(action(nl("cat > notes.md <<'EOF'", "Don't panic", "EOF", "rm -rf /", `echo it${BS}'s done`))).toBe("deny");
+    expect(action(nl("cat > notes.md <<'EOF'", "Don't panic", "EOF", "git push --force", `echo it${BS}'s done`))).toBe("ask");
+    expect(action(nl("cat > notes.md <<'EOF'", "Don't panic", "EOF", "rm -rf /"))).toBe("deny");
+  });
+
+  test("an apostrophe in a heredoc body leaves the rest of the command readable", () => {
+    expect(action(nl("cat > notes.md <<'EOF'", "Don't panic", "EOF", "ls -la"))).toBe("none");
+    expect(action(nl("cat > notes.md <<'EOF'", "Don't run rm -rf / here", "EOF"))).toBe("ask");
+    // One unreadable body does not send the other parts to the raw-text fallback.
+    expect(action(nl("cat <<A <<B", 'echo "git push --force"', "A", "Don't", "B"))).toBe("none");
+  });
+
+  test("several heredocs on one line are each cut out and scanned", () => {
+    expect(action(nl("cat <<A <<'B'", "Don't", "A", "it's", "B", "rm -rf /"))).toBe("deny");
+    expect(action(nl("cat <<A <<'B'", "Don't", "A", "rm -rf /", "B"))).toBe("deny");
+    expect(action(nl("cat <<A <<'B'", "git push --force", "A", "it's", "B"))).toBe("ask");
+    expect(action(nl("cat <<A <<'B'", "Don't", "A", "it's", "B", "ls"))).toBe("none");
+  });
+
+  test("a heredoc closed with <<- and tabs, or never closed, is still cut out and scanned", () => {
+    const TAB = String.fromCharCode(9);
+    expect(action(nl("cat <<-'EOF'", `${TAB}Don't panic`, `${TAB}EOF`, "rm -rf /"))).toBe("deny");
+    expect(action(nl("cat <<'EOF'", "Don't panic", "rm -rf /"))).toBe("ask");
+    expect(action(nl("cat <<'EOF'", "rm -rf /"))).toBe("deny");
+    const CR = String.fromCharCode(13);
+    expect(action(nl(`cat <<'EOF'${CR}`, `Don't panic${CR}`, `EOF${CR}`, `rm -rf /${CR}`))).toBe("deny");
+  });
+
+  test("deeply nested heredocs stay linear and are still read", () => {
+    const lines = Array.from({ length: 20000 }, (_, i) => `cat <<A${i}`);
+    const started = performance.now();
+    expect(action(nl(...lines, "rm -rf /"))).not.toBe("none");
+    expect(performance.now() - started).toBeLessThan(5000);
+    // Past the budget a segment is read whole, so its own quotes could pair across a body. It is
+    // read as raw text as well.
+    expect(action(nl(...lines, "Don't", "rm -rf /", `echo it${BS}'s`))).toBe("ask");
+  });
+
+  test("a << inside a quoted string still leaves every part scanned", () => {
+    // The false cut takes the closing quote into the body, so the command text left behind is
+    // unreadable and the raw-text fallback asks.
+    expect(action(nl('echo "x <<EOF', '"', "EOF", "rm -rf /", 'echo "y"'))).toBe("ask");
+    expect(action(nl("echo 'a <<EOF b'", "rm -rf /", "EOF"))).toBe("deny");
   });
 
   test("a << inside a quoted string is not a heredoc and hides nothing", () => {
