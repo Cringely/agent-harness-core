@@ -100,3 +100,11 @@ One entry per consequential choice, written when the choice is made. Roles only,
 - Rejected: keeping the tracked copies and teaching the installer to accept a tracked rule that matches core's source, which would add code for a case nothing needs.
 - Accepted: top-level `claude --worktree` sessions in this repo do not get the installed rules.
 - Drafted by: coordinator. Decided by: operator.
+
+## 2026-11-14: per-project opt-in to raw gh pr merge (#274)
+
+- Choice: a project whose committed `.claude/.harness-manifest.json` records `allowRawPrMerge` with a non-empty risk sentence gets the publish deny fragment without its two canonical `gh pr merge` rules, and any copy of them already in its deny list is removed. The default install still denies them everywhere. The flag-first `gh pr * merge *` rules and every create and alias rule stay in both cases.
+- Rejected: a new `-AllowRawPrMerge` installer switch, which would need its own sticky-or-not rule across re-installs and could relax the deny from a command line nobody reviews. The manifest key follows the `allowUnpinnedPlugins` precedent, is committed with the project, and names its risk.
+- Rejected: removing `gh pr merge` from the shared fragment, which would relax it for every project.
+- Accepted: Claude Code deny rules match by prefix, so the opt-in allows every `gh pr merge` form that starts with the subcommand, not only `--admin --match-head-commit`.
+- Drafted by: general-purpose lane agent. Decided by: operator (option C, 2026-11-14). The shape is the lane agent's, for coordinator review.

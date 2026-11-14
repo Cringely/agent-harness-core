@@ -357,6 +357,110 @@ Describe "Install-Harness" {
         $raw | Should -Match '"deny":\s*\['
     }
 
+    # #274, operator ruling 2026-11-14: a project may opt in, in its committed manifest, to raw
+    # `gh pr merge` so the coordinator can run `gh pr merge --admin --match-head-commit` on an
+    # App-approved pull request. Only the two canonical merge rules drop. Without the opt-in every
+    # install denies them.
+    It "denies raw gh pr merge in both shells on a default install, with no allowRawPrMerge recorded" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $deny = @((Get-Content "$script:target/.claude/settings.json" -Raw | ConvertFrom-Json).permissions.deny)
+        $deny | Should -Contain 'Bash(gh pr merge *)'
+        $deny | Should -Contain 'PowerShell(gh pr merge *)'
+        $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+        $m.Contains('allowRawPrMerge') | Should -BeFalse
+    }
+
+    It "drops only the two canonical gh pr merge rules when the manifest records allowRawPrMerge, and keeps the opt-in recorded" {
+        New-Item -ItemType Directory -Path "$script:target/.claude" | Out-Null
+        $risk = 'Example risk: an agent shell here can merge any pull request it can name.'
+        @{ files = @{}; allowRawPrMerge = @{ risk = $risk } } | ConvertTo-Json -Depth 5 |
+            Set-Content -LiteralPath "$script:target/.claude/.harness-manifest.json"
+        $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target *>&1 | Out-String -Width 500
+        $deny = @((Get-Content "$script:target/.claude/settings.json" -Raw | ConvertFrom-Json).permissions.deny)
+        $deny | Should -Not -Contain 'Bash(gh pr merge *)'
+        $deny | Should -Not -Contain 'PowerShell(gh pr merge *)'
+        $deny.Count | Should -Be 12
+        # Every other raw publish rule stays, the flag-first merge forms included.
+        foreach ($rule in @(
+                'Bash(gh pr create *)', 'Bash(gh issue create *)', 'Bash(gh pr * create *)', 'Bash(gh issue * create *)',
+                'Bash(gh pr * merge *)', 'Bash(gh alias set *)',
+                'PowerShell(gh pr create *)', 'PowerShell(gh issue create *)', 'PowerShell(gh pr * create *)',
+                'PowerShell(gh issue * create *)', 'PowerShell(gh pr * merge *)', 'PowerShell(gh alias set *)'
+            )) { $deny | Should -Contain $rule }
+        $out.Contains($risk) | Should -BeTrue
+        $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+        $m['allowRawPrMerge']['risk'] | Should -Be $risk
+        # A re-install changes nothing in permissions.deny, so it reports no deny row: the two
+        # rules are never merged in only to be removed again.
+        $again = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target *>&1 | Out-String -Width 500
+        $again | Should -Not -Match 'settings\.json:permissions\.deny'
+        @((Get-Content "$script:target/.claude/settings.json" -Raw | ConvertFrom-Json).permissions.deny).Count | Should -Be 12
+    }
+
+    It "removes the canonical merge rules a default install added once the opt-in is recorded, and restores them once it is removed" {
+        New-Item -ItemType Directory -Path "$script:target/.claude" | Out-Null
+        '{"permissions":{"deny":["Bash(rm -rf *)"]}}' | Set-Content "$script:target/.claude/settings.json"
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        @((Get-Content "$script:target/.claude/settings.json" -Raw | ConvertFrom-Json).permissions.deny).Count | Should -Be 15
+
+        $manifestPath = "$script:target/.claude/.harness-manifest.json"
+        $m = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+        $m['allowRawPrMerge'] = @{ risk = 'Example risk sentence.' }
+        $m | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestPath
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $deny = @((Get-Content "$script:target/.claude/settings.json" -Raw | ConvertFrom-Json).permissions.deny)
+        $deny.Count | Should -Be 13
+        $deny[0] | Should -Be 'Bash(rm -rf *)'
+        $deny | Should -Not -Contain 'Bash(gh pr merge *)'
+        $deny | Should -Not -Contain 'PowerShell(gh pr merge *)'
+
+        $m = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+        $m.Remove('allowRawPrMerge')
+        $m | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestPath
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $deny = @((Get-Content "$script:target/.claude/settings.json" -Raw | ConvertFrom-Json).permissions.deny)
+        $deny.Count | Should -Be 15
+        $deny | Should -Contain 'Bash(gh pr merge *)'
+        $deny | Should -Contain 'PowerShell(gh pr merge *)'
+    }
+
+    It "refuses before any write when allowRawPrMerge is <Name>" -ForEach @(
+        @{ Name = 'a bare true'; Value = $true }
+        @{ Name = 'a string'; Value = 'yes' }
+        @{ Name = 'an object with no risk'; Value = @{} }
+        @{ Name = 'an object with a blank risk'; Value = @{ risk = '  ' } }
+        @{ Name = 'an object with a non-string risk'; Value = @{ risk = 3 } }
+    ) {
+        New-Item -ItemType Directory -Path "$script:target/.claude" | Out-Null
+        @{ files = @{}; allowRawPrMerge = $Value } | ConvertTo-Json -Depth 5 |
+            Set-Content -LiteralPath "$script:target/.claude/.harness-manifest.json"
+        { & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target *>&1 | Out-Null } |
+            Should -Throw -ExpectedMessage '*allowRawPrMerge*'
+        Test-Path -LiteralPath "$script:target/.claude/agents" | Should -BeFalse
+        Test-Path -LiteralPath "$script:target/.claude/settings.json" | Should -BeFalse
+    }
+
+    It "refuses before any write when allowRawPrMerge is recorded but the deny fragment no longer carries a canonical merge rule" {
+        $fakeRepo = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-fakerepo-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path (Join-Path $fakeRepo 'install') -Force | Out-Null
+        Copy-Item "$PSScriptRoot/Install-Harness.ps1" (Join-Path $fakeRepo 'install/Install-Harness.ps1')
+        Copy-Item "$PSScriptRoot/Deps.ps1" (Join-Path $fakeRepo 'install/Deps.ps1')
+        Copy-Item -Recurse "$PSScriptRoot/../core" (Join-Path $fakeRepo 'core')
+        Set-Content -LiteralPath (Join-Path $fakeRepo 'core/claude/templates/settings.permissions.json') `
+            -Value '{"permissions":{"deny":["Bash(gh pr create *)","Bash(gh pr merge *)"]}}'
+        New-Item -ItemType Directory -Path "$script:target/.claude" | Out-Null
+        @{ files = @{}; allowRawPrMerge = @{ risk = 'Example risk sentence.' } } | ConvertTo-Json -Depth 5 |
+            Set-Content -LiteralPath "$script:target/.claude/.harness-manifest.json"
+        try {
+            { & (Join-Path $fakeRepo 'install/Install-Harness.ps1') @script:dep -Target $script:target *>&1 | Out-Null } |
+                Should -Throw -ExpectedMessage '*allowRawPrMerge*'
+            Test-Path -LiteralPath "$script:target/.claude/agents" | Should -BeFalse
+        }
+        finally {
+            Remove-Item -Recurse -Force $fakeRepo
+        }
+    }
+
     It "refuses before the first copy when settings.json holds <Name>" -ForEach @(
         @{ Name = 'permissions that is not an object'; Json = '{"permissions":["Bash(x)"]}' }
         @{ Name = 'permissions.deny that is not a list'; Json = '{"permissions":{"deny":"Bash(x)"}}' }

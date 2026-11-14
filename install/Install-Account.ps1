@@ -672,7 +672,7 @@ function Convert-SettingsForTarget {
             #
             # Also wraps the pipeline OUTPUT: a single surviving hook unwraps to a bare scalar
             # and would serialise `"hooks": {...} instead of "hooks": [...]`
-            # (install/Install-Harness.ps1:2414-2417).
+            # (install/Install-Harness.ps1:2463-2466).
             $kept = @(@($group.hooks) | Where-Object {
                     $_ -and ($NpmPresent -or ($_.command -notmatch 'ccstatusline'))
                 })

@@ -10,7 +10,9 @@
     and tracks installed-file hashes in <Target>/.claude/.harness-manifest.json so
     re-installs never silently clobber a project-modified file. The deny rules in
     core/claude/templates/settings.permissions.json are added to the same settings file's
-    permissions.deny (#274), and the skills under core/claude/skills are copied to
+    permissions.deny (#274). A project whose manifest records allowRawPrMerge with a risk
+    sentence gets every rule except the two canonical `gh pr merge` ones, and any copy of
+    those two already in its deny list is removed. The skills under core/claude/skills are copied to
     <Target>/.claude/skills like any other managed file.
 
     The manifest is v2: installed-file hashes live under `files`, deliberate project
@@ -709,7 +711,7 @@ function ConvertTo-ManifestV2 {
         # ConvertTo-ManifestV3 reads from its own input, so dropping them here loses nothing.
         $files = @{}
         foreach ($key in @($m.Keys)) {
-            if ($key -in @('stackDetected', 'accepted', 'coreRepo', 'coreCommit', 'schemaVersion', 'layers', 'settings', 'allowUnpinnedPlugins')) { continue }
+            if ($key -in @('stackDetected', 'accepted', 'coreRepo', 'coreCommit', 'schemaVersion', 'layers', 'settings', 'allowUnpinnedPlugins', 'allowRawPrMerge')) { continue }
             $files[$key] = $m[$key]
         }
 
@@ -908,6 +910,18 @@ function ConvertTo-ManifestV3 {
             }
         }
         $m['allowUnpinnedPlugins'] = @($rawAllow)
+    }
+
+    # The per-project opt-in to raw `gh pr merge` (#274). Validated here, above every write, so a
+    # malformed value refuses rather than being read as either answer. Absent means the default,
+    # which denies the merge rules.
+    if ($source.Contains('allowRawPrMerge')) {
+        $rawMerge = $source['allowRawPrMerge']
+        if ($rawMerge -isnot [System.Collections.IDictionary] -or
+            $rawMerge['risk'] -isnot [string] -or -not $rawMerge['risk'].Trim()) {
+            throw ".harness-manifest.json 'allowRawPrMerge' must be an object with a non-empty string risk sentence saying what the project accepts by letting an agent shell run raw gh pr merge. Fix it, or delete the key to keep the default deny."
+        }
+        $m['allowRawPrMerge'] = $rawMerge
     }
 
     return $m
@@ -1628,6 +1642,39 @@ function Merge-PermissionDeny {
     return $added
 }
 
+# The two rules a project's allowRawPrMerge opt-in drops (#274, operator ruling 2026-11-14): the
+# canonical `gh pr merge` form in each shell, which the coordinator needs for `gh pr merge <n>
+# --admin --match-head-commit <sha>` on an App-approved pull request. Permission rules match by
+# prefix and a deny cannot carve an exception out of a broader deny, so the opt-in removes these
+# two and nothing else. The flag-first `gh pr * merge *` rules and every create and alias rule stay.
+$script:rawMergeDenyRules = [string[]]@('Bash(gh pr merge *)', 'PowerShell(gh pr merge *)')
+
+# Applies the opt-in to the fragment's rules. Refuses when the fragment no longer carries both
+# canonical merge rules, because the opt-in would then name rules that do not exist, and removing
+# them from the project's settings would strip rules the installer never added.
+function Select-DenyRulesForProject {
+    param([string[]]$Rules, [bool]$AllowRawPrMerge)
+    if (-not $AllowRawPrMerge) { return , $Rules }
+    foreach ($rule in $script:rawMergeDenyRules) {
+        if ($Rules -cnotcontains $rule) {
+            throw "The project manifest records allowRawPrMerge, but the permission fragment no longer holds '$rule'. Refusing rather than guessing which rules the opt-in should drop. Update the installer's rawMergeDenyRules to match the fragment, or delete allowRawPrMerge from .harness-manifest.json."
+        }
+    }
+    return , [string[]]@($Rules | Where-Object { $script:rawMergeDenyRules -cnotcontains $_ })
+}
+
+# Removes the canonical merge rules from a project that opted in after an earlier default install
+# added them. A union alone never removes, so without this the opt-in would change nothing in an
+# existing project. Returns how many rules it removed. Ordinal, like the merge.
+function Remove-RawMergeDeny {
+    param($Settings)
+    if (-not $Settings.PSObject.Properties['permissions'] -or -not $Settings.permissions.PSObject.Properties['deny']) { return 0 }
+    $before = @($Settings.permissions.deny)
+    $kept = [string[]]@($before | Where-Object { $script:rawMergeDenyRules -cnotcontains $_ })
+    $Settings.permissions.deny = $kept
+    return $before.Count - $kept.Count
+}
+
 $settingsPath = Join-Path $claudeDir 'settings.json'
 $settingsRead = Read-TargetSettings -Path $settingsPath
 $settings = $settingsRead.Settings
@@ -2203,6 +2250,8 @@ if ($settingsParseError) {
     throw "Target settings.json does not parse as JSON: $settingsPath. Merging the hook registrations into it would destroy whatever it holds, so nothing was copied and the manifest was not written. Fix or move that file, then re-run. Parser reported: $settingsParseError"
 }
 $denyRules = Get-DenyFragment -Path (Join-Path $templatesSrc 'settings.permissions.json')
+$allowRawPrMerge = $manifest.Contains('allowRawPrMerge')
+$denyRules = Select-DenyRulesForProject -Rules $denyRules -AllowRawPrMerge $allowRawPrMerge
 Assert-SettingsPermissionsShape -Settings $settings -Path $settingsPath
 
 # Sidecar decision, ahead of every write this install makes (round-4 C). Round 3 threw the R2-2
@@ -2542,6 +2591,11 @@ foreach ($eventType in $hooksTemplate.PSObject.Properties.Name) {
 # The publish deny rules, read and checked above the first copy.
 $denyAdded = Merge-PermissionDeny -Settings $settings -Rules $denyRules
 if ($denyAdded -gt 0) { $results.Add([pscustomobject]@{ File = 'settings.json:permissions.deny'; Action = 'merged' }) }
+if ($allowRawPrMerge) {
+    $denyRemoved = Remove-RawMergeDeny -Settings $settings
+    if ($denyRemoved -gt 0) { $results.Add([pscustomobject]@{ File = 'settings.json:permissions.deny'; Action = 'gh pr merge rules removed (allowRawPrMerge)' }) }
+    Write-Host "allowRawPrMerge: raw gh pr merge is not denied in this project. Recorded risk: $($manifest['allowRawPrMerge']['risk'])"
+}
 
 # Install-time provenance, refreshed on every install. A project that re-installs from a
 # newer core should record the commit it actually got, not the one it first got. coreCommit

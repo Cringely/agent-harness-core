@@ -171,7 +171,7 @@ and a target inside a repository gets a warning with that command and a `FAILED`
 `git:core.hooksPath`. The Claude Code hooks take the other path:
 `core/claude/templates/settings.hooks.json` is merged into the project's `.claude/settings.json`.
 So is `core/claude/templates/settings.permissions.json`, whose deny rules for raw `gh pr create`,
-`gh issue create`, `gh pr merge`, `gh alias set` and related forms are added to the project's own (#274). They stay in the project:
+`gh issue create`, `gh pr merge`, `gh alias set` and related forms are added to the project's own (#274). A project whose committed manifest records `allowRawPrMerge` with a risk sentence keeps every rule except the two canonical `gh pr merge` ones, which lets its coordinator merge an App-approved pull request with `gh pr merge --admin --match-head-commit` (see `tools/publish/README.md`). They stay in the project:
 the account installer ships no such rule. A fragment that cannot be read or lists no rule, or a
 project `permissions` block the rules cannot be added to, stops the install before it writes.
 
@@ -691,7 +691,9 @@ active rule on `master` shown met, and posts the bypass rationale first. Under t
 it cannot show that, so it refuses and the operator merges those by hand. A COMMENT makes it
 refuse, whatever its reasons: merging that pull request is an operator override, done by hand with a
 bypass-rationale comment. The project installer denies raw `gh pr merge` in the Bash and PowerShell tools
-of each project it installs into, which makes the tool the default route. It does not change the point above: the deny list is
+of each project it installs into, which makes the tool the default route. A project that records
+`allowRawPrMerge` in its manifest drops only the canonical merge rule, so its coordinator can merge
+an App-approved pull request with `gh pr merge --admin --match-head-commit`. It does not change the point above: the deny list is
 a tripwire against the common direct forms, not enforcement. `gh api` writes, the edit and comment
 subcommands and shell wrappers such as `bash -c` are not matched, and an agent shell that can mint
 the operator's token can still run `gh pr merge --admin` by one of those routes.
