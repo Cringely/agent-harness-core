@@ -17,6 +17,7 @@ const HOOK = join(import.meta.dir, "..", "core", "claude", "hooks", "bash-tripwi
 
 const bash = (command: string) => ({ tool_name: "Bash", tool_input: { command } });
 const action = (command: string) => decide(bash(command)).action;
+const nl = (...lines: string[]) => lines.join(String.fromCharCode(10));
 
 // Commands assembled from parts so this file never holds one contiguous token-shaped string that a
 // secret scanner or a reader would mistake for a real credential read.
@@ -229,6 +230,22 @@ describe("credential reads", () => {
 describe("quoting, heredocs and substitutions", () => {
   test("a heredoc body that talks about a dangerous command is not scanned", () => {
     const cmd = ["cat > notes.md <<'EOF'", "rm -rf /", "git push --force", "cat .env", "EOF"].join("\n");
+    expect(action(cmd)).toBe("none");
+  });
+
+  test("a heredoc body fed to a shell is a script and is scanned", () => {
+    expect(action(nl("bash <<'EOF'", "rm -rf /", "EOF"))).toBe("deny");
+    expect(action(nl("sh -s <<EOF", "git push --force", "EOF"))).toBe("ask");
+    expect(action(nl("cat <<EOF | bash", "rm -rf /", "EOF"))).toBe("deny");
+  });
+
+  test("a heredoc body sent over ssh is a remote script and is scanned", () => {
+    expect(action(nl("ssh host bash -s <<'EOF'", "git push --force", "EOF"))).toBe("ask");
+    expect(action(nl("ssh host <<'EOF'", "rm -rf /", "EOF"))).toBe("deny");
+  });
+
+  test("a commit-message heredoc that mentions a dangerous command stays silent", () => {
+    const cmd = nl(`git commit -m "$(cat <<'EOF'`, "rm -rf /", "git push --force", "EOF", `)"`);
     expect(action(cmd)).toBe("none");
   });
 

@@ -23,10 +23,11 @@
 //         Get-Content and similar).
 //
 // WHAT THIS IS NOT. It is a tripwire, not a sandbox. It reads the command text with a small shell
-// tokenizer, so it sees `bash -c "..."`, `eval`, `sudo`, `env` and `$(...)` wrappers, and it skips
-// heredoc bodies and single-quoted strings, which are data. It does not expand variables, follow
-// aliases or functions, resolve a path, or read a script a command runs. A command built to evade
-// it will. Its job is the accident and the habitual shortcut, where one prompt is the whole value.
+// tokenizer, so it sees `bash -c "..."`, `eval`, `sudo`, `env` and `$(...)` wrappers. It skips
+// single-quoted strings, which are data, and heredoc bodies unless the heredoc feeds a shell or
+// goes over ssh, where the body is a script. It does not expand variables, follow aliases or
+// functions, resolve a path, or read a script a command runs. A command built to evade it will.
+// Its job is the accident and the habitual shortcut, where one prompt is the whole value.
 // Readers it does not know (grep, sed, awk, cp, scp) are not covered.
 //
 // OPT-IN. The installer ships this file and registers it only under -IncludeBashTripwire. A
@@ -73,10 +74,22 @@ interface Resolved {
 // ---------------------------------------------------------------------------
 
 /**
+ * A shell interpreter, or ssh (whose remote login shell reads stdin), named anywhere on a line.
+ * A heredoc on such a line feeds a script to that interpreter, so its body is code, not data.
+ * Matching the whole line over-matches (a `bash` in a commit message line), which only means a
+ * body gets scanned: the safe direction.
+ */
+const INTERPRETER_ON_LINE = new RegExp(
+  "(^|[\\s|;&(`'\"])(sh|bash|zsh|dash|ksh|csh|tcsh|fish|ash|pwsh|powershell|ssh)(\\.exe)?(?=[\\s|;&)`'\"]|$)",
+  "i",
+);
+
+/**
  * Remove heredoc bodies, keeping the `<<WORD` operator and the closing line. The body is data (a
  * commit message, a generated file), and scanning it would flag prose that merely mentions a
- * dangerous command. A heredoc with no terminator line is left in place: scanning too much is the
- * safe direction. A `<<` inside a quoted string is not told apart from a real one, which can hide
+ * dangerous command. A body fed to a shell interpreter or sent over ssh is a script, so it stays
+ * in place and is scanned. A heredoc with no terminator line is left in place: scanning too much
+ * is the safe direction. A `<<` inside a quoted string is not told apart from a real one, which can hide
  * the lines that follow it up to a line equal to the word. That is the same class of gap as every
  * other evasion in this file, accepted for the same reason.
  */
@@ -91,6 +104,7 @@ function stripHeredocBodies(src: string): string {
     i++;
     const m = /(?<!<)<<(-?)\s*(['"]?)([A-Za-z_][A-Za-z0-9_-]*)\2(?!<)/.exec(line);
     if (!m) continue;
+    if (INTERPRETER_ON_LINE.test(line)) continue;
     const word = m[3];
     const dash = m[1] === "-";
     let end = -1;
