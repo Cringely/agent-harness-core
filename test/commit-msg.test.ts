@@ -534,14 +534,34 @@ describe("commit-msg hook — the Why check runs only when no editor ran", () =>
       refusedForWhy(result, dir);
     });
 
-    test("a Why line below a typed scissors line counts", () => {
-      const dir = setup();
-      const message =
-        "fix: correct the retry backoff\n\n" +
-        "The first attempt waited zero seconds.\n" +
-        "# ------------------------ >8 ------------------------\n" +
-        "Why: the first backoff was too short.\n";
-      accepted(git(["commit", "-m", message], dir), dir);
+    test.each([
+      ["-v", ["-v"], []],
+      ["commit.verbose=true", [], [["commit.verbose", "true"]]],
+      ["no verbose flag", [], []],
+    ] as Array<[string, string[], Array<[string, string]>]>)(
+      "a Why line below a typed scissors line does not count (%s): git cuts there under -v",
+      (_label, flags, config) => {
+        const dir = setup(config);
+        const message =
+          "fix: correct the retry backoff\n\n" +
+          "The first attempt waited zero seconds.\n" +
+          "# ------------------------ >8 ------------------------\n" +
+          "Why: the first backoff was too short.\n";
+        refusedForWhy(git(["commit", ...flags, "-m", message], dir), dir);
+      },
+    );
+
+    test("a Why line above a typed scissors line counts, -v or not", () => {
+      for (const flags of [["-v"], []]) {
+        const dir = setup();
+        const message =
+          "fix: correct the retry backoff\n\n" +
+          "The first attempt waited zero seconds.\n" +
+          WHY +
+          "# ------------------------ >8 ------------------------\n" +
+          "More text below the cut.\n";
+        accepted(git(["commit", ...flags, "-m", message], dir), dir);
+      }
     });
 
     test("a -F message with a body and no Why line is refused", () => {

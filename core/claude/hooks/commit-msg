@@ -100,7 +100,8 @@ printf '%s\n' "$scan" | LC_ALL=C grep -aqiE '(noreply@anthropic\.com|claude\.ai/
 # after the subject is body, comment lines and a typed scissors line included,
 # except a trailer whose key holds a hyphen. Without an editor git keeps
 # comment lines unless commit.cleanup=strip is set, so the raw file is close to
-# what git stores. Under commit.cleanup=strip a #-led body line still needs a
+# what git stores. One exception: a Why line below a scissors line does not
+# count, because -v or commit.verbose cuts the message there. Under commit.cleanup=strip a #-led body line still needs a
 # Why line, and a caller who sets GIT_EDITOR=: for an editor-mode commit (git
 # commit --amend) has the template's comment lines read as body. Use --no-edit
 # there.
@@ -115,6 +116,7 @@ needs_why() {
     subject=
     has_body=0
     has_why=0
+    cut=0
     while IFS= read -r line || [ -n "$line" ]; do
         line=${line%"$cr"}
         case "$line" in *[![:space:]]*) ;; *) continue ;; esac
@@ -129,6 +131,14 @@ needs_why() {
             *-*) ;;
             *) has_body=1 ;;
         esac
+        # git commit -v (or commit.verbose=true) cuts the message at the
+        # scissors line even with -m, so a Why line below it is never stored.
+        # Body lines below it still count, since without -v git keeps them.
+        # Any comment prefix matches, as the hook cannot see core.commentChar.
+        case "$line" in
+            *" ------------------------ >8 ------------------------") cut=1 ;;
+        esac
+        [ "$cut" -eq 1 ] && continue
         case "$line" in
             [Ww][Hh][Yy]:*)
                 # Unquoted on purpose: word splitting counts the words after the colon.
