@@ -460,11 +460,89 @@ describe("commit-msg hook — judges the message git will store", () => {
     expect(git(["log", "-1", "--format=%B"], dir).stdout.toString().trim()).toBe("fix: correct the retry backoff");
   });
 
-  test("an attribution string inside a verbose diff does not trip the attribution scan", () => {
+  test("the attribution scan reads the whole raw file, so an attribution string inside a verbose diff is refused", () => {
+    // A known false refusal, taken on purpose: the hook cannot see -v, so it
+    // cannot know git will discard the diff, and cutting there would let a
+    // trailer below a hand-typed scissors line through.
     const dir = setup();
     writeFileSync(join(dir, "notes.txt"), "Contact noreply@anthropic.com for details.\n");
     git(["add", "notes.txt"], dir);
-    accepted(commitViaEditor(dir, "docs: add the contact note", ["-v"]), dir);
+    const result = commitViaEditor(dir, "docs: add the contact note", ["-v"]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("Anthropic address");
+    expect(headExists(dir)).toBe(false);
+  });
+
+  test("an attribution trailer below a hand-typed scissors line is refused when git keeps it", () => {
+    // Editor ran (GIT_EDITOR=true), default strip cleanup, no -v: git drops the
+    // scissors line as a comment and stores the trailer under it.
+    const dir = setup();
+    const env = { ...process.env, GIT_EDITOR: "true" };
+    const message =
+      "fix: correct the retry backoff\n\n" +
+      "# ------------------------ >8 ------------------------\n" +
+      "Co-authored-by: Claude <helper@example.test>\n";
+    const result = Bun.spawnSync(["git", "commit", "-e", "-m", message], {
+      cwd: dir,
+      stdout: "pipe",
+      stderr: "pipe",
+      env,
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("Co-Authored-By trailer");
+    expect(headExists(dir)).toBe(false);
+  });
+
+  describe("GIT_EDITOR=: is ambiguous, so the Why check takes the reading that requires it", () => {
+    // git sets GIT_EDITOR=: for the hook when it used no editor, and passes a
+    // caller's own GIT_EDITOR=: through when it did. The hook judges both.
+    function run(dir: string, args: string[]) {
+      const env = { ...process.env, GIT_EDITOR: ":" };
+      return Bun.spawnSync(["git", "commit", ...args], { cwd: dir, stdout: "pipe", stderr: "pipe", env });
+    }
+
+    test("a Why line only below a scissors line that git cuts under -v is refused", () => {
+      // Editor mode with a no-op editor and -v: git cuts at the first scissors
+      // line and stores the body without the Why line.
+      const dir = setup();
+      const message =
+        "fix: correct the retry backoff\n\n" +
+        "The first attempt waited zero seconds.\n" +
+        "# ------------------------ >8 ------------------------\n" +
+        "Why: the stored message would lack this line.\n";
+      refusedForWhy(run(dir, ["-e", "-v", "-m", message]), dir);
+    });
+
+    test("a Why line above the scissors line is accepted", () => {
+      const dir = setup();
+      const message =
+        "fix: correct the retry backoff\n\n" +
+        "The first attempt waited zero seconds.\n" +
+        "Why: the first backoff was too short.\n";
+      accepted(run(dir, ["-e", "-v", "-m", message]), dir);
+    });
+
+    test("a subject-only -m commit is accepted", () => {
+      const dir = setup();
+      accepted(run(dir, ["-m", "fix: correct the retry backoff"]), dir);
+    });
+
+    test("a #-led body line under -m still counts as body", () => {
+      const dir = setup();
+      refusedForWhy(run(dir, ["-m", "fix: retry", "-m", "#263 adds the backoff"]), dir);
+    });
+
+    test("known cost: a subject-only amend in editor mode is refused, --no-edit is the way round it", () => {
+      const dir = setup();
+      expect(git(["commit", "-m", "fix: base"], dir).exitCode).toBe(0);
+      stageSomething(dir, "g.txt");
+      const amended = run(dir, ["--amend"]);
+      expect(amended.exitCode).not.toBe(0);
+      expect(amended.stderr.toString()).toContain("No 'Why:' line");
+      const noEdit = run(dir, ["--amend", "--no-edit"]);
+      expect(noEdit.stderr.toString()).not.toContain("commit-msg: refused");
+      expect(noEdit.exitCode).toBe(0);
+    });
   });
 
   test("a subject-only commit through the editor with a non-default comment character is accepted", () => {
