@@ -34,8 +34,14 @@
 //      every commit's author and committer, and personal terms in commit messages, title and body.
 //      CONTRIBUTING.md requires it for a bypass merge, and it runs before every merge here
 //  10. for an administrator-bypass merge, the reason is posted as a pull request comment first
-//      (CONTRIBUTING.md has every bypass say why). Then gh pr merge with --match-head-commit, and
-//      the merge is confirmed
+//      (CONTRIBUTING.md has every bypass say why)
+//  11. the title and body are read once more and must equal the ones step 8 audited, or nothing is
+//      merged. Then gh pr merge with --match-head-commit and, for --merge, an explicit subject and
+//      body built from that audited text, so the merge commit never carries GitHub's default message
+//      built from whatever the title and body say at merge time
+//  12. the merge is confirmed, and the issues GitHub links the merged pull request to close must be
+//      exactly --closes. A mismatch is an error naming the merge: it has already happened, so the
+//      tool reports it rather than claiming anything was undone
 //
 // Every git call names the configured identity and a credential helper that answers with the
 // configured account's token from the child environment, never the active gh account.
@@ -48,7 +54,7 @@ import { ownerIdentity, reviewerConfig, type OwnerIdentity, type PublishConfig, 
 import { PublishError, PublishRefusal } from "./errors";
 import { parseRepo } from "../pr-review/types";
 import { childEnv, type RunResult, type Runner } from "./exec";
-import { Gh, type PrState } from "./gh";
+import { Gh, type ClosingRef, type PrState } from "./gh";
 import { checksSummary, decideMerge, enumText, parseReviewOutput, type BypassEvidence, type ReviewResult } from "./merge-decision";
 import { assertClean, loadBody } from "./publish";
 import { compareClosing, findClosingRefs } from "./scan";
@@ -109,6 +115,21 @@ function auditClosing(gh: Gh, repo: string, view: PrState, declared: number[]): 
     repo,
   );
   if (!verdict.ok) throw new PublishRefusal(`not merged: ${verdict.reason} across the title, body and commit messages`);
+}
+
+// The merge commit message for a --merge merge: the tool's own subject, and the title and body as
+// auditClosing read them, never as they stand when GitHub writes the commit.
+export function mergeMessage(pr: number, audited: PrState): { subject: string; body: string } {
+  const body = audited.body.trim() === "" ? audited.title : `${audited.title}\n\n${audited.body}`;
+  return { subject: `Merge pull request #${pr}`, body };
+}
+
+// True when GitHub's closing links for the merged pull request are exactly --closes, all in repo.
+function closingMatches(refs: ClosingRef[], declared: number[], repo: string): boolean {
+  if (refs.some((ref) => ref.repo.toLowerCase() !== repo.toLowerCase())) return false;
+  const linked = [...new Set(refs.map((ref) => ref.number))].sort((a, b) => a - b);
+  const wanted = [...new Set(declared)].sort((a, b) => a - b);
+  return linked.length === wanted.length && linked.every((n, i) => n === wanted[i]);
 }
 
 // owner/name of a GitHub remote URL, or null for anything else. The host is anchored to the start
@@ -352,10 +373,25 @@ export async function reviewMerge(ctx: ReviewMergeContext, args: ReviewMergeArgs
     if (adminReason === null) throw new PublishRefusal("an administrator-bypass merge needs a reason");
     gh.commentPr(args.repo, args.pr, adminReason);
   }
-  gh.mergePr(args.repo, args.pr, head, args.method, decision.admin);
+  // GitHub links closing issues from the body as it stands at merge, so an edit after the audit
+  // would close what --closes never named. Re-read as late as possible and refuse on any change.
+  const latest = gh.prView(args.repo, args.pr);
+  if (latest.title !== final.title || latest.body !== final.body) {
+    throw new PublishRefusal("the title or body changed after the closing-keyword audit. Nothing was merged");
+  }
+  gh.mergePr(args.repo, args.pr, head, args.method, decision.admin, mergeMessage(args.pr, final));
   const merged = gh.mergedState(args.repo, args.pr);
   if (merged.state !== "MERGED" || merged.mergeSha === null) {
     throw new PublishError("gh reported no error, but the pull request is not merged. Check it for auto-merge before running again");
   }
-  return `merged #${args.pr} at ${merged.mergeSha.slice(0, 7)} (${decision.admin ? "administrator bypass" : "App approval"})`;
+  const at = merged.mergeSha.slice(0, 7);
+  if (merged.closing === null) {
+    throw new PublishError(`merged #${args.pr} at ${at}, but the issues it closes could not be read. Check them against --closes by hand`);
+  }
+  if (!closingMatches(merged.closing, args.closes, args.repo)) {
+    const linked = merged.closing.map((ref) => `${ref.repo}#${ref.number}`).join(", ") || "none";
+    const wanted = args.closes.length === 0 ? "none" : [...args.closes].sort((a, b) => a - b).map((n) => `#${n}`).join(", ");
+    throw new PublishError(`merged #${args.pr} at ${at}, but GitHub links it to close ${linked} where --closes named ${wanted}. Reopen what should not have closed`);
+  }
+  return `merged #${args.pr} at ${at} (${decision.admin ? "administrator bypass" : "App approval"})`;
 }
