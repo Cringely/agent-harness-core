@@ -49,7 +49,7 @@ Plan C additions:
 2. A project that records `documents` and then drops it, holding a project-edited file under `.claude/skills/not-ai/`: the installer leaves the whole skill folder in place, warns once for that skill, and `-Audit` counts each of its files as `installed (layer not selected)`. It never deletes. Test in Task 5.
 3. A retire-list entry that names a file deeper inside a skill (`skills/old/reference/a.md`) rather than its `SKILL.md`: `Install-Account.ps1` must throw before renaming anything. Today it renames that file and leaves the skill loading with a missing reference, while its `SKILL.md`, the file Claude Code discovers, stays live. Test in Task 6.
 4. An office tool probe whose output carries text beyond a version: the sidecar `toolchain` record holds only `present`, `version` and `probedAt`, and the committed manifest never gains a `toolchain` key. Test in Task 3.
-5. The window between copying skills into core (Task 4) and removing the account copies (Task 8): an edit to an account skill in that window must turn the copy test red, so nothing written to `~/.claude` during the move is lost. An edit already exported to `account/claude/` is caught by the copy case, ablated in Task 4. An edit made in the live `~/.claude` and never exported is caught by Task 8 Step 3's "Live sources match core" check, which exports with the pre-Task-7 exporter and runs the copy case on that export before Step 4 moves anything.
+5. The window between copying skills into core (Task 4) and removing the account copies (Task 8): an edit to an account skill in that window must turn the copy test red, so nothing written to `~/.claude` during the move is lost. An edit already exported to `account/claude/` is caught by the copy case, ablated in Task 4. An edit made in the live `~/.claude` and never exported is caught by Task 8 Step 3's "Live sources match core" check, which exports with the pre-Task-7 exporter, proves the export overwrote a planted marker in the check worktree, and runs the copy case on that export before Step 4 moves anything.
 6. Python bytecode under `core/claude/skills/`: any local run of the not-ai gate can leave a gitignored `__pycache__` folder there, and a `.pyc` embeds its compile path, which holds the workstation username. The installer must never copy a `.pyc` or anything under `__pycache__` into a project or record it in the manifest. Test in Task 5.
 
 ## Inventory
@@ -60,9 +60,9 @@ Source: `account/claude/` at the Plan C base, plus the live `~/.claude` where th
 |---|---|---|---|
 | `skills/not-ai/` and `tools/not-ai/` | account | core skill, layers `code` and `documents`. `tools/not-ai/` becomes the skill's `scripts/` | The spec puts it in documents. `writing-style.md` (kernel) routes every file-based prose deliverable through it, and code projects ship READMEs and docs, so the code layer carries it too. A physical-only project gets neither skill |
 | `skills/prose-lint/` | account | core skill, layers `code` and `documents` | The spec's code layer names "the prose lint on committed docs", and its documents layer names this skill. The Vale kit under `tools/prose-lint/` stays in the account layer, because the account hook, the core `lint-doc-prose.ts` hook and `writing-style.md` all read it from there |
-| `skills/owasp-agentic`, `owasp-cicd`, `owasp-infrastructure`, `owasp-llm`, `owasp-mcp`, `owasp-top-10`, `secure-by-design` | account | core skills, layer `code` | Spec, code layer. Domain knowledge, so the C3 gate ruling decides whether they move |
-| `skills/reviewing-container-images` | live `~/.claude` only, not in the export at the time of writing | core skill, layer `code`, only if it is in `account/claude/skills/` at Task 4's `BASE-SHA` | Spec, code layer. A skill that has not been exported has no redacted copy to build from, so it waits for its own export PR. Domain knowledge, so the C3 gate ruling also applies |
-| `skills/wiring-diagram/` | account (its `examples/` is never exported) | core skill, layer `physical` | Spec, physical layer. `examples/` stays with the operator's backup (Task 8). Domain knowledge, so the C3 gate ruling decides whether it moves |
+| `skills/owasp-agentic`, `owasp-cicd`, `owasp-infrastructure`, `owasp-llm`, `owasp-mcp`, `owasp-top-10`, `secure-by-design` | account | stay in the account layer. Only on C3 gate ruling A: core skills, layer `code` | Spec, code layer. Domain knowledge, which `CONTRIBUTING.md` keeps out of core, so they move only on an explicit ruling |
+| `skills/reviewing-container-images` | live `~/.claude` only, not in the export at the time of writing | stays in the account layer. Only on C3 gate ruling A: core skill, layer `code`, and only if it is in `account/claude/skills/` at Task 4's `BASE-SHA` | Spec, code layer. A skill that has not been exported has no redacted copy to build from, so it waits for its own export PR. Domain knowledge, so it moves only on an explicit ruling |
+| `skills/wiring-diagram/` | account (its `examples/` is never exported) | stays in the account layer. Only on C3 gate ruling A: core skill, layer `physical` | Spec, physical layer. On A, `examples/` stays with the operator's backup (Task 8). Domain knowledge, so it moves only on an explicit ruling |
 | `document-skills@anthropic-agent-skills` | enabled at user scope in the live `~/.claude/settings.json`, absent from the export | project scope only, through the `documents` entry Plan A put in `deps.json` | Spec. User-scope copies keep loading everywhere |
 | `agents/appsec-sme.md`, `governance-sme.md`, `senior-developer.md` (code) and `pcb-dfm-reviewer.md`, `power-analog-reviewer.md`, `schematic-reviewer.md` (physical) | account | the operator's ruling in Task 10 decides. Default: they stay in the account layer | `CONTRIBUTING.md` bars domain agent definitions from core, and the accepted graduation-bar decision requires two projects before an agent definition enters core. The spec's assignment is a coordinator's call that conflicts with both |
 | code-context MCP server | account `mcp-servers.json` | stays in the account layer (Out of scope, recorded) | Its command is machine-specific |
@@ -321,26 +321,32 @@ PR C2 body: `Docs: README updated: Install section names the office toolchain re
 
 ### C3 gate: ruling on the domain skills (operator)
 
-`CONTRIBUTING.md` carries a process-versus-domain question that governs "what kind of knowledge a core file is allowed to carry at all", and says "Domain logic stays where the domain lives". Its reason is cadence: core updates only when a project reruns the installer, while a domain moves on its own schedule. The six `owasp-*` skills, `secure-by-design`, `reviewing-container-images` and `wiring-diagram` are domain knowledge, so moving them into core meets that objection. `not-ai` and `prose-lint` are process (how to write and check prose), and this question does not touch them. A contradiction between the spec and a repository rule goes to the operator, so the coordinator asks this before Task 4 is dispatched:
+`CONTRIBUTING.md` carries a process-versus-domain question that governs "what kind of knowledge a core file is allowed to carry at all", and says "Domain logic stays where the domain lives". Its reason is cadence: core updates only when a project reruns the installer, while a domain moves on its own schedule. The six `owasp-*` skills, `secure-by-design`, `reviewing-container-images` and `wiring-diagram` are domain knowledge, so moving them into core meets that objection. `not-ai` and `prose-lint` are process (how to write and check prose), and this question does not touch them. A contradiction between the spec and a repository rule goes to the operator, so the coordinator asks this before Task 4 is dispatched. Silence is not a ruling, so without an answer the plan takes the side the rule already takes: Tasks 4 to 8 are written for B, and only an explicit A adds the domain skills.
 
 ```
 1. Do the domain knowledge skills the layering spec assigns to layers move into core as layer content?
    - Where this came from: the spec puts the six owasp-* skills, secure-by-design and reviewing-container-images in the code layer and wiring-diagram in the physical layer, which moves them out of the account layer into core. CONTRIBUTING.md says domain logic stays where the domain lives, because core updates only when a project reruns the installer while a domain moves on its own schedule. Its explicit bar and the accepted graduation-bar decision name agent definitions, not skills, so how far the rule reaches over skills is unsettled.
-   - Default taken: A. Why A over B: no written rule or accepted decision names skills, and a layer skill installs only into projects that record its layer.
-   - A means: Tasks 4 to 8 run as written. Each project that records the layer gets the skill, other people's projects get it too, and each copy goes stale until its project is reinstalled. Undo: retire the skills from core and restore the account copies from git.
-   - B means: only not-ai and prose-lint move. The domain skills stay in the account layer and load on every project on this machine and on no one else's. Before dispatch, Tasks 4 to 8 drop them: MOVED_SKILLS, the layers.json skills map, the assignment case, Task 4's copy-case ablation (it moves from owasp-top-10/SKILL.md to prose-lint/SKILL.md), Task 5's code and physical cases (code asserts on not-ai and prose-lint only, physical installs no layer skill), Task 7's retire entries and NOTICE edits, and Task 8's move list. Undo: run the move later.
-   - Flips if: the operator reads the cadence argument in CONTRIBUTING.md as covering any domain knowledge in core, not only agent definitions and code.
+   - Default taken: B. Why B over A: CONTRIBUTING.md keeps domain knowledge out of core on a cadence argument that fits a knowledge base as well as an agent definition, so moving these skills needs a ruling, and no answer is not one.
+   - A means: the domain skills move too. Each project that records the layer gets them, other people's projects get them too, and each copy goes stale until its project is reinstalled. Before dispatch, Tasks 4 to 8 gain them as the "On ruling A" list below says. Undo: retire the skills from core and restore the account copies from git.
+   - B means: Tasks 4 to 8 run as written. Only not-ai and prose-lint move. The domain skills stay in the account layer and load on every project on this machine and on no one else's. Undo: run the move later on an A ruling.
+   - Flips if: the operator reads "core" in CONTRIBUTING.md as the always-installed kernel, so layer content opted into per project is outside what the cadence argument bars.
    - Blocks: Task 4's skill list. Tasks 1 to 3 do not wait on it.
 ```
 
-- [ ] **Step 1:** Ask, record the answer in `docs/decision-log.md` (roles only, UTC date), and on B revise Tasks 4 to 8 as the B line says before dispatching Task 4. With no answer, take A and log it to the session's `needs-you.md`.
+On ruling A, the coordinator extends Tasks 4 to 8 before Task 4 is dispatched:
+- Task 4: `MOVED_SKILLS` gains `{ from: ["skills/<name>"], rewrites: [] }` for each of the six `owasp-*` skills, `secure-by-design` and `wiring-diagram`, plus `reviewing-container-images` when it is in `account/claude/skills/` at Task 4's `BASE-SHA`. Each is copied with `cp -R account/claude/skills/<name> core/claude/skills/<name>`. The assignment case maps the `owasp-*` directories, `secure-by-design` and `reviewing-container-images` to `["code"]`, and `wiring-diagram` to `["physical"]`. The NOTICE edit also covers "Security skill knowledge bases".
+- Task 5: the code case asserts that `owasp-top-10` and `secure-by-design` are installed and `wiring-diagram` is not, in place of its no-other-folder check. The physical case becomes "-Layers physical installs wiring-diagram only among layer skills".
+- Task 7: the retire entries and the NOTICE edit cover them.
+- Task 8: Step 4 moves their folders too. `wiring-diagram/examples/` goes with its skill and stays in the backup, and the operator decides whether to copy it into a physical project.
+
+- [ ] **Step 1:** Ask, record the answer in `docs/decision-log.md` (roles only, UTC date), and on A extend Tasks 4 to 8 as the "On ruling A" list says before dispatching Task 4. With no answer, take B, dispatch Task 4 as written, and log the item to the session's `needs-you.md`.
 
 ---
 
 ### Task 4: Layer skills in core, identical to the account copies after line-ending normalization except the listed SKILL.md rewrites
 
 **Files:**
-- Create: `core/claude/skills/not-ai/` (the account `skills/not-ai/` tree, plus `scripts/` holding the account `tools/not-ai/` tree without its duplicate `LICENSE`), `core/claude/skills/prose-lint/`, `core/claude/skills/owasp-agentic/`, `owasp-cicd/`, `owasp-infrastructure/`, `owasp-llm/`, `owasp-mcp/`, `owasp-top-10/`, `secure-by-design/`, `wiring-diagram/`, and `reviewing-container-images/` only when the Inventory's condition holds
+- Create: `core/claude/skills/not-ai/` (the account `skills/not-ai/` tree, plus `scripts/` holding the account `tools/not-ai/` tree without its duplicate `LICENSE`), `core/claude/skills/prose-lint/`, and on C3 gate ruling A the domain skill directories its "On ruling A" list names
 - Modify: `test/not-ai-gate.test.ts` (the existing suite: its `GATE` path, its header comment, its spawn environment, and two appended cases)
 - Modify: `core/claude/rules/layers.json` (`skills`, `kernelSkills`), `test/layer-rules.test.ts`, `NOTICE`
 - Maybe modify: any file `bun test test/citation-drift.test.ts` reports as citing a moved path, such as the comment at `core/claude/hooks/identity-patterns.sh:42`
@@ -367,9 +373,7 @@ export const MOVED_SKILLS: Record<string, { from: string[]; rewrites: [string, s
       ['--output=line "<target-file>"`', "--output=line \"<target-file>\"`, where `<home>` is what `bun -e \"process.stdout.write(require('node:os').homedir())\"` prints. Git Bash's `$HOME` and `~` can name a different folder on Windows, so do not use them here.", 1],
     ],
   },
-  "owasp-agentic": { from: ["skills/owasp-agentic"], rewrites: [] },
-  // owasp-cicd, owasp-infrastructure, owasp-llm, owasp-mcp, owasp-top-10, secure-by-design,
-  // wiring-diagram the same, plus reviewing-container-images when it was exported
+  // On C3 gate ruling A only: one { from: ["skills/<name>"], rewrites: [] } entry per domain skill
 };
 ```
 
@@ -381,7 +385,7 @@ export const MOVED_SKILLS: Record<string, { from: string[]; rewrites: [string, s
     - Every core file under the key's directory has an account counterpart, so nothing was added.
     - A `from` directory absent under `account/claude/` is skipped. That is the after-cutover state, and Task 8 deletes the case.
   - Case "every core skill directory is registered exactly once": the directories under `core/claude/skills/` equal the union of `Object.keys(layers.skills)` and `layers.kernelSkills`, and the two sets do not intersect. Every `skills` list is non-empty and holds only `code`, `documents` and `physical`.
-  - Case "layer skill assignments": `not-ai` and `prose-lint` map to `["code", "documents"]`. The six `owasp-*` directories and `secure-by-design` map to `["code"]`, as does `reviewing-container-images` when present. `wiring-diagram` maps to `["physical"]`. `kernelSkills` is `["publish"]`.
+  - Case "layer skill assignments": `not-ai` and `prose-lint` map to `["code", "documents"]`, `skills` has no other key, and `kernelSkills` is `["publish"]`.
   - Case "no core skill carries an unexpanded CLAUDE_HOME token": no file under `core/claude/skills/` contains `{{CLAUDE_HOME}}`.
   - `test/not-ai-gate.test.ts` already exists and shells out to `account/claude/tools/not-ai/gate.py`. It is modified, not created:
     - `const GATE` becomes `join(import.meta.dir, "..", "core", "claude", "skills", "not-ai", "scripts", "gate.py")`.
@@ -393,18 +397,18 @@ export const MOVED_SKILLS: Record<string, { from: string[]; rewrites: [string, s
 - [ ] **Step 2: Run to verify they fail.** `bun test test/layer-rules.test.ts test/not-ai-gate.test.ts`. Expected: FAIL, the directories are missing.
 
 - [ ] **Step 3: Copy and register** (Git Bash, from the worktree root).
-  - For each plain skill: `cp -R account/claude/skills/<n> core/claude/skills/<n>`.
+  - prose-lint: `cp -R account/claude/skills/prose-lint core/claude/skills/prose-lint`.
   - not-ai: `cp -R account/claude/skills/not-ai core/claude/skills/not-ai`, then `mkdir core/claude/skills/not-ai/scripts`, then `cp -R account/claude/tools/not-ai/gate.py account/claude/tools/not-ai/not_ai_core core/claude/skills/not-ai/scripts/`. `gate.py` imports `not_ai_core` from its own folder, so the two stay side by side.
   - Strip bytecode a local run may have left in the account tree, then confirm none came across: `find core/claude/skills -name __pycache__ -type d -prune -exec rm -rf {} +`, `find core/claude/skills -name '*.pyc' -delete`, then `find core/claude/skills \( -name __pycache__ -o -name '*.pyc' \) | wc -l` prints `0`.
   - Apply each `rewrites` entry to the two `SKILL.md` files with an exact-string replace of every occurrence, and change nothing else.
   - Confirm with `git diff --no-index --stat account/claude/skills/<n> core/claude/skills/<n>` that only the rewritten `SKILL.md` files differ.
   - `layers.json` gains the `skills` and `kernelSkills` keys named in Step 1's assignment case.
-  - **NOTICE.** In "Security skill knowledge bases" and "not-ai", name the core paths beside the account paths ("`core/claude/skills/owasp-agentic/` ... and, until the account layer stops shipping them, `account/claude/skills/...`"). Task 7 drops the account half. The `not-ai` section names `core/claude/skills/not-ai/` and says the gate now sits in its `scripts/` folder.
+  - **NOTICE.** In "not-ai", name the core path beside the account paths ("`core/claude/skills/not-ai/` ... and, until the account layer stops shipping them, `account/claude/skills/not-ai/`"). Task 7 drops the account half. The `not-ai` section names `core/claude/skills/not-ai/` and says the gate now sits in its `scripts/` folder.
   - **Citations.** Run `bun test test/citation-drift.test.ts`. A citation of a file that now exists at both paths stays as written until Task 7. A citation the suite reports as broken is repointed to the core path.
   - **Commit gates.** The identity and secret pre-commit gates scan every added file. If either refuses a copied file, stop and report BLOCKED with the file path and the gate's rule name, never the matched text. A copied file is not edited to get past a gate.
 
 - [ ] **Step 4: Run to verify they pass.** `bun test`. Expected: all PASS. Then:
-  - Append one line to `account/claude/skills/owasp-top-10/SKILL.md` in the worktree, confirm the copy case fails, and revert it. This is the exported half of Review Focus 5. Task 8 Step 3 covers the live half.
+  - Append one line to `account/claude/skills/prose-lint/SKILL.md` in the worktree, confirm the copy case fails, and revert it. This is the exported half of Review Focus 5. Task 8 Step 3 covers the live half.
   - Change the not-ai rewrite's count from 4 to 3, confirm the occurrence check fails, and restore it.
   - Run `bun test test/not-ai-gate.test.ts test/layer-rules.test.ts` a second time, then `find core/claude/skills \( -name __pycache__ -o -name '*.pyc' \) | wc -l`. Expected: both runs green and `0`. Then plant `core/claude/skills/not-ai/scripts/__pycache__/x.pyc`, confirm the copy case still passes, and delete the plant.
 
@@ -422,7 +426,7 @@ Between this commit and Task 5's, #341's ungated loop would install every one of
 ### Task 5: The installer gates skills by layer
 
 **Files:**
-- Modify: `install/Install-Harness.ps1` (`Get-CoreSkillFiles` from #341, `Get-LayerRegistry`, `Get-ComponentGate`, the rule install loop, the skill install loop from #341, `.PARAMETER Audit` help), `README.md` (the `core/claude/rules/` row and #341's skills row or Install sentence), `docs/security-controls.md` (one new row)
+- Modify: `install/Install-Harness.ps1` (`Get-CoreSkillFiles` from #341, `Get-LayerRegistry`, `Get-ComponentGate`, the rule install loop, the skill install loop from #341, `.PARAMETER Layers` help), `README.md` (the `core/claude/rules/` row and #341's skills row or Install sentence), `docs/security-controls.md` (one new row)
 - Test: `install/Install-Harness.Tests.ps1` (new `Context 'layer skills'`)
 
 **Interfaces:**
@@ -434,9 +438,9 @@ Between this commit and Task 5's, #341's ungated loop would install every one of
   - `Invoke-UnselectedManagedFile -Key <string> -DestPath <string>` returns `'left-in-place (layer not selected)'`, `'record-dropped (layer not selected)'` or `$null`, and adds the matching row to `$results`. It holds the branch that the rule loop runs today for an unselected rule, minus the warning, which each caller prints.
 
 - [ ] **Step 1: Write the failing tests** in `Context 'layer skills'`.
-  - "-Layers documents installs not-ai and prose-lint and no code or physical skill": `.claude/skills/not-ai/SKILL.md`, `.claude/skills/not-ai/scripts/gate.py` and `.claude/skills/prose-lint/SKILL.md` exist. `.claude/skills/owasp-top-10` and `.claude/skills/wiring-diagram` do not. `.claude/skills/publish/SKILL.md` exists.
-  - "-Layers code installs the security skills and the prose skills": `owasp-top-10`, `secure-by-design`, `not-ai` and `prose-lint` exist, and `wiring-diagram` does not.
-  - "-Layers physical installs wiring-diagram only among layer skills".
+  - "-Layers documents installs not-ai and prose-lint": `.claude/skills/not-ai/SKILL.md`, `.claude/skills/not-ai/scripts/gate.py`, `.claude/skills/prose-lint/SKILL.md` and `.claude/skills/publish/SKILL.md` exist, and `.claude/skills/` holds no other folder.
+  - "-Layers code installs the prose skills": `not-ai`, `prose-lint` and `publish` exist, and `.claude/skills/` holds no other folder.
+  - "-Layers physical installs no layer skill": `.claude/skills/` holds `publish` and nothing else.
   - "-Layers none installs only kernel skills": `.claude/skills/` holds `publish` and nothing else.
   - Review Focus 2, "a dropped layer's skill folder is left in place, warned once, and counted by the audit":
     - Install `-Layers documents`, append `PROJECT EDIT` to `.claude/skills/not-ai/reference/profile.md`, and re-run `-Layers code`. The appended line survives, and so does every other not-ai file.
@@ -550,38 +554,41 @@ This commit's sha is the `BASE-SHA` the coordinator checks out for Task 8.
 
 In the main clone, on `feat/310-layer-skills` at Task 7's commit. Nothing leaves `~/.claude` until Step 3 passes.
 
-- [ ] **Step 1: Ask the operator once which projects take which layers.** Take the project list from Plan A Task 11 Step 2. The question carries each project's current `Layers:` line and asks which ones record `documents` or `physical` as well as, or instead of, `code`. Default taken if the operator says nothing: every project keeps `code`, which already carries `not-ai`, `prose-lint` and the security skills, and only `wiring-diagram` leaves projects that record no `physical` layer. Log the item to the session's `needs-you.md` when asked.
+- [ ] **Step 1: Ask the operator once which projects take which layers.** Take the project list from Plan A Task 11 Step 2. The question carries each project's current `Layers:` line and asks which ones record `documents` or `physical` as well as, or instead of, `code`. Default taken if the operator says nothing: every project keeps `code`, which carries `not-ai` and `prose-lint`, so no project loses a skill it loads today. On C3 gate ruling A, `code` also carries the security skills, and only `wiring-diagram` leaves projects that record no `physical` layer. Log the item to the session's `needs-you.md` when asked.
 - [ ] **Step 2: Reinstall.** `pwsh -NoProfile -File install/Install-Harness.ps1 -Target <project> -Layers <answer>` for each project, this repo included. Expected per project: `.claude/skills/<name>/SKILL.md` for every skill its layers select. Collect each `git status --short` for the operator, as Plan A Task 11 Step 3 did.
 - [ ] **Step 3: Live checks, before anything is removed.** Run from Git Bash. Print only the verdicts, because headless output can carry the account email.
   - **Project skill loads.** In a temp folder installed with `-Layers documents`, temporarily set `~/.claude/skills/not-ai/SKILL.md` aside by renaming it to `SKILL.md.check`, so only the project copy can answer. Run `claude -p --model haiku "Without using any tool, is a skill named not-ai available to you? Reply YES or NO."`. Then restore the name. Expected: `YES`.
   - **Gate path resolves.** In the same folder with a two-sentence `draft.txt`, run `claude -p --model haiku --output-format stream-json --verbose "Use the not-ai skill's gate on draft.txt with --genre technical --json."` to a scratch file, with the account `SKILL.md` set aside again. A `bun -e` one-liner finds the first Bash `tool_use` whose command contains `gate.py` and prints `GATE PATH RESOLVED` when that command contains `.claude/skills/not-ai/scripts/gate.py` and its `tool_result` exit code is 0 or 1, `GATE PATH UNRESOLVED` when the command still contains the literal `${CLAUDE_SKILL_DIR}` or the result reports a missing file, and `GATE NOT RUN` when there is no such call. Restore the name and delete the scratch file.
   - **Live sources match core.** An edit made in `~/.claude` after the last export reaches `account/claude/` only through an export, so the copy case cannot see it yet. Task 7 stopped the exporter shipping `tools/not-ai` and templating the two `SKILL.md` files, so this check exports with the exporter from Task 7's parent commit, into a throwaway worktree, and runs the copy case there. With `<task7>` the Task 7 sha and `<scratch>` the session scratchpad:
     - `git worktree add --detach <scratch>/live-skill-check HEAD`, then `git -C <scratch>/live-skill-check checkout <task7>~1 -- install/AccountShared.ps1 install/Export-Account.ps1`. The worktree keeps HEAD's `core/claude/skills/` and `MOVED_SKILLS`, including any Step 3 fallback commit.
+    - Plant a marker the export must overwrite: `printf '\nLIVE-EXPORT-MARKER\n' >> <scratch>/live-skill-check/account/claude/skills/prose-lint/SKILL.md`. The live `~/.claude/skills/prose-lint/SKILL.md` never carries that line, so an export that reached this worktree removes it.
     - `pwsh -NoProfile -File <scratch>/live-skill-check/install/Export-Account.ps1 > <scratch>/live-skill-export.log 2>&1`. Its output root defaults to the script's own repository, so it writes into the check worktree's `account/claude/` and leaves the main clone alone. The log names the account home path, so print only the exit code.
+    - Assert the export landed: `grep -c LIVE-EXPORT-MARKER <scratch>/live-skill-check/account/claude/skills/prose-lint/SKILL.md` prints `0`, and `git status --porcelain -- account/claude` in the main clone prints nothing. A nonzero count means the export wrote nothing into the check worktree, so the copy case below would only compare HEAD's tree with itself. Stop and find where the export wrote before trusting any copy-case result.
     - From the check worktree's root, `bun test test/layer-rules.test.ts > <scratch>/live-skill-test.log 2>&1`, and print only the pass and fail counts and the names of failing cases.
-    - Expected: export exit 0 and the copy case passing. On any failure, stop. Nothing has been moved yet. The failing paths name a live edit that core lacks. Copy each such file from the check worktree's `account/claude/` to its core path on the branch (a `SKILL.md` with its `MOVED_SKILLS` rewrites applied), commit, and re-run this check.
+    - Expected: export exit 0, a marker count of `0`, and the copy case passing. On any failure, stop. Nothing has been moved yet. The failing paths name a live edit that core lacks. Copy each such file from the check worktree's `account/claude/` to its core path on the branch (a `SKILL.md` with its `MOVED_SKILLS` rewrites applied), commit, and re-run this check.
     - Remove the check worktree with `git worktree remove --force <scratch>/live-skill-check` and delete both logs. Step 4 follows this check directly, with no edit to a moved skill in between.
   - **Gate.**
     - `YES`, `GATE PATH RESOLVED` and live sources matching core: continue to Step 4.
     - `NO`: stop. Project skills under `.claude/skills/` do not load, so Tasks 4 to 7 do not merge, and the coordinator raises a Needs-you item with this result.
     - `YES` and `GATE PATH UNRESOLVED`: stop. Change the not-ai rewrite's replacement in `MOVED_SKILLS` and the core `SKILL.md` to the project-relative `python3 -B ".claude/skills/not-ai/scripts/gate.py"`, add a sentence that the command runs from the project root, commit that on the branch, reinstall the temp folder, and re-run this step.
     - `GATE NOT RUN`: one retry, then treat as `GATE PATH UNRESOLVED`.
-- [ ] **Step 4: Move the sources out of `~/.claude`.** Create `~/.claude-backups/skills-<yyyyMMddTHHmmssZ>/` (UTC) and move each moved skill's folder there, plus `~/.claude/tools/not-ai`. `wiring-diagram/examples/` goes with its skill and stays in the backup. The operator decides whether to copy it into a physical project.
+- [ ] **Step 4: Move the sources out of `~/.claude`.** Create `~/.claude-backups/skills-<yyyyMMddTHHmmssZ>/` (UTC) and move each moved skill's folder there, plus `~/.claude/tools/not-ai`. On C3 gate ruling A, `wiring-diagram/examples/` goes with its skill and stays in the backup, and the operator decides whether to copy it into a physical project.
 - [ ] **Step 5: Kernel pointer.** In `~/.claude/rules/writing-style.md`, the Surface Routing row 1 cell "not-ai skill for editing existing prose" becomes "the not-ai skill (code and documents layers) for editing existing prose".
 - [ ] **Step 6: Export and check.**
-  - Run `pwsh -NoProfile -File install/Export-Account.ps1`, then `git diff --stat account/claude`. Expected, and the only paths staged: each moved `account/claude/skills/<name>/` deleted, `account/claude/tools/not-ai/` deleted, and `account/claude/rules/writing-style.md` modified.
+  - Run `pwsh -NoProfile -File install/Export-Account.ps1`, then `git diff --stat account/claude`. Expected, and the only `account/claude` paths staged: each moved `account/claude/skills/<name>/` deleted, `account/claude/tools/not-ai/` deleted, and `account/claude/rules/writing-style.md` modified.
   - Delete the "moved skills match their account copy" case from `test/layer-rules.test.ts`, and `MOVED_SKILLS` with it. Its job ends here.
-  - Run `bun test`, `pwsh -NoProfile -File install/Install-Account.Tests.ps1` and `pwsh -NoProfile -File install/Export-Account.Tests.ps1`. Expected: all PASS. `test/not-ai-gate.test.ts` has pointed at `core/claude/skills/not-ai/scripts/gate.py` since Task 4, so deleting `account/claude/tools/not-ai` leaves it green. `git grep -n "account/claude/tools/not-ai" -- test` prints nothing. A hit is a test still reading the deleted tree: repoint it to the core path and stage it with Step 7.
+  - Run `bun test`, `pwsh -NoProfile -File install/Install-Account.Tests.ps1` and `pwsh -NoProfile -File install/Export-Account.Tests.ps1`. Expected: all PASS. `test/not-ai-gate.test.ts` has pointed at `core/claude/skills/not-ai/scripts/gate.py` since Task 4, so deleting `account/claude/tools/not-ai` leaves it green. `git grep -n "account/claude/tools/not-ai" -- test` prints nothing. A hit is a test still reading the deleted tree: repoint it to the core path. Step 7 stages it.
   - Dry run: seed a temp home's `skills/not-ai/SKILL.md` from `git show <Task 7 sha>:account/claude/skills/not-ai/SKILL.md` (Git Bash) and run `pwsh -NoProfile -File install/Install-Account.ps1 -ClaudeHome <tmp-home> -ClaudeJson <tmp-home>/claude.json -SkipPreflight -WhatIf`. Expected: one `What if` move line for `skills/not-ai/SKILL.md`, and the file still in place.
 - [ ] **Step 7: Commit.**
 
 ```bash
 git add -A account/claude/skills account/claude/tools/not-ai
 git add account/claude/rules/writing-style.md test/layer-rules.test.ts
+git add <each test file Step 6 repointed, if any>
 git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "refactor(account): layer skills ship from core, not the account layer (#310)"
 ```
 
-Before the first `git add`, confirm with `git diff --stat --cached` that nothing outside those paths is staged.
+Before the first `git add`, confirm `git diff --stat --cached` prints nothing. Before the commit, confirm it lists only those paths and the test files Step 6 repointed.
 
 PR C3 body: `Docs: README updated: core/claude/rules row, skills install sentence. docs/security-controls.md: new core skill bytecode row, retire-list row extended`. After the merge, the coordinator re-runs Step 2's reinstall once more on each project, and tells the operator that a second machine needs `git pull`, then `Install-Harness.ps1` on each project, then `Install-Account.ps1`, in that order.
 
@@ -646,5 +653,5 @@ PR C5 body: `Docs: README updated: core/claude/rules row names the agents map. C
 - The `office-on-windows` skill #308 proposed (section 4.2). The spec places it in the account layer or a skill pack, and only #308 reports the need.
 - Gating hooks by layer. Every core hook still installs for every layer, as in Plan A.
 - Duplicate skills from the `core-workflow` plugin (`council`, `handoff`, `subagent-prompting`). The spec records this as a separate open observation.
-- The export's special cases for the OWASP reference files (`Export-Account.ps1` near lines 359, 1179 and 1220) become unreachable once those skills leave the payload. They are harmless and stay until someone edits that code for another reason.
+- The export's special cases for the OWASP reference files (`Export-Account.ps1` near lines 359, 1179 and 1220) become unreachable if C3 gate ruling A moves those skills out of the payload. They are harmless and stay until someone edits that code for another reason.
 - License-restricted inputs (#294). Seen once, so it waits for a second report.
