@@ -46,6 +46,17 @@
 msg_file="$1"
 [ -f "$msg_file" ] || exit 0
 
+# --- Binary input -----------------------------------------------------------
+# grep drops to binary mode on a NUL byte or on bytes invalid in the locale and
+# prints "Binary file ... matches" in place of the lines, so the scans below
+# would read the wrong text. Every grep here runs as LC_ALL=C grep -a, which
+# treats the file as plain bytes. A NUL byte cannot be held in a shell variable
+# at all, and git cannot store one in a commit message cleanly, so refuse it.
+if ! tr -d '\000' < "$msg_file" | cmp -s - "$msg_file"; then
+    echo "commit-msg: refused. The message holds a NUL byte, which git cannot store in a commit message." >&2
+    exit 1
+fi
+
 # --- Attribution ------------------------------------------------------------
 # Scanned over the whole raw file: comment lines, the scissors line and
 # everything below it included. Which of those lines git keeps depends on
@@ -57,7 +68,7 @@ msg_file="$1"
 #
 # Lines indented two or more spaces are dropped first: that is the documented
 # way to write one of these strings as prose.
-scan=$(grep -v '^  ' "$msg_file")
+scan=$(LC_ALL=C grep -a -v '^  ' "$msg_file")
 
 fail() {
     echo "commit-msg: refused. $1" >&2
@@ -70,16 +81,16 @@ fail() {
     exit 1
 }
 
-printf '%s\n' "$scan" | grep -qiE '^Co-authored-by:.*(claude|anthropic)' &&
+printf '%s\n' "$scan" | LC_ALL=C grep -aqiE '^Co-authored-by:.*(claude|anthropic)' &&
     fail "Co-Authored-By trailer naming Claude or Anthropic."
 
-printf '%s\n' "$scan" | grep -qiE '^Claude-Session:' &&
+printf '%s\n' "$scan" | LC_ALL=C grep -aqiE '^Claude-Session:' &&
     fail "Claude-Session trailer."
 
-printf '%s\n' "$scan" | grep -qiE 'generated with .{0,4}\[?claude code' &&
+printf '%s\n' "$scan" | LC_ALL=C grep -aqiE 'generated with .{0,4}\[?claude code' &&
     fail "'Generated with Claude Code' attribution line."
 
-printf '%s\n' "$scan" | grep -qiE '(noreply@anthropic\.com|claude\.ai/code/session)' &&
+printf '%s\n' "$scan" | LC_ALL=C grep -aqiE '(noreply@anthropic\.com|claude\.ai/code/session)' &&
     fail "Anthropic address or Claude session URL."
 
 # --- Why line: the message git will store ------------------------------------
@@ -92,8 +103,9 @@ printf '%s\n' "$scan" | grep -qiE '(noreply@anthropic\.com|claude\.ai/code/sessi
 # comments when an editor ran and keeps them when none did. Only "strip" drops
 # comment lines. "scissors", "whitespace" and "verbatim" keep them. A --cleanup
 # flag on the command line is not visible to a hook, so it cannot be honoured
-# here. When an editor ran, everything from git's scissors line down is cut,
-# as git does for commit -v and for scissors mode.
+# here. Everything from the scissors line down is cut, as git does, only for
+# cleanup mode scissors and for commit -v (told apart by the marker line git
+# writes under its scissors line). A hand-typed scissors line is otherwise body.
 #
 # Whether an editor ran is not always knowable. git sets GIT_EDITOR to ":" for
 # the hook when it used no editor, and otherwise passes the caller's
@@ -120,6 +132,23 @@ EOT
 scissors="$comment ------------------------ >8 ------------------------"
 cr=$(printf '\r')
 
+# Git cuts at the scissors line only for commit -v, which writes the line with
+# a marker line right under it, and for cleanup mode scissors. A scissors line
+# someone typed into the message is otherwise kept by git as ordinary text, and
+# cutting there would hide the lines below it from the Why check. Detect -v by
+# the marker line directly under a scissors line.
+verbose=0
+prev_scissors=0
+while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%"$cr"}
+    if [ "$prev_scissors" -eq 1 ] && [ "$line" = "$comment Do not modify or remove the line above." ]; then
+        verbose=1
+        break
+    fi
+    prev_scissors=0
+    [ "$line" = "$scissors" ] && prev_scissors=1
+done < "$msg_file"
+
 # needs_why EDITED: exit 0 when the message, cleaned up as git would after an
 # editor did (EDITED=1) or did not (EDITED=0) run, has a body, no qualifying
 # Why line, and no exempt subject.
@@ -128,6 +157,9 @@ cr=$(printf '\r')
 needs_why() {
     edited=$1
     strip=0
+    cut=0
+    [ "$cleanup" = scissors ] && cut=1
+    [ "$edited" -eq 1 ] && [ "$verbose" -eq 1 ] && cut=1
     case "$cleanup" in
         strip) strip=1 ;;
         default) strip=$edited ;;
@@ -137,7 +169,7 @@ needs_why() {
     has_why=0
     while IFS= read -r line || [ -n "$line" ]; do
         line=${line%"$cr"}
-        [ "$edited" -eq 1 ] && [ "$line" = "$scissors" ] && break
+        [ "$cut" -eq 1 ] && [ "$line" = "$scissors" ] && break
         if [ "$strip" -eq 1 ]; then
             case "$line" in "$comment"*) continue ;; esac
         fi

@@ -585,3 +585,116 @@ describe("commit-msg hook — judges the message git will store", () => {
     expect(git(["log", "-1", "--format=%B"], dir).stdout.toString().trim()).toBe("fix: retry");
   });
 });
+
+describe("commit-msg hook — binary-looking messages cannot hide text from the scans", () => {
+  // grep switches to binary mode on a NUL byte or on bytes invalid in the
+  // locale, and then prints "Binary file ... matches" instead of the lines.
+  function commitFile(dir: string, bytes: Buffer) {
+    const file = join(dir, ".git", "msg.bin");
+    writeFileSync(file, bytes);
+    return Bun.spawnSync(["git", "commit", "-F", file], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+  }
+  function ready(): string {
+    const dir = initRepo();
+    installHook(dir);
+    stageSomething(dir);
+    return dir;
+  }
+  const TRAILER = "Claude-Session: https://example.test/s\n";
+
+  test("a NUL byte below a scissors line with an attribution trailer is refused", () => {
+    const dir = ready();
+    const bytes = Buffer.concat([
+      Buffer.from("fix: correct the retry backoff\n\n" + WHY + "# ------------------------ >8 ------------------------\n"),
+      Buffer.from([0]),
+      Buffer.from("\n" + TRAILER),
+    ]);
+    const result = commitFile(dir, bytes);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("commit-msg: refused");
+    expect(result.stderr.toString()).toContain("NUL");
+    expect(headExists(dir)).toBe(false);
+  });
+
+  test("a non-UTF-8 byte in the subject and in the attribution trailer line is refused as attribution", () => {
+    const dir = ready();
+    const bytes = Buffer.concat([
+      Buffer.from("fix: correct the retry backoff "),
+      Buffer.from([0xff]),
+      Buffer.from("\n\n" + WHY + "Claude-Session: https://example.test/s "),
+      Buffer.from([0xff]),
+      Buffer.from("\n"),
+    ]);
+    const result = commitFile(dir, bytes);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("Claude-Session trailer");
+    expect(headExists(dir)).toBe(false);
+  });
+
+  test("a non-UTF-8 byte in the subject with no Why line is refused for the Why line", () => {
+    const dir = ready();
+    const bytes = Buffer.concat([Buffer.from("fix: retry "), Buffer.from([0xff]), Buffer.from("\n\nBody text.\n")]);
+    const result = commitFile(dir, bytes);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("No 'Why:' line");
+  });
+
+  test("a normal non-ASCII UTF-8 message still passes", () => {
+    const dir = ready();
+    const result = commitFile(dir, Buffer.from("fix: handle café — naïve input\n\n" + WHY, "utf8"));
+    expect(result.stderr.toString()).not.toContain("commit-msg: refused");
+    expect(result.exitCode).toBe(0);
+  });
+});
+
+describe("commit-msg hook — a hand-typed scissors line is a cut only where git cuts", () => {
+  function run(dir: string, args: string[], editor = "true") {
+    const env = { ...process.env, GIT_EDITOR: editor };
+    return Bun.spawnSync(["git", "commit", ...args], { cwd: dir, stdout: "pipe", stderr: "pipe", env });
+  }
+  function ready(config: Array<[string, string]> = []): string {
+    const dir = initRepo();
+    for (const [k, v] of config) git(["config", k, v], dir);
+    installHook(dir);
+    stageSomething(dir);
+    return dir;
+  }
+  const message =
+    "fix: correct the retry backoff\n\n" +
+    "The first attempt waited zero seconds.\n" +
+    "# ------------------------ >8 ------------------------\n" +
+    "Why: the first backoff was too short.\n";
+
+  test("editor, default strip, no -v: git keeps the text under a typed scissors line, so its Why line counts", () => {
+    const dir = ready();
+    const result = run(dir, ["-e", "-m", message]);
+    expect(result.stderr.toString()).not.toContain("commit-msg: refused");
+    expect(result.exitCode).toBe(0);
+    expect(git(["log", "-1", "--format=%B"], dir).stdout.toString()).toContain("Why: the first backoff");
+  });
+
+  test("editor with -v: git cuts at the first scissors line, so a Why line below it does not count", () => {
+    const dir = ready();
+    const result = run(dir, ["-e", "-v", "-m", message]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("No 'Why:' line");
+  });
+
+  test("commit.cleanup=scissors cuts at a typed scissors line, so a Why line below it does not count", () => {
+    const dir = ready([["commit.cleanup", "scissors"]]);
+    const result = run(dir, ["-e", "-m", message]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("No 'Why:' line");
+  });
+
+  test("editor, no -v: a body line under a typed scissors line is body, so a Why line is still required", () => {
+    const dir = ready();
+    const result = run(dir, [
+      "-e",
+      "-m",
+      "fix: correct the retry backoff\n\n# ------------------------ >8 ------------------------\nBody git keeps.\n",
+    ]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("No 'Why:' line");
+  });
+});
