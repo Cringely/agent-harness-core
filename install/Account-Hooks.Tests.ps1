@@ -1027,4 +1027,38 @@ $errs.Value.Count
             else { Set-Item "Env:$probeVar" -Value $savedOutside }
         }
     }
+
+    # The prose-lint style files under styles/Cringely/ that Build-CringelyStyle.ps1 writes are
+    # generated, and the kit's README says never to hand-edit them. Nothing ran the generator, so
+    # a change to it could ship without its output, or an output could be hand-edited away from
+    # what the generator produces, and every suite stayed green. This runs the exported copy in
+    # an empty sandbox and requires every file it writes to match the committed file of the same
+    # name. It compares whatever the generator writes rather than a fixed list, so a new output
+    # is checked the day the generator starts writing it. Line endings are normalized because
+    # Set-Content ends the file with the platform newline while the checkout holds LF.
+    It "regenerates every committed prose-lint style file Build-CringelyStyle.ps1 writes" {
+        $kit = Join-Path (Join-Path (Join-Path (Join-Path (Split-Path $PSScriptRoot -Parent) 'account') 'claude') 'tools') 'prose-lint'
+        $committedDir = Join-Path (Join-Path $kit 'styles') 'Cringely'
+        $sandbox = Join-Path ([IO.Path]::GetTempPath()) ("prose-lint-gen-" + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $sandbox | Out-Null
+        try {
+            $script = Join-Path $sandbox 'Build-CringelyStyle.ps1'
+            Copy-Item -LiteralPath (Join-Path $kit 'Build-CringelyStyle.ps1') -Destination $script
+            $out = @(& pwsh -NoProfile -File $script 2>&1)
+            $LASTEXITCODE | Should -Be 0 -Because "the generator must run clean: $($out -join "`n")"
+
+            $generatedDir = Join-Path (Join-Path $sandbox 'styles') 'Cringely'
+            $generated = @(Get-ChildItem -LiteralPath $generatedDir -File -ErrorAction SilentlyContinue)
+            # An empty list would make the loop below pass without comparing anything.
+            @($generated.Name) | Should -Contain 'Vocabulary.yml'
+            foreach ($file in $generated) {
+                $committed = Join-Path $committedDir $file.Name
+                Test-Path -LiteralPath $committed | Should -BeTrue -Because "$($file.Name) is generated, so it must be committed under styles/Cringely/"
+                $want = [IO.File]::ReadAllText($committed) -replace "`r`n", "`n"
+                $got = [IO.File]::ReadAllText($file.FullName) -replace "`r`n", "`n"
+                $got | Should -BeExactly $want -Because "the committed $($file.Name) must be what Build-CringelyStyle.ps1 generates"
+            }
+        }
+        finally { Remove-Item -Recurse -Force $sandbox -ErrorAction SilentlyContinue }
+    }
 }
