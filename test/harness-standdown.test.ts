@@ -142,6 +142,19 @@ const rows: Row[] = [
     },
   },
   {
+    hook: "bash-tripwire.ts",
+    run(mode) {
+      const dir = tempDir("standdown-bt-");
+      const payload = JSON.stringify({ tool_name: "Bash", tool_input: { command: "git push --force" } });
+      const r = spawn(bunHook(this.hook), dir, childEnv(mode, { CLAUDE_PROJECT_DIR: dir }), payload);
+      return { ...r, effect: false };
+    },
+    acted(r) {
+      expect(r.exitCode).toBe(0);
+      expect(JSON.parse(r.stdout).hookSpecificOutput.permissionDecision).toBe("ask");
+    },
+  },
+  {
     hook: "agent-write-scope.ts",
     run(mode) {
       const dir = tempDir("standdown-ws-");
@@ -423,4 +436,29 @@ describe("pin: new wave-close string matches the legacy one under bash with CLAU
     },
     ROW_TIMEOUT_MS,
   );
+});
+
+// --- Bash tripwire command string ---------------------------------------------------------------
+//
+// The tripwire sits on the Bash matcher, which Copilot's shell tool fires. A bare double-quoted bun
+// string would have a PowerShell host expand $CLAUDE_PROJECT_DIR as its own empty variable, and a
+// failing preToolUse hook reads as a deny, so every shell call would be refused. It uses the same
+// sh -c exec form as the other shell-fired hooks.
+
+describe("bash-tripwire command form", () => {
+  const tripwireCommand = (): string => {
+    const tpl = JSON.parse(readFileSync(TEMPLATE, "utf8"));
+    const commands: string[] = tpl.hooks.PreToolUse.flatMap((g: { hooks: { command: string }[] }) =>
+      g.hooks.map((h) => h.command),
+    );
+    const hit = commands.filter((c) => c.includes("/.claude/hooks/bash-tripwire.ts"));
+    expect(hit.length).toBe(1);
+    return hit[0];
+  };
+
+  test("uses the sh -c exec form", () => {
+    expect(tripwireCommand()).toBe(
+      `sh -c 'exec bun "$CLAUDE_PROJECT_DIR/.claude/hooks/bash-tripwire.ts"'`,
+    );
+  });
 });
