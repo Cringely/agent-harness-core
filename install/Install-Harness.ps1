@@ -343,9 +343,12 @@ $gitHookNames = @('pre-commit', 'pre-push', 'commit-msg')
 # byte, and a binary file is hashed as it is. Only a CRLF pair is rewritten, so a lone CR stays.
 # [System.IO.File] resolves a relative path against the process working directory, which
 # Set-Location does not move, so every byte read goes through the PowerShell location first.
+# The array is returned with the unary comma. A bare byte[] is unrolled onto the pipeline, which
+# hands the caller $null for an empty file and a lone [byte] for a one-byte file, and
+# [System.Array]::IndexOf throws on the first.
 function Read-FileBytes {
     param([string]$Path)
-    [System.IO.File]::ReadAllBytes($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path))
+    return , [System.IO.File]::ReadAllBytes($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path))
 }
 
 function Get-NormalizedBytes {

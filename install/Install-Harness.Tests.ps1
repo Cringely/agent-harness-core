@@ -801,6 +801,72 @@ Describe "Install-Harness" {
         finally { Pop-Location }
     }
 
+    It "hashes and compares an empty file and a one-byte file as byte arrays, never as a pipeline scalar or null" {
+        # Read-FileBytes returns a byte[], which PowerShell unrolls onto the pipeline unless the
+        # function returns it with the unary comma. An empty file then arrives as $null and a one-byte
+        # file as a bare [byte], and the byte-array helpers throw or answer from a coerced scalar.
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile("$PSScriptRoot/Install-Harness.ps1", [ref]$null, [ref]$null)
+        $names = 'Read-FileBytes', 'Get-NormalizedBytes', 'Get-FileHashHex', 'Get-CrlfExpandedHashHex', 'Test-CrAddedToLfFile'
+        foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in $names }, $true)) {
+            . ([scriptblock]::Create($f.Extent.Text))
+        }
+        $dir = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-bytes-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $dir | Out-Null
+        try {
+            $sha = { param([byte[]]$b) [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($b)) }
+            $empty = "$dir/empty"; $cr = "$dir/cr"; $lf = "$dir/lf"; $a = "$dir/a"; $nul = "$dir/zero"
+            [System.IO.File]::WriteAllBytes($empty, [byte[]]@())
+            [System.IO.File]::WriteAllBytes($cr, [byte[]]@(13))
+            [System.IO.File]::WriteAllBytes($lf, [byte[]]@(10))
+            [System.IO.File]::WriteAllBytes($a, [byte[]]@(65))
+            [System.IO.File]::WriteAllBytes($nul, [byte[]]@(0))
+
+            (Read-FileBytes -Path $empty).GetType().FullName | Should -Be 'System.Byte[]'
+            (Read-FileBytes -Path $empty).Length | Should -Be 0
+            (Read-FileBytes -Path $a).GetType().FullName | Should -Be 'System.Byte[]'
+
+            Get-FileHashHex -Path $empty | Should -Be (& $sha ([byte[]]@()))
+            Get-FileHashHex -Path $cr | Should -Be (& $sha ([byte[]]@(13)))
+            Get-FileHashHex -Path $nul | Should -Be (& $sha ([byte[]]@(0)))
+
+            # Expanding an empty file has nothing to expand. A one-byte LF becomes a CRLF pair.
+            Get-CrlfExpandedHashHex -Path $empty | Should -Be (& $sha ([byte[]]@()))
+            Get-CrlfExpandedHashHex -Path $lf | Should -Be (& $sha ([byte[]]@(13, 10)))
+            Get-CrlfExpandedHashHex -Path $nul | Should -BeNullOrEmpty
+
+            Test-CrAddedToLfFile -SourcePath $empty -DestPath $empty | Should -BeFalse
+            Test-CrAddedToLfFile -SourcePath $a -DestPath $empty | Should -BeFalse
+            Test-CrAddedToLfFile -SourcePath $empty -DestPath $cr | Should -BeTrue
+            Test-CrAddedToLfFile -SourcePath $a -DestPath $cr | Should -BeTrue
+            Test-CrAddedToLfFile -SourcePath $cr -DestPath $cr | Should -BeFalse
+            Test-CrAddedToLfFile -SourcePath $cr -DestPath $a | Should -BeFalse
+        }
+        finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It "audits and installs over a managed file the project emptied, reporting it as modified instead of throwing" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $dst = "$script:target/.claude/agents/task-reviewer.md"
+        [System.IO.File]::WriteAllBytes($dst, [byte[]]@())
+        $audit = $null
+        { $script:audit = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500 } | Should -Not -Throw
+        $script:audit | Should -Match 'agents/task-reviewer\.md\s+project-modified'
+        { $script:out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target *>&1 | Out-String -Width 500 } | Should -Not -Throw
+        $script:out | Should -Match 'agents/task-reviewer\.md\s+skipped-modified'
+        (Get-Item -LiteralPath $dst).Length | Should -Be 0
+    }
+
+    It "pins an empty overlay by the empty-input hash and keeps it accepted in the audit" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $overlay = "$script:target/.claude/agents/empty-overlay.md"
+        [System.IO.File]::WriteAllBytes($overlay, [byte[]]@())
+        { & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Accept 'agents/empty-overlay.md' | Out-Null } | Should -Not -Throw
+        $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+        $m['accepted']['agents/empty-overlay.md'] | Should -Be ([System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([byte[]]@())))
+        $script:audit = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $script:audit | Should -Match 'agents/empty-overlay\.md\s+overlay \(accepted\)'
+    }
+
     It "leaves an LF project copy untouched when core's file is CRLF" {
         & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
         $dst = "$script:target/.claude/agents/task-reviewer.md"
