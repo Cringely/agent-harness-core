@@ -1,6 +1,11 @@
 // Checks a body against a repository's PR or issue template (#274). Every heading in the template
 // is a section the body must carry, by heading text at any level, with something other than
-// whitespace and HTML comments under it before the next heading at the same level or above. The
+// whitespace and HTML comments under it. A body section ends at the next heading at its own level
+// or above, and also at the next heading that names any template section other than one nested
+// under it in the template. Body heading depth is the author's choice, so without that second
+// boundary a body using a shallower heading would swallow the next template section's content and
+// an empty section would read as filled. The nth template section with a given heading matches the
+// nth body heading with that text, so one body section never fills two template sections. The
 // template's own instruction comments are stripped first, so leaving them in place does not count
 // as filling the section. Headings inside fenced code are not headings.
 //
@@ -66,18 +71,34 @@ export function templateSections(template: string): TemplateSection[] {
 // 1-based indexes of the template's sections that the body lacks or leaves empty.
 export function unfilledSections(template: string, body: string): number[] {
   const lines = splitLines(stripComments(body));
+  const sections = templateSections(template);
   const unfilled: number[] = [];
-  templateSections(template).forEach((section, index) => {
-    const start = lines.findIndex((line) => line.heading?.key === section.key);
+  const seen = new Map<string, number>();
+  sections.forEach((section, index) => {
+    const occurrence = seen.get(section.key) ?? 0;
+    seen.set(section.key, occurrence + 1);
+    let start = -1;
+    for (let i = 0, found = 0; i < lines.length; i++) {
+      if (lines[i]!.heading?.key !== section.key) continue;
+      if (found++ === occurrence) {
+        start = i;
+        break;
+      }
+    }
     if (start === -1) {
       unfilled.push(index + 1);
       return;
     }
+    // Template sections nested under this one may sit inside its body section. Every other
+    // template heading ends it. A key that is both nested and not nested ends it.
+    const nested = new Set<number>();
+    for (let j = index + 1; j < sections.length && sections[j]!.level > section.level; j++) nested.add(j);
+    const stopKeys = new Set(sections.filter((_, j) => !nested.has(j)).map((s) => s.key));
     const level = lines[start]!.heading!.level;
     let content = "";
     for (let i = start + 1; i < lines.length; i++) {
       const heading = lines[i]!.heading;
-      if (heading && heading.level <= level) break;
+      if (heading && (heading.level <= level || stopKeys.has(heading.key))) break;
       if (heading) continue;
       content += lines[i]!.text;
     }
