@@ -18,7 +18,7 @@ describe("parseCodeowners()", () => {
     const parsed = parseCodeowners(text);
     expect(parsed.ok).toBe(true);
     const owned = parsed.ok ? parsed.rules : [];
-    expect(isOwned(owned, "tools/publish/merge-decision.ts")).toBe(true);
+    expect(isOwned(owned, "tools/pr-review/cli.ts")).toBe(true);
     expect(isOwned(owned, "CONTRIBUTING.md")).toBe(true);
     expect(isOwned(owned, "README.md")).toBe(false);
     expect(isOwned(owned, "core/claude/skills/publish/SKILL.md")).toBe(false);
