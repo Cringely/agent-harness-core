@@ -26,7 +26,7 @@ Local configuration lives in `~/.claude-publish/config.json`, outside every repo
       "appId": "<numeric App ID>",
       "keyCommand": ["pwsh", "-NoProfile", "-File", "<absolute path>/read-reviewer-key.ps1"],
       "keyCommandEnv": { "OP_BIOMETRIC_UNLOCK_ENABLED": "false" },
-      "checkout": "<absolute path to a dedicated clone>",
+      "checkout": "<absolute path to a dedicated clone of agent-harness-core>",
       "termsFile": "<absolute path to the personal-term list, outside every checkout>"
     }
   }
@@ -35,11 +35,11 @@ Local configuration lives in `~/.claude-publish/config.json`, outside every repo
 
 Every field is validated and a missing one refuses. Values are never printed, because a value here is an identity, a secret reference or a machine path. Each owner entry names the git author and the gh account every command for that owner uses. The tool refuses when none is configured, and it never falls back to the active gh account or to git's own configuration.
 
-The reviewer checkout's origin must be the repository. The tool fetches it, detaches it at the default branch head, and refuses when it is dirty.
+The reviewer checkout must be a clone of agent-harness-core, the repository this tool comes from, never of the repository under review, whichever repository the entry is for. The reviewer reads the App's key and `premerge` runs with the owner's token, so a clone of the reviewed repository would hand both to whatever anyone who can write to its default branch had put there. `review-merge` never fetches or moves this checkout. It refuses unless the checkout is clean and at exactly `--tool-head`, the pin described under "Run it from a dedicated clone".
 
 `termsFile` is the personal-term list `premerge` reads (`tools/pr-review/README.md`, "Premerge hygiene check"), usually the file the local git config `harness.personalTermsFile` names. `review-merge` runs `premerge` before every merge, so a reviewer entry without it refuses.
 
-`review-merge` serves only agent-harness-core for now. `tools/pr-review/cli.ts` reviews any other repository only with `--policy` (#318), and a reviewer entry here has no field to name that policy file, so a reviewer configured for another repository refuses there and nothing merges.
+`review-merge` serves only agent-harness-core for now. `tools/pr-review/cli.ts` reviews any other repository only with `--policy` (#318), and a reviewer entry here has no field to name that policy file, so a reviewer configured for another repository refuses and nothing merges. That refusal comes from agent-harness-core's own `cli.ts` at the pin, never from code in the other repository.
 
 ### The key command
 
@@ -92,12 +92,12 @@ A `review-merge` refusal that follows its `review:` line means the App's review 
 
 `review-merge` waits for CI, runs the App reviewer, and merges only on what the merge rule allows. Its steps, in the order of the header of `tools/publish/review-merge.ts`:
 
-1. The config names an owner identity. This tool's own checkout is clean, cloned from agent-harness-core (a fork's origin refuses, since a fork's default branch is not reviewed code), and at its default branch head, the bar the reviewer checkout meets in step 6, because the code that holds the token and makes the merge decision must be reviewed code too.
+1. The config names an owner identity. This tool's own checkout is clean, cloned from agent-harness-core (a fork's origin refuses, since a fork's default branch is not reviewed code), and at `--tool-head`, and `--tool-head` is agent-harness-core's default branch head, because the code that holds the token and makes the merge decision must be reviewed code.
 2. The config names a reviewer for the repository. With `--allow-admin`, the reason file reads and passes the same text gates as a body. The reviewer checkout holds `tools/pr-review/cli.ts`.
 3. The pull request is open, not a draft, from this repository, and into the default branch. Its head is pinned here as the head to review.
 4. Closing keywords in the title, the body and every commit message equal `--closes`. This runs early so a mismatch costs no model run.
 5. `gh pr checks --watch` runs, bounded by `--checks-timeout-min`. Then every check must have succeeded on the pinned head, which must not have moved.
-6. The reviewer checkout is fetched, detached at the default branch's current head, and must then be clean and at exactly that commit.
+6. The reviewer checkout must be cloned from agent-harness-core, never from the repository under review, and be clean and at exactly `--tool-head`. It is never fetched or moved here.
 7. The reviewer runs from the work directory, outside every checkout, with the key piped from the configured key command, `--expect-head` pinned, `--post` and `--json`.
 8. The pull request is read again, waiting out an `UNKNOWN` merge state, and the closing-keyword audit repeats. With `--allow-admin`, what the bypass needs is read next: `.github/CODEOWNERS` at the default branch head (the base, never the pull request's head, which the pull request could edit), the whole changed-file list, the pull request's reviews, and the default branch's active rules. Then the merge rule rules.
 9. `premerge` runs from the reviewer checkout on the pinned head, with `--closes`, the owner identity and the configured `termsFile`, and must print `PREMERGE OK` for this pull request and head. It checks what the diff does not carry: closing references GitHub links outside the text, every commit's author and committer, and personal terms in commit messages, title and body. Its channel lines are logged. CONTRIBUTING.md requires it for a bypass merge, and it runs before every merge here.
@@ -126,11 +126,12 @@ A `COMMENT` never merges, whatever its verification reasons, the ones CI cannot 
 
 ### Run it from a dedicated clone
 
-`review-merge` runs only from a checkout that is clean, untracked files included, and at its origin's default branch head. That is the bar the reviewer checkout meets, and it applies here because this code holds the token and makes the merge decision. Keep a dedicated clone for it (`~/.claude-publish/tool` in the operator's setup, which doubles as the reviewer checkout) and bring it to the default branch head before each run:
+`review-merge` runs only from a clone of agent-harness-core that is clean, untracked files included, and at `--tool-head`, a full 40-character commit id that must be agent-harness-core's default branch head. The reviewer checkout meets the same bar at the same pin, because the reviewer gets the App's key and `premerge` the owner's token. There is no default pin, and a missing or malformed one is a usage error. Keep a dedicated clone for it (`~/.claude-publish/tool` in the operator's setup, which doubles as the reviewer checkout), bring it to the default branch head before each run, and pass the commit it now holds:
 
 ```
 git -C <clone> fetch origin <default branch>
 git -C <clone> checkout --detach origin/<default branch>
+git -C <clone> rev-parse HEAD
 ```
 
 ### Run it in the background

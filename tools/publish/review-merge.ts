@@ -1,11 +1,11 @@
-// review-merge (#274): wait for CI, run the App reviewer from a clean default-branch checkout,
-// and merge only on what merge-decision.ts allows. In order:
+// review-merge (#274): wait for CI, run the App reviewer from a clean checkout of this tool's own
+// repository at an explicit pin, and merge only on what merge-decision.ts allows. In order:
 //
 //   1. config names an owner identity for the repository. This tool's own checkout is clean, cloned
-//      from the repository this tool comes from (cli.ts passes CORE_POLICY.repo), and at that
-//      repository's default branch head, the bar the reviewer checkout meets in step 6, because the
-//      code that holds the token and makes the merge decision must be reviewed code too. A fork's
-//      default branch head is not reviewed code, so any other origin refuses
+//      from the repository this tool comes from (cli.ts passes CORE_POLICY.repo), at --tool-head, and
+//      --tool-head is that repository's default branch head, because the code that holds the token
+//      and makes the merge decision must be reviewed code. A fork's default branch head is not
+//      reviewed code, so any other origin refuses
 //   2. config names a reviewer for the repository. With --allow-admin, the reason file reads and
 //      passes the same text gates as a body. The reviewer checkout holds tools/pr-review/cli.ts
 //   3. the pull request is open, not a draft, from this repository, and into the default branch.
@@ -14,8 +14,11 @@
 //      a mismatch costs no model run). The title counts because a --merge merge commit carries it
 //   5. `gh pr checks --watch`, bounded by --checks-timeout-min. Then every check must have
 //      succeeded on the pinned head, which must not have moved
-//   6. the reviewer checkout is fetched and detached at the default branch's current head, and
-//      must then be clean (tools/pr-review/tool-state.ts) and at exactly that commit
+//   6. the reviewer checkout must be cloned from the repository this tool comes from, never from the
+//      repository under review, and be clean (tools/pr-review/tool-state.ts) and at exactly
+//      --tool-head. It is never fetched or moved here. The reviewer gets the App key and premerge the
+//      owner's token, so a checkout of the reviewed repository would hand both to whatever anyone who
+//      can write to that repository's default branch put there
 //   7. the reviewer runs from the work directory, outside every checkout, with the key piped from
 //      the configured key command, --expect-head pinned, --post and --json
 //   8. the pull request is read again (waiting out an UNKNOWN merge state), the closing-keyword
@@ -65,6 +68,10 @@ export interface ReviewMergeArgs {
   adminReasonFile: string | null;
   method: "merge" | "rebase";
   checksTimeoutMin: number;
+  // The commit of this tool's own repository that every credential-holding step runs from: this
+  // tool's checkout and the reviewer checkout must both be clean and at it. cli.ts requires it as
+  // 40 lowercase hex.
+  toolHead: string;
 }
 
 export interface ReviewMergeContext {
@@ -140,22 +147,16 @@ function git(ctx: ReviewMergeContext, owner: OwnerIdentity, token: string, dir: 
   return result;
 }
 
-function prepareReviewerCheckout(ctx: ReviewMergeContext, gh: Gh, owner: OwnerIdentity, reviewer: ReviewerConfig, repo: string, defaultBranch: string): void {
+// The reviewer reads the App key on stdin and premerge runs with the owner's token, so both must be
+// this tool's own reviewed code at the pin, held to the same bar as this tool's checkout. The origin
+// is compared with ctx.toolRepo, never with the repository under review: a clone of that repository
+// would run code anyone who can write to its default branch controls. Nothing here fetches or
+// moves the checkout, so it runs exactly the commit the operator pinned or refuses.
+function assertReviewerPinned(ctx: ReviewMergeContext, gh: Gh, owner: OwnerIdentity, reviewer: ReviewerConfig, toolHead: string): void {
   const dir = reviewer.checkout;
   const origin = git(ctx, owner, gh.token, dir, ["remote", "get-url", "origin"]);
-  if (origin.code !== 0 || !remoteMatches(origin.stdout, repo)) {
-    throw new PublishRefusal("the reviewer checkout's origin is not this repository");
-  }
-  if (git(ctx, owner, gh.token, dir, ["fetch", "--quiet", "origin", defaultBranch]).code !== 0) {
-    throw new PublishError("git fetch failed in the reviewer checkout");
-  }
-  const tracked = git(ctx, owner, gh.token, dir, ["rev-parse", `refs/remotes/origin/${defaultBranch}`]);
-  const sha = tracked.stdout.trim();
-  if (tracked.code !== 0 || sha !== gh.branchHead(repo, defaultBranch)) {
-    throw new PublishRefusal("the reviewer checkout could not be brought to the default branch's current head");
-  }
-  if (git(ctx, owner, gh.token, dir, ["checkout", "--quiet", "--detach", sha]).code !== 0) {
-    throw new PublishRefusal("the reviewer checkout could not be switched to the default branch head. It may carry local changes");
+  if (origin.code !== 0 || !remoteMatches(origin.stdout, ctx.toolRepo)) {
+    throw new PublishRefusal("the reviewer checkout's origin is not the repository this tool comes from");
   }
   let state: { revision: string; dirty: boolean };
   try {
@@ -163,14 +164,15 @@ function prepareReviewerCheckout(ctx: ReviewMergeContext, gh: Gh, owner: OwnerId
   } catch {
     throw new PublishRefusal("the reviewer checkout is not a readable git checkout");
   }
-  if (state.dirty || state.revision !== sha) throw new PublishRefusal("the reviewer checkout is not a clean copy of the default branch head");
+  if (state.dirty || state.revision !== toolHead) throw new PublishRefusal("the reviewer checkout is not a clean copy of --tool-head");
 }
 
 // The tool's own checkout is often an operator's working clone, on another branch or carrying
 // edits. An edited or stale merge-decision.ts there would decide merges, so that checkout must be
-// clean, cloned from ctx.toolRepo, and at that repository's default branch head before anything
-// else runs. A fork's default branch passes none of the review this tool's own code goes through.
-function assertToolCurrent(ctx: ReviewMergeContext, gh: Gh, owner: OwnerIdentity): void {
+// clean, cloned from ctx.toolRepo, and at the pin, and the pin must be that repository's default
+// branch head, before anything else runs. A fork's default branch passes none of the review this
+// tool's own code goes through.
+function assertToolCurrent(ctx: ReviewMergeContext, gh: Gh, owner: OwnerIdentity, toolHead: string): void {
   let state: { revision: string; dirty: boolean };
   try {
     state = ctx.toolState(ctx.toolRoot);
@@ -184,8 +186,11 @@ function assertToolCurrent(ctx: ReviewMergeContext, gh: Gh, owner: OwnerIdentity
   if (origin.code !== 0 || !remoteMatches(origin.stdout, ctx.toolRepo)) {
     throw new PublishRefusal("this tool's own checkout's origin is not the repository this tool comes from. Run review-merge from a clone of it");
   }
-  if (state.revision !== gh.branchHead(ctx.toolRepo, gh.defaultBranch(ctx.toolRepo))) {
-    throw new PublishRefusal("this tool's own checkout is not at its default branch's current head. Update it and run again");
+  if (state.revision !== toolHead) {
+    throw new PublishRefusal("this tool's own checkout is not at --tool-head");
+  }
+  if (toolHead !== gh.branchHead(ctx.toolRepo, gh.defaultBranch(ctx.toolRepo))) {
+    throw new PublishRefusal("--tool-head is not at its default branch's current head. Update the checkouts and the pin and run again");
   }
 }
 
@@ -221,8 +226,8 @@ async function runReviewer(ctx: ReviewMergeContext, reviewer: ReviewerConfig, cl
   return parseReviewOutput(run.consumer.stdout);
 }
 
-// Runs premerge from the reviewer checkout, which prepareReviewerCheckout left clean at the default
-// branch head, so the hygiene check is reviewed code too. Its output names channels and counts
+// Runs premerge from the reviewer checkout, which assertReviewerPinned found clean at --tool-head,
+// so the hygiene check is reviewed code too. Its output names channels and counts
 // only (premerge.ts), so it is safe to log. Anything but exit 0 with the OK line for exactly this
 // pull request and head refuses.
 function runPremerge(ctx: ReviewMergeContext, gh: Gh, owner: OwnerIdentity, reviewer: ReviewerConfig, cli: string, args: ReviewMergeArgs, head: string): void {
@@ -291,7 +296,7 @@ function settledView(ctx: ReviewMergeContext, gh: Gh, repo: string, pr: number):
 export async function reviewMerge(ctx: ReviewMergeContext, args: ReviewMergeArgs): Promise<string> {
   const owner = ownerIdentity(ctx.config, args.repo);
   const gh = Gh.forUser(ctx.runner, owner.ghUser, ctx.env);
-  assertToolCurrent(ctx, gh, owner);
+  assertToolCurrent(ctx, gh, owner, args.toolHead);
   // Read and scanned before the pull request is touched, so a reason that would be refused costs
   // no model run.
   let adminReason: string | null = null;
@@ -323,7 +328,7 @@ export async function reviewMerge(ctx: ReviewMergeContext, args: ReviewMergeArgs
     );
   }
 
-  prepareReviewerCheckout(ctx, gh, owner, reviewer, args.repo, defaultBranch);
+  assertReviewerPinned(ctx, gh, owner, reviewer, args.toolHead);
   const review = await runReviewer(ctx, reviewer, cli, args.repo, args.pr, head);
   ctx.log(`review: status=${enumText(review.status)} event=${enumText(review.event)} findings=${review.severities.length}`);
 

@@ -19,6 +19,8 @@ afterAll(() => rmSync(ROOT, { recursive: true, force: true }));
 
 const NOT_A_REPO = on(["git", "-C"], { code: 128, stderr: "fatal: not a git repository (or any of the parent directories): .git" });
 const ABS = process.platform === "win32" ? "C:/fixture/body.md" : "/fixture/body.md";
+const PIN = "f".repeat(40);
+const RM = ["review-merge", "--repo", REPO, "--pr", "9", "--tool-head", PIN];
 
 describe("parseCommand()", () => {
   test("parses pr create", () => {
@@ -28,7 +30,7 @@ describe("parseCommand()", () => {
   });
 
   test("parses review-merge with its defaults", () => {
-    expect(parseCommand(["review-merge", "--repo", REPO, "--pr", "9"])).toEqual({
+    expect(parseCommand(RM)).toEqual({
       kind: "review-merge",
       repo: REPO,
       pr: 9,
@@ -37,13 +39,22 @@ describe("parseCommand()", () => {
       adminReasonFile: null,
       method: "merge",
       checksTimeoutMin: 30,
+      toolHead: PIN,
     });
   });
 
+  // The pin names the only commit the credential-holding code may run from, so there is no default.
+  test("requires --tool-head as a full lowercase commit id", () => {
+    expect(() => parseCommand(["review-merge", "--repo", REPO, "--pr", "9"])).toThrow(UsageError);
+    for (const bad of ["", "f".repeat(39), "F".repeat(40), "f".repeat(41), "master", `${"f".repeat(39)}g`]) {
+      expect(() => parseCommand(["review-merge", "--repo", REPO, "--pr", "9", "--tool-head", bad])).toThrow(UsageError);
+    }
+  });
+
   test("takes --allow-admin only together with --admin-reason-file", () => {
-    expect(() => parseCommand(["review-merge", "--repo", REPO, "--pr", "9", "--allow-admin"])).toThrow(UsageError);
-    expect(() => parseCommand(["review-merge", "--repo", REPO, "--pr", "9", "--admin-reason-file", ABS])).toThrow(UsageError);
-    expect(parseCommand(["review-merge", "--repo", REPO, "--pr", "9", "--allow-admin", "--admin-reason-file", ABS])).toMatchObject({
+    expect(() => parseCommand([...RM, "--allow-admin"])).toThrow(UsageError);
+    expect(() => parseCommand([...RM, "--admin-reason-file", ABS])).toThrow(UsageError);
+    expect(parseCommand([...RM, "--allow-admin", "--admin-reason-file", ABS])).toMatchObject({
       allowAdmin: true,
       adminReasonFile: ABS,
     });
@@ -76,8 +87,8 @@ describe("parseCommand()", () => {
   });
 
   test("rejects an out-of-range checks timeout and an unknown merge method", () => {
-    expect(() => parseCommand(["review-merge", "--repo", REPO, "--pr", "9", "--checks-timeout-min", "0"])).toThrow(UsageError);
-    expect(() => parseCommand(["review-merge", "--repo", REPO, "--pr", "9", "--method", "squash"])).toThrow(UsageError);
+    expect(() => parseCommand([...RM, "--checks-timeout-min", "0"])).toThrow(UsageError);
+    expect(() => parseCommand([...RM, "--method", "squash"])).toThrow(UsageError);
   });
 });
 

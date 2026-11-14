@@ -13,6 +13,10 @@ import { BASE_HEAD, FakeRunner, HEAD, on, REPO, type Responder } from "./publish
 const CHECKOUT = process.platform === "win32" ? "C:/fixture/reviewer-checkout" : "/fixture/reviewer-checkout";
 const WORK = process.platform === "win32" ? "C:/fixture/work" : "/fixture/work";
 const TOOL_ROOT = process.platform === "win32" ? "C:/fixture/tool-checkout" : "/fixture/tool-checkout";
+// The repository this tool and its reviewer come from. Distinct from REPO, the repository under
+// review, so a test can tell the two origins apart.
+const TOOL_REPO = "fixture-owner/fixture-tool";
+const TOOL_HEAD = "f".repeat(40);
 const TERMS = process.platform === "win32" ? "C:/fixture/terms.json" : "/fixture/terms.json";
 const CONFIG = parsePublishConfig(
   JSON.stringify({
@@ -21,7 +25,16 @@ const CONFIG = parsePublishConfig(
   }),
 );
 const PREMERGE_CLI = join(CHECKOUT, "tools", "pr-review", "cli.ts");
-const ARGS: ReviewMergeArgs = { repo: REPO, pr: 9, closes: [], allowAdmin: false, adminReasonFile: null, method: "merge", checksTimeoutMin: 30 };
+const ARGS: ReviewMergeArgs = {
+  repo: REPO,
+  pr: 9,
+  closes: [],
+  allowAdmin: false,
+  adminReasonFile: null,
+  method: "merge",
+  checksTimeoutMin: 30,
+  toolHead: TOOL_HEAD,
+};
 const REASON_PATH = process.platform === "win32" ? "C:/fixture/reason.md" : "/fixture/reason.md";
 const ADMIN_ARGS: ReviewMergeArgs = { ...ARGS, allowAdmin: true, adminReasonFile: REASON_PATH };
 const REASON = "Administrator bypass: this change edits an owned path, which needs a code-owner review the operator cannot give.";
@@ -151,10 +164,10 @@ function scenario(
     on(["gh", "pr", "view", "9", `--repo=${REPO}`, "--json=state,mergeCommit"], {
       stdout: JSON.stringify({ state: opts.merged ?? "MERGED", mergeCommit: { oid: MERGE_SHA } }),
     }),
-    (argv) => (gitSub(argv)[0] === "remote" ? { stdout: `https://github.com/${REPO}.git\n` } : undefined),
-    (argv) => (gitSub(argv)[0] === "fetch" ? {} : undefined),
-    (argv) => (gitSub(argv)[0] === "rev-parse" ? { stdout: `${BASE_HEAD}\n` } : undefined),
-    (argv) => (gitSub(argv)[0] === "checkout" ? {} : undefined),
+    on(["gh", "api", `repos/${TOOL_REPO}`, "--jq", ".default_branch"], { stdout: "main\n" }),
+    on(["gh", "api", `repos/${TOOL_REPO}/branches/main`], { stdout: `${TOOL_HEAD}\n` }),
+    // Both checkouts are clones of the tool's repository, never of the repository under review.
+    (argv) => (gitSub(argv)[0] === "remote" ? { stdout: `https://github.com/${TOOL_REPO}.git\n` } : undefined),
   ]);
 }
 
@@ -165,10 +178,10 @@ function ctx(runner: FakeRunner, overrides: Partial<ReviewMergeContext> = {}): R
     env: { PATH: "x", GH_TOKEN: "inherited" },
     workDir: WORK,
     toolRoot: TOOL_ROOT,
-    toolRepo: REPO,
+    toolRepo: TOOL_REPO,
     bunPath: "/fixture/bun",
     exists: () => true,
-    toolState: () => ({ revision: BASE_HEAD, dirty: false }),
+    toolState: () => ({ revision: TOOL_HEAD, dirty: false }),
     sleep: () => {},
     log: () => {},
     loadIdentity: () => ({
@@ -240,7 +253,7 @@ describe("review-merge: merges", () => {
     const runner = withReviewer(scenario(), reviewerSays(APPROVE_OUTPUT));
     await reviewMerge(ctx(runner), ARGS);
     const gitCalls = runner.calls.filter((call) => call.argv[0] === "git");
-    expect(gitCalls.length).toBe(5);
+    expect(gitCalls.length).toBe(2);
     for (const call of gitCalls) {
       expect(call.argv).toContain("user.name=fixture-owner");
       expect(call.argv).toContain("credential.helper=");
@@ -348,7 +361,7 @@ describe("review-merge: refuses before the reviewer runs", () => {
   test("this tool's own checkout carrying uncommitted changes", async () => {
     const runner = scenario();
     await refusal(
-      reviewMerge(ctx(runner, { toolState: (root) => ({ revision: BASE_HEAD, dirty: root === TOOL_ROOT }) }), ARGS),
+      reviewMerge(ctx(runner, { toolState: (root) => ({ revision: TOOL_HEAD, dirty: root === TOOL_ROOT }) }), ARGS),
       runner,
       "own checkout has uncommitted changes",
       false,
@@ -362,19 +375,33 @@ describe("review-merge: refuses before the reviewer runs", () => {
     // The fork's own default branch head is the checkout's revision, so only the origin differs.
     const runner = scenario({
       extra: [
-        (argv) => (gitSub(argv)[0] === "remote" && argv.includes(TOOL_ROOT) ? { stdout: `https://github.com/${REPO}-fork.git\n` } : undefined),
-        on(["gh", "api", `repos/${REPO}-fork`, "--jq", ".default_branch"], { stdout: "main\n" }),
-        on(["gh", "api", `repos/${REPO}-fork/branches/main`], { stdout: `${BASE_HEAD}\n` }),
+        (argv) => (gitSub(argv)[0] === "remote" && argv.includes(TOOL_ROOT) ? { stdout: `https://github.com/${TOOL_REPO}-fork.git\n` } : undefined),
+        on(["gh", "api", `repos/${TOOL_REPO}-fork`, "--jq", ".default_branch"], { stdout: "main\n" }),
+        on(["gh", "api", `repos/${TOOL_REPO}-fork/branches/main`], { stdout: `${TOOL_HEAD}\n` }),
       ],
     });
     await refusal(reviewMerge(ctx(runner), ARGS), runner, "own checkout's origin is not", false);
     expect(runner.calls.some((call) => call.argv[1] === "pr")).toBe(false);
   });
 
-  test("this tool's own checkout away from the default branch head", async () => {
+  test("this tool's own checkout away from --tool-head", async () => {
     const runner = scenario();
     await refusal(
-      reviewMerge(ctx(runner, { toolState: (root) => ({ revision: root === TOOL_ROOT ? "e".repeat(40) : BASE_HEAD, dirty: false }) }), ARGS),
+      reviewMerge(ctx(runner, { toolState: (root) => ({ revision: root === TOOL_ROOT ? "e".repeat(40) : TOOL_HEAD, dirty: false }) }), ARGS),
+      runner,
+      "own checkout is not at --tool-head",
+      false,
+    );
+    expect(runner.calls.some((call) => call.argv[1] === "pr")).toBe(false);
+  });
+
+  // Both checkouts at the pin, but the pin is not the tool repository's default branch head, so the
+  // code the run would trust is not reviewed code.
+  test("a --tool-head away from the default branch head", async () => {
+    const runner = scenario();
+    const stale = "e".repeat(40);
+    await refusal(
+      reviewMerge(ctx(runner, { toolState: () => ({ revision: stale, dirty: false }) }), { ...ARGS, toolHead: stale }),
       runner,
       "not at its default branch's current head",
       false,
@@ -451,26 +478,48 @@ describe("review-merge: refuses before the reviewer runs", () => {
     await refusal(reviewMerge(ctx(runner), ARGS), runner, "0 total", false);
   });
 
+  // The reviewer receives the App key and premerge the owner's token, so their code must be this
+  // tool's own reviewed code. A clone of the repository under review would run whatever anyone who
+  // can write to that repository's default branch put there.
+  test("a reviewer checkout cloned from the repository under review", async () => {
+    const runner = scenario({
+      extra: [(argv) => (gitSub(argv)[0] === "remote" && argv.includes(CHECKOUT) ? { stdout: `https://github.com/${REPO}.git\n` } : undefined)],
+    });
+    await refusal(reviewMerge(ctx(runner), ARGS), runner, "reviewer checkout's origin is not the repository this tool comes from", false);
+  });
+
   test("a reviewer checkout whose origin is another repository", async () => {
     const runner = scenario({
       extra: [(argv) => (gitSub(argv)[0] === "remote" && argv.includes(CHECKOUT) ? { stdout: "https://github.com/someone/else.git\n" } : undefined)],
     });
-    await refusal(reviewMerge(ctx(runner), ARGS), runner, "origin is not this repository", false);
+    await refusal(reviewMerge(ctx(runner), ARGS), runner, "reviewer checkout's origin is not the repository this tool comes from", false);
   });
 
-  test("a reviewer checkout that lags the default branch", async () => {
-    const runner = scenario({ extra: [(argv) => (gitSub(argv)[0] === "rev-parse" ? { stdout: `${"e".repeat(40)}\n` } : undefined)] });
-    await refusal(reviewMerge(ctx(runner), ARGS), runner, "current head", false);
+  test("a reviewer checkout away from --tool-head", async () => {
+    const runner = scenario();
+    await refusal(
+      reviewMerge(ctx(runner, { toolState: (root) => ({ revision: root === CHECKOUT ? "e".repeat(40) : TOOL_HEAD, dirty: false }) }), ARGS),
+      runner,
+      "reviewer checkout is not a clean copy of --tool-head",
+      false,
+    );
   });
 
   test("a dirty reviewer checkout", async () => {
     const runner = scenario();
     await refusal(
-      reviewMerge(ctx(runner, { toolState: (root) => ({ revision: BASE_HEAD, dirty: root === CHECKOUT }) }), ARGS),
+      reviewMerge(ctx(runner, { toolState: (root) => ({ revision: TOOL_HEAD, dirty: root === CHECKOUT }) }), ARGS),
       runner,
-      "not a clean copy",
+      "reviewer checkout is not a clean copy of --tool-head",
       false,
     );
+  });
+
+  test("never fetches, switches or otherwise moves the reviewer checkout", async () => {
+    const runner = withReviewer(scenario(), reviewerSays(APPROVE_OUTPUT));
+    await reviewMerge(ctx(runner), ARGS);
+    const moves = runner.calls.filter((call) => ["fetch", "checkout", "switch", "reset", "pull"].includes(gitSub(call.argv)[0] ?? ""));
+    expect(moves).toEqual([]);
   });
 
   test("git missing from PATH", async () => {

@@ -22,7 +22,7 @@ import { cwdHasAutoloadFile, stripControlChars } from "../pr-review/cli";
 import { loadIdentity, type IdentityLoad } from "../pr-review/identity";
 import { CORE_POLICY } from "../pr-review/repo-policy";
 import { toolState } from "../pr-review/tool-state";
-import { parseRepo } from "../pr-review/types";
+import { parseRepo, SHA_RE } from "../pr-review/types";
 import { loadPublishConfig, WORK_DIR, type PublishConfig } from "./config";
 import { PublishError, PublishRefusal, UsageError } from "./errors";
 import { childEnv, realRunner, type Runner } from "./exec";
@@ -36,7 +36,7 @@ export const USAGE = [
   "bun --cwd <home>/.claude-publish/work <abs>/tools/publish/cli.ts issue edit --repo <owner/name> --issue <n> [--title <t>] [--body-file <abs path> [--template <file.md>]]",
   "bun --cwd <home>/.claude-publish/work <abs>/tools/publish/cli.ts pr create --repo <owner/name> --base <branch> --head <branch> --title <t> --body-file <abs path> [--closes <n,n>] [--draft]",
   "bun --cwd <home>/.claude-publish/work <abs>/tools/publish/cli.ts pr edit --repo <owner/name> --pr <n> --base <branch> [--title <t>] [--body-file <abs path> [--closes <n,n>]]",
-  "bun --cwd <home>/.claude-publish/work <abs>/tools/publish/cli.ts review-merge --repo <owner/name> --pr <n> [--closes <n,n>] [--allow-admin --admin-reason-file <abs path>] [--method merge|rebase] [--checks-timeout-min <1-180>]",
+  "bun --cwd <home>/.claude-publish/work <abs>/tools/publish/cli.ts review-merge --repo <owner/name> --pr <n> --tool-head <commit> [--closes <n,n>] [--allow-admin --admin-reason-file <abs path>] [--method merge|rebase] [--checks-timeout-min <1-180>]",
 ].join("\n");
 
 export type Command =
@@ -147,7 +147,11 @@ export function parseCommand(argv: readonly string[]): Command {
   }
 
   if (first === "review-merge") {
-    const v = parse(second === undefined ? [] : [second, ...rest], ["repo", "pr", "closes", "method", "checks-timeout-min", "admin-reason-file"], ["allow-admin"]);
+    const v = parse(second === undefined ? [] : [second, ...rest], ["repo", "pr", "closes", "method", "checks-timeout-min", "admin-reason-file", "tool-head"], ["allow-admin"]);
+    // The commit every credential-holding step must run from. No default: a missing or partial pin
+    // would let the run trust whatever the checkouts hold.
+    const toolHead = v["tool-head"];
+    if (typeof toolHead !== "string" || !SHA_RE.test(toolHead)) throw new UsageError("--tool-head must be a full 40-character lowercase commit id");
     const allowAdmin = v["allow-admin"] === true;
     const reason = v["admin-reason-file"];
     if (allowAdmin !== (reason !== undefined)) throw new UsageError("--allow-admin and --admin-reason-file <absolute path> go together");
@@ -169,6 +173,7 @@ export function parseCommand(argv: readonly string[]): Command {
       adminReasonFile: typeof reason === "string" ? reason : null,
       method,
       checksTimeoutMin: Number(timeout),
+      toolHead,
     };
   }
 
