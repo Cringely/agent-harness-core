@@ -310,7 +310,8 @@ pruned-file logic and never touches the pruned file.)
 `-Audit` writes nothing and reports drift in both directions, using a three-way compare of core
 source, the manifest hash, and the installed file: `project-modified` and `untracked (differs from
 core)` files are candidates to promote upstream, `core-updated` and `not-installed` mean the project
-should re-run the installer, and `overlay (changed)` means a pinned fork has moved since it was
+should re-run the installer (`core-updated` also covers an LF file that the project copy has converted
+to CRLF, which the install rewrites), and `overlay (changed)` means a pinned fork has moved since it was
 pinned and wants re-reviewing. `missing` splits: a tracked file that was deleted comes back with a
 re-run, while a deleted overlay exists only in the project's own history, so it is restored from
 there or the pin goes with `-Unaccept`. Nothing automatic ever recreates the second kind. `orphaned`

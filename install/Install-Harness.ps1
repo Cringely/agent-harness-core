@@ -130,7 +130,8 @@
     Report-only drift check; writes nothing. Three-way compare (core source vs
     manifest hash vs installed file) classifies every managed file:
       in-sync            installed file matches current core
-      core-updated       core changed since install, project didn't — re-run installer
+      core-updated       core changed since install, project didn't — re-run installer.
+                         Also an LF file core ships that the project copy has converted to CRLF
       project-modified   project changed it, core didn't — promotion candidate for core
       conflict           both sides changed — reconcile by hand
       missing            in manifest but deleted from the project
@@ -340,6 +341,13 @@ $gitHookNames = @('pre-commit', 'pre-push', 'commit-msg')
 # is LF in the index into CRLF on disk, and a project that commits the same content as LF would
 # otherwise read as modified with no content difference. Text is decided by the absence of a NUL
 # byte, and a binary file is hashed as it is. Only a CRLF pair is rewritten, so a lone CR stays.
+# [System.IO.File] resolves a relative path against the process working directory, which
+# Set-Location does not move, so every byte read goes through the PowerShell location first.
+function Read-FileBytes {
+    param([string]$Path)
+    [System.IO.File]::ReadAllBytes($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path))
+}
+
 function Get-NormalizedBytes {
     param([byte[]]$Bytes)
     if ([System.Array]::IndexOf($Bytes, [byte]0) -ge 0) { return , $Bytes }
@@ -353,7 +361,7 @@ function Get-NormalizedBytes {
 
 function Get-FileHashHex {
     param([string]$Path)
-    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $bytes = Read-FileBytes -Path $Path
     $norm = Get-NormalizedBytes -Bytes $bytes
     [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($norm))
 }
@@ -373,7 +381,7 @@ function Get-RawFileHashHex {
 # from the normalised bytes means an existing CRLF pair is not doubled.
 function Get-CrlfExpandedHashHex {
     param([string]$Path)
-    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $bytes = Read-FileBytes -Path $Path
     if ([System.Array]::IndexOf($bytes, [byte]0) -ge 0) { return $null }
     $norm = Get-NormalizedBytes -Bytes $bytes
     $out = [System.Collections.Generic.List[byte]]::new($norm.Length + 16)
@@ -397,11 +405,12 @@ function Test-RecordedHashMatch {
 # True when the project copy carries a CR and core's file carries none: an LF file that was
 # converted to CRLF. The reverse (core CRLF from a Windows checkout, project LF) is not a
 # difference worth a copy, since rewriting it would reintroduce the churn normalised hashing
-# removes.
+# removes. -Audit and Install-ManagedFile both ask this one question, so a file the install would
+# rewrite never reads in-sync.
 function Test-CrAddedToLfFile {
     param([string]$SourcePath, [string]$DestPath)
-    $src = [System.IO.File]::ReadAllBytes($SourcePath)
-    $dst = [System.IO.File]::ReadAllBytes($DestPath)
+    $src = Read-FileBytes -Path $SourcePath
+    $dst = Read-FileBytes -Path $DestPath
     return ([System.Array]::IndexOf($dst, [byte]13) -ge 0) -and ([System.Array]::IndexOf($src, [byte]13) -lt 0)
 }
 
@@ -1870,7 +1879,10 @@ if ($Audit) {
         }
 
         $recHash = $manifest['files'][$key]
-        $status = if ($dstHash -eq $srcHash) { 'in-sync' }
+        $status = if ($dstHash -eq $srcHash) {
+            # Same text as core, but a CR core's LF file does not have: the install rewrites it.
+            if (Test-CrAddedToLfFile -SourcePath $srcPath -DestPath $dstPath) { 'core-updated' } else { 'in-sync' }
+        }
         elseif (Test-RecordedHashMatch -Path $dstPath -Recorded $recHash) { 'core-updated' }
         elseif (Test-RecordedHashMatch -Path $srcPath -Recorded $recHash) { 'project-modified' }
         else { 'conflict' }

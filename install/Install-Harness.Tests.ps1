@@ -736,7 +736,8 @@ Describe "Install-Harness" {
             # Same text either way. The only rewrite is a copy that gained CRs core's file lacks.
             $rewritten = ([System.Array]::IndexOf($bytes, [byte]13) -ge 0) -and ([System.Array]::IndexOf($src, [byte]13) -lt 0)
             $audit = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
-            $audit | Should -Match 'agents/task-reviewer\.md\s+in-sync'
+            # The audit answers with the install's own predicate, so a copy the install rewrites is not in-sync.
+            $audit | Should -Match ('agents/task-reviewer\.md\s+' + $(if ($rewritten) { 'core-updated' } else { 'in-sync' }))
             $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target *>&1 | Out-String -Width 500
             $out | Should -Match ('agents/task-reviewer\.md\s+' + $(if ($rewritten) { 'updated' } else { 'unchanged' }))
             $out | Should -Not -Match "Skipping 'agents/task-reviewer\.md'"
@@ -783,6 +784,23 @@ Describe "Install-Harness" {
         (Get-LfHash -Path $dst) | Should -Be (Get-LfHash -Path "$PSScriptRoot/../core/claude/agents/task-reviewer.md")
     }
 
+    It "hashes and audits through a relative -Target after the PowerShell location moves off the process directory" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $parent = Split-Path -Parent $script:target
+        $leaf = Split-Path -Leaf $script:target
+        # Set-Location moves the PowerShell location and leaves the process working directory
+        # where it was, which is what a raw [System.IO.File] call resolves a relative path against.
+        Push-Location $parent
+        try {
+            [System.IO.Directory]::GetCurrentDirectory() | Should -Not -Be ((Get-Location).ProviderPath)
+            $audit = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target "./$leaf" -Audit *>&1 | Out-String -Width 500
+            $audit | Should -Match 'agents/task-reviewer\.md\s+in-sync'
+            $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target "./$leaf" *>&1 | Out-String -Width 500
+            $out | Should -Match 'agents/task-reviewer\.md\s+unchanged'
+        }
+        finally { Pop-Location }
+    }
+
     It "leaves an LF project copy untouched when core's file is CRLF" {
         & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
         $dst = "$script:target/.claude/agents/task-reviewer.md"
@@ -804,6 +822,9 @@ Describe "Install-Harness" {
         [System.Array]::IndexOf($coreBytes, [byte]13) | Should -Be -1
         $text = [System.Text.UTF8Encoding]::new($false).GetString($coreBytes)
         [System.IO.File]::WriteAllBytes($dst, [System.Text.UTF8Encoding]::new($false).GetBytes(($text -replace "`n", "`r`n")))
+        $audit = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $audit | Should -Match 'hooks/commit-msg\s+core-updated'
+        $audit | Should -Not -Match 'hooks/commit-msg\s+in-sync'
         $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target *>&1 | Out-String -Width 500
         $out | Should -Match 'hooks/commit-msg\s+updated'
         [System.Linq.Enumerable]::SequenceEqual([byte[]][System.IO.File]::ReadAllBytes($dst), [byte[]]$coreBytes) | Should -BeTrue
