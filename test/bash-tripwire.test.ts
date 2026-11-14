@@ -402,6 +402,13 @@ describe("quoting, heredocs and substitutions", () => {
     expect(action(nl("cat <<'EOF' > notes.md # don't pipe to bash", "rm -rf /", "EOF"))).toBe("none");
   });
 
+  test.each(["cat <<'EOF' | `#` bash", "cat <<'EOF' | $(#) bash", "cat <<'EOF' | (#) bash"])(
+    "a # inside a substitution or subshell does not hide the rest of the line: %s",
+    (first) => {
+      expect(action(nl(first, "rm -rf /", "EOF"))).toBe("deny");
+    },
+  );
+
   test("a long command after a data heredoc's pipeline has ended does not make the body code", () => {
     const filler = Array.from({ length: 20000 }, () => "echo x").join("; ");
     expect(action(nl(`git commit -m "$(cat <<'EOF'`, "rm -rf /", "EOF", `)" && ${filler}`))).toBe("none");

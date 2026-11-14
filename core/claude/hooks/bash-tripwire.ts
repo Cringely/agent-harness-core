@@ -130,7 +130,8 @@ interface OwnerFrame {
  * command after `;`, `&&`, `||` or `&` is a different pipeline and does not count, which is what
  * keeps `bash -n x.sh && git commit -m "$(cat <<EOF` a data heredoc. A line that ends in `|`,
  * `|&`, `&&` or `||` goes on past the body, as bash reads it, so `cat <<EOF |` with `bash` on the
- * line after the terminator is code. Comments are skipped. Words in the body are never read here.
+ * line after the terminator is code. Comments outside any group or substitution are skipped. Words
+ * in the body are never read here.
  *
  * Anything this cannot settle answers true, which keeps the body in place to be scanned: a `<<`
  * inside a quoted string (not a heredoc at all), an unclosed single quote, a command that ends on
@@ -209,7 +210,8 @@ function heredocIsCode(line: string, at: number, opLen: number, rest: string): b
       endWord();
       continue;
     }
-    if (!f.dq && c === "#" && f.word === "" && !f.quoted) {
+    // Only at the outer level. Skipping to the newline inside a frame would swallow its closer.
+    if (frames.length === 1 && !f.dq && c === "#" && f.word === "" && !f.quoted) {
       const e = text.indexOf("\n", i);
       i = (e < 0 ? text.length : e) - 1;
       continue;
