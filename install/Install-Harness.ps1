@@ -445,11 +445,14 @@ function Test-CrAddedToLfFile {
 # same byte change Test-CrAddedToLfFile reports on a managed file, and a CR after a shebang breaks
 # an sh hook. A pin recorded over the exact bytes (a legacy raw pin, or -Accept on an overlay
 # that already carried the CRs) still matches, so an accepted CRLF fork is not flagged forever.
-# An overlay core does not ship has no LF file to compare with, so the hash decides alone.
+# An overlay core does not ship has no core file to compare with, so no CR can be called ordinary
+# for it. -Accept pins such an overlay over its exact bytes and only those bytes are intact. A
+# normalised pin, which cannot tell the CRLF copy from the LF one it was taken on, is never enough
+# there: the same conversion that breaks an sh hook would otherwise read as accepted.
 function Test-PinnedOverlayIntact {
     param([string]$DestPath, [string]$SourcePath, [string]$Pinned)
+    if (-not $SourcePath) { return ((Get-RawFileHashHex -Path $DestPath) -eq $Pinned) }
     if (-not (Test-RecordedHashMatch -Path $DestPath -Recorded $Pinned)) { return $false }
-    if (-not $SourcePath) { return $true }
     if (-not (Test-CrAddedToLfFile -SourcePath $SourcePath -DestPath $DestPath)) { return $true }
     return ((Get-RawFileHashHex -Path $DestPath) -eq $Pinned)
 }
@@ -1687,11 +1690,11 @@ if ($Accept) {
     # Decided before the manifest write, so an R2-2 refusal leaves the manifest untouched and a
     # retry once git answers still has its pin to make (round-4 B). See Get-SidecarPlan.
     $sidecarPlan = Get-SidecarPlan -TargetDir $Target
-    # A text overlay is pinned by its normalised hash, which cannot tell LF from CRLF. An overlay
-    # of a core LF file that already carries CRs is pinned by its raw bytes instead, so the audit
+    # A normalised pin cannot tell LF from CRLF. An overlay core does not ship, and an overlay of a
+    # core LF file that already carries CRs, are pinned by their raw bytes instead, so the audit
     # can tell that fork from the same text converted to CRLF later (Test-PinnedOverlayIntact).
     $acceptCoreSrc = (Get-CoreFilesMap)[$acceptKey]
-    $manifest['accepted'][$acceptKey] = if ($acceptCoreSrc -and (Test-CrAddedToLfFile -SourcePath $acceptCoreSrc -DestPath $acceptPath)) {
+    $manifest['accepted'][$acceptKey] = if (-not $acceptCoreSrc -or (Test-CrAddedToLfFile -SourcePath $acceptCoreSrc -DestPath $acceptPath)) {
         Get-RawFileHashHex -Path $acceptPath
     }
     else {

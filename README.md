@@ -303,10 +303,13 @@ a fresh scan's would be, until the ignore rule is fixed and the installer runs a
 
 `-Accept <relpath>` writes the second kind of entry. Point it at a path relative to the project's
 `.claude` and it pins that file's current hash, which turns a permanent audit warning into a silent
-`overlay (accepted)` row. The hash ignores line endings, with one exception: a fork of a file core
-ships with LF endings is pinned over its exact bytes when it already carries CRs, and a fork that
-gains CRs after it was pinned reads `overlay (changed)`, the same conversion `core-updated` reports
-on an installed file. It touches the manifest and the shared sidecar step described above, and
+`overlay (accepted)` row. The pin is the hash of the fork's exact bytes, with one exception: a fork of
+a file core itself ships with CRLF endings (a Windows checkout) is pinned over LF-folded text, so
+line endings alone never move it. For every other overlay a line-ending change is a change, and
+it reads `overlay (changed)`. That covers a fork of a file core ships with LF endings that gains
+CRs after it was pinned, the same conversion `core-updated` reports on an installed file, and any
+overlay of a file core does not ship, such as a project-only hook, where there is no core file to
+compare with and any byte difference from the pin counts. It touches the manifest and the shared sidecar step described above, and
 nothing else. Run it again after reviewing a
 change to the fork to re-pin at the new hash. A path resolving outside `.claude` is refused rather
 than pinned, and so is one already tracked in `files`, which is an installed file rather than an
@@ -343,7 +346,8 @@ source, the manifest hash, and the installed file: `project-modified` and `untra
 core)` files are candidates to promote upstream, `core-updated` and `not-installed` mean the project
 should re-run the installer (`core-updated` also covers an LF file that the project copy has converted
 to CRLF, which the install rewrites), and `overlay (changed)` means a pinned fork has moved since it was
-pinned (or an LF fork of an LF core file has been converted to CRLF) and wants re-reviewing. `missing` splits: a tracked file that was deleted comes back with a
+pinned (or an LF fork of an LF core file, or any overlay of a file core does not ship, has been
+converted to CRLF) and wants re-reviewing. `missing` splits: a tracked file that was deleted comes back with a
 re-run, while a deleted overlay exists only in the project's own history, so it is restored from
 there or the pin goes with `-Unaccept`. Nothing automatic ever recreates the second kind. `orphaned`
 splits three ways instead: a key core no longer ships whose file already left the project reads

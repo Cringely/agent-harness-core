@@ -797,22 +797,28 @@ Describe "Install-Harness" {
         }
     }
 
-    It "reads an LF copy as unchanged when the manifest recorded the CRLF raw hash of the same content" {
+    It "reads a locally edited LF copy as project-modified when the manifest holds the legacy CRLF raw hash of core's text" {
         & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
         $dst = "$script:target/.claude/agents/task-reviewer.md"
-        $lf = ([System.IO.File]::ReadAllText($dst) -replace "`r`n", "`n")
         $enc = [System.Text.UTF8Encoding]::new($false)
-        $crlfBytes = $enc.GetBytes(($lf -replace "`n", "`r`n"))
-        $rawCrlf = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($crlfBytes))
-        [System.IO.File]::WriteAllBytes($dst, $enc.GetBytes($lf))
+        # An older install on a CRLF working tree recorded the raw hash of core's text with CRLF
+        # endings. The project has since edited its LF copy, so the copy differs from core and the
+        # recorded value matches neither the copy nor core's own bytes on an LF host. Only the
+        # CRLF-expanded form of core's text reaches it, and it says the edit is the project's.
+        $coreLf = ([System.IO.File]::ReadAllText("$PSScriptRoot/../core/claude/agents/task-reviewer.md") -replace "`r`n", "`n")
+        $rawCrlf = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($enc.GetBytes(($coreLf -replace "`n", "`r`n"))))
+        $edited = $enc.GetBytes($coreLf + "local edit`n")
+        [System.IO.File]::WriteAllBytes($dst, $edited)
         $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
         $m['files']['agents/task-reviewer.md'] = $rawCrlf
         $m | ConvertTo-Json -Depth 20 | Set-Content "$script:target/.claude/.harness-manifest.json"
+
+        $audit = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $audit | Should -Match 'agents/task-reviewer\.md\s+project-modified'
+        $audit | Should -Not -Match 'agents/task-reviewer\.md\s+conflict'
         $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target *>&1 | Out-String -Width 500
-        $out | Should -Match 'agents/task-reviewer\.md\s+(unchanged|updated)'
-        $out | Should -Not -Match "Skipping 'agents/task-reviewer\.md'"
-        $after = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
-        $after['files']['agents/task-reviewer.md'] | Should -Be (Get-LfHash -Path $dst)
+        $out | Should -Match 'agents/task-reviewer\.md\s+skipped-modified'
+        [System.IO.File]::ReadAllBytes($dst) | Should -Be $edited
     }
 
     It "replaces an LF copy whose manifest holds the legacy CRLF raw hash when core has also changed" {
@@ -897,6 +903,39 @@ Describe "Install-Harness" {
         finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
     }
 
+    It "matches a recorded hash that is normalised, raw, or the raw hash of the same text with CRLF endings" {
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile("$PSScriptRoot/Install-Harness.ps1", [ref]$null, [ref]$null)
+        $names = 'Read-FileBytes', 'Get-NormalizedBytes', 'Get-FileHashHex', 'Get-RawFileHashHex', 'Get-CrlfExpandedHashHex', 'Test-RecordedHashMatch'
+        foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in $names }, $true)) {
+            . ([scriptblock]::Create($f.Extent.Text))
+        }
+        $dir = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-match-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $dir | Out-Null
+        try {
+            $sha = { param([byte[]]$b) [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($b)) }
+            $lf = "$dir/lf"; $crlf = "$dir/crlf"; $bin = "$dir/bin"
+            [System.IO.File]::WriteAllBytes($lf, [byte[]](65, 10, 66, 10))
+            [System.IO.File]::WriteAllBytes($crlf, [byte[]](65, 13, 10, 66, 13, 10))
+            [System.IO.File]::WriteAllBytes($bin, [byte[]](65, 0, 10))
+            $lfHash = & $sha ([byte[]](65, 10, 66, 10))
+            $crlfHash = & $sha ([byte[]](65, 13, 10, 66, 13, 10))
+
+            # An LF copy matches the normalised hash, its own raw hash, and the raw hash of the CRLF form.
+            Test-RecordedHashMatch -Path $lf -Recorded $lfHash | Should -BeTrue
+            Test-RecordedHashMatch -Path $lf -Recorded $crlfHash | Should -BeTrue
+            # A CRLF copy matches the normalised hash and its own raw hash.
+            Test-RecordedHashMatch -Path $crlf -Recorded $lfHash | Should -BeTrue
+            Test-RecordedHashMatch -Path $crlf -Recorded $crlfHash | Should -BeTrue
+            # Other content, and an empty record, never match.
+            Test-RecordedHashMatch -Path $lf -Recorded (& $sha ([byte[]](67, 10))) | Should -BeFalse
+            Test-RecordedHashMatch -Path $lf -Recorded '' | Should -BeFalse
+            # A binary file is never expanded, so the CRLF form of its bytes is not a match.
+            Test-RecordedHashMatch -Path $bin -Recorded (& $sha ([byte[]](65, 0, 13, 10))) | Should -BeFalse
+            Test-RecordedHashMatch -Path $bin -Recorded (& $sha ([byte[]](65, 0, 10))) | Should -BeTrue
+        }
+        finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
     It "judges a pinned overlay by its CRs only where core's file has none" {
         $ast = [System.Management.Automation.Language.Parser]::ParseFile("$PSScriptRoot/Install-Harness.ps1", [ref]$null, [ref]$null)
         $names = 'Read-FileBytes', 'Get-NormalizedBytes', 'Get-FileHashHex', 'Get-RawFileHashHex', 'Get-CrlfExpandedHashHex', 'Test-RecordedHashMatch', 'Test-CrAddedToLfFile', 'Test-PinnedOverlayIntact'
@@ -923,8 +962,12 @@ Describe "Install-Harness" {
             Test-PinnedOverlayIntact -DestPath $crlfFork -SourcePath $crlfCore -Pinned $normPin | Should -BeTrue
             # A pin over the exact CRLF bytes records that the CRs were intended.
             Test-PinnedOverlayIntact -DestPath $crlfFork -SourcePath $lfCore -Pinned $rawPin | Should -BeTrue
-            # A fork core does not ship has nothing to compare, so the hash alone decides.
-            Test-PinnedOverlayIntact -DestPath $crlfFork -SourcePath $null -Pinned $normPin | Should -BeTrue
+            # A fork core does not ship has no LF file to compare with, so only its exact bytes can
+            # say it is unchanged. A normalised pin cannot tell the CRLF copy from the LF one it was taken on.
+            Test-PinnedOverlayIntact -DestPath $lfFork -SourcePath $null -Pinned $normPin | Should -BeTrue
+            Test-PinnedOverlayIntact -DestPath $crlfFork -SourcePath $null -Pinned $normPin | Should -BeFalse
+            Test-PinnedOverlayIntact -DestPath $crlfFork -SourcePath $null -Pinned $rawPin | Should -BeTrue
+            Test-PinnedOverlayIntact -DestPath $lfFork -SourcePath $null -Pinned $rawPin | Should -BeFalse
             # A moved fork is never intact, whatever the endings.
             Test-PinnedOverlayIntact -DestPath $lfCore -SourcePath $lfCore -Pinned $normPin | Should -BeFalse
         }
@@ -1017,7 +1060,7 @@ Describe "Install-Harness" {
         $after['files']['agents/task-reviewer.md'] | Should -Be (Get-LfHash -Path $dst)
     }
 
-    It "pins a text overlay by its LF hash and a binary overlay by its raw hash" {
+    It "pins an overlay core does not ship by its exact bytes, text or binary" {
         & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
         $textOverlay = "$script:target/.claude/agents/crlf-overlay.md"
         $binOverlay = "$script:target/.claude/agents/bin-overlay.md"
@@ -1026,8 +1069,8 @@ Describe "Install-Harness" {
         & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Accept 'agents/crlf-overlay.md' | Out-Null
         & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Accept 'agents/bin-overlay.md' | Out-Null
         $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
-        $lfExpected = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([byte[]](65, 10, 66, 10)))
-        $m['accepted']['agents/crlf-overlay.md'] | Should -Be $lfExpected
+        $m['accepted']['agents/crlf-overlay.md'] | Should -Be (Get-FileHash -LiteralPath $textOverlay -Algorithm SHA256).Hash
+        $m['accepted']['agents/crlf-overlay.md'] | Should -Not -Be ([System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([byte[]](65, 10, 66, 10))))
         $m['accepted']['agents/bin-overlay.md'] | Should -Be (Get-FileHash -LiteralPath $binOverlay -Algorithm SHA256).Hash
     }
 
@@ -1080,6 +1123,42 @@ Describe "Install-Harness" {
         $audit | Should -Match 'hooks/commit-msg\s+overlay \(accepted\)'
         $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target *>&1 | Out-String -Width 500
         $out | Should -Match 'hooks/commit-msg\s+skipped-pinned'
+    }
+
+    It "reports an overlay core does not ship as changed once it gains CRs, and keeps an accepted CRLF one accepted" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $overlay = "$script:target/.claude/hooks/project-only.sh"
+        $enc = [System.Text.UTF8Encoding]::new($false)
+        [System.IO.File]::WriteAllBytes($overlay, $enc.GetBytes("#!/bin/sh`nproject only`n"))
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Accept 'hooks/project-only.sh' | Out-Null
+        $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+        $m['accepted']['hooks/project-only.sh'] | Should -Be (Get-FileHash -LiteralPath $overlay -Algorithm SHA256).Hash
+        $audit = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $audit | Should -Match 'hooks/project-only\.sh\s+overlay \(accepted\)'
+
+        # Same text, CRLF endings. Core has no file to say CRs are wrong here, but the bytes are no longer what was pinned.
+        [System.IO.File]::WriteAllBytes($overlay, $enc.GetBytes("#!/bin/sh`r`nproject only`r`n"))
+        $audit = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $audit | Should -Match 'hooks/project-only\.sh\s+overlay \(changed\)'
+        $audit | Should -Not -Match 'hooks/project-only\.sh\s+overlay \(accepted\)'
+
+        # Re-pinning the CRLF bytes records that they were intended.
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Accept 'hooks/project-only.sh' | Out-Null
+        $audit = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $audit | Should -Match 'hooks/project-only\.sh\s+overlay \(accepted\)'
+    }
+
+    It "reports an overlay core does not ship as changed when its pin is the normalised hash and the file holds CRs" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $overlay = "$script:target/.claude/hooks/project-only.sh"
+        $enc = [System.Text.UTF8Encoding]::new($false)
+        [System.IO.File]::WriteAllBytes($overlay, $enc.GetBytes("#!/bin/sh`r`nproject only`r`n"))
+        $lfHash = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($enc.GetBytes("#!/bin/sh`nproject only`n")))
+        $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+        $m['accepted']['hooks/project-only.sh'] = $lfHash
+        $m | ConvertTo-Json -Depth 20 | Set-Content "$script:target/.claude/.harness-manifest.json"
+        $audit = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $audit | Should -Match 'hooks/project-only\.sh\s+overlay \(changed\)'
     }
 
     It "records an empty stackDetected.plugins array in the sidecar when the plugin cache dir is missing, without throwing" {
@@ -2182,7 +2261,7 @@ Describe "Install-Harness" {
         $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
         $secondPin = $m['accepted']['agents/project-only.md']
         $secondPin | Should -Not -Be $firstPin
-        $secondPin | Should -Be (Get-LfHash -Path $overlay)
+        $secondPin | Should -Be (Get-FileHash -LiteralPath $overlay -Algorithm SHA256).Hash
         $audit = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
         $audit | Should -Match 'agents/project-only\.md\s+overlay \(accepted\)'
     }
@@ -2549,7 +2628,7 @@ Describe "Install-Harness" {
         # dropped this one from `files`, so -Accept now takes it without a hand-edited manifest.
         & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Accept 'agents/retired-agent.md' | Out-Null
         $pinned = Get-Content $manifestPath -Raw | ConvertFrom-Json -AsHashtable
-        $pinned['accepted']['agents/retired-agent.md'] | Should -Be (Get-LfHash -Path $orphanPath)
+        $pinned['accepted']['agents/retired-agent.md'] | Should -Be (Get-FileHash -LiteralPath $orphanPath -Algorithm SHA256).Hash
     }
 
     It "-Prune drops a stale manifest record when the orphaned file is already gone from disk" {
