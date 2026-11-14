@@ -5,6 +5,7 @@
 //
 //   bun tools/model-currency/check.ts [--root <dir-or-file>]... [--exclude <name>]...
 //                                     [--latest <file.json>] [--no-resolve]
+//   bun tools/model-currency/check.ts --aliases [--latest <file.json>]
 //
 // Latest-model source, first that answers: the Models API (needs ANTHROPIC_API_KEY), the --latest
 // JSON file (family name to one model id or a list of them), then the live resolution of each tier
@@ -47,6 +48,16 @@
 // in any other position, such as one built from a variable, is not seen.
 // Exit 1 when any row is behind or stale-alias. Otherwise 2 when any row is unknown, the source is
 // the alias source, there is no source, or no file was scanned. Otherwise 0.
+//
+// --aliases is the on-demand drift probe. It reads no files. It resolves each tier alias (fable,
+// opus, sonnet, haiku) through `claude -p` on this machine and prints one row per alias:
+//   <status>\t<alias>\t<resolved model or ->\t<expected latest or ->
+// status is current (resolved to the latest), stale-alias (resolved below it), not-served (no single
+// model of that family came back, so the account or an org setting does not serve the tier), or
+// unknown (above the latest, unlisted, or no latest). The expected latest comes only from the Models
+// API or --latest, never from the aliases themselves, so with neither every row is unknown. Exit 1
+// when any row is stale-alias, otherwise 2 when any row is not current, otherwise 0. It cannot be
+// combined with --root, --exclude or --no-resolve.
 //
 // A line holding the text "model-currency: ignore" is never reported. The alias resolution step
 // reads only the model names under modelUsage in the claude CLI's JSON, and nothing else from it
@@ -268,6 +279,25 @@ export const defaultClaudeRunner: ClaudeRunner = (args) => {
   }
 };
 
+export interface ProbeRow {
+  status: "current" | "stale-alias" | "not-served" | "unknown";
+  alias: Family;
+  resolved: string | null;
+  latest: string | null;
+}
+
+// The on-demand drift probe. `latest` must come from a verified source (api or file). An alias-derived
+// table is never passed in, because it would judge each alias against itself.
+export function probeAliases(latest: LatestTable | null, runClaude: ClaudeRunner): ProbeRow[] {
+  return FAMILIES.map((alias): ProbeRow => {
+    const resolved = resolveAlias(alias, runClaude);
+    const latestId = latest === null ? null : (latest.models[alias] ?? null);
+    if (resolved === null) return { status: "not-served", alias, resolved, latest: latestId };
+    const v = judge(parseModelId(resolved), latest);
+    return { status: v === "older" ? "stale-alias" : v === "same" ? "current" : "unknown", alias, resolved, latest: latestId };
+  });
+}
+
 export const DEFAULT_EXCLUDES = [
   ".git", "node_modules", "runs", "worktrees", "projects", "file-history", "plugins", "debug", "backups", "superpowers", ".superpowers",
 ];
@@ -378,7 +408,7 @@ export interface RunDeps {
   readFile?: (path: string) => Buffer;
 }
 
-const USAGE = "usage: bun tools/model-currency/check.ts [--root <dir-or-file>]... [--exclude <name>]... [--latest <file.json>] [--no-resolve]";
+const USAGE = "usage: bun tools/model-currency/check.ts [--root <dir-or-file>]... [--exclude <name>]... [--latest <file.json>] [--no-resolve]\n       bun tools/model-currency/check.ts --aliases [--latest <file.json>]";
 
 function readLatestFile(path: string): LatestTable | null {
   try {
@@ -408,11 +438,30 @@ export async function run(argv: string[], deps: RunDeps): Promise<{ exitCode: 0 
         exclude: { type: "string", multiple: true },
         latest: { type: "string" },
         "no-resolve": { type: "boolean" },
+        aliases: { type: "boolean" },
       },
       allowPositionals: false,
     }));
   } catch (e) {
     return fail((e as Error).message);
+  }
+
+  if (values.aliases === true) {
+    if (values.root !== undefined || values.exclude !== undefined || values["no-resolve"] === true) {
+      return fail("--aliases reads no files and cannot be combined with --root, --exclude or --no-resolve");
+    }
+    let known = await fetchLatestFromApi(deps.env.ANTHROPIC_API_KEY, deps.fetchImpl);
+    if (known === null && values.latest !== undefined) {
+      known = readLatestFile(values.latest);
+      if (known === null) return fail(`cannot use --latest file: ${values.latest}`);
+    }
+    const probe = probeAliases(known, deps.runClaude);
+    const head = known === null ? "latest source: none (latest unknown)" : `latest source: ${known.source}`;
+    const exitCode = probe.some((r) => r.status === "stale-alias") ? 1 : probe.every((r) => r.status === "current") ? 0 : 2;
+    return {
+      exitCode,
+      output: [head, ...probe.map((r) => `${r.status}\t${r.alias}\t${r.resolved ?? "-"}\t${r.latest ?? "-"}`)].join("\n"),
+    };
   }
 
   const excludes = new Set([...DEFAULT_EXCLUDES, ...(values.exclude ?? [])]);

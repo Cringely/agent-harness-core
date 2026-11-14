@@ -5,10 +5,12 @@
 
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join, sep } from "node:path";
 import {
   WRITE_SCOPE_GATE_VERSION,
+  accountHome,
+  claudeConfigRoots,
   decide,
   inScratch,
   readSessionCwd,
@@ -168,10 +170,6 @@ describe("inScratch(): a scratch-named ancestor of the project is not scratch", 
 
   test("decide() denies a scoped write inside such a project", () => {
     expect(decide("scratch", `${PROJ}/src/index.ts`, PROJ, PROJ).action).toBe("deny");
-  });
-
-  test("the gate version marks this fix", () => {
-    expect(WRITE_SCOPE_GATE_VERSION).toBe(2);
   });
 });
 
@@ -388,6 +386,221 @@ describe("inScratch(): a project at a filesystem root still restricts scratch to
   test.each(roots)("project root %p: a relative write resolves against the cwd", (_label, root) => {
     expect(inScratch(join("scratch", "CLAUDE.md"), root, root)).toBe(false);
     expect(inScratch(join(".claude", "scratch", "r.md"), root, root)).toBe(true);
+  });
+});
+
+// The account Claude folder (the user's ~/.claude, or CLAUDE_CONFIG_DIR) holds rules, skills,
+// agent definitions and hooks that every session loads. A scratch-named folder there is still that
+// tree, so a scoped agent is denied it whatever the segment says. Most cases also run with no config
+// roots, to show the same path would otherwise be scratch and the deny comes from this rule.
+const homeRoot = mkdtempSync(join(realTmp, "write-scope-home-"));
+afterAll(() => {
+  rmSync(homeRoot, { recursive: true, force: true });
+});
+
+describe("inScratch(): nothing at or under the account Claude folder is scratch", () => {
+  const home = join(homeRoot, "home");
+  const claudeDir = join(home, ".claude");
+  const proj = join(homeRoot, "work", "repo");
+  mkdirSync(join(claudeDir, "skills"), { recursive: true });
+  mkdirSync(join(claudeDir, "scratch"), { recursive: true });
+  mkdirSync(join(proj, ".claude", "scratch"), { recursive: true });
+  const roots = claudeConfigRoots({}, home);
+
+  test.each([
+    [["scratch", "r.md"]],
+    [["scratchpad", "r.md"]],
+    [[".scratch", "r.md"]],
+    [["skills", "scratch", "SKILL.md"]],
+    [["projects", "p", "memory", "scratchpad", "n.md"]],
+  ])("a scratch-named folder under it is denied: %p", (rel) => {
+    const target = join(claudeDir, ...rel);
+    expect(inScratch(target, proj, proj, [])).toBe(true);
+    expect(inScratch(target, proj, proj, roots)).toBe(false);
+  });
+
+  test("the folder itself is denied when it is scratch-named", () => {
+    const cfg = join(homeRoot, "cfg", "scratch");
+    const cfgRoots = claudeConfigRoots({ CLAUDE_CONFIG_DIR: cfg }, home);
+    expect(inScratch(join(cfg, "r.md"), proj, proj, [])).toBe(true);
+    expect(inScratch(join(cfg, "r.md"), proj, proj, cfgRoots)).toBe(false);
+    expect(inScratch(cfg, proj, proj, cfgRoots)).toBe(false);
+  });
+
+  test("a different case is denied", () => {
+    const target = join(home, ".CLAUDE", "Scratch", "r.md");
+    expect(inScratch(target, proj, proj, [])).toBe(true);
+    expect(inScratch(target, proj, proj, roots)).toBe(false);
+  });
+
+  test("forward-slash and mixed separators are denied", () => {
+    const slashed = claudeDir.split(BS).join("/");
+    const targets = [`${slashed}/scratch/r.md`];
+    if (WIN) targets.push(`${slashed}/scratch${BS}r.md`, `${claudeDir}/scratch/r.md`);
+    for (const target of targets) {
+      expect(inScratch(target, proj, proj, [])).toBe(true);
+      expect(inScratch(target, proj, proj, roots)).toBe(false);
+    }
+  });
+
+  test("dot-dot segments that land inside it are denied", () => {
+    for (const target of [
+      [home, "other", "..", ".claude", "scratch", "r.md"].join(sep),
+      [homeRoot, "pad", "scratchpad", "..", "..", "home", ".claude", "scratch", "r.md"].join(sep),
+    ]) {
+      expect(inScratch(target, proj, proj, [])).toBe(true);
+      expect(inScratch(target, proj, proj, roots)).toBe(false);
+    }
+  });
+
+  test("a relative path resolved from a cwd inside it is denied", () => {
+    const rel = join(".claude", "scratch", "r.md");
+    expect(inScratch(rel, home, proj, [])).toBe(true);
+    expect(inScratch(rel, home, proj, roots)).toBe(false);
+  });
+
+  let linked = true;
+  const viaLink = join(homeRoot, "out", "via");
+  const namedLink = join(homeRoot, "out2", "scratchpad");
+  try {
+    mkdirSync(dirname(viaLink), { recursive: true });
+    mkdirSync(dirname(namedLink), { recursive: true });
+    symlinkSync(claudeDir, viaLink, "junction");
+    symlinkSync(join(claudeDir, "scratch"), namedLink, "junction");
+  } catch {
+    linked = false;
+  }
+
+  test.skipIf(!linked)("a link into it is judged by where it resolves", () => {
+    for (const target of [join(viaLink, "scratch", "r.md"), join(namedLink, "r.md")]) {
+      expect(inScratch(target, proj, proj, [])).toBe(true);
+      expect(inScratch(target, proj, proj, roots)).toBe(false);
+    }
+  });
+
+  // A subfolder linked out of the tree (skills kept in a dotfiles repo) resolves outside every
+  // canonical root, so the spelling the write was given has to decide as well.
+  let linkedOut = true;
+  const dotfiles = join(homeRoot, "dotfiles");
+  const homeB = join(homeRoot, "home-b");
+  const claudeB = join(homeB, ".claude");
+  const homeC = join(homeRoot, "home-c");
+  const claudeC = join(homeC, ".claude");
+  try {
+    mkdirSync(join(dotfiles, "skills-b"), { recursive: true });
+    mkdirSync(join(dotfiles, "claude-c"), { recursive: true });
+    mkdirSync(join(dotfiles, "skills-c"), { recursive: true });
+    mkdirSync(claudeB, { recursive: true });
+    mkdirSync(homeC, { recursive: true });
+    symlinkSync(join(dotfiles, "skills-b"), join(claudeB, "skills"), "junction");
+    symlinkSync(join(dotfiles, "claude-c"), claudeC, "junction");
+    symlinkSync(join(dotfiles, "skills-c"), join(dotfiles, "claude-c", "skills"), "junction");
+  } catch {
+    linkedOut = false;
+  }
+
+  test.skipIf(!linkedOut)("a subfolder junctioned out of it is denied by the path as given", () => {
+    const target = join(claudeB, "skills", "scratch", "SKILL.md");
+    expect(inScratch(target, proj, proj, [])).toBe(true);
+    expect(inScratch(target, proj, proj, claudeConfigRoots({}, homeB))).toBe(false);
+  });
+
+  test.skipIf(!linkedOut)("a linked account folder is a root under the spelling it was given", () => {
+    const target = join(claudeC, "skills", "scratch", "SKILL.md");
+    expect(inScratch(target, proj, proj, [])).toBe(true);
+    expect(inScratch(target, proj, proj, claudeConfigRoots({}, homeC))).toBe(false);
+  });
+
+  test.skipIf(!linkedOut)("the link target's own spelling is not denied (stated residual)", () => {
+    const target = join(dotfiles, "skills-b", "scratch", "SKILL.md");
+    expect(inScratch(target, proj, proj, claudeConfigRoots({}, homeB))).toBe(true);
+  });
+
+  test.skipIf(!linked)("a config root given through a link is canonicalised", () => {
+    const linkRoots = claudeConfigRoots({ CLAUDE_CONFIG_DIR: viaLink }, join(homeRoot, "elsewhere"));
+    expect(inScratch(join(claudeDir, "scratch", "r.md"), proj, proj, linkRoots)).toBe(false);
+  });
+
+  test("CLAUDE_CONFIG_DIR is a root of its own", () => {
+    const cfg = join(homeRoot, "cfg-dir");
+    const cfgRoots = claudeConfigRoots({ CLAUDE_CONFIG_DIR: cfg }, home);
+    expect(inScratch(join(cfg, "scratchpad", "r.md"), proj, proj, roots)).toBe(true);
+    expect(inScratch(join(cfg, "scratchpad", "r.md"), proj, proj, cfgRoots)).toBe(false);
+    expect(inScratch(join(claudeDir, "scratch", "r.md"), proj, proj, cfgRoots)).toBe(false);
+  });
+
+  test("an empty CLAUDE_CONFIG_DIR adds no root", () => {
+    expect(claudeConfigRoots({ CLAUDE_CONFIG_DIR: "" }, home)).toEqual(claudeConfigRoots({}, home));
+  });
+
+  // An unknown home means the account folder could be anywhere, so the roots are unknown (null)
+  // rather than empty. Empty would let a scratch-named folder inside that account folder pass.
+  test("an empty or relative home leaves the roots unknown", () => {
+    expect(claudeConfigRoots({}, "")).toBeNull();
+    expect(claudeConfigRoots({}, "relative-home")).toBeNull();
+    expect(claudeConfigRoots({}, null)).toBeNull();
+    expect(claudeConfigRoots({ CLAUDE_CONFIG_DIR: join(homeRoot, "cfg") }, null)).toBeNull();
+  });
+
+  test("a home lookup that throws, or answers empty or relative, is unknown, not a throw", () => {
+    const throwing = () => {
+      throw new Error("no home for this user");
+    };
+    expect(accountHome(throwing)).toBeNull();
+    expect(accountHome(() => "")).toBeNull();
+    expect(accountHome(() => "relative-home")).toBeNull();
+    expect(accountHome(() => home)).toBe(home);
+  });
+
+  test("with the account folder unknown, no path is scratch", () => {
+    for (const target of [
+      join(homeRoot, "tmp", "claude", "sess", "scratchpad", "r.md"),
+      join(claudeDir, "scratch", "r.md"),
+      join(proj, ".claude", "scratch", "r.md"),
+    ]) {
+      expect(inScratch(target, proj, proj, null)).toBe(false);
+    }
+  });
+
+  test("decide() denies every scoped write when the home lookup fails", () => {
+    const unknown = claudeConfigRoots({}, accountHome(() => {
+      throw new Error("no home for this user");
+    }));
+    for (const target of [
+      join(homeRoot, "tmp", "claude", "sess", "scratchpad", "r.md"),
+      join(claudeDir, "skills", "scratch", "SKILL.md"),
+      join(proj, "src", "index.ts"),
+    ]) {
+      expect(decide("scratch", target, proj, proj, unknown).action).toBe("deny");
+    }
+    expect(decide(null, join(proj, "src", "index.ts"), proj, proj, unknown)).toEqual({ action: "allow" });
+  });
+
+  test("ordinary scratch folders stay scratch", () => {
+    for (const target of [
+      join(homeRoot, "tmp", "claude", "sess", "scratchpad", "r.md"),
+      join(home, "scratch", "r.md"),
+      join(home, ".claude-other", "scratch", "r.md"),
+      join(home, ".claudex", "scratchpad", "r.md"),
+    ]) {
+      expect(inScratch(target, proj, proj, roots)).toBe(true);
+    }
+    expect(inScratch(join(proj, ".claude", "scratch", "r.md"), proj, proj, roots)).toBe(true);
+  });
+
+  test("a project at the home folder loses its drop box, since that is the account folder", () => {
+    expect(inScratch(join(claudeDir, "scratch", "r.md"), home, home, [])).toBe(true);
+    expect(inScratch(join(claudeDir, "scratch", "r.md"), home, home, roots)).toBe(false);
+  });
+
+  test("decide() applies it with the real home folder by default", () => {
+    const target = join(homedir(), ".claude", "scratch", "r.md");
+    expect(decide("scratch", target, proj, proj).action).toBe("deny");
+    expect(decide("scratch", join(homeRoot, "tmp", "scratchpad", "r.md"), proj, proj)).toEqual({ action: "allow" });
+  });
+
+  test("the gate version marks this change", () => {
+    expect(WRITE_SCOPE_GATE_VERSION).toBe(3);
   });
 });
 
@@ -796,5 +1009,25 @@ describe("spawned process — the fail-open path stays open and says why", () =>
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe("");
     expect(result.stderr).toBe("");
+  });
+});
+
+describe("spawned process — the account Claude folder", () => {
+  test("a scratch folder under CLAUDE_CONFIG_DIR is denied, a plain scratchpad is not", () => {
+    const root = mkdtempSync(join(tmpdir(), "write-scope-cfg-"));
+    try {
+      const cfg = join(root, "cfg");
+      const payload = (filePath: string) =>
+        JSON.stringify({ agent_type: "scratch-spawn-agent", cwd: spawnScopeRoot, tool_input: { file_path: filePath } });
+      const env = { CLAUDE_PROJECT_DIR: spawnScopeRoot, CLAUDE_CONFIG_DIR: cfg };
+      const denied = runHook(payload(join(cfg, "scratchpad", "r.md")), env);
+      expect(denied.exitCode).toBe(0);
+      expect(denied.stdout).toContain(`"permissionDecision":"deny"`);
+      const allowed = runHook(payload(join(root, "sess", "scratchpad", "r.md")), env);
+      expect(allowed.exitCode).toBe(0);
+      expect(allowed.stdout).toBe("");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
