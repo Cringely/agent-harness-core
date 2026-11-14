@@ -39,7 +39,7 @@ nothing changed produces no content diff, so anything the diff shows is a real c
 
 A clone that predates the `account/claude/** text=auto eol=lf` rule in `.gitattributes` keeps
 CRLF working files after pulling it, and `git checkout -- account/claude` does not change that,
-because git skips files whose stat info is unchanged. Renormalise once. This overwrites
+because git skips files whose stat info is unchanged. Renormalize once. This overwrites
 uncommitted changes under `account/claude/`, so commit or discard a pending export first and
 check `git status -- account/claude`:
 
@@ -49,8 +49,8 @@ git checkout HEAD -- account/claude
 ```
 
 `git ls-files --eol account/claude` should then show every file as `i/lf w/lf`. In a clone
-renormalised this way, `git status` is reliable for `account/claude`, because the export's LF
-output matches the checkout. In a clone that has not been renormalised, the checkout writes CRLF
+renormalized this way, `git status` is reliable for `account/claude`, because the export's LF
+output matches the checkout. In a clone that has not been renormalized, the checkout writes CRLF
 and a no-change re-export flips the working-tree endings without touching the index (203 paths
 listed by `git status --short` on a clean tree, 2026-09-05), so use `git diff` there.
 

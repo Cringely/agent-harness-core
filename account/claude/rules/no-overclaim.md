@@ -50,7 +50,7 @@ It is not sufficient. The defects that survive it:
   metric names the passage it is judged against, or it is not measured.
 - **A mistyped task.** A stale-index task graded as a stale-note task measures something the run does not
   claim. Verify the failure condition exists on disk before building the task on it.
-- **A stipulated premise.** A key that asserts an external fact rewards accepting it and penalises the
+- **A stipulated premise.** A key that asserts an external fact rewards accepting it and penalizes the
   agent that correctly challenges it.
 
 Two process rules follow. The key gets an adversarial read by an agent that did not write it, before the
@@ -61,7 +61,7 @@ with a caveat attached: a number in a results table outlives the sentence next t
 
 2026-08-19, a tile-based building simulation: buildings on grid cells, shipped as a managed assembly
 that a decompiler opens. To decide whether a building's `Container.dropOffset` applies from the cell
-centre (`Map.CellCentre`) or from the building transform (`Map.CellBase`), the
+center (`Map.CellCentre`) or from the building transform (`Map.CellBase`), the
 assistant spent about an hour on camera-to-screen geometry, per-cell pixel bands and twenty timed
 screenshots, and asked the operator to place and stock one particular dispenser in their live save. The
 two origins differ by 0.49 in y and `Map.ToCell` is `(int)(pos.y + 0.05f)`, so they land in
@@ -79,7 +79,7 @@ clean answer that no observation contradicts.
   is decoration: discard it rather than running it longer, because no further observation separates two
   hypotheses that predict the same observation. Skipping this check fails silently, since the rig then
   returns a clean reading that agrees with whichever answer you already held.
-- **Name what produces the behaviour and check whether you can open it.** The code layer's `fix-quality.md` patches the
+- **Name what produces the behavior and check whether you can open it.** The code layer's `fix-quality.md` patches the
   producer rather than the consumer, and the same choice applies to where evidence gets gathered. Where the
   producer is nameable and readable, a rig buys one instance of what reading it settles for every case.
   Reading `Container.Add` and `Container.Drop` out of the shipped assembly took about four tool calls,

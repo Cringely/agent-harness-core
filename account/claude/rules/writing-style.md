@@ -82,7 +82,7 @@ knowing what they are looking for. Structure beats prose there, and this row is 
 "no converting prose into bullets" rule below does not apply.
 
 Group by artifact or subsystem, in the order the reader walks the thing. Grouping by defect class,
-theme, or severity organises the work around the author's mental model, which the reader does not
+theme, or severity organizes the work around the author's mental model, which the reader does not
 have.
 
 Label groups with a bold label on its own line, not a `##` header. Lighter weight, no anchor
@@ -108,8 +108,8 @@ Keep the sections the artifact cannot supply. Testing evidence and known gaps st
 reader can reconstruct what changed from the diff and cannot reconstruct what is still broken or
 how you know it works.
 
-Shortening prose does not satisfy this row, and neither does labelling it. A tightened block of
-paragraphs is still a block of paragraphs, and so is a labelled one. The complaint is shape, not
+Shortening prose does not satisfy this row, and neither does labeling it. A tightened block of
+paragraphs is still a block of paragraphs, and so is a labeled one. The complaint is shape, not
 length. Read the draft back as rendered markdown and check for actual indentation. If every line
 starts at the left margin, the row is not satisfied.
 
@@ -165,9 +165,24 @@ annotated the four at `suggestion` with a "keep it" message was written, measure
 the same span saying the opposite thing, and no consumer prints the severity that would rank the
 pair: the PostToolUse hook, the repo pre-commit gate and the `/prose-lint` skill all run
 `vale --output=line`. Every finding that rule ever produced on the measured corpus was one half of
-a contradiction, so there was no non-contradictory behaviour left to keep. The full rejection with
+a contradiction, so there was no non-contradictory behavior left to keep. The full rejection with
 its measurements is recorded in `~/.claude/tools/prose-lint/.vale.ini`. This section is the guard:
 a writer who reads it overrules the alert, and nothing in the toolchain will do that for them.
+
+## US English
+
+Write American English spelling on every surface the banned-vocabulary list binds, which is every surface except row 5 of the routing table. Operator directive, 2026-11-11.
+
+- `-ize` and `-ization` where US usage has the z: `organize`, `normalize`, `recognize`, `renormalization`.
+- `-or` for `-our`: `behavior`, `color`, `favor`, `honor`, `neighbor`.
+- `-er` for `-re`: `center`, `meter`, `fiber`.
+- `-ense` for `-ence` where US spells it so: `license` (noun and verb), `defense`, `offense`.
+- A single `l` before a suffix: `labeled`, `canceled`, `modeling`, `traveled`.
+- Other pairs: `judgment` not `judgement`, `analyze` not `analyse`, `catalog` not `catalogue`, `gray` not `grey`, `program` not `programme`, `artifact` not `artefact`.
+
+Quoted text, code, identifiers, file names, command text and proper names keep their original spelling. A quoted operator directive stays verbatim even when it carries a British form, and a symbol such as `Map.CellCentre` is not respelled to match the prose around it.
+
+`Cringely.UsSpelling` in the prose-lint kit flags the common British forms as a substitution. Its list is generated from the same pairs by `Build-CringelyStyle.ps1`, so a change to the pairs lands here first.
 
 ## Banned Words and Phrases
 
