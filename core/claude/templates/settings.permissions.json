@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(gh pr create *)",
+      "Bash(gh issue create *)",
+      "Bash(gh pr merge *)",
+      "Bash(gh pr * create *)",
+      "Bash(gh issue * create *)",
+      "Bash(gh pr * merge *)",
+      "Bash(gh alias set *)",
+      "PowerShell(gh pr create *)",
+      "PowerShell(gh issue create *)",
+      "PowerShell(gh pr merge *)",
+      "PowerShell(gh pr * create *)",
+      "PowerShell(gh issue * create *)",
+      "PowerShell(gh pr * merge *)",
+      "PowerShell(gh alias set *)"
+    ]
+  }
+}

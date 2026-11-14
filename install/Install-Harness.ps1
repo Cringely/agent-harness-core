@@ -8,7 +8,12 @@
     <Target>/.claude, deep-merges the hook registrations from
     core/claude/templates/settings.hooks.json into <Target>/.claude/settings.json,
     and tracks installed-file hashes in <Target>/.claude/.harness-manifest.json so
-    re-installs never silently clobber a project-modified file.
+    re-installs never silently clobber a project-modified file. The deny rules in
+    core/claude/templates/settings.permissions.json are added to the same settings file's
+    permissions.deny (#274). A project whose manifest records allowRawPrMerge with a risk
+    sentence gets every rule except the two canonical `gh pr merge` ones, and any copy of
+    those two already in its deny list is removed. The skills under core/claude/skills are copied to
+    <Target>/.claude/skills like any other managed file.
 
     The manifest is v2: installed-file hashes live under `files`, deliberate project
     forks pinned with -Accept live under `accepted`, and `coreCommit` records which
@@ -329,8 +334,10 @@ $agentsSrc = Join-Path $coreDir 'agents'
 $hooksSrc = Join-Path $coreDir 'hooks'
 $templatesSrc = Join-Path $coreDir 'templates'
 $rulesSrc = Join-Path $coreDir 'rules'
+$skillsSrc = Join-Path $coreDir 'skills'
 
 $claudeDir = Join-Path $Target '.claude'
+$skillsDst = Join-Path $claudeDir 'skills'
 $agentsDst = Join-Path $claudeDir 'agents'
 $hooksDst = Join-Path $claudeDir 'hooks'
 $scratchDst = Join-Path $claudeDir 'scratch'
@@ -423,6 +430,16 @@ function Resolve-LayerPath {
 # -Prune: both need the identical answer to "does core still ship this key", and two copies of
 # that scan are two chances for one to drift from the other and call a still-shipped ceremony
 # file orphaned.
+# Every file under core/claude/skills, keyed by its manifest key: skills/ plus its path relative to
+# that directory, with forward slashes, so a skill's supporting files install beside its SKILL.md.
+# Shared by the install loop and Get-CoreFilesMap, so both name a skill file the same way.
+function Get-CoreSkillFiles {
+    foreach ($f in @(Get-ChildItem -LiteralPath $skillsSrc -Recurse -File)) {
+        $relative = [System.IO.Path]::GetRelativePath($skillsSrc, $f.FullName).Replace('\', '/')
+        [pscustomobject]@{ Key = "skills/$relative"; Relative = $relative; FullName = $f.FullName }
+    }
+}
+
 # Claude Code ignores an unrecognized agent frontmatter key without reporting it, so a typo such as
 # `reasoning_effort` for `effort` runs the def at inherited session settings indefinitely. The
 # allowlist is core/claude/agent-frontmatter-keys.json, the same file test/agent-frontmatter-keys.test.ts
@@ -505,10 +522,15 @@ function Get-CoreFilesMap {
     if ($hookFiles.Count -eq 0) {
         throw "Get-CoreFilesMap: $hooksSrc exists but contains no hook files. Refusing rather than reporting every installed hook as orphaned."
     }
+    $skillFiles = @(Get-CoreSkillFiles)
+    if ($skillFiles.Count -eq 0) {
+        throw "Get-CoreFilesMap: $skillsSrc exists but contains no skill files. Refusing rather than reporting every installed skill as orphaned."
+    }
 
     $map = [ordered]@{}
     foreach ($f in $agentFiles) { $map["agents/$($f.Name)"] = $f.FullName }
     foreach ($f in $hookFiles) { $map["hooks/$($f.Name)"] = $f.FullName }
+    foreach ($f in $skillFiles) { $map[$f.Key] = $f.FullName }
     $map['guardrails.md'] = Join-Path $templatesSrc 'guardrails.template.md'
     $map['scratch/.gitignore'] = Join-Path $templatesSrc 'scratch.gitignore'
     $map['.gitignore'] = Join-Path $templatesSrc 'manifest-local.gitignore'
@@ -712,7 +734,7 @@ function ConvertTo-ManifestV2 {
         # ConvertTo-ManifestV3 reads from its own input, so dropping them here loses nothing.
         $files = @{}
         foreach ($key in @($m.Keys)) {
-            if ($key -in @('stackDetected', 'accepted', 'coreRepo', 'coreCommit', 'schemaVersion', 'layers', 'settings', 'allowUnpinnedPlugins')) { continue }
+            if ($key -in @('stackDetected', 'accepted', 'coreRepo', 'coreCommit', 'schemaVersion', 'layers', 'settings', 'allowUnpinnedPlugins', 'allowRawPrMerge')) { continue }
             $files[$key] = $m[$key]
         }
 
@@ -911,6 +933,18 @@ function ConvertTo-ManifestV3 {
             }
         }
         $m['allowUnpinnedPlugins'] = @($rawAllow)
+    }
+
+    # The per-project opt-in to raw `gh pr merge` (#274). Validated here, above every write, so a
+    # malformed value refuses rather than being read as either answer. Absent means the default,
+    # which denies the merge rules.
+    if ($source.Contains('allowRawPrMerge')) {
+        $rawMerge = $source['allowRawPrMerge']
+        if ($rawMerge -isnot [System.Collections.IDictionary] -or
+            $rawMerge['risk'] -isnot [string] -or -not $rawMerge['risk'].Trim()) {
+            throw ".harness-manifest.json 'allowRawPrMerge' must be an object with a non-empty string risk sentence saying what the project accepts by letting an agent shell run raw gh pr merge. Fix it, or delete the key to keep the default deny."
+        }
+        $m['allowRawPrMerge'] = $rawMerge
     }
 
     return $m
@@ -1570,6 +1604,102 @@ function Read-TargetSettings {
     }
     return $read
 }
+# The project-scoped permission rules (#274): core/claude/templates/settings.permissions.json lists
+# the deny rules for raw gh publishing, so an agent publishes through tools/publish instead. They
+# go into the project's settings and never the account's, by operator ruling of 2026-11-11. A
+# fragment that is missing, does not parse, or lists no rule refuses: merging nothing would leave
+# the project looking covered while every raw route stayed open.
+function Get-DenyFragment {
+    param([string]$Path)
+    try {
+        $parsed = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    }
+    catch {
+        throw "Permission fragment cannot be read as JSON: $Path. Refusing rather than installing a project without the publish deny rules. Reported: $($_.Exception.Message)"
+    }
+    $deny = $null
+    if ($parsed -is [System.Management.Automation.PSCustomObject] -and $parsed.PSObject.Properties['permissions'] -and
+        $parsed.permissions -is [System.Management.Automation.PSCustomObject] -and $parsed.permissions.PSObject.Properties['deny']) {
+        $deny = $parsed.permissions.deny
+    }
+    if ($deny -isnot [array] -or $deny.Count -eq 0 -or
+        @($deny | Where-Object { $_ -isnot [string] -or -not $_.Trim() }).Count -gt 0) {
+        throw "Permission fragment $Path must hold permissions.deny as a non-empty list of rule strings. Refusing rather than merging nothing."
+    }
+    return , [string[]]$deny
+}
+
+# A target settings.json whose permissions block the merge cannot union into is refused before the
+# first write, like a settings.json that does not parse. Replacing it would drop the project's own
+# rules, and skipping it would leave the deny rules out.
+function Assert-SettingsPermissionsShape {
+    param($Settings, [string]$Path)
+    if (-not $Settings.PSObject.Properties['permissions']) { return }
+    $permissions = $Settings.permissions
+    if ($permissions -isnot [System.Management.Automation.PSCustomObject]) {
+        throw "Target settings.json has a permissions value that is not an object: $Path. The publish deny rules cannot be merged into it, so nothing was copied and the manifest was not written. Fix that file, then re-run."
+    }
+    if (-not $permissions.PSObject.Properties['deny']) { return }
+    $deny = $permissions.deny
+    if ($deny -isnot [array] -or @($deny | Where-Object { $_ -isnot [string] }).Count -gt 0) {
+        throw "Target settings.json has a permissions.deny that is not a list of rule strings: $Path. The publish deny rules cannot be merged into it, so nothing was copied and the manifest was not written. Fix that file, then re-run."
+    }
+}
+
+# Unions the fragment's rules into permissions.deny, after the project's own rules and in fragment
+# order, comparing ordinally because Claude Code's rule matching is case-sensitive. Returns how many
+# rules it added. Assert-SettingsPermissionsShape has already run, so deny is absent or a list.
+function Merge-PermissionDeny {
+    param($Settings, [string[]]$Rules)
+    if (-not $Settings.PSObject.Properties['permissions']) {
+        $Settings | Add-Member -NotePropertyName permissions -NotePropertyValue ([pscustomobject]@{})
+    }
+    $merged = [System.Collections.Generic.List[string]]::new()
+    if ($Settings.permissions.PSObject.Properties['deny']) {
+        foreach ($rule in $Settings.permissions.deny) { $merged.Add($rule) }
+    }
+    $added = 0
+    foreach ($rule in $Rules) {
+        if (-not $merged.Contains($rule)) { $merged.Add($rule); $added++ }
+    }
+    if ($Settings.permissions.PSObject.Properties['deny']) { $Settings.permissions.deny = $merged.ToArray() }
+    else { $Settings.permissions | Add-Member -NotePropertyName deny -NotePropertyValue $merged.ToArray() }
+    return $added
+}
+
+# The two rules a project's allowRawPrMerge opt-in drops (#274, operator ruling 2026-11-14): the
+# canonical `gh pr merge` form in each shell, which the coordinator needs for `gh pr merge <n>
+# --admin --match-head-commit <sha>` on an App-approved pull request. Permission rules match by
+# prefix and a deny cannot carve an exception out of a broader deny, so the opt-in removes these
+# two and nothing else. The flag-first `gh pr * merge *` rules and every create and alias rule stay.
+$script:rawMergeDenyRules = [string[]]@('Bash(gh pr merge *)', 'PowerShell(gh pr merge *)')
+
+# Applies the opt-in to the fragment's rules. Refuses when the fragment no longer carries both
+# canonical merge rules, because the opt-in would then name rules that do not exist, and removing
+# them from the project's settings would strip rules the installer never added.
+function Select-DenyRulesForProject {
+    param([string[]]$Rules, [bool]$AllowRawPrMerge)
+    if (-not $AllowRawPrMerge) { return , $Rules }
+    foreach ($rule in $script:rawMergeDenyRules) {
+        if ($Rules -cnotcontains $rule) {
+            throw "The project manifest records allowRawPrMerge, but the permission fragment no longer holds '$rule'. Refusing rather than guessing which rules the opt-in should drop. Update the installer's rawMergeDenyRules to match the fragment, or delete allowRawPrMerge from .harness-manifest.json."
+        }
+    }
+    return , [string[]]@($Rules | Where-Object { $script:rawMergeDenyRules -cnotcontains $_ })
+}
+
+# Removes the canonical merge rules from a project that opted in after an earlier default install
+# added them. A union alone never removes, so without this the opt-in would change nothing in an
+# existing project. Returns how many rules it removed. Ordinal, like the merge.
+function Remove-RawMergeDeny {
+    param($Settings)
+    if (-not $Settings.PSObject.Properties['permissions'] -or -not $Settings.permissions.PSObject.Properties['deny']) { return 0 }
+    $before = @($Settings.permissions.deny)
+    $kept = [string[]]@($before | Where-Object { $script:rawMergeDenyRules -cnotcontains $_ })
+    $Settings.permissions.deny = $kept
+    return $before.Count - $kept.Count
+}
+
 $settingsPath = Join-Path $claudeDir 'settings.json'
 $settingsRead = Read-TargetSettings -Path $settingsPath
 $settings = $settingsRead.Settings
@@ -2144,6 +2274,10 @@ function Install-ManagedFile {
 if ($settingsParseError) {
     throw "Target settings.json does not parse as JSON: $settingsPath. Merging the hook registrations into it would destroy whatever it holds, so nothing was copied and the manifest was not written. Fix or move that file, then re-run. Parser reported: $settingsParseError"
 }
+$denyRules = Get-DenyFragment -Path (Join-Path $templatesSrc 'settings.permissions.json')
+$allowRawPrMerge = $manifest.Contains('allowRawPrMerge')
+$denyRules = Select-DenyRulesForProject -Rules $denyRules -AllowRawPrMerge $allowRawPrMerge
+Assert-SettingsPermissionsShape -Settings $settings -Path $settingsPath
 
 # Sidecar decision, ahead of every write this install makes (round-4 C). Round 3 threw the R2-2
 # refusal from the sidecar write at the bottom of the script, after the copy loops below had
@@ -2201,6 +2335,7 @@ if ($settingsRead.ParseError) {
     throw "Target settings.json does not parse as JSON after the dependency preflight: $settingsPath. Merging the hook registrations into it would destroy whatever it holds, so nothing was copied and the manifest was not written. Fix or move that file, then re-run. Parser reported: $($settingsRead.ParseError)"
 }
 $settings = $settingsRead.Settings
+Assert-SettingsPermissionsShape -Settings $settings -Path $settingsPath
 
 # A dry run stops here. Every write below is either a built-in cmdlet that would honour -WhatIf on
 # its own or a native command (git config core.hooksPath, chmod) that would not, and stopping
@@ -2225,6 +2360,14 @@ foreach ($dir in @($claudeDir, $agentsDst, $hooksDst, $scratchDst, $rulesHarness
 Get-ChildItem -LiteralPath $agentsSrc -Filter '*.md' -File | ForEach-Object {
     if (Get-ComponentGate -Key "agents/$($_.Name)" -Layers $projectLayers -IncludeCeremonies $includeCeremoniesFlag -IncludeBashTripwire $includeBashTripwireFlag) { return }
     Install-ManagedFile -SourcePath $_.FullName -DestPath (Join-Path $agentsDst $_.Name) -ManifestKey "agents/$($_.Name)"
+}
+
+# Skills (#274: the publish skill), each file at its own path under .claude/skills.
+foreach ($skillFile in @(Get-CoreSkillFiles)) {
+    $skillDst = Join-Path $skillsDst $skillFile.Relative
+    $skillDir = Split-Path -Parent $skillDst
+    if (-not (Test-Path -LiteralPath $skillDir)) { New-Item -ItemType Directory -Path $skillDir -Force | Out-Null }
+    Install-ManagedFile -SourcePath $skillFile.FullName -DestPath $skillDst -ManifestKey $skillFile.Key
 }
 
 # Hooks
@@ -2469,6 +2612,15 @@ foreach ($eventType in $hooksTemplate.PSObject.Properties.Name) {
         $results.Add([pscustomobject]@{ File = "settings.json:$eventType"; Action = 'merged' })
     }
     $settings.hooks.$eventType = $existingGroups.ToArray()
+}
+
+# The publish deny rules, read and checked above the first copy.
+$denyAdded = Merge-PermissionDeny -Settings $settings -Rules $denyRules
+if ($denyAdded -gt 0) { $results.Add([pscustomobject]@{ File = 'settings.json:permissions.deny'; Action = 'merged' }) }
+if ($allowRawPrMerge) {
+    $denyRemoved = Remove-RawMergeDeny -Settings $settings
+    if ($denyRemoved -gt 0) { $results.Add([pscustomobject]@{ File = 'settings.json:permissions.deny'; Action = 'gh pr merge rules removed (allowRawPrMerge)' }) }
+    Write-Host "allowRawPrMerge: raw gh pr merge is not denied in this project. Recorded risk: $($manifest['allowRawPrMerge']['risk'])"
 }
 
 # Install-time provenance, refreshed on every install. A project that re-installs from a

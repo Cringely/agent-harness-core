@@ -14,18 +14,20 @@ The rule that keeps these from drifting into a mess: core is upstream. Projects 
 |---|---|
 | `core/claude/agents/` | Self-contained process roles `adversarial-reviewer`, `doc-steward`, `research-scout`, `soc-monitor`, `task-reviewer`. See `patterns/agent-def-shape.md` on why none point at a charter yet |
 | `core/claude/hooks/` | Worktree gate, write-scope gate, model-tier gate, Bash tripwire (opt-in), session guardrails, drift check, wave-close handoff, prose-lint-on-write. `core/claude/templates/settings.hooks.json` is the list of Claude Code hooks that actually gets wired. This row goes stale, that file does not. The three git hooks in the same directory, `pre-commit`, `pre-push` and `commit-msg`, are wired a second way, through `core.hooksPath` (see Install) |
-| `core/claude/templates/` | `guardrails.template.md`, a settings fragment, a scratch `.gitignore` and `manifest-local.gitignore`, installed as `.claude/.gitignore` to keep the per-machine sidecar out of a commit, and `project-settings.template.md`, rendered into `.claude/rules/harness/project-settings.md`, all of which the installer applies on every run, a ceremony ledger template it applies only under `-IncludeCeremonies`, plus three reference templates it leaves in core: agent-def authoring, the reviewer-lockout protocol, and the untrusted-content boundary block |
+| `core/claude/templates/` | `guardrails.template.md`, two settings fragments (`settings.hooks.json` for the hooks, `settings.permissions.json` for the project-scoped deny of raw gh publishing), a scratch `.gitignore` and `manifest-local.gitignore`, installed as `.claude/.gitignore` to keep the per-machine sidecar out of a commit, and `project-settings.template.md`, rendered into `.claude/rules/harness/project-settings.md`, all of which the installer applies on every run, a ceremony ledger template it applies only under `-IncludeCeremonies`, plus three reference templates it leaves in core: agent-def authoring, the reviewer-lockout protocol, and the untrusted-content boundary block |
+| `core/claude/skills/` | Skills the installer copies into a project's `.claude/skills/`. Today that is `publish`, which points every issue, pull request and merge at `tools/publish/` |
 | `core/claude/rules/` | Layer rule files and layers.json, which assigns each file to the code, documents or physical layer and defines the project settings. The installer copies the layers a project records into its .claude/rules/harness/ |
 | `core/claude/agent-frontmatter-keys.json` | Every frontmatter key Claude Code accepts in an agent definition, plus core's own `writeScope`, with the docs page it was checked against. `-Audit` and `test/agent-frontmatter-keys.test.ts` both read it. It is never copied into a project |
 | `core/claude/deps.json` | The dependencies the kernel and each layer rely on, tools and Claude Code plugins, each with its severity per layer, a probe, and a pinned install where one exists (git on Linux is installed unpinned). Both installers read it on every run (see Install) |
 | `patterns/` | The design docs behind the above, listed in [`patterns/INDEX.md`](patterns/INDEX.md) |
 | `install/` | The installer that copies core into a project's `.claude/`. The `Export-Account.ps1` and `Install-Account.ps1` pair that carries the account layer between machines (see below), with `AccountShared.ps1`, the library both dot-source for the payload tables they have to agree on. `Deps.ps1`, the dependency preflight both installers dot-source. `Restore-ClaudeProject.ps1` for moving a project, its session history and the `~/.claude` global layer to another machine. `Start-CappedCopilot.ps1`, which launches Copilot CLI with a per-session credit cap. `check-account-payload.sh`, the commit-time check that staged `account/claude/` paths match a fresh export. And the Pester suites beside them |
 | `tools/pr-review/` | This repository's own pull request reviewer, run by hand: a tool-less model reviews the diff, code computes the verdict, and a GitHub App posts it (#120). Outside the paths `.github/CODEOWNERS` assigns, its approval is what normally supplies the one approving review `master` requires before a merge. On an owned path the operator merges through the recorded administrator bypass alongside the App approval (see Testing and merging). Not part of core, and nothing installs it. [`tools/pr-review/README.md`](tools/pr-review/README.md) covers setup and commands |
+| `tools/publish/` | The publish route for issues, pull requests and review-then-merge (#274): every create, edit and merge goes through one tool whose gates fail closed, and `review-merge` runs the `tools/pr-review/` App reviewer and merges only on what its merge rule allows. Not part of core, and nothing installs it. [`tools/publish/README.md`](tools/publish/README.md) covers setup, commands and gates |
 | `account/claude/` | The workstation account layer: rules, agents, skills, the Vale prose-lint kit, hooks, templated `settings.account.json` and `mcp-servers.json`, and ccstatusline's own config at `ccstatusline/settings.json`. Generated by `install/Export-Account.ps1`, never hand-edited |
 | `packs.json`, `packs/` | The source of the installable plugin packs and the packs generated from it, with `.claude-plugin/marketplace.json` beside them. Generated by `tools/packs/cli.ts`, never hand-edited (see Packs) |
 | `tools/packs/` | The pack generator and its `--check` drift gate (#254). Not part of core, and nothing installs it |
 | `tools/model-currency/` | The kernel's model currency check: every exact model ID, and every tier alias written as a `model` setting or a `--model` option, under the roots given, against the latest models, with aliases resolved live. `--aliases` is a separate mode that reads no files and reports which model each tier alias resolves to on this machine, against the latest (#258). Anything in scope it did not read (an unreadable, oversize or binary file, or a symlink) makes the run inconclusive instead of clean. Excluded classes (`.jsonl` files, backup names, and a default list of directories such as `worktrees` and `.superpowers`) are counted in the last line as excluded. Run by hand. Nothing installs it |
-| `test/` | The `bun test` suite, covering the hooks, the agent definitions (frontmatter keys, names, and the doc-steward tool grant), `tools/pr-review/`, `tools/packs/` and `tools/model-currency/`, plus the CI secret-scan job's workflow steps (`secret-scan-ci.test.ts`), the commit-time account payload check (`account-payload-check.test.ts`, the one `install/` script tested here rather than in Pester), and the layer rules: `layer-rules.test.ts` checks the shape of `core/claude/rules/layers.json` and that no file points at a moved rule by its account path. `test/regression/` is the regression net (#96): `manifest.json` maps selected past defects to existing bun tests recorded as pinning their fixes, most of them marked `assumed` rather than ablated, and `bun run regression` runs them and prints each defect as caught or not caught (see `test/regression/README.md`). It measures only known failure classes, so a green run is not evidence the harness is sound |
+| `test/` | The `bun test` suite, covering the hooks, the agent definitions (frontmatter keys, names, and the doc-steward tool grant), `tools/pr-review/`, `tools/publish/`, `tools/packs/` and `tools/model-currency/`, plus the CI secret-scan job's workflow steps (`secret-scan-ci.test.ts`), the commit-time account payload check (`account-payload-check.test.ts`, the one `install/` script tested here rather than in Pester), and the layer rules: `layer-rules.test.ts` checks the shape of `core/claude/rules/layers.json` and that no file points at a moved rule by its account path. `test/regression/` is the regression net (#96): `manifest.json` maps selected past defects to existing bun tests recorded as pinning their fixes, most of them marked `assumed` rather than ablated, and `bun run regression` runs them and prints each defect as caught or not caught (see `test/regression/README.md`). It measures only known failure classes, so a green run is not evidence the harness is sound |
 | `docs/` | Design specs and plans under `docs/superpowers/`, the security control register (`docs/security-controls.md`, pinned by `test/security-controls.test.ts`), the decision log (`docs/decision-log.md`), and two HTML writeups at the top level: a memory-systems assessment and a two-day recap from 2026-08-02 |
 | `.github/workflows/` | `test.yml`, the one workflow. `CORE_POLICY` in `tools/pr-review/repo-policy.ts` names which of its jobs the pull request reviewer reads to decide what CI vouches for (see Testing and merging). `.gitleaks.toml` at the repo root configures its secret-scan job |
 
@@ -196,6 +198,10 @@ without git through (git is optional outside the `code` layer), the run still fi
 and a target inside a repository gets a warning with that command and a `FAILED` row for
 `git:core.hooksPath`. The Claude Code hooks take the other path:
 `core/claude/templates/settings.hooks.json` is merged into the project's `.claude/settings.json`.
+So is `core/claude/templates/settings.permissions.json`, whose deny rules for raw `gh pr create`,
+`gh issue create`, `gh pr merge`, `gh alias set` and related forms are added to the project's own (#274). A project whose committed manifest records `allowRawPrMerge` with a risk sentence keeps every rule except the two canonical `gh pr merge` ones, which lets its coordinator merge an App-approved pull request with `gh pr merge --admin --match-head-commit` (see `tools/publish/README.md`). They stay in the project:
+the account installer ships no such rule. A fragment that cannot be read or lists no rule, or a
+project `permissions` block the rules cannot be added to, stops the install before it writes.
 
 ### The identity gate is off until you configure it
 
@@ -691,7 +697,8 @@ the only code owner is the operator, who authors these pull requests and whom Gi
 approving them. Those merges go through the administrator bypass the operator orders, which GitHub
 is configured to record as a rule-suite bypass (pending live verification under #235), and each one carries a comment in the pull request saying why. A
 bypass merge also needs a passing `premerge` run (`tools/pr-review/cli.ts premerge`) on the head being
-merged: it checks the channels the diff does not carry, namely the pull request's state, checks and
+merged, and `tools/publish/cli.ts review-merge` runs it on the reviewed head before every merge.
+It checks the channels the diff does not carry, namely the pull request's state, checks and
 closing references, every commit's author, committer and message, and the pull request's title and
 body, which no git hook ever sees. The
 bypass skips only the default ruleset: its review rule (the approval, the code-owner review and the
@@ -705,8 +712,24 @@ enforcement. Any agent shell that can mint the operator's token can run `gh pr m
 skip the review rule, and no ruleset stops that. What the code-owner rule does is stop the App's
 approval from merging an enforcement path on its own. A push after approval dismisses it, and the
 `tools/pr-review/` reviewer runs by hand rather than on a trigger, so a new push needs a fresh
-manual run before the PR can merge again. CONTRIBUTING.md carries the flow, and says when the
-administrator bypass is used instead.
+manual run before the PR can merge again.
+
+Merges go through `tools/publish/cli.ts review-merge`, which waits for CI, runs the App reviewer
+and merges only on the App's APPROVE of the reviewed head. On an owned path it takes the
+administrator bypass under `--allow-admin`, once it has found a changed file owned under
+`.github/CODEOWNERS` at the base commit, the App's approval as the latest review, and every other
+active rule on `master` shown met, and posts the bypass rationale first. Under the current rulesets
+it cannot show that, so it refuses and the operator merges those by hand. A COMMENT makes it
+refuse, whatever its reasons: merging that pull request is an operator override, done by hand with a
+bypass-rationale comment. The project installer denies raw `gh pr merge` in the Bash and PowerShell tools
+of each project it installs into, which makes the tool the default route. A project that records
+`allowRawPrMerge` in its manifest drops only the canonical merge rule, so its coordinator can merge
+an App-approved pull request with `gh pr merge --admin --match-head-commit`. It does not change the point above: the deny list is
+a tripwire against the common direct forms, not enforcement. `gh api` writes, the edit and comment
+subcommands and shell wrappers such as `bash -c` are not matched, and an agent shell that can mint
+the operator's token can still run `gh pr merge --admin` by one of those routes.
+[`tools/publish/README.md`](tools/publish/README.md) has the commands and the merge rule.
+CONTRIBUTING.md carries the flow, and says when the administrator bypass is used instead.
 
 ## Source
 
