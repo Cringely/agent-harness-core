@@ -5,7 +5,7 @@ The code-repo half of `change-management.md`. The confirmation list, backups, co
 ## Decision Documentation
 
 **In commit messages:**
-- Why this change was needed (not just what changed). Put it on a line starting with `Why:` followed by at least three words. The `commit-msg` hook refuses a commit without one, on any message that has a body. Subject-only commits of any type (trailers whose key holds a hyphen, such as `Signed-off-by:`, are not a body on their own), merge commits (a `MERGE_HEAD`, or a subject git writes: `Merge branch `, `Merge branches `, `Merge remote-tracking branch `, `Merge pull request `, `Merge tag `, `Merge commit `, each with its trailing space), reverts git generates (`Revert "` or `Reapply "` subjects), and `fixup!`, `squash!` and `amend!` subjects are exempt
+- Why this change was needed (not just what changed). Put it on a line starting with `Why:` followed by at least three words. The `commit-msg` hook refuses a commit without one when the message has a body and is given with `-m` or `-F` without an editor. In a commit made through an editor the line is expected but not enforced. Subject-only commits of any type (trailers whose key holds a hyphen, such as `Signed-off-by:`, are not a body on their own), merge commits (a `MERGE_HEAD`, or a subject git writes: `Merge branch `, `Merge branches `, `Merge remote-tracking branch `, `Merge pull request `, `Merge tag `, `Merge commit `, each with its trailing space), reverts git generates (`Revert "` or `Reapply "` subjects), and `fixup!`, `squash!` and `amend!` subjects are exempt
 - What was considered and rejected
 - Any trade-offs made
 
