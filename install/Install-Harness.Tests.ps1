@@ -844,6 +844,40 @@ Describe "Install-Harness" {
         finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
     }
 
+    It "judges a pinned overlay by its CRs only where core's file has none" {
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile("$PSScriptRoot/Install-Harness.ps1", [ref]$null, [ref]$null)
+        $names = 'Read-FileBytes', 'Get-NormalizedBytes', 'Get-FileHashHex', 'Get-RawFileHashHex', 'Get-CrlfExpandedHashHex', 'Test-RecordedHashMatch', 'Test-CrAddedToLfFile', 'Test-PinnedOverlayIntact'
+        foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in $names }, $true)) {
+            . ([scriptblock]::Create($f.Extent.Text))
+        }
+        $dir = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-pin-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $dir | Out-Null
+        try {
+            $enc = [System.Text.UTF8Encoding]::new($false)
+            $lfCore = "$dir/lf-core"; $crlfCore = "$dir/crlf-core"; $lfFork = "$dir/lf-fork"; $crlfFork = "$dir/crlf-fork"
+            [System.IO.File]::WriteAllBytes($lfCore, $enc.GetBytes("core`n"))
+            [System.IO.File]::WriteAllBytes($crlfCore, $enc.GetBytes("core`r`n"))
+            [System.IO.File]::WriteAllBytes($lfFork, $enc.GetBytes("fork`n"))
+            [System.IO.File]::WriteAllBytes($crlfFork, $enc.GetBytes("fork`r`n"))
+            $normPin = Get-FileHashHex -Path $lfFork
+            $rawPin = Get-RawFileHashHex -Path $crlfFork
+
+            # An LF fork pinned at its LF hash, then converted to CRLF: the normalised pin still
+            # matches, and only the CR check says the file is no longer what was pinned.
+            Test-PinnedOverlayIntact -DestPath $lfFork -SourcePath $lfCore -Pinned $normPin | Should -BeTrue
+            Test-PinnedOverlayIntact -DestPath $crlfFork -SourcePath $lfCore -Pinned $normPin | Should -BeFalse
+            # A CRLF core file makes CRLF the host's ordinary ending, so the same conversion is no change.
+            Test-PinnedOverlayIntact -DestPath $crlfFork -SourcePath $crlfCore -Pinned $normPin | Should -BeTrue
+            # A pin over the exact CRLF bytes records that the CRs were intended.
+            Test-PinnedOverlayIntact -DestPath $crlfFork -SourcePath $lfCore -Pinned $rawPin | Should -BeTrue
+            # A fork core does not ship has nothing to compare, so the hash alone decides.
+            Test-PinnedOverlayIntact -DestPath $crlfFork -SourcePath $null -Pinned $normPin | Should -BeTrue
+            # A moved fork is never intact, whatever the endings.
+            Test-PinnedOverlayIntact -DestPath $lfCore -SourcePath $lfCore -Pinned $normPin | Should -BeFalse
+        }
+        finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
     It "audits and installs over a managed file the project emptied, reporting it as modified instead of throwing" {
         & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
         $dst = "$script:target/.claude/agents/task-reviewer.md"
@@ -956,6 +990,43 @@ Describe "Install-Harness" {
         $audit | Should -Match 'agents/task-reviewer\.md\s+overlay \(accepted\)'
         $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target *>&1 | Out-String -Width 500
         $out | Should -Match 'agents/task-reviewer\.md\s+skipped-pinned'
+    }
+
+    It "reports a pinned overlay of a core file as changed once an LF overlay gains CRs, in the audit and on re-install" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $overlay = "$script:target/.claude/hooks/commit-msg"
+        [System.IO.File]::WriteAllBytes($overlay, [System.Text.Encoding]::UTF8.GetBytes("#!/bin/sh`nfork line one`n"))
+        $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+        $m['files'].Remove('hooks/commit-msg')
+        $m | ConvertTo-Json -Depth 20 | Set-Content "$script:target/.claude/.harness-manifest.json"
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Accept 'hooks/commit-msg' | Out-Null
+        $audit = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $audit | Should -Match 'hooks/commit-msg\s+overlay \(accepted\)'
+
+        # The same text with CRLF endings has the same normalised hash, so only the CR check tells
+        # the two apart. A CR after a shebang breaks an sh hook, and core ships commit-msg with LF on every host.
+        [System.IO.File]::WriteAllBytes($overlay, [System.Text.Encoding]::UTF8.GetBytes("#!/bin/sh`r`nfork line one`r`n"))
+        $audit = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $audit | Should -Match 'hooks/commit-msg\s+overlay \(changed\)'
+        $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target *>&1 | Out-String -Width 500
+        $out | Should -Not -Match 'hooks/commit-msg\s+skipped-pinned'
+    }
+
+    It "pins a CRLF overlay of an LF core file by its raw hash so an accepted CRLF fork stays accepted" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $overlay = "$script:target/.claude/hooks/commit-msg"
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes("#!/bin/sh`r`ncrlf fork line one`r`n")
+        [System.IO.File]::WriteAllBytes($overlay, $bytes)
+        $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+        $m['files'].Remove('hooks/commit-msg')
+        $m | ConvertTo-Json -Depth 20 | Set-Content "$script:target/.claude/.harness-manifest.json"
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Accept 'hooks/commit-msg' | Out-Null
+        $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
+        $m['accepted']['hooks/commit-msg'] | Should -Be (Get-FileHash -LiteralPath $overlay -Algorithm SHA256).Hash
+        $audit = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $audit | Should -Match 'hooks/commit-msg\s+overlay \(accepted\)'
+        $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target *>&1 | Out-String -Width 500
+        $out | Should -Match 'hooks/commit-msg\s+skipped-pinned'
     }
 
     It "records an empty stackDetected.plugins array in the sidecar when the plugin cache dir is missing, without throwing" {

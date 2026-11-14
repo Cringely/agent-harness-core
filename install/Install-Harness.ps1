@@ -417,6 +417,20 @@ function Test-CrAddedToLfFile {
     return ([System.Array]::IndexOf($dst, [byte]13) -ge 0) -and ([System.Array]::IndexOf($src, [byte]13) -lt 0)
 }
 
+# True when a pinned overlay is still what was pinned. A normalised pin cannot tell LF from CRLF,
+# so an overlay of a core file that gained CRs core's LF file does not have is not intact: the
+# same byte change Test-CrAddedToLfFile reports on a managed file, and a CR after a shebang breaks
+# an sh hook. A pin recorded over the exact bytes (a legacy raw pin, or -Accept on an overlay
+# that already carried the CRs) still matches, so an accepted CRLF fork is not flagged forever.
+# An overlay core does not ship has no LF file to compare with, so the hash decides alone.
+function Test-PinnedOverlayIntact {
+    param([string]$DestPath, [string]$SourcePath, [string]$Pinned)
+    if (-not (Test-RecordedHashMatch -Path $DestPath -Recorded $Pinned)) { return $false }
+    if (-not $SourcePath) { return $true }
+    if (-not (Test-CrAddedToLfFile -SourcePath $SourcePath -DestPath $DestPath)) { return $true }
+    return ((Get-RawFileHashHex -Path $DestPath) -eq $Pinned)
+}
+
 # One resolver for -Accept and -Unaccept rather than the obvious copy of the block into the second
 # flag: containment is the security-relevant half of both, and two copies rot apart the first time
 # one of them is fixed. Returns the canonical full path beside the key because -Accept needs the
@@ -1648,7 +1662,16 @@ if ($Accept) {
     # Decided before the manifest write, so an R2-2 refusal leaves the manifest untouched and a
     # retry once git answers still has its pin to make (round-4 B). See Get-SidecarPlan.
     $sidecarPlan = Get-SidecarPlan -TargetDir $Target
-    $manifest['accepted'][$acceptKey] = Get-FileHashHex -Path $acceptPath
+    # A text overlay is pinned by its normalised hash, which cannot tell LF from CRLF. An overlay
+    # of a core LF file that already carries CRs is pinned by its raw bytes instead, so the audit
+    # can tell that fork from the same text converted to CRLF later (Test-PinnedOverlayIntact).
+    $acceptCoreSrc = (Get-CoreFilesMap)[$acceptKey]
+    $manifest['accepted'][$acceptKey] = if ($acceptCoreSrc -and (Test-CrAddedToLfFile -SourcePath $acceptCoreSrc -DestPath $acceptPath)) {
+        Get-RawFileHashHex -Path $acceptPath
+    }
+    else {
+        Get-FileHashHex -Path $acceptPath
+    }
     (ConvertTo-SortedMap -Map $manifest) | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath
     $null = Invoke-SidecarPlan -Plan $sidecarPlan -Sidecar $sidecar
     Write-Host "Accepted overlay '$acceptKey' pinned at $($manifest['accepted'][$acceptKey])."
@@ -1821,7 +1844,7 @@ if ($Audit) {
                 continue
             }
             $pinnedHash = $acceptedMap[$key]
-            $status = if (Test-RecordedHashMatch -Path $dstPath -Recorded $pinnedHash) { 'overlay (accepted)' } else { 'overlay (changed)' }
+            $status = if (Test-PinnedOverlayIntact -DestPath $dstPath -SourcePath $srcPath -Pinned $pinnedHash) { 'overlay (accepted)' } else { 'overlay (changed)' }
             $results.Add([pscustomobject]@{ File = $key; Status = $status })
             continue
         }
@@ -2181,7 +2204,7 @@ function Install-ManagedFile {
     # file skipped after a prior install is.
     $acceptedHash = $script:manifest['accepted'][$ManifestKey]
 
-    if ($acceptedHash -and (Test-RecordedHashMatch -Path $DestPath -Recorded $acceptedHash)) {
+    if ($acceptedHash -and (Test-PinnedOverlayIntact -DestPath $DestPath -SourcePath $SourcePath -Pinned $acceptedHash)) {
         # Already pinned, and still at the hash it was pinned at. The operator settled this file
         # once; core's version is deliberately not copied over it and there is nothing to act on,
         # which is why this is the one branch on the normal stream rather than a warning.
