@@ -43,7 +43,7 @@ The reviewer checkout must be a clone of agent-harness-core, the repository this
 
 ### The key command
 
-The key command fetches its own credential. The config file is plain text, so `keyCommandEnv` carries only non-secret settings, and the tool refuses a variable whose name contains TOKEN, SECRET, KEY or PASSWORD.
+The key command fetches its own credential. The config file is plain text, so `keyCommandEnv` carries only non-secret settings: it accepts `OP_BIOMETRIC_UNLOCK_ENABLED`, `OP_ACCOUNT` and `NO_COLOR` (`KEY_COMMAND_ENV_NAMES` in `config.ts`) and refuses every other name. A name pattern cannot tell a session key such as `BW_SESSION` or `OP_SESSION_<account>` from a setting, so nothing outside that list is passed through.
 
 Where the key sits behind a 1Password service account, `op` reads that account's token from `OP_SERVICE_ACCOUNT_TOKEN`. The key command is then a wrapper script, kept outside every repository, that decrypts the token into its own environment and runs `op read`. The token exists only in that process and its `op` child. The Windows form, placeholders only, with the token saved once by `Read-Host -AsSecureString | Export-Clixml <token file>` (DPAPI, readable only by the same user on the same machine):
 

@@ -272,9 +272,11 @@ export class Gh {
         "api",
         "graphql",
         "--paginate",
-        "-F",
+        // -f, not -F: gh's typed -F turns true, false, null and integers into JSON types and reads
+        // an @-prefixed value from a file, and both would reach the String! variables.
+        "-f",
         `owner=${owner}`,
-        "-F",
+        "-f",
         `name=${name}`,
         "-F",
         `number=${pr}`,
