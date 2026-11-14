@@ -4,7 +4,7 @@
 
 **Goal:** Fill the documents and physical layers that Plan A built the machinery for. That means the two layer rule files, an office toolchain probe whose result a session can read, the move of layer skills out of the account layer into core so a project gets them only when it records the layer, `document-skills` loading at project scope only, and a ruling on the agent definitions the spec assigns to layers.
 
-**Architecture:** Rule content lands as `core/claude/rules/documents.md` and `core/claude/rules/physical.md`, registered in `core/claude/rules/layers.json`, and Plan A's installer copies them unchanged. The office probe reuses Plan A's dependency preflight: new `documents` entries in `core/claude/deps.json`, and `Invoke-DepsPreflight` hands its per-tool results back so `Install-Harness.ps1` can write them to the sidecar. Skills reuse the `core/claude/skills/` install path that PR #341 adds, with a new `skills` map in `layers.json` deciding which project receives each one. The account copies are removed at the source, exported, and retired on receivers through Plan A's retire list, which learns to retire a skill by its `SKILL.md`.
+**Architecture:** Rule content lands as `core/claude/rules/documents.md` and `core/claude/rules/physical.md`, registered in `core/claude/rules/layers.json`, and Plan A's installer copies them unchanged. The office probe reuses Plan A's dependency preflight: new `documents` entries in `core/claude/deps.json`, and `Invoke-DepsPreflight` hands its per-tool results back so `Install-Harness.ps1` can write them to the sidecar. Skills reuse the `core/claude/skills/` install path that PR #341 adds, with a new `skills` map in `layers.json` deciding which project receives each one. The account copies are removed at the source, exported, and retired on receivers through Plan A's retire list. That list already retires a skill by its `SKILL.md` and refuses a directory entry the receiver holds. It learns to refuse every other `skills/` entry.
 
 **Tech Stack:** Bun and TypeScript (`bun test`), PowerShell 7 with Pester 5 for the installers, Python 3 standard library for the not-ai gate.
 
@@ -45,9 +45,10 @@ Plan C additions:
 
 1. A directory under `core/claude/skills/` that `layers.json` lists in neither `skills` nor `kernelSkills`: `Get-LayerRegistry` must throw before any write, so a domain skill dropped into core never installs into every project by default. Test in Task 5.
 2. A project that records `documents` and then drops it, holding a project-edited file under `.claude/skills/not-ai/`: the installer leaves the whole skill folder in place, warns once for that skill, and `-Audit` counts each of its files as `installed (layer not selected)`. It never deletes. Test in Task 5.
-3. A retire-list entry that names a skill directory (`skills/old`) rather than its `SKILL.md`: `Install-Account.ps1` must throw before renaming anything, because a renamed directory can still hold a `SKILL.md` that Claude Code discovers. Test in Task 6.
+3. A retire-list entry that names a file deeper inside a skill (`skills/old/reference/a.md`) rather than its `SKILL.md`: `Install-Account.ps1` must throw before renaming anything. Today it renames that file and leaves the skill loading with a missing reference, while its `SKILL.md`, the file Claude Code discovers, stays live. Test in Task 6.
 4. An office tool probe whose output carries text beyond a version: the sidecar `toolchain` record holds only `present`, `version` and `probedAt`, and the committed manifest never gains a `toolchain` key. Test in Task 3.
 5. The window between copying skills into core (Task 4) and removing the account copies (Task 8): an edit to an account skill in that window must turn the copy test red, so nothing written to `~/.claude` during the move is lost. Test in Task 4.
+6. Python bytecode under `core/claude/skills/`: any local run of the not-ai gate can leave a gitignored `__pycache__` folder there, and a `.pyc` embeds its compile path, which holds the workstation username. The installer must never copy a `.pyc` or anything under `__pycache__` into a project or record it in the manifest. Test in Task 5.
 
 ## Inventory
 
@@ -70,7 +71,8 @@ Source: `account/claude/` at the Plan C base, plus the live `~/.claude` where th
 - `core/claude/rules/layers.json` gains `skills` (directory name to layer list) and `kernelSkills` (directory names installed for every project). Plan B's interview can read both to say what each layer brings.
 - `.claude/.harness-manifest.local.json` gains `toolchain`, a map from tool name to `{ present, version, probedAt }`, written only when the project records `documents`.
 - `Invoke-DepsPreflight` returns `ToolResults` beside `PluginRecords`.
-- `install/account-retired.json` accepts `skills/<name>/SKILL.md` entries.
+- `install/account-retired.json` accepts only `skills/<name>/SKILL.md` entries under `skills/`.
+- `Get-CoreSkillFiles` never yields a `.pyc` file or a file under a `__pycache__` folder.
 
 ## Task groups
 
@@ -319,7 +321,7 @@ PR C2 body: `Docs: README updated: Install section names the office toolchain re
 
 **Files:**
 - Create: `core/claude/skills/not-ai/` (the account `skills/not-ai/` tree, plus `scripts/` holding the account `tools/not-ai/` tree without its duplicate `LICENSE`), `core/claude/skills/prose-lint/`, `core/claude/skills/owasp-agentic/`, `owasp-cicd/`, `owasp-infrastructure/`, `owasp-llm/`, `owasp-mcp/`, `owasp-top-10/`, `secure-by-design/`, `wiring-diagram/`, and `reviewing-container-images/` only when the Inventory's condition holds
-- Create: `test/not-ai-gate.test.ts`
+- Modify: `test/not-ai-gate.test.ts` (the existing 770-line suite: its `GATE` path, its header comment, its spawn environment, and two appended cases)
 - Modify: `core/claude/rules/layers.json` (`skills`, `kernelSkills`), `test/layer-rules.test.ts`, `NOTICE`
 - Maybe modify: any file `bun test test/citation-drift.test.ts` reports as citing a moved path, such as the comment at `core/claude/hooks/identity-patterns.sh:42`
 
@@ -336,7 +338,7 @@ PR C2 body: `Docs: README updated: Install section names the office toolchain re
 export const MOVED_SKILLS: Record<string, { from: string[]; rewrites: [string, string, number][] }> = {
   "not-ai": {
     from: ["skills/not-ai", "tools/not-ai"],
-    rewrites: [['"{{CLAUDE_HOME}}/tools/not-ai/gate.py"', '"${CLAUDE_SKILL_DIR}/scripts/gate.py"', 4]],
+    rewrites: [['python3 "{{CLAUDE_HOME}}/tools/not-ai/gate.py"', 'python3 -B "${CLAUDE_SKILL_DIR}/scripts/gate.py"', 4]],
   },
   "prose-lint": {
     from: ["skills/prose-lint"],
@@ -351,7 +353,8 @@ export const MOVED_SKILLS: Record<string, { from: string[]; rewrites: [string, s
 };
 ```
 
-  - Case "moved skills match their account copy while the account still ships it". For each entry, for each `from` directory that exists under `account/claude/`:
+  - The not-ai rewrite adds `-B` so a session running the gate from a project's `.claude/skills/not-ai/scripts/` writes no `__pycache__` there. All four occurrences in the account `SKILL.md` start `python3 "{{CLAUDE_HOME}}/tools/not-ai/gate.py"`.
+  - Case "moved skills match their account copy while the account still ships it". Both sides are enumerated with `git ls-files --cached --others --exclude-standard -z -- <dir>`, run through `Bun.spawnSync` from the repo root and split on `\0`, never with a filesystem walk. That leaves out gitignored `__pycache__` folders and `.pyc` files, which any local gate run can leave in either tree, so a second local run stays green. For each entry, for each `from` directory that exists under `account/claude/`:
     - Every account file has a core counterpart. `skills/<x>/...` maps to `core/claude/skills/<key>/...`, and `tools/not-ai/<rest>` maps to `core/claude/skills/not-ai/scripts/<rest>`, except `tools/not-ai/LICENSE`, which must equal `core/claude/skills/not-ai/LICENSE`.
     - Every pair is equal after `\r\n` to `\n` normalization, except `SKILL.md`, which must equal the account text with every occurrence of each search string replaced.
     - Each rewrite's search string occurs in the account `SKILL.md` exactly its stated number of times, so a changed source fails rather than passing unrewritten.
@@ -360,15 +363,19 @@ export const MOVED_SKILLS: Record<string, { from: string[]; rewrites: [string, s
   - Case "every core skill directory is registered exactly once": the directories under `core/claude/skills/` equal the union of `Object.keys(layers.skills)` and `layers.kernelSkills`, and the two sets do not intersect. Every `skills` list is non-empty and holds only `code`, `documents` and `physical`.
   - Case "layer skill assignments": `not-ai` and `prose-lint` map to `["code", "documents"]`. The six `owasp-*` directories and `secure-by-design` map to `["code"]`, as does `reviewing-container-images` when present. `wiring-diagram` maps to `["physical"]`. `kernelSkills` is `["publish"]`.
   - Case "no core skill points at an account tool path": no file under `core/claude/skills/` contains `{{CLAUDE_HOME}}`.
-  - `test/not-ai-gate.test.ts`, each case under `test.skipIf(!Bun.which("python3"))` and spawned with a 20-second timeout, since a Windows Store `python3` stub can hang:
-    - A temp `draft.txt` holding two plain sentences, run as `python3 core/claude/skills/not-ai/scripts/gate.py <draft> --genre technical --json`: the exit code is 0 or 1, and stdout parses as JSON.
-    - A path that does not exist: the exit code is 2.
+  - `test/not-ai-gate.test.ts` already exists and shells out to `account/claude/tools/not-ai/gate.py`. It is modified, not created:
+    - `const GATE` becomes `join(import.meta.dir, "..", "core", "claude", "skills", "not-ai", "scripts", "gate.py")`.
+    - The header comment's first line names `core/claude/skills/not-ai/scripts/not_ai_core/gate.py`, and its last two lines say the suite shells out to the copy the not-ai skill ships in `core/claude/skills/not-ai/scripts/`, the one CI and every installed project run.
+    - `runGate`'s `Bun.spawnSync` gains `env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" }`, so the suite writes no bytecode into core.
+    - Two cases are appended in a new `describe("not-ai gate — runs from the skill's scripts folder")`, each under the file's existing `test.skipIf(!PYTHON)`, spawned with the same `env` and with `timeout: 20_000`, since a Windows Store `python3` stub can hang. First, `runGate("two-sentences.md", "The gate reads this file. It reports what it finds.\n")` returns an `exitCode` of 0 or 1 and a `json` that is an object. Second, a spawn of `[PYTHON, GATE, join(fixturesDir, "does-not-exist.md"), "--genre", "technical", "--json"]` exits 2.
+    - Every existing case stays as written. With `GATE` pointing at core, the suite keeps passing after Task 8 deletes `account/claude/tools/not-ai`.
 
 - [ ] **Step 2: Run to verify they fail.** `bun test test/layer-rules.test.ts test/not-ai-gate.test.ts`. Expected: FAIL, the directories are missing.
 
 - [ ] **Step 3: Copy and register** (Git Bash, from the worktree root).
   - For each plain skill: `cp -R account/claude/skills/<n> core/claude/skills/<n>`.
   - not-ai: `cp -R account/claude/skills/not-ai core/claude/skills/not-ai`, then `mkdir core/claude/skills/not-ai/scripts`, then `cp -R account/claude/tools/not-ai/gate.py account/claude/tools/not-ai/not_ai_core core/claude/skills/not-ai/scripts/`. `gate.py` imports `not_ai_core` from its own folder, so the two stay side by side.
+  - Strip bytecode a local run may have left in the account tree, then confirm none came across: `find core/claude/skills -name __pycache__ -type d -prune -exec rm -rf {} +`, `find core/claude/skills -name '*.pyc' -delete`, then `find core/claude/skills \( -name __pycache__ -o -name '*.pyc' \) | wc -l` prints `0`.
   - Apply each `rewrites` entry to the two `SKILL.md` files with an exact-string replace of every occurrence, and change nothing else.
   - Confirm with `git diff --no-index --stat account/claude/skills/<n> core/claude/skills/<n>` that only the rewritten `SKILL.md` files differ.
   - `layers.json` gains the `skills` and `kernelSkills` keys named in Step 1's assignment case.
@@ -379,6 +386,7 @@ export const MOVED_SKILLS: Record<string, { from: string[]; rewrites: [string, s
 - [ ] **Step 4: Run to verify they pass.** `bun test`. Expected: all PASS. Then:
   - Append one line to `account/claude/skills/owasp-top-10/SKILL.md` in the worktree, confirm the copy case fails, and revert it. This is Review Focus 5.
   - Change the not-ai rewrite's count from 4 to 3, confirm the occurrence check fails, and restore it.
+  - Run `bun test test/not-ai-gate.test.ts test/layer-rules.test.ts` a second time, then `find core/claude/skills \( -name __pycache__ -o -name '*.pyc' \) | wc -l`. Expected: both runs green and `0`. Then plant `core/claude/skills/not-ai/scripts/__pycache__/x.pyc`, confirm the copy case still passes, and delete the plant.
 
 - [ ] **Step 5: Commit.**
 
@@ -394,12 +402,13 @@ Between this commit and Task 5's, #341's ungated loop would install every one of
 ### Task 5: The installer gates skills by layer
 
 **Files:**
-- Modify: `install/Install-Harness.ps1` (`Get-LayerRegistry`, `Get-ComponentGate`, the rule install loop, the skill install loop from #341, `.PARAMETER Audit` help), `README.md` (the `core/claude/rules/` row and #341's skills row or Install sentence)
+- Modify: `install/Install-Harness.ps1` (`Get-CoreSkillFiles` from #341, `Get-LayerRegistry`, `Get-ComponentGate`, the rule install loop, the skill install loop from #341, `.PARAMETER Audit` help), `README.md` (the `core/claude/rules/` row and #341's skills row or Install sentence), `docs/security-controls.md` (one new row)
 - Test: `install/Install-Harness.Tests.ps1` (new `Context 'layer skills'`)
 
 **Interfaces:**
 - Consumes: `Get-CoreSkillFiles` and the `skills/<relative>` keys from #341, `layers.json` from Task 4.
 - Produces:
+  - `Get-CoreSkillFiles` keeps its #341 signature and output shape, and skips every file whose relative path has a `__pycache__` segment or ends in `.pyc`. `Get-CoreFilesMap`, the skill install loop and `-Audit` all read through it, so none of them sees bytecode.
   - `Get-LayerRegistry` returns `[pscustomobject]@{ LayerNames; Rules; Settings; Skills; KernelSkills }`. `Skills` is an ordered map from directory name to `string[]`. `KernelSkills` is `string[]`.
   - `Get-ComponentGate -Key -Layers -IncludeCeremonies` also answers `layer not selected` for a `skills/<name>/...` key whose `<name>` is in `Skills` and shares no layer with `-Layers`. A `KernelSkills` key is always selected.
   - `Invoke-UnselectedManagedFile -Key <string> -DestPath <string>` returns `'left-in-place (layer not selected)'`, `'record-dropped (layer not selected)'` or `$null`, and adds the matching row to `$results`. It holds the branch that the rule loop runs today for an unselected rule, minus the warning, which each caller prints.
@@ -417,11 +426,14 @@ Between this commit and Task 5's, #341's ungated loop would install every one of
     - Delete `.claude/skills/not-ai` and re-run. No `skills/not-ai/` key is left in the manifest's `files`, and the output carries `record-dropped (layer not selected)` rows for them.
   - Review Focus 1, "an unregistered core skill directory refuses before any write": build a fake repo the way the suite's "throws instead of reporting every installed agent as orphaned" case does (copy `install/Install-Harness.ps1`, `install/Deps.ps1` and `core/` into a temp folder, since `$repoRoot` comes from `$PSScriptRoot` and has no parameter), add `core/claude/skills/stray/SKILL.md` there, and run the copied installer with `@script:dep`. It throws a message naming `stray` and `layers.json`, and the target has no `.claude`.
   - "a registered skill directory with no SKILL.md refuses": same setup, remove `SKILL.md` from one registered directory. The message names that directory.
+  - Review Focus 6, "bytecode under a core skill never installs": same fake-repo setup. Plant `core/claude/skills/not-ai/scripts/__pycache__/gate.cpython-312.pyc` and `core/claude/skills/not-ai/scripts/stray.pyc`, each holding the text `compiled from a path`, and run the copied installer with `-Layers documents`. The target's `.claude/skills/not-ai/scripts/` holds `gate.py` and `not_ai_core/` and no `__pycache__` folder or `.pyc` file anywhere under `.claude/skills/`. No key in the manifest's `files` contains `__pycache__` or ends in `.pyc`. An `-Audit` run afterwards prints no row naming either planted file.
   - "the rule loop keeps its per-file warning": Plan A's dropped-rule case still passes unchanged.
 
 - [ ] **Step 2: Run to verify they fail.** `pwsh -NoProfile -File install/Install-Harness.Tests.ps1`. Expected: the new cases FAIL.
 
 - [ ] **Step 3: Implement.**
+  - **`Get-CoreSkillFiles`.** Inside its loop, after `$relative` is computed, `continue` when `@($relative -split '/') -contains '__pycache__'` or `$relative.EndsWith('.pyc', [System.StringComparison]::OrdinalIgnoreCase)`. A comment states the reason: the folder is gitignored, and a `.pyc` embeds its compile path, which holds the username of whoever ran the gate. This mirrors the exporter's `__pycache__` skip in `install/Export-Account.ps1`.
+  - **`docs/security-controls.md`.** One new row: control "Core skill bytecode exclusion". Invariant: the project installer never copies a `.pyc` file or anything under a `__pycache__` folder from `core/claude/skills/` into a project, and never records one in the manifest, because a `.pyc` embeds its compile path. Files: `install/Install-Harness.ps1`, `.gitignore`. Tests: `install/Install-Harness.Tests.ps1`.
   - **`Get-LayerRegistry`** validates the two new keys and throws, before anything reads the manifest, when:
     - `skills` is absent or not a map, or `kernelSkills` is absent or not an array
     - a name does not match `^[a-z0-9][a-z0-9-]*$`
@@ -441,44 +453,47 @@ Between this commit and Task 5's, #341's ungated loop would install every one of
   - the neither-list check in `Get-LayerRegistry` (Review Focus 1)
   - the `skills/` branch in `Get-ComponentGate` (the documents and physical cases)
   - the once-per-skill de-duplication (the exactly-one-warning assertion)
+  - the bytecode skip in `Get-CoreSkillFiles` (Review Focus 6)
 
 - [ ] **Step 5: Commit.**
 
 ```bash
-git add install/Install-Harness.ps1 install/Install-Harness.Tests.ps1 README.md
+git add install/Install-Harness.ps1 install/Install-Harness.Tests.ps1 README.md docs/security-controls.md
 git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "feat(install): a project gets the skills of the layers it records (#310)"
 ```
 
 ---
 
-### Task 6: Install-Account retires a skill by its SKILL.md
+### Task 6: Install-Account refuses a skills entry other than a SKILL.md
+
+Most of what Task 7 needs from the retire list already exists at the Plan C base. `Invoke-AccountRetirement` in `install/Install-Account.ps1` (near line 382) refuses an entry that is a directory on the receiver with a message naming `SKILL.md`, pinned by "refuses a directory entry before renaming anything, and says to list the SKILL.md" in `install/Install-Account.Tests.ps1` (near line 2602). A payload still carrying a listed path refuses (near line 2667), and `README.md` (near line 592) already says a skill is retired by listing its `SKILL.md`. Two gaps remain:
+- An entry naming a deeper file in a skill, such as `skills/old/reference/a.md`, passes validation and is renamed, so the skill keeps loading through its live `SKILL.md` with a reference missing.
+- A directory entry such as `skills/old` passes on a receiver that has no `skills/old`, so a wrong entry is not caught on the machine where the list is written and only fails on a receiver that has the skill.
 
 **Files:**
-- Modify: `install/Install-Account.ps1` (`Invoke-AccountRetirement` entry validation)
+- Modify: `install/Install-Account.ps1` (`Invoke-AccountRetirement` entry validation), `docs/security-controls.md` (the "Account retire-list path check" row)
 - Test: `install/Install-Account.Tests.ps1` (`Context 'retired paths'`)
-- Modify: `README.md` (Account layer section, the retire list sentence)
 
 **Interfaces:**
-- Consumes: Plan A's `Invoke-AccountRetirement -ClaudeHome -PayloadRoot -ListPath` and the list shape.
-- Produces: the rule that an entry under `skills/` must match `^skills/[A-Za-z0-9._-]+/SKILL\.md$`.
+- Consumes: Plan A's `Invoke-AccountRetirement -ClaudeHome -PayloadRoot -ListPath`, the list shape, and the suite's `Invoke-Retire`, `New-StandInPayload`, `New-StandInClaudeHome`, `New-RetiredList` and `Get-RetiredCopies` helpers.
+- Produces: the rule that an entry whose first segment is `skills` must match `^skills/[A-Za-z0-9._-]+/SKILL\.md\z`.
 
 - [ ] **Step 1: Write the failing tests** with the suite's sandbox pattern.
-  - Review Focus 3, "a skill directory entry is refused": a list naming `skills/old` throws a message containing `SKILL.md`, and the sandbox `skills/old/` is untouched.
-  - "a skill is retired by renaming its SKILL.md": the sandbox has `skills/old/SKILL.md` and `skills/old/reference/a.md`, and the list names `skills/old/SKILL.md`. Afterwards `skills/old/SKILL.md` is gone, exactly one `skills/old/SKILL.md.retired-*` holds the original content, and `skills/old/reference/a.md` is unchanged.
-  - "a payload still carrying a retired SKILL.md refuses before copying anything".
-  - "a deeper path under a skill is refused": `skills/old/reference/a.md` throws.
+  - Review Focus 3, "refuses a path deeper than a skill's SKILL.md before renaming anything": the home holds `rules/keep.md`, `skills/old/SKILL.md` and `skills/old/reference/a.md`, and the list names `rules/keep.md` then `skills/old/reference/a.md`. It throws a message matching `*retired-paths list*skills/old/reference/a.md*SKILL.md*`. Afterwards `skills/old/reference/a.md` and `rules/keep.md` still exist, and `Get-RetiredCopies` finds no copy of either.
+  - "refuses a skill directory entry the receiver does not have": the home has no `skills/` folder, and the list names `skills/absent`. It throws a message matching `*retired-paths list*skills/absent*SKILL.md*`, and `rules/security.md` is absent from the home, so nothing was copied.
+  - The existing directory, link-to-directory and payload cases stay as written. Place the new check after the directory check so they keep their messages: the directory and link cases still expect `*is a directory*`, and "refuses when the payload carries a file inside a retired directory" (`skills/prose-lint`) expects only `*skills/prose-lint*`, which the new message also carries.
 
-- [ ] **Step 2: Run to verify they fail.** `pwsh -NoProfile -File install/Install-Account.Tests.ps1`. Expected: the new cases FAIL.
+- [ ] **Step 2: Run to verify they fail.** `pwsh -NoProfile -File install/Install-Account.Tests.ps1`. Expected: the two new cases FAIL (the deeper file is renamed, and the absent directory is accepted), and every existing case PASSES.
 
-- [ ] **Step 3: Implement.** In the validation pass, an entry whose first segment is `skills` must match the pattern above, else throw `account-retired.json: '<path>' names a skill by something other than its SKILL.md. A skill is retired by renaming its SKILL.md, because a renamed folder can still hold a SKILL.md that Claude Code discovers.` Entries under `rules/`, `agents/` and `hooks/` keep today's rule. README: the retire list sentence gains "and a skill by its `SKILL.md`".
+- [ ] **Step 3: Implement.** In the validation loop of `Invoke-AccountRetirement`, directly after the `$present.PSIsContainer` throw and before the payload check, add: when `$segments[0] -ceq 'skills'` and `$path -cnotmatch '^skills/[A-Za-z0-9._-]+/SKILL\.md\z'`, throw `"${label}: '$path' names a skill by something other than its SKILL.md. A skill is retired by renaming its SKILL.md, the file Claude Code discovers, so list skills/<name>/SKILL.md. Nothing was renamed."` Entries under `rules/`, `agents/` and `hooks/` keep today's rule. In `docs/security-controls.md`, the "Account retire-list path check" row's invariant gains one sentence after the directory clause: "An entry under skills must name a skill's SKILL.md, so a deeper file or a bare skill folder is refused whether or not the receiver has it." `README.md` already states the rule and is not edited.
 
-- [ ] **Step 4: Run to verify they pass.** Expected: all PASS. Remove the pattern check, confirm the directory case fails, and restore it.
+- [ ] **Step 4: Run to verify they pass.** `pwsh -NoProfile -File install/Install-Account.Tests.ps1` and `bun test test/security-controls.test.ts`. Expected: all PASS. Remove the new pattern check, confirm both new cases fail (Review Focus 3 renames `a.md`), and restore it.
 
 - [ ] **Step 5: Commit.**
 
 ```bash
-git add install/Install-Account.ps1 install/Install-Account.Tests.ps1 README.md
-git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "feat(install-account): retire a skill by renaming its SKILL.md (#310)"
+git add install/Install-Account.ps1 install/Install-Account.Tests.ps1 docs/security-controls.md
+git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit -m "feat(install-account): a skills retire entry must name the skill's SKILL.md (#310)"
 ```
 
 ---
@@ -523,14 +538,14 @@ In the main clone, on `feat/310-layer-skills` at Task 7's commit. Nothing leaves
   - **Gate.**
     - `YES` and `GATE PATH RESOLVED`: continue to Step 4.
     - `NO`: stop. Project skills under `.claude/skills/` do not load, so Tasks 4 to 7 do not merge, and the coordinator raises a Needs-you item with this result.
-    - `YES` and `GATE PATH UNRESOLVED`: stop. Change the not-ai rewrite in `MOVED_SKILLS` and the core `SKILL.md` to the project-relative `.claude/skills/not-ai/scripts/gate.py`, add a sentence that the command runs from the project root, commit that on the branch, reinstall the temp folder, and re-run this step.
+    - `YES` and `GATE PATH UNRESOLVED`: stop. Change the not-ai rewrite's replacement in `MOVED_SKILLS` and the core `SKILL.md` to the project-relative `python3 -B ".claude/skills/not-ai/scripts/gate.py"`, add a sentence that the command runs from the project root, commit that on the branch, reinstall the temp folder, and re-run this step.
     - `GATE NOT RUN`: one retry, then treat as `GATE PATH UNRESOLVED`.
 - [ ] **Step 4: Move the sources out of `~/.claude`.** Create `~/.claude-backups/skills-<yyyyMMddTHHmmssZ>/` (UTC) and move each moved skill's folder there, plus `~/.claude/tools/not-ai`. `wiring-diagram/examples/` goes with its skill and stays in the backup. The operator decides whether to copy it into a physical project.
 - [ ] **Step 5: Kernel pointer.** In `~/.claude/rules/writing-style.md`, the Surface Routing row 1 cell "not-ai skill for editing existing prose" becomes "the not-ai skill (code and documents layers) for editing existing prose".
 - [ ] **Step 6: Export and check.**
   - Run `pwsh -NoProfile -File install/Export-Account.ps1`, then `git diff --stat account/claude`. Expected, and the only paths staged: each moved `account/claude/skills/<name>/` deleted, `account/claude/tools/not-ai/` deleted, and `account/claude/rules/writing-style.md` modified.
   - Delete the "moved skills match their account copy" case from `test/layer-rules.test.ts`, and `MOVED_SKILLS` with it. Its job ends here.
-  - Run `bun test`, `pwsh -NoProfile -File install/Install-Account.Tests.ps1` and `pwsh -NoProfile -File install/Export-Account.Tests.ps1`. Expected: all PASS.
+  - Run `bun test`, `pwsh -NoProfile -File install/Install-Account.Tests.ps1` and `pwsh -NoProfile -File install/Export-Account.Tests.ps1`. Expected: all PASS. `test/not-ai-gate.test.ts` has pointed at `core/claude/skills/not-ai/scripts/gate.py` since Task 4, so deleting `account/claude/tools/not-ai` leaves it green. `git grep -n "account/claude/tools/not-ai" -- test` prints nothing. A hit is a test still reading the deleted tree: repoint it to the core path and stage it with Step 7.
   - Dry run: seed a temp home's `skills/not-ai/SKILL.md` from `git show <Task 7 sha>:account/claude/skills/not-ai/SKILL.md` (Git Bash) and run `pwsh -NoProfile -File install/Install-Account.ps1 -ClaudeHome <tmp-home> -ClaudeJson <tmp-home>/claude.json -SkipPreflight -WhatIf`. Expected: one `What if` move line for `skills/not-ai/SKILL.md`, and the file still in place.
 - [ ] **Step 7: Commit.**
 
@@ -542,7 +557,7 @@ git -c user.name=Cringely -c user.email=Cringely@users.noreply.github.com commit
 
 Before the first `git add`, confirm with `git diff --stat --cached` that nothing outside those paths is staged.
 
-PR C3 body: `Docs: README updated: core/claude/rules row, skills install sentence, Account layer retire list`. After the merge, the coordinator re-runs Step 2's reinstall once more on each project, and tells the operator that a second machine needs `git pull`, then `Install-Harness.ps1` on each project, then `Install-Account.ps1`, in that order.
+PR C3 body: `Docs: README updated: core/claude/rules row, skills install sentence. docs/security-controls.md: new core skill bytecode row, retire-list row extended`. After the merge, the coordinator re-runs Step 2's reinstall once more on each project, and tells the operator that a second machine needs `git pull`, then `Install-Harness.ps1` on each project, then `Install-Account.ps1`, in that order.
 
 ---
 
