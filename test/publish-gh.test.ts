@@ -195,9 +195,20 @@ describe("prReviews()", () => {
       { id: 1, state: "APPROVED", commitId: HEAD, author: "reviewer-app", authorCanPush: true },
     ]);
     const argv = runner.calls[1]!.argv;
-    expect(argv.slice(0, 10)).toEqual(["gh", "api", "graphql", "--paginate", "-F", "owner=fixture-owner", "-F", "name=fixture-repo", "-F", "number=7"]);
+    expect(argv.slice(0, 10)).toEqual(["gh", "api", "graphql", "--paginate", "-f", "owner=fixture-owner", "-f", "name=fixture-repo", "-F", "number=7"]);
     expect(argv[11]).toContain("authorCanPushToRepository");
     expect(argv[11]).toContain("endCursor");
+  });
+
+  // gh's -F turns true, false, null and integers into JSON types and reads an @-prefixed value from
+  // a file, so owner and name go as raw strings and only the number is typed.
+  test("passes owner and name as raw strings, even when they read as a number or a boolean", () => {
+    const runner = reviews(`${JSON.stringify(APPROVAL)}
+`);
+    gh(runner).prReviews("2048/true", 7);
+    const argv = runner.calls[1]!.argv;
+    expect(argv.slice(4, 10)).toEqual(["-f", "owner=2048", "-f", "name=true", "-F", "number=7"]);
+    expect(argv.filter((arg, i) => argv[i - 1] === "-F")).toEqual(["number=7"]);
   });
 
   test("throws on a review without an integer id, a state, a push flag, or JSON", () => {

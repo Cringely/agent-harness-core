@@ -42,9 +42,10 @@ export interface PublishConfig {
 export const GH_USER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const ENV_KEY_RE = /^[A-Z_][A-Z0-9_]*$/;
 // keyCommandEnv sits in this file as plain text, so a credential the key command needs must not
-// live there. The key command fetches its own (tools/publish/README.md shows a wrapper that
-// decrypts one into its child's environment), and a variable named like a secret is refused.
-const SECRET_NAME_RE = /TOKEN|SECRET|KEY|PASSWORD/;
+// live there: the key command fetches its own. A name pattern cannot tell a session key or a
+// passphrase from a setting, so keyCommandEnv accepts only these non-secret settings and refuses
+// every other name.
+export const KEY_COMMAND_ENV_NAMES: readonly string[] = ["OP_BIOMETRIC_UNLOCK_ENABLED", "OP_ACCOUNT", "NO_COLOR"];
 const EMAIL_RE = /^[^\s@]+@[^\s@]+$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -110,9 +111,9 @@ export function parsePublishConfig(raw: string): PublishConfig {
           if (!ENV_KEY_RE.test(name) || typeof value !== "string") {
             throw new PublishRefusal("a reviewer entry's keyCommandEnv must map variable names to strings");
           }
-          if (SECRET_NAME_RE.test(name)) {
+          if (!KEY_COMMAND_ENV_NAMES.includes(name)) {
             throw new PublishRefusal(
-              "a reviewer entry's keyCommandEnv names a variable that marks a secret (TOKEN, SECRET, KEY or PASSWORD). The key command must fetch its own credential",
+              `a reviewer entry's keyCommandEnv names a variable outside the permitted list (${KEY_COMMAND_ENV_NAMES.join(", ")}). The key command must fetch its own credential`,
             );
           }
           keyCommandEnv[name] = value;
@@ -142,7 +143,7 @@ export function loadPublishConfig(path: string = CONFIG_PATH): PublishConfig {
   try {
     raw = readFileSync(path, "utf8");
   } catch {
-    throw new PublishRefusal("no publish config could be read at ~/.claude-publish/config.json (see tools/publish/README.md)");
+    throw new PublishRefusal("no publish config could be read at ~/.claude-publish/config.json");
   }
   return parsePublishConfig(raw);
 }
