@@ -593,14 +593,44 @@ const runs = ev.flatMap((e) => (e.type === "assistant" ? blocks(e) : [])).filter
 if (runs.length === 0) out.push("GATE NOT RUN");
 else {
   const named = runs.flatMap((b) => [...String(b.input.command).matchAll(/"([^"]*gate\.py)"|(\S*gate\.py)/g)].map((m) => norm(m[1] ?? m[2])));
-  const res = ev.flatMap((e) => (e.type === "user" ? blocks(e) : [])).find((b) => b.type === "tool_result" && b.tool_use_id === runs[0].id);
-  const ok = res && (!res.is_error || /Exit code 1(?!\d)/.test(JSON.stringify(res.content ?? "")));
+  const results = ev.flatMap((e) => (e.type === "user" ? blocks(e) : [])).filter((b) => b.type === "tool_result");
+  const body = (r: any): string => typeof r.content === "string" ? r.content : Array.isArray(r.content) ? r.content.filter((c: any) => c?.type === "text").map((c: any) => String(c.text)).join("\n") : "";
+  const jsonObject = (t: string) => {
+    const a = t.indexOf("{"), z = t.lastIndexOf("}");
+    if (a < 0 || z < a) return false;
+    try { const j = JSON.parse(t.slice(a, z + 1)); return j !== null && typeof j === "object" && !Array.isArray(j); } catch { return false; }
+  };
+  // Python exits 1 on an uncaught exception too, so an exit code alone cannot tell findings from a crash.
+  // Every run must print the JSON object --json produces, and no run may print a traceback.
+  const ok = runs.every((run) => {
+    const r = results.find((b) => b.tool_use_id === run.id);
+    if (!r) return false;
+    const t = body(r);
+    if (t.includes("Traceback")) return false;
+    if (r.is_error && !/Exit code 1(?!\d)/.test(t)) return false;
+    return jsonObject(t);
+  });
   out.push(!named.every((p) => p === gatePath) ? "GATE RAN ELSEWHERE" : ok ? "GATE RAN FROM PROJECT" : "GATE FAILED IN PROJECT");
 }
 console.log(out.join("\n"));
 ```
 
-  - What each verdict proves. `SKILL LISTED` and `SKILL LOADED FROM PROJECT` together show the session discovered not-ai and loaded the project copy, not the account copy or a plugin's namespaced skill. `GATE PATH SUBSTITUTED` shows Claude Code expanded `${CLAUDE_SKILL_DIR}` in all four gate commands to the project's own `scripts/gate.py` and that the file exists there. `GATE RAN FROM PROJECT` shows every `gate.py` the model ran was that file, and that the gate exited 0 or 1. Any command naming another `gate.py`, the account one included, prints `GATE RAN ELSEWHERE`.
+  - What each verdict proves. `SKILL LISTED` and `SKILL LOADED FROM PROJECT` together show the session discovered not-ai and loaded the project copy, not the account copy or a plugin's namespaced skill. `GATE PATH SUBSTITUTED` shows Claude Code expanded `${CLAUDE_SKILL_DIR}` in all four gate commands to the project's own `scripts/gate.py` and that the file exists there. `GATE RAN FROM PROJECT` shows every `gate.py` the model ran was that file, and that every run exited 0 or 1, printed the JSON object `--json` produces (the success signal Task 4's new `not-ai-gate` case uses) and printed no Python traceback. An exit of 1 alone proves nothing, because Python also exits 1 when the gate crashes on an import. Any command naming another `gate.py`, the account one included, prints `GATE RAN ELSEWHERE`.
+  - **Crashed-gate case.** Before trusting `GATE RAN FROM PROJECT`, prove the script refuses a gate that crashed. Write the script below to `<scratch>/skill-check-crash.ts` and run `bun <scratch>/skill-check-crash.ts <scratch>/skill-check.jsonl <scratch>/skill-check-crash.jsonl`, then `bun <scratch>/skill-check.ts <scratch>/skill-check-crash.jsonl <temp folder>`. It copies the live stream and replaces every gate run's result with an exit of 1 carrying a Python traceback and no JSON, which is what a gate that cannot import `not_ai_core` produces. Expected: the first three verdicts unchanged and the fourth `GATE FAILED IN PROJECT`. Any other fourth line means the stream check would pass a crashed gate, and the task stops here with nothing moved. Delete `<scratch>/skill-check-crash.jsonl` with the live stream.
+
+```ts
+import { readFileSync, writeFileSync } from "node:fs";
+const [src, dst] = process.argv.slice(2);
+const crash = ["Exit code 1", "Traceback (most recent call last):", '  File "gate.py", line 8, in <module>', "ModuleNotFoundError: No module named 'not_ai_core'"].join(String.fromCharCode(10));
+const ev: any[] = readFileSync(src, "utf8").split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l));
+const blocks = (e: any): any[] => (Array.isArray(e?.message?.content) ? e.message.content : []);
+const ids = new Set(ev.flatMap((e) => (e.type === "assistant" ? blocks(e) : [])).filter((b) => b.type === "tool_use" && b.name === "Bash" && String(b.input?.command ?? "").includes("gate.py")).map((b) => b.id));
+let edited = 0;
+for (const e of ev) if (e.type === "user") for (const b of blocks(e)) if (b.type === "tool_result" && ids.has(b.tool_use_id)) { b.is_error = true; b.content = crash; edited++; }
+if (edited === 0) { console.log("NOTHING EDITED"); process.exit(1); }
+writeFileSync(dst, ev.map((e) => JSON.stringify(e)).join(String.fromCharCode(10)) + String.fromCharCode(10));
+```
+
   - Delete `<scratch>/skill-check.jsonl` after reading the verdicts. Keep `<scratch>/skill-check.ts` for any re-run.
   - **Live sources match core.** An edit made in `~/.claude` after the last export reaches `account/claude/` only through an export, so the copy case cannot see it yet. Task 7 stopped the exporter shipping `tools/not-ai` and templating the two `SKILL.md` files, so this check exports with the exporter from Task 7's parent commit, into a throwaway worktree, and runs the copy case there. With `<task7>` the Task 7 sha and `<scratch>` the session scratchpad:
     - `git worktree add --detach <scratch>/live-skill-check HEAD`, then `git -C <scratch>/live-skill-check checkout <task7>~1 -- install/AccountShared.ps1 install/Export-Account.ps1`. The worktree keeps HEAD's `core/claude/skills/` and `MOVED_SKILLS`, including any Step 3 fallback commit.
@@ -610,7 +640,7 @@ console.log(out.join("\n"));
     - From the check worktree's root, `bun test test/layer-rules.test.ts > <scratch>/live-skill-test.log 2>&1`, and print only the pass and fail counts and the names of failing cases.
     - Expected: export exit 0, a marker count of `0`, and the copy case passing. On any failure, stop. Nothing has been moved yet. The failing paths name a live edit that core lacks. Copy each such file from the check worktree's `account/claude/` to its core path on the branch (a `SKILL.md` with its `MOVED_SKILLS` rewrites applied), commit, and re-run this check.
     - Remove the check worktree with `git worktree remove --force <scratch>/live-skill-check` and delete both logs. Step 4 follows this check directly, with no edit to a moved skill in between.
-  - **Gate.** Step 4 runs only when the script printed exactly `SKILL LISTED`, `SKILL LOADED FROM PROJECT`, `GATE PATH SUBSTITUTED` and `GATE RAN FROM PROJECT`, and the live sources matched core. Every other result stops the task here with nothing in `~/.claude` moved:
+  - **Gate.** Step 4 runs only when the script printed exactly `SKILL LISTED`, `SKILL LOADED FROM PROJECT`, `GATE PATH SUBSTITUTED` and `GATE RAN FROM PROJECT`, the crashed-gate case printed `GATE FAILED IN PROJECT`, and the live sources matched core. Every other result stops the task here with nothing in `~/.claude` moved:
     - `SHAPE UNKNOWN`, `SKILL NOT LISTED`, `SKILL NOT LOADED` or `SKILL LOADED ELSEWHERE`: stop. Either the installed Claude Code emits a stream this script cannot read, or project skills under `.claude/skills/` do not load in place of the account copy. First confirm the account `SKILL.md` was renamed during the run. Tasks 4 to 7 do not merge, and the coordinator raises a Needs-you item with the verdicts.
     - `GATE PATH UNSUBSTITUTED` or `GATE PATH WRONG`: stop. Change the not-ai rewrite's replacement in `MOVED_SKILLS` and the core `SKILL.md` to the project-relative `python3 -B ".claude/skills/not-ai/scripts/gate.py"`, add a sentence that the command runs from the project root, commit that on the branch, reinstall the temp folder, and re-run this step. The script resolves a relative command path against the temp folder, so the same four verdicts decide the re-run.
     - `GATE RAN ELSEWHERE`, `GATE FAILED IN PROJECT` or `GATE NOT RUN`: one re-run of this step. A second result other than `GATE RAN FROM PROJECT` stops the task, and the coordinator raises a Needs-you item with the verdicts.
