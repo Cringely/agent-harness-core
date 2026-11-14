@@ -42,8 +42,9 @@ Prerequisites: PowerShell 7 (`pwsh`). Every other tool a layer relies on is decl
 winget on Windows, apt or npm on Linux, each at an exact version (git on Linux is the one named
 exception, below). The installer probes them before
 its first write, and a missing hard dependency refuses the install and prints its install command.
-The hard ones are `bun`, since every TypeScript gate is registered as a bare `bun` command and fails
-open without it, and Git Bash on Windows, which Claude Code runs the three shell hooks through. Git
+The hard ones are `bun`, since every TypeScript gate runs on it and fails open without it under
+Claude Code (each is registered as a bare `bun` command, except the Bash tripwire, which `sh -c`
+starts with `exec bun`), and Git Bash on Windows, which Claude Code runs the three shell hooks through. Git
 Bash is found under the Git for Windows install, never from PATH, where a bare `bash` can be the WSL
 launcher. The code layer adds `git` as a hard dependency. On Linux its install is `sudo apt-get
 install -y git` with no version pin, a deliberate exception to the exact-version rule (operator
@@ -89,13 +90,18 @@ down there. A dispatch also went through with the `bun` gates installed when Cop
 from a subdirectory of the project (verified live). Under Copilot, enforcement comes from written
 policy and the git hooks below, which run on every commit and push whatever made them. A third
 harness that sets neither variable gets the hooks acting as they do under Claude Code.
-The three `sh` hook commands run through `sh -c` so a PowerShell host passes `$CLAUDE_PROJECT_DIR`
-to `sh` unexpanded. They need `sh` on the PATH of the Copilot process, so launch Copilot from Git
-Bash or put Git's `usr\bin` on PATH first. Without `sh` each of them logs an error and blocks
-nothing. The `sh -c` form works on PowerShell 7.3 and later. Windows PowerShell 5.1 and PowerShell
-6.x through 7.2 use legacy native argument passing, which strips the inner double quotes, so a
-project path containing a space splits into two arguments and the hook misses its script. For a
-project not yet re-installed, Copilot's documented stopgap is
+Four hook commands run through `sh -c` so a PowerShell host passes `$CLAUDE_PROJECT_DIR` to the
+script unexpanded: the three `sh` hooks and, where `-IncludeBashTripwire` installed it, the Bash
+tripwire, which `sh -c` hands to `bun`. They need `sh` on the PATH of the Copilot process, so
+launch Copilot from Git Bash or put Git's `usr\bin` on PATH first. Without `sh` the three `sh`
+hooks each log an error and block nothing. The tripwire fails the other way: it is a `preToolUse`
+hook, so without `sh` every Copilot shell call in a project that installed it is denied. The
+`sh -c` form works on PowerShell 7.3 and later. Windows PowerShell 5.1 and PowerShell 6.x through
+7.2 use legacy native argument passing, which strips the inner double quotes, so a project path
+containing a space splits into two arguments and the hook misses its script. The `sh` hooks then
+do nothing, and the tripwire again denies every Copilot shell call. For a project not yet
+re-installed, or a Copilot session in either situation with the tripwire installed, Copilot's
+documented stopgap is
 `{ "disableAllHooks": true }` in the repository's `.github/copilot/settings.local.json`, which also
 turns off that repository's own Copilot hooks.
 
@@ -137,12 +143,13 @@ of a `.git` directory or a bare variable (asked), `git push` with `--force`, `-f
 `op read`, an ssh private key, a `.env` file or anything under `secrets/`). It runs locally with
 bun, needs no API key, and sends nothing off the machine. It reads command text with a small
 tokenizer and does not expand variables or follow aliases, so it catches the accident and the
-habitual shortcut, not a command written to evade it. A command it cannot read in full, such as one
-with an unclosed quote, is read again as flat text and prompts if any of those patterns appears in
-it. Heredoc bodies are always scanned, whatever command they feed, each as a script of its own,
-so quoting in a body cannot hide the command around it. A commit message or note written through a
-heredoc prompts when one of its lines is a listed command, or is denied when a line is a root
-delete. A hosted-classifier
+habitual shortcut, not a command written to evade it. Besides its structured reads, it always reads
+the whole input as flat text, ignoring quotes, comments and heredoc boundaries, so any listed
+pattern anywhere in the input prompts at least. The cost is a prompt on a command that only
+mentions a pattern, such as `echo "git push --force"` or a commit message that names one. The flat
+read only ever asks. A deny comes from the structured reads, which read heredoc bodies as commands
+whatever command they feed, so a commit message or note written through a heredoc is denied when
+one of its lines is a root delete. A hosted-classifier
 design was rejected
 because command text can carry inline secrets and the vendor's retention terms set no limit.
 Without the switch, neither the script nor its settings entry is installed. Re-running without it

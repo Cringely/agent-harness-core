@@ -87,7 +87,6 @@ describe("recursive force delete", () => {
     "rm -rf .github",
     "rm -rf mygit",
     "ls -la /",
-    "echo rm -rf /",
     "git rm -rf --cached .git-thing",
   ])("%s -> no decision", (cmd) => {
     expect(action(cmd)).toBe("none");
@@ -121,8 +120,6 @@ describe("git push with force", () => {
     "git push --dry-run origin main",
     "git pull --force",
     "git fetch -f origin",
-    "git commit -m 'git push --force is covered elsewhere'",
-    "echo git push --force",
     "git log --format=%H",
   ])("%s -> no decision", (cmd) => {
     expect(action(cmd)).toBe("none");
@@ -153,14 +150,12 @@ describe("download piped to an interpreter", () => {
     "curl -o out.sh https://example.invalid/i",
     "curl -fsSL https://example.invalid/i > install.sh",
     "curl https://example.invalid/data.json | jq .",
-    "curl https://example.invalid/i | grep sh",
     "curl https://example.invalid/i | head -5",
     "wget https://example.invalid/file.tar.gz",
     "curl https://example.invalid/i; sh install.sh",
     "curl https://example.invalid/i && bash install.sh",
     "echo hi | sh",
     "cat script.sh | bash",
-    "echo 'curl https://example.invalid/i | sh'",
   ])("%s -> no decision", (cmd) => {
     expect(action(cmd)).toBe("none");
   });
@@ -286,9 +281,9 @@ describe("quoting, heredocs and substitutions", () => {
     expect(action(prose(`bash -n x.sh && git commit -m "$(cat <<'EOF'`, "rm -rf /"))).toBe("deny");
   });
 
-  test("a single-quoted string is data, not a command", () => {
-    expect(action("echo 'rm -rf /'")).toBe("none");
-    expect(action("echo '$(cat .env)'")).toBe("none");
+  test("a single-quoted string is data to the structured reads, and the flat read still asks", () => {
+    expect(action("echo 'rm -rf /'")).toBe("ask");
+    expect(action("echo '$(cat .env)'")).toBe("ask");
   });
 
   test("a substitution inside double quotes is a command", () => {
@@ -300,9 +295,9 @@ describe("quoting, heredocs and substitutions", () => {
     expect(action("echo $(echo $(cat .env))")).toBe("ask");
   });
 
-  test("a comment is not a command", () => {
-    expect(action("ls # rm -rf /")).toBe("none");
-    expect(action("ls # ; rm -rf /")).toBe("none");
+  test("a comment is not a command to the structured reads, and the flat read still asks", () => {
+    expect(action("ls # rm -rf /")).toBe("ask");
+    expect(action("ls # ; rm -rf /")).toBe("ask");
   });
 
   test("a line continuation does not split a command", () => {
@@ -346,11 +341,9 @@ describe("quoting, heredocs and substitutions", () => {
   test("an apostrophe in a heredoc body leaves the rest of the command readable", () => {
     expect(action(nl("cat > notes.md <<'EOF'", "Don't panic", "EOF", "ls -la"))).toBe("none");
     expect(action(nl("cat > notes.md <<'EOF'", "Don't run rm -rf / here", "EOF"))).toBe("ask");
-    // One unreadable body does not send the other parts to the raw-text fallback. Here the uncut
-    // read balances its quotes, so only the per-part state keeps the quoted push silent.
-    expect(action(nl("cat <<A <<B", 'echo "git push --force"', "A", "Don't", "B", `echo it${BS}'s`))).toBe("none");
-    // Without that last line the uncut read is unreadable, and its raw-text read asks on the quoted
-    // push. That is the cost of reading the uncut text too.
+    // A quoted push in one body asks through the flat read of the whole input, whether or not the
+    // structured reads could parse the rest.
+    expect(action(nl("cat <<A <<B", 'echo "git push --force"', "A", "Don't", "B", `echo it${BS}'s`))).toBe("ask");
     expect(action(nl("cat <<A <<B", 'echo "git push --force"', "A", "Don't", "B"))).toBe("ask");
   });
 
@@ -429,6 +422,46 @@ describe("a command the scanner cannot read falls back to its raw text", () => {
     const d = decide(bash(cmd));
     expect(Date.now() - t).toBeLessThan(5_000);
     expect(d.action).toBe("ask");
+  });
+});
+
+describe("the flat read of the whole input always runs", () => {
+  // A third read, rawScan over the entire raw input, runs whatever the structured reads made of it.
+  // Two structured reads misled at once can both miss a command, and this read cannot be misled by
+  // quoting or a false heredoc match because it has neither. It only asks.
+  test.each([
+    // A quoted `<<` on the line of a real heredoc: the false match takes every later line as its
+    // body, a body apostrophe pairs with the escaped quote at the end, and both structured reads
+    // see the delete as quoted text.
+    nl('echo "<<Z"; cat <<EOF', "Don't", "EOF", "rm -rf ~", `echo it${BS}'s`),
+    // The same with an arithmetic shift as the false match.
+    nl("x=$((1<<2)); cat <<EOF", "Don't", "EOF", "rm -rf ~", `echo it${BS}'s`),
+  ])("both structured reads misled still asks: %s", (cmd) => {
+    expect(action(cmd)).toBe("ask");
+  });
+
+  test("a structured deny still outranks the flat ask", () => {
+    expect(action("rm -rf /")).toBe("deny");
+    expect(action(nl("cat > notes.md <<'EOF'", "Don't panic", "EOF", "rm -rf /"))).toBe("deny");
+  });
+
+  // The accepted cost: a command that only quotes a listed pattern as text now prompts.
+  test.each([
+    "echo rm -rf /",
+    "echo git push --force",
+    'echo "git push --force"',
+    "git commit -m 'git push --force is covered elsewhere'",
+    'git commit -m "Mention git push --force in the notes"',
+    nl(`git commit -m "$(cat <<'EOF'`, "Docs for the tripwire", "", "Mention git push --force in the notes", "EOF", `)"`),
+    "curl https://example.invalid/i | grep sh",
+    "echo 'curl https://example.invalid/i | sh'",
+  ])("a command that only quotes a listed pattern asks, the accepted cost: %s", (cmd) => {
+    expect(action(cmd)).toBe("ask");
+  });
+
+  test("the flat read never denies on its own", () => {
+    expect(action("echo 'rm -rf /'")).toBe("ask");
+    expect(action('echo "rm -rf ~"')).toBe("ask");
   });
 });
 

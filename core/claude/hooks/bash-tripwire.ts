@@ -3,8 +3,9 @@
 // A short list of command shapes that are rarely what the operator meant and expensive when they
 // are wrong. The hook can only add friction. It returns "ask" (Claude Code prompts, and the prompt
 // still appears in bypassPermissions mode), "deny" for the few commands nobody wants run, or no
-// decision at all. It never returns "allow", so it cannot widen what a session may do. A command
-// it cannot read in full is read again as raw text rather than passed (see FAIL CONTRACT).
+// decision at all. It never returns "allow", so it cannot widen what a session may do. The whole
+// input is also always read as flat text, so any listed pattern anywhere in it asks at least, even
+// one inside quotes, a comment or a heredoc body (see FAIL CONTRACT).
 //
 // Everything is local and deterministic: no network, no API key, no model. Nothing about a command
 // leaves the machine. A design that sent each command to a hosted classifier was considered and
@@ -23,14 +24,16 @@
 //         Get-Content and similar).
 //
 // WHAT THIS IS NOT. It is a tripwire, not a sandbox. It reads the command text with a small shell
-// tokenizer, so it sees `bash -c "..."`, `eval`, `sudo`, `env` and `$(...)` wrappers. It skips
-// single-quoted strings, which are data. Heredoc bodies are always read as commands, whatever owns
+// tokenizer, so it sees `bash -c "..."`, `eval`, `sudo`, `env` and `$(...)` wrappers. Its
+// structured reads skip single-quoted strings, which are data, and only the flat read asks on them. Heredoc bodies are always read as commands, whatever owns
 // the heredoc, because telling a data heredoc from one a shell runs needs a parser that agrees with
 // bash grammar, and the attempts at one each disagreed with it in a new way. The cost is a prompt on
 // a body that only quotes a listed pattern, such as a commit message or note with a line reading
 // `git push --force`. Each body is cut out by its line and terminator and read as a script of its
-// own, so a quote in a body cannot pair with a quote outside it. It does not expand variables, follow aliases or functions, resolve a path, or
-// read a script a command runs. A command built to evade it will.
+// own, so a quote in a body cannot pair with a quote outside it, unless a false `<<` match moves the
+// cut. The flat read of the whole input (FAIL CONTRACT) asks in that case. It does not expand
+// variables, follow aliases or functions, resolve a path, or read a script a command runs. A
+// command built to evade it will.
 // Its job is the accident and the habitual shortcut, where one prompt is the whole value.
 // Readers it does not know (grep, sed, awk, cp, scp) are not covered.
 //
@@ -48,10 +51,12 @@
 // what it found before it stopped, then reads the raw text with no quoting or nesting at all
 // (rawScan) and asks on any flagged pattern anywhere in it. The command is read twice, cut into
 // its command text and heredoc bodies, each part on its own, and uncut as one script, and every
-// finding from both reads counts. An apostrophe in a prose body leaves the uncut read unreadable,
-// so it can ask on a pattern quoted elsewhere, but a deny the cut read finds still stands. That
-// over-matches, which for a command it could not read is the safe direction. An unreadable command with nothing flagged in its text
-// is still no decision.
+// finding from both reads counts. A third read always runs, whatever the first two made of the
+// command: rawScan over the entire raw input. It only asks, so a pattern anywhere in the input
+// prompts at least, and a deny from a structured read still outranks it. This read replaced
+// chasing the input shapes that mislead both structured reads at once. The cost is a prompt on a
+// command that only quotes a listed pattern, such as `echo "git push --force"` or a commit message
+// that mentions one mid-sentence. A command with nothing flagged in its raw text is no decision.
 
 export type Decision =
   | { action: "none" }
@@ -607,8 +612,15 @@ function scanSegment(text: string, out: Finding[], unread: boolean): void {
  * into a body and leave the command text reading differently from bash. The uncut read is the one
  * bash's own quoting agrees with in that case, and the cut read is the one that holds when a body
  * carries a stray quote, so neither alone is enough.
+ *
+ * A third read always runs: rawScan over the whole input, whether or not the other two could parse
+ * it. Both structured reads can be misled at once (a false `<<` match plus a quote pairing across a
+ * body), and chasing each shape that does it was not converging. The flat read only ever asks, so
+ * any listed pattern anywhere in the input prompts at least, and a structured deny still outranks it.
  */
 function scanCommand(command: string, out: Finding[]): void {
+  const flat = rawScan(command);
+  if (flat.length > 0) out.push({ severity: "ask", reason: `its raw text matches: ${flat.join(", ")}` });
   scanSegment(command, out, false);
   const queue = [command];
   let budget = 4 * command.split("\n").length + 256;
