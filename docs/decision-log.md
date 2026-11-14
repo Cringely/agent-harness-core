@@ -64,7 +64,7 @@ One entry per consequential choice, written when the choice is made. Roles only,
 - Rejected: user-level deny rules and the skill shipped through the account layer, as the plan first proposed. Gating the rules on the code layer, since a documents project files issues too.
 - Accepted: a project whose repository owner has no entry in the publish tool's local configuration can neither run raw gh publishing nor use the tool until one is added.
 - Flips if: an installed project has to publish through raw gh, which would call for a per-project opt-out.
-- Drafted by: coordinator (deny scope), the agent that built it (skill route and layer scope). Decided by: operator for the deny scope, 2026-11-11. The skill route and the layer scope await operator review.
+- Drafted by: coordinator (deny scope), the agent that built it (skill route and layer scope). Decided by: operator for the deny scope, 2026-11-11. The skill route and the layer scope are coordinator defaults the operator may overturn.
 
 ## 2026-11-12: the portable PR reviewer spec is approved, stage 2 on hold (#146)
 
@@ -107,4 +107,4 @@ One entry per consequential choice, written when the choice is made. Roles only,
 - Rejected: a new `-AllowRawPrMerge` installer switch, which would need its own sticky-or-not rule across re-installs and could relax the deny from a command line nobody reviews. The manifest key follows the `allowUnpinnedPlugins` precedent, is committed with the project, and names its risk.
 - Rejected: removing `gh pr merge` from the shared fragment, which would relax it for every project.
 - Accepted: Claude Code deny rules match by prefix, so the opt-in allows every `gh pr merge` form that starts with the subcommand, not only `--admin --match-head-commit`.
-- Drafted by: general-purpose lane agent. Decided by: operator (option C, 2026-11-14). The shape is the lane agent's, for coordinator review.
+- Drafted by: general-purpose lane agent. Decided by: operator (option C, 2026-11-14). The manifest-key shape is a coordinator default the operator may overturn.
