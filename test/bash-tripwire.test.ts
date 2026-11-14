@@ -370,6 +370,38 @@ describe("quoting, heredocs and substitutions", () => {
     expect(action(nl("(cat <<'EOF'", "rm -rf /", "EOF", `${filler}) > notes.md`))).toBe("deny");
   });
 
+  test("a pipe at the end of the heredoc line carries the pipeline past the body", () => {
+    const CR = String.fromCharCode(13);
+    expect(action(nl("cat <<'EOF' |", "rm -rf /", "EOF", "bash"))).toBe("deny");
+    expect(action(nl("cat <<'EOF' |&", "rm -rf /", "EOF", "bash"))).toBe("deny");
+    expect(action(nl("cat <<'EOF' |", "git push --force", "EOF", "", "bash"))).toBe("ask");
+    expect(action(nl("cat <<'EOF' | # feed the script", "rm -rf /", "EOF", "bash"))).toBe("deny");
+    expect(action(nl(`cat <<'EOF' |${CR}`, `rm -rf /${CR}`, `EOF${CR}`, `bash${CR}`))).toBe("deny");
+    // A line continuation after the pipe still leaves the pipe as the last token.
+    expect(action(nl(`cat <<'EOF' | ${BS}`, "bash", "rm -rf /", "EOF"))).toBe("deny");
+    // A dangling pipe with nothing after it keeps the body.
+    expect(action(nl("cat <<'EOF' |", "rm -rf /", "EOF"))).toBe("deny");
+  });
+
+  test("&& and || at the end of the heredoc line continue the line but end the pipeline", () => {
+    // The command after && or || is a new pipeline and does not read the heredoc.
+    expect(action(nl("cat <<'EOF' &&", "rm -rf /", "EOF", "bash -n x.sh"))).toBe("none");
+    expect(action(nl("cat <<'EOF' ||", "rm -rf /", "EOF", "bash -n x.sh"))).toBe("none");
+    // In a group piped to a shell the body is still code.
+    expect(action(nl("{ cat <<'EOF' &&", "rm -rf /", "EOF", "true; } | bash"))).toBe("deny");
+    expect(action(nl("{ cat <<'EOF' ||", "rm -rf /", "EOF", "true; } | bash"))).toBe("deny");
+    // Left dangling at the end of the input, they keep the body.
+    expect(action(nl("(cat <<'EOF' &&", "rm -rf /", "EOF"))).toBe("deny");
+    expect(action(nl("(cat <<'EOF' ||", "rm -rf /", "EOF"))).toBe("deny");
+  });
+
+  test("a data heredoc followed by a separate shell command stays silent", () => {
+    expect(action(nl("cat <<'EOF'", "rm -rf /", "EOF", "bash -n x.sh"))).toBe("none");
+    expect(action(nl("cat <<'EOF' | tee notes.md", "rm -rf /", "EOF", "bash -n x.sh"))).toBe("none");
+    // A comment is not a command, and an apostrophe in it hides nothing.
+    expect(action(nl("cat <<'EOF' > notes.md # don't pipe to bash", "rm -rf /", "EOF"))).toBe("none");
+  });
+
   test("a long command after a data heredoc's pipeline has ended does not make the body code", () => {
     const filler = Array.from({ length: 20000 }, () => "echo x").join("; ");
     expect(action(nl(`git commit -m "$(cat <<'EOF'`, "rm -rf /", "EOF", `)" && ${filler}`))).toBe("none");

@@ -128,12 +128,14 @@ interface OwnerFrame {
  * pipeline that owns a heredoc inside one runs on outward, past a closer that may sit after the
  * body: `{ cat <<EOF; } | bash`, `(cat <<EOF ... EOF) | bash`, `bash -c "$(cat <<EOF ...)"`. A
  * command after `;`, `&&`, `||` or `&` is a different pipeline and does not count, which is what
- * keeps `bash -n x.sh && git commit -m "$(cat <<EOF` a data heredoc. Words in the body are never
- * read here.
+ * keeps `bash -n x.sh && git commit -m "$(cat <<EOF` a data heredoc. A line that ends in `|`,
+ * `|&`, `&&` or `||` goes on past the body, as bash reads it, so `cat <<EOF |` with `bash` on the
+ * line after the terminator is code. Comments are skipped. Words in the body are never read here.
  *
  * Anything this cannot settle answers true, which keeps the body in place to be scanned: a `<<`
- * inside a quoted string (not a heredoc at all), an unclosed single quote, or an owner pipeline
- * that runs on past HEREDOC_OWNER_SCAN characters.
+ * inside a quoted string (not a heredoc at all), an unclosed single quote, a command that ends on
+ * one of those four operators, or an owner pipeline that runs on past HEREDOC_OWNER_SCAN
+ * characters.
  */
 function heredocIsCode(line: string, at: number, opLen: number, rest: string): boolean {
   const head = `${line.slice(0, at)} `;
@@ -196,15 +198,30 @@ function heredocIsCode(line: string, at: number, opLen: number, rest: string): b
     return false;
   };
   let done = false;
+  // The last token read was |, |&, && or ||. Bash then reads on past a newline for the rest of
+  // the command, so that newline is not a separator, and a command that ends there keeps the body.
+  let dangling = false;
   for (let i = 0; i < text.length && !done; i++) {
     if (i > limit) return true;
     const f = top();
     const c = text[i];
+    if (!f.dq && (c === " " || c === "\t" || c === "\r" || (c === "\n" && dangling))) {
+      endWord();
+      continue;
+    }
+    if (!f.dq && c === "#" && f.word === "" && !f.quoted) {
+      const e = text.indexOf("\n", i);
+      i = (e < 0 ? text.length : e) - 1;
+      continue;
+    }
+    if (c === "\\" && text[i + 1] === "\n") {
+      i++;
+      continue;
+    }
+    dangling = false;
     if (c === "\\") {
-      if (text[i + 1] !== "\n") {
-        f.word += text[i + 1] ?? "";
-        f.quoted = true;
-      }
+      f.word += text[i + 1] ?? "";
+      f.quoted = true;
       i++;
       continue;
     }
@@ -250,22 +267,27 @@ function heredocIsCode(line: string, at: number, opLen: number, rest: string): b
         if (text[i + 1] === "&") i++;
         top().cmdPos = true;
       }
+      dangling = true;
     } else if (c === "&") {
       if (text[i - 1] === ">" || text[i - 1] === "<" || text[i + 1] === ">") {
         endWord();
+      } else if (text[i + 1] === "&") {
+        i++;
+        done = separator();
+        dangling = true;
       } else {
-        if (text[i + 1] === "&") i++;
         done = separator();
       }
     } else if (c === ";" || c === "\n") {
       done = separator();
-    } else if (c === " " || c === "\t" || c === "\r" || c === "<" || c === ">") {
+    } else if (c === "<" || c === ">") {
       endWord();
     } else {
       f.word += c;
     }
   }
   if (!done) {
+    if (dangling) return true;
     // Frames left open at the end: each one is a stage of the pipeline around it.
     endWord();
     let inside = false;
