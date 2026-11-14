@@ -21,7 +21,7 @@ const TERMS = process.platform === "win32" ? "C:/fixture/terms.json" : "/fixture
 const CONFIG = parsePublishConfig(
   JSON.stringify({
     owners: { "fixture-owner": { gitName: "fixture-owner", gitEmail: "fixture-owner@users.noreply.example.test", ghUser: "fixture-owner" } },
-    reviewers: { [REPO]: { appId: "1", keyCommand: ["fixture-key-cmd"], keyCommandEnv: { FIXTURE_FLAG: "false" }, checkout: CHECKOUT, termsFile: TERMS } },
+    reviewers: { [REPO]: { appId: "1", keyCommand: ["fixture-key-cmd"], keyCommandEnv: { OP_BIOMETRIC_UNLOCK_ENABLED: "false" }, checkout: CHECKOUT, termsFile: TERMS } },
   }),
 );
 const PREMERGE_CLI = join(CHECKOUT, "tools", "pr-review", "cli.ts");
@@ -238,7 +238,7 @@ describe("review-merge: merges", () => {
     const { producer, consumer } = runner.piped[0]!;
     expect(producer.argv).toEqual(["fixture-key-cmd"]);
     expect(producer.cwd).toBe(WORK);
-    expect(producer.env.FIXTURE_FLAG).toBe("false");
+    expect(producer.env.OP_BIOMETRIC_UNLOCK_ENABLED).toBe("false");
     expect(producer.env.GH_TOKEN).toBeUndefined();
     expect(consumer.argv).toEqual([
       "/fixture/bun",
