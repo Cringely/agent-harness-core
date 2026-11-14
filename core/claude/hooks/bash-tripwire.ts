@@ -46,10 +46,11 @@
 // is a real command: an unclosed single or double quote, nesting deeper than MAX_DEPTH (shells
 // inside shells inside substitutions), or an exception in the scanner. For those the hook keeps
 // what it found before it stopped, then reads the raw text with no quoting or nesting at all
-// (rawScan) and asks on any flagged pattern anywhere in it. This is decided per part: the command
-// text and each heredoc body are read on their own, so an apostrophe in a prose body sends only
-// that body to rawScan. That over-matches, which for a command it could not read is the safe
-// direction. An unreadable command with nothing flagged in its text
+// (rawScan) and asks on any flagged pattern anywhere in it. The command is read twice, cut into
+// its command text and heredoc bodies, each part on its own, and uncut as one script, and every
+// finding from both reads counts. An apostrophe in a prose body leaves the uncut read unreadable,
+// so it can ask on a pattern quoted elsewhere, but a deny the cut read finds still stands. That
+// over-matches, which for a command it could not read is the safe direction. An unreadable command with nothing flagged in its text
 // is still no decision.
 
 export type Decision =
@@ -600,8 +601,15 @@ function scanSegment(text: string, out: Finding[], unread: boolean): void {
  * otherwise pair with a quote outside it and hide the commands between them in one quoted word.
  * Bodies are split again for heredocs of their own. Nested bodies are re-read at each level, so
  * past a line budget the remaining segments are scanned whole and read as raw text as well.
+ *
+ * The uncut command is also scanned as one script, and every finding from both reads counts. The
+ * operator match does not know quoting, so a `<<` inside a quoted string can cut a closing quote
+ * into a body and leave the command text reading differently from bash. The uncut read is the one
+ * bash's own quoting agrees with in that case, and the cut read is the one that holds when a body
+ * carries a stray quote, so neither alone is enough.
  */
 function scanCommand(command: string, out: Finding[]): void {
+  scanSegment(command, out, false);
   const queue = [command];
   let budget = 4 * command.split("\n").length + 256;
   while (queue.length > 0) {

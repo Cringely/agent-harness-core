@@ -346,8 +346,12 @@ describe("quoting, heredocs and substitutions", () => {
   test("an apostrophe in a heredoc body leaves the rest of the command readable", () => {
     expect(action(nl("cat > notes.md <<'EOF'", "Don't panic", "EOF", "ls -la"))).toBe("none");
     expect(action(nl("cat > notes.md <<'EOF'", "Don't run rm -rf / here", "EOF"))).toBe("ask");
-    // One unreadable body does not send the other parts to the raw-text fallback.
-    expect(action(nl("cat <<A <<B", 'echo "git push --force"', "A", "Don't", "B"))).toBe("none");
+    // One unreadable body does not send the other parts to the raw-text fallback. Here the uncut
+    // read balances its quotes, so only the per-part state keeps the quoted push silent.
+    expect(action(nl("cat <<A <<B", 'echo "git push --force"', "A", "Don't", "B", `echo it${BS}'s`))).toBe("none");
+    // Without that last line the uncut read is unreadable, and its raw-text read asks on the quoted
+    // push. That is the cost of reading the uncut text too.
+    expect(action(nl("cat <<A <<B", 'echo "git push --force"', "A", "Don't", "B"))).toBe("ask");
   });
 
   test("several heredocs on one line are each cut out and scanned", () => {
@@ -355,6 +359,8 @@ describe("quoting, heredocs and substitutions", () => {
     expect(action(nl("cat <<A <<'B'", "Don't", "A", "rm -rf /", "B"))).toBe("deny");
     expect(action(nl("cat <<A <<'B'", "git push --force", "A", "it's", "B"))).toBe("ask");
     expect(action(nl("cat <<A <<'B'", "Don't", "A", "it's", "B", "ls"))).toBe("none");
+    // The second body carries the stray quote, so only cutting it out reads the delete.
+    expect(action(nl("cat <<A <<B", "x", "A", "Don't", "B", "rm -rf /", `echo it${BS}'s`))).toBe("deny");
   });
 
   test("a heredoc closed with <<- and tabs, or never closed, is still cut out and scanned", () => {
@@ -377,9 +383,12 @@ describe("quoting, heredocs and substitutions", () => {
   });
 
   test("a << inside a quoted string still leaves every part scanned", () => {
-    // The false cut takes the closing quote into the body, so the command text left behind is
-    // unreadable and the raw-text fallback asks.
-    expect(action(nl('echo "x <<EOF', '"', "EOF", "rm -rf /", 'echo "y"'))).toBe("ask");
+    // The false cut takes the closing quote into the body, so the cut command text is unreadable
+    // and only asks. The uncut text is read as well, and it reads the delete.
+    expect(action(nl('echo "x <<EOF', '"', "EOF", "rm -rf /", 'echo "y"'))).toBe("deny");
+    // Known false deny: a quoted delimiter that spells a listed command leaves its terminator line in
+    // the text, where it reads as that command.
+    expect(action(nl("cat <<'rm -rf /'", "hello", "rm -rf /"))).toBe("deny");
     expect(action(nl("echo 'a <<EOF b'", "rm -rf /", "EOF"))).toBe("deny");
   });
 
