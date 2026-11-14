@@ -38,7 +38,7 @@ $words = ($canonical + $slopWords) |
   Where-Object { $_ -and $_.Length -ge 4 -and $exclude -notcontains $_ } |
   Sort-Object -Unique
 
-$styleDir = Join-Path $PSScriptRoot 'styles\Cringely'
+$styleDir = Join-Path (Join-Path $PSScriptRoot 'styles') 'Cringely'
 New-Item -ItemType Directory -Force $styleDir | Out-Null
 
 $yml = @"
