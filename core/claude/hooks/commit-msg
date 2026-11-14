@@ -33,12 +33,18 @@
 # judges the raw message file as given. An editor commit skips the check: what
 # the editor leaves behind depends on cleanup rules a hook cannot see. Exempt:
 #   - subject-only commits of any type: nothing after the subject but blank
-#     lines and trailers whose key holds a hyphen (Signed-off-by:, Reviewed-by:)
-#   - merge commits (a MERGE_HEAD exists, or the subject is one git writes:
-#     "Merge branch ", "Merge branches ", "Merge remote-tracking branch ",
-#     "Merge pull request ", "Merge tag ", "Merge commit ")
-#   - reverts made by git revert (subject starts: Revert " or Reapply ")
-#   - fixup!, squash! and amend! subjects
+#     lines and, in the final paragraph only, trailers whose key holds a hyphen
+#     (Signed-off-by:, Reviewed-by:)
+#   - merge commits: a MERGE_HEAD exists, or the subject starts "Merge branch ",
+#     "Merge branches ", "Merge remote-tracking branch ", "Merge pull request ",
+#     "Merge tag " or "Merge commit " and HEAD is a merge with that same subject
+#     (git commit --amend of a merge)
+#   - reverts: the subject starts Revert " or Reapply " and either REVERT_HEAD
+#     exists in the git dir or the body carries git's "This reverts commit
+#     <hex>." line
+#   - fixup! and squash! subjects (amend! is not exempt: its body replaces the
+#     target's message under rebase --autosquash, which runs no commit-msg hook)
+# A look-alike subject with no such evidence is checked like any other.
 # Only the refusal reason is printed. A message that fails both this check and
 # an attribution check is refused for attribution first.
 
@@ -108,27 +114,39 @@ printf '%s\n' "$scan" | LC_ALL=C grep -aqiE '(noreply@anthropic\.com|claude\.ai/
 [ "${GIT_EDITOR-}" = ":" ] || exit 0
 cr=$(printf '\r')
 
-# needs_why: exit 0 when the message has a body, no qualifying Why line, and no
-# exempt subject. One pass over the file, with no external process: a commit
+# needs_why: returns 0 when the message has a body, no qualifying Why line, and
+# no fixup! or squash! subject. One pass over the file, with no external process: a commit
 # runs this hook every time, and process spawns are what make a hook slow on
 # Windows.
 needs_why() {
     subject=
     has_body=0
     has_why=0
+    has_revert_line=0
+    para_trailer=0
     cut=0
     while IFS= read -r line || [ -n "$line" ]; do
         line=${line%"$cr"}
-        case "$line" in *[![:space:]]*) ;; *) continue ;; esac
+        case "$line" in
+            *[![:space:]]*) ;;
+            *)
+                # A paragraph ends. Trailer-shaped lines in it were not in the
+                # final paragraph, where git keeps trailers, so they are body.
+                [ "$para_trailer" -eq 1 ] && has_body=1
+                para_trailer=0
+                continue
+                ;;
+        esac
         if [ -z "$subject" ]; then
             subject=$line
             continue
         fi
-        # A trailer whose key holds a hyphen (Signed-off-by:) is not a body.
+        # A trailer whose key holds a hyphen (Signed-off-by:) is not a body,
+        # provided it sits in the final paragraph.
         key=${line%%: *}
         case "$key" in
             "$line" | -* | *[!A-Za-z0-9-]*) has_body=1 ;;
-            *-*) ;;
+            *-*) para_trailer=1 ;;
             *) has_body=1 ;;
         esac
         # git commit -v (or commit.verbose=true) cuts the message at the
@@ -145,14 +163,22 @@ needs_why() {
                 set -- ${line#*:}
                 [ "$#" -ge 3 ] && has_why=1
                 ;;
+            "This reverts commit "*)
+                # git revert writes "This reverts commit <hex>." (or
+                # "<hex>, reversing" for a merge).
+                rest=${line#This reverts commit }
+                hex=${rest%%[.,]*}
+                case "$hex" in
+                    "" | *[!0-9a-f]*) ;;
+                    *) [ "${#hex}" -ge 7 ] && [ "$rest" != "$hex" ] && has_revert_line=1 ;;
+                esac
+                ;;
         esac
     done < "$msg_file"
     [ "$has_why" -eq 1 ] && return 1
     [ "$has_body" -eq 0 ] && return 1
     case "$subject" in
-        "Merge branch "* | "Merge branches "* | "Merge remote-tracking branch "* | "Merge pull request "* | \
-        "Merge tag "* | "Merge commit "* | \
-        'Revert "'* | 'Reapply "'* | "fixup! "* | "squash! "* | "amend! "*) return 1 ;;
+        "fixup! "* | "squash! "*) return 1 ;;
     esac
     return 0
 }
@@ -161,6 +187,21 @@ set -f
 needs_why || exit 0
 set +f
 git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1 && exit 0
+
+# A subject that looks git-generated is exempt only on evidence the hook can
+# check, since a hand-typed one looks the same.
+case "$subject" in
+    'Revert "'* | 'Reapply "'*)
+        [ "$has_revert_line" -eq 1 ] && exit 0
+        git_dir=$(git rev-parse --git-dir 2>/dev/null) &&
+            [ -f "$git_dir/REVERT_HEAD" ] && exit 0
+        ;;
+    "Merge branch "* | "Merge branches "* | "Merge remote-tracking branch "* | "Merge pull request "* | "Merge tag "* | "Merge commit "*)
+        # git commit --amend of a merge: HEAD is a merge with this same subject.
+        git rev-parse -q --verify HEAD^2 >/dev/null 2>&1 &&
+            [ "$(git log -1 --format=%s HEAD 2>/dev/null)" = "$subject" ] && exit 0
+        ;;
+esac
 
 echo "commit-msg: refused. No 'Why:' line with at least three words. Add one, e.g. 'Why: the retry loop spun without backoff.'" >&2
 exit 1

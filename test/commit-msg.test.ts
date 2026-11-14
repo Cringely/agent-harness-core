@@ -323,9 +323,14 @@ describe("commit-msg hook — requires a Why line", () => {
     test.each([
       ["fixup!", "fixup! fix: correct the retry backoff\n\nBody text with no rationale line.\n"],
       ["squash!", "squash! fix: correct the retry backoff\n\nBody text with no rationale line.\n"],
-      ["amend!", "amend! fix: correct the retry backoff\n\nBody text with no rationale line.\n"],
     ])("a %s subject is accepted", (_label, message) => {
       expectAccepted(message);
+    });
+
+    test("an amend! subject with a body and no Why line is refused", () => {
+      // Under rebase --autosquash an amend! body replaces the target's message,
+      // and the rebase runs no commit-msg hook, so the body is checked here.
+      expectRefusedForWhy("amend! fix: correct the retry backoff\n\nBody text with no rationale line.\n");
     });
 
     test("a fixup! mention is exempt only at the start of the subject", () => {
@@ -360,8 +365,41 @@ describe("commit-msg hook — requires a Why line", () => {
       ["tag", "Merge tag 'v1' into main\n\nBody text here.\n"],
       ["commit", "Merge commit 'abc123' into main\n\nBody text here.\n"],
       ["branches (octopus)", "Merge branches 'a' and 'b'\n\nBody text here.\n"],
-    ])("a git-written Merge %s subject with a body is accepted without a Why line", (_label, message) => {
-      expectAccepted(message);
+    ])("a hand-typed Merge %s subject with a body and no merge in progress is refused", (_label, message) => {
+      expectRefusedForWhy(message);
+    });
+
+    /** A repo whose HEAD is a real merge commit with a Merge subject and a body. */
+    function repoWithMergeHead(): string {
+      const dir = initRepo();
+      installHook(dir);
+      stageSomething(dir);
+      expect(commitWith(dir, `fix: base commit\n\n${WHY}`).exitCode).toBe(0);
+      git(["branch", "-M", "main"], dir);
+      git(["checkout", "-q", "-b", "side"], dir);
+      stageSomething(dir, "side.txt");
+      expect(commitWith(dir, `feat: side work\n\n${WHY}`).exitCode).toBe(0);
+      git(["checkout", "-q", "main"], dir);
+      stageSomething(dir, "main.txt");
+      expect(commitWith(dir, `feat: main work\n\n${WHY}`).exitCode).toBe(0);
+      const merged = git(["merge", "--no-ff", "-m", "Merge branch 'side' into main\n\nBody text with no rationale line.", "side"], dir);
+      expect(merged.exitCode).toBe(0);
+      return dir;
+    }
+
+    test("amending a merge commit with --no-edit is accepted without a Why line", () => {
+      const dir = repoWithMergeHead();
+      const amended = git(["commit", "--amend", "--no-edit"], dir);
+      expect(amended.stderr.toString()).not.toContain("commit-msg: refused");
+      expect(amended.exitCode).toBe(0);
+    });
+
+    test("a Merge subject on a new commit above a merge commit is refused", () => {
+      const dir = repoWithMergeHead();
+      stageSomething(dir, "later.txt");
+      const result = commitWith(dir, "Merge branch 'other' into main\n\nBody text with no rationale line.\n");
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr.toString()).toContain(WHY_REASON);
     });
 
     test("a conflicted git revert, finished with git commit, is accepted without a Why line", () => {
@@ -396,8 +434,51 @@ describe("commit-msg hook — requires a Why line", () => {
       expect(git(["log", "-1", "--format=%s"], dir).stdout.toString()).toContain('Revert "fix: second version"');
     });
 
-    test("a Reapply subject, which git revert writes when it reverts a revert, is accepted", () => {
-      expectAccepted('Reapply "fix: second version"\n\nBody text with no rationale line.\n');
+    test("a Revert subject typed by hand while REVERT_HEAD exists is accepted", () => {
+      // The typed message drops git's "This reverts commit" line, so only
+      // REVERT_HEAD in the git dir can admit it.
+      const dir = initRepo();
+      installHook(dir);
+      const write = (content: string) => writeFileSync(join(dir, "f.txt"), content);
+      const commitAll = (subject: string) => {
+        git(["add", "f.txt"], dir);
+        expect(commitWith(dir, `${subject}\n\n${WHY}`).exitCode).toBe(0);
+      };
+      write("a\n");
+      commitAll("fix: first version");
+      write("b\n");
+      commitAll("fix: second version");
+      write("c\n");
+      commitAll("fix: third version");
+      const env = { ...process.env, GIT_EDITOR: "true" };
+      const run = (args: string[]) =>
+        Bun.spawnSync(["git", ...args], { cwd: dir, stdout: "pipe", stderr: "pipe", env });
+      expect(run(["revert", "--no-edit", "HEAD~1"]).exitCode).not.toBe(0);
+      write("resolved\n");
+      git(["add", "f.txt"], dir);
+
+      const finished = commitWith(dir, 'Revert "fix: second version"\n\nResolved the conflict by hand.\n');
+
+      expect(finished.stderr.toString()).not.toContain("commit-msg: refused");
+      expect(finished.exitCode).toBe(0);
+    });
+
+    test("a Reapply subject carrying git's This reverts commit line is accepted", () => {
+      expectAccepted('Reapply "fix: second version"\n\nThis reverts commit 0123456789abcdef0123456789abcdef01234567.\n');
+    });
+
+    test("a Revert subject carrying git's merge-revert line is accepted", () => {
+      expectAccepted(
+        'Revert "Merge branch side"\n\nThis reverts commit 0123456789abcdef0123456789abcdef01234567, reversing\nchanges made to 89abcdef0123456789abcdef0123456789abcdef.\n',
+      );
+    });
+
+    test.each([
+      ["Revert", 'Revert "fix: second version"\n\nBody text with no rationale line.\n'],
+      ["Reapply", 'Reapply "fix: second version"\n\nBody text with no rationale line.\n'],
+      ["Revert with a non-hex reverts line", 'Revert "fix: x"\n\nThis reverts commit the-old-one.\n'],
+    ])("a hand-typed %s subject with a body and no revert in progress is refused", (_label, message) => {
+      expectRefusedForWhy(message);
     });
 
     test("a hand-written message that only mentions revert is not exempt", () => {
@@ -414,6 +495,7 @@ describe("commit-msg hook — requires a Why line", () => {
     test.each([
       ["a trailer plus a prose line", "fix: correct the retry backoff\n\nThe first attempt waited zero seconds.\n\nSigned-off-by: A Person <a@example.test>\n"],
       ["a colon line whose key has no hyphen", "fix: correct the retry backoff\n\nNote: the first attempt waited zero seconds.\n"],
+      ["a hyphen-key prose line outside the final paragraph", "fix: correct the retry backoff\n\nFollow-up: rewrote the loop\n\nSigned-off-by: A Person <a@example.test>\n"],
     ])("%s still counts as a body and needs a Why line", (_label, message) => {
       expectRefusedForWhy(message);
     });
