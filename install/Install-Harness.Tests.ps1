@@ -506,6 +506,59 @@ Describe "Install-Harness" {
         $ceremonyCommands | Where-Object { $_ -match "wave-close-handoff\.sh" } | Should -Not -BeNullOrEmpty
     }
 
+    It "installs the Bash tripwire and its hook registration only with -IncludeBashTripwire" {
+        function Get-HookCommands($root) {
+            $cfg = Get-Content "$root/.claude/settings.json" -Raw | ConvertFrom-Json
+            $found = @()
+            foreach ($event in $cfg.hooks.PSObject.Properties.Name) {
+                foreach ($group in @($cfg.hooks.$event)) {
+                    foreach ($h in @($group.hooks)) { $found += $h.command }
+                }
+            }
+            return , $found
+        }
+
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        Test-Path "$script:target/.claude/hooks/bash-tripwire.ts" | Should -BeFalse
+        $default = Get-HookCommands $script:target
+        @($default | Where-Object { $_ -match "bash-tripwire\.ts" }).Count | Should -Be 0
+        # The ceremony switch is a different gate and must not pull the tripwire in.
+        Remove-Item -Recurse -Force $script:target
+        New-Item -ItemType Directory -Path $script:target | Out-Null
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -IncludeCeremonies
+        Test-Path "$script:target/.claude/hooks/bash-tripwire.ts" | Should -BeFalse
+        $ceremony = Get-HookCommands $script:target
+        @($ceremony | Where-Object { $_ -match "bash-tripwire\.ts" }).Count | Should -Be 0
+
+        Remove-Item -Recurse -Force $script:target
+        New-Item -ItemType Directory -Path $script:target | Out-Null
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -IncludeBashTripwire
+        Test-Path "$script:target/.claude/hooks/bash-tripwire.ts" | Should -BeTrue
+        $optIn = Get-HookCommands $script:target
+        @($optIn | Where-Object { $_ -match "bash-tripwire\.ts" }).Count | Should -Be 1
+        # Registered on the Bash matcher, once, and not as a ceremony hook.
+        $cfg = Get-Content "$script:target/.claude/settings.json" -Raw | ConvertFrom-Json
+        $bashGroups = @($cfg.hooks.PreToolUse | Where-Object { $_.matcher -ceq 'Bash' })
+        $bashGroups.Count | Should -Be 1
+        @($bashGroups[0].hooks).Count | Should -Be 1
+        $bashGroups[0].hooks[0].command | Should -Match 'bash-tripwire\.ts'
+        @($optIn | Where-Object { $_ -match "wave-close-handoff\.sh" }).Count | Should -Be 0
+        Test-Path "$script:target/.claude/hooks/wave-close-handoff.sh" | Should -BeFalse
+
+        # A second run with the switch adds nothing, and a run without it leaves the install alone.
+        # Assign before filtering: Get-HookCommands returns its array as one pipeline object, so
+        # piping it straight into Where-Object counts one match however many entries there are.
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -IncludeBashTripwire
+        $rerun = Get-HookCommands $script:target
+        @($rerun | Where-Object { $_ -match "bash-tripwire\.ts" }).Count | Should -Be 1
+        $cfg = Get-Content "$script:target/.claude/settings.json" -Raw | ConvertFrom-Json
+        @(@($cfg.hooks.PreToolUse | Where-Object { $_.matcher -ceq 'Bash' }) | ForEach-Object { @($_.hooks) }).Count | Should -Be 1
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        Test-Path "$script:target/.claude/hooks/bash-tripwire.ts" | Should -BeTrue
+        $plain = Get-HookCommands $script:target
+        @($plain | Where-Object { $_ -match "bash-tripwire\.ts" }).Count | Should -Be 1
+    }
+
     It "audit reports in-sync after a clean install and writes nothing" {
         & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
         $manifestBefore = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw
@@ -2013,6 +2066,20 @@ Describe "Install-Harness" {
         # assertion that the rows vanished would be asserting a different bug.
         $audit | Should -Match 'agents/soc-monitor\.md\s+not-installed \(ceremony-gated\)'
         $audit | Should -Match 'hooks/wave-close-handoff\.sh\s+not-installed \(ceremony-gated\)'
+        # The opt-in hook is the same class of row, with its own name so the response is clear.
+        $audit | Should -Match 'hooks/bash-tripwire\.ts\s+not-installed \(opt-in\)'
+    }
+
+    It "reports an installed Bash tripwire in-sync and one deleted after install as missing" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -IncludeBashTripwire *>&1 | Out-Null
+        $audit = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $audit | Should -Match 'hooks/bash-tripwire\.ts\s+in-sync'
+        $audit | Should -Not -Match 'file\(s\) need attention'
+
+        Remove-Item "$script:target/.claude/hooks/bash-tripwire.ts"
+        $audit = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $audit | Should -Match 'hooks/bash-tripwire\.ts\s+missing'
+        $audit | Should -Match '1 file\(s\) need attention'
     }
 
     It "still counts a ceremony file that was installed and then deleted" {

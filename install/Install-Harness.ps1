@@ -53,6 +53,11 @@
     ceremony-ledger.json and their hook registrations) assume wave/standup ceremony
     infrastructure most projects lack, and are only installed with -IncludeCeremonies.
 
+    The Bash tripwire (bash-tripwire.ts, a PreToolUse hook on Bash that only ever asks or
+    denies, never allows) and its hook registration are held back the same way and only
+    installed with -IncludeBashTripwire. It changes what a session may run without a prompt,
+    so a project opts in by name rather than receiving it with the default hooks.
+
     A file dropped from core since a project's last install stays in that project's manifest
     forever, flagged 'orphaned' by -Audit with no repair path, unless the operator prunes it
     with -Prune. That is deliberately a standalone command rather than an automatic step on
@@ -75,6 +80,12 @@
 
 .PARAMETER IncludeCeremonies
     Also install the ceremony-gated agent, hook, ledger, and hook registration.
+
+.PARAMETER IncludeBashTripwire
+    Also install the opt-in Bash tripwire hook (hooks/bash-tripwire.ts) and register it as a
+    PreToolUse hook on Bash. Off by default. The hook runs locally, sends nothing anywhere, and
+    can only prompt or block, never approve. Re-running without the switch leaves an installed
+    copy and its registration in place, the way a ceremony install is left in place.
 
 .PARAMETER Accept
     Pin a project file as an accepted overlay, recording its current hash under the
@@ -153,6 +164,10 @@
                          never installed here. Listed, deliberately not counted as drift:
                          the gate working is not a fault, and the response is to re-run with
                          -IncludeCeremonies if this project wants ceremonies at all.
+      not-installed (opt-in)
+                         the Bash tripwire hook, held back by the -IncludeBashTripwire gate
+                         and never installed here. Listed, not counted, for the ceremony
+                         gate's reason. Re-run with -IncludeBashTripwire to install it.
       not-installed (layer not selected)
                          a layer rule for a layer the manifest does not record, absent from
                          the project. Listed, not counted, for the ceremony gate's reason.
@@ -229,6 +244,8 @@ param(
     [switch]$Force,
 
     [switch]$IncludeCeremonies,
+
+    [switch]$IncludeBashTripwire,
 
     [string]$Accept,
 
@@ -329,6 +346,12 @@ $ceremonyHookNames = @('wave-close-handoff.sh')
 # from disagreeing with them, and the disagreement would be silent.
 $ceremonyKeys = @($ceremonyAgentNames | ForEach-Object { "agents/$_" }) +
     @($ceremonyHookNames | ForEach-Object { "hooks/$_" })
+
+# Hooks that install only under -IncludeBashTripwire. A separate list and a separate switch from
+# the ceremony gate: ceremonies are infrastructure a project may simply lack, while this hook
+# changes what a session may run unprompted, so it is a choice and not a default.
+$optInHookNames = @('bash-tripwire.ts')
+$optInKeys = @($optInHookNames | ForEach-Object { "hooks/$_" })
 
 # The three hooks git itself invokes (no extension, unlike the Claude Code PostToolUse hooks
 # also shipped from this directory as .ts/.sh files). Named once and reused by the chmod loop
@@ -1004,12 +1027,14 @@ function Get-ProjectSettingsFileState {
 }
 
 # The one answer to "does this project get this component". $null means selected. Otherwise the
-# reason it is held back: 'ceremony-gated' (not installed without -IncludeCeremonies) or
+# reason it is held back: 'ceremony-gated' (not installed without -IncludeCeremonies), 'opt-in'
+# (not installed without -IncludeBashTripwire) or
 # 'layer not selected' (a layer rule none of whose layers the project records). The install loops,
 # the settings-hook filter and the audit all ask this instead of reading the gate lists themselves.
 function Get-ComponentGate {
-    param([string]$Key, [string[]]$Layers, [bool]$IncludeCeremonies)
+    param([string]$Key, [string[]]$Layers, [bool]$IncludeCeremonies, [bool]$IncludeBashTripwire = $false)
     if (-not $IncludeCeremonies -and $script:ceremonyKeys -contains $Key) { return 'ceremony-gated' }
+    if (-not $IncludeBashTripwire -and $script:optInKeys -contains $Key) { return 'opt-in' }
     $rulePrefix = 'rules/harness/'
     if ($Key.StartsWith($rulePrefix, [System.StringComparison]::Ordinal)) {
         $file = $Key.Substring($rulePrefix.Length)
@@ -1661,7 +1686,7 @@ if ($Prune) {
 
     $coreFiles = Get-CoreFilesMap
     if ($coreFiles.Contains($pruneKey)) {
-        throw "-Prune '$pruneKey': core still ships this file, so it is not an orphan. Re-run the installer to bring it back in sync, or with -IncludeCeremonies if it is gated on that switch."
+        throw "-Prune '$pruneKey': core still ships this file, so it is not an orphan. Re-run the installer to bring it back in sync, or with -IncludeCeremonies or -IncludeBashTripwire if it is gated on that switch."
     }
 
     if ($manifest['accepted'].Contains($pruneKey)) {
@@ -1946,7 +1971,7 @@ if ($Audit) {
     # every default install forever, which is the decoration CONTRIBUTING.md's drift gate names.
     # 'not-installed (layer not selected)' is uncounted for the same reason: the project's recorded
     # layers leave the file out by design.
-    $attention = @($results | Where-Object { $_.Status -notin @('in-sync', 'stateful (not audited)', 'overlay (accepted)', 'not-installed (ceremony-gated)', 'not-installed (layer not selected)') })
+    $attention = @($results | Where-Object { $_.Status -notin @('in-sync', 'stateful (not audited)', 'overlay (accepted)', 'not-installed (ceremony-gated)', 'not-installed (opt-in)', 'not-installed (layer not selected)') })
 
     # -Quiet returns here rather than guarding each Write-Host below it. Everything past this
     # point prints on a clean run: the summary line, and then a header plus a
@@ -2141,6 +2166,7 @@ if ($PSBoundParameters.ContainsKey('LengthBudget')) {
 }
 $projectSettings = Resolve-ProjectSettings -Recorded $manifest['settings'] -Defaults (Get-DefaultProjectSettings -Layers $projectLayers) -Bound $boundSettings
 $includeCeremoniesFlag = [bool]$IncludeCeremonies
+$includeBashTripwireFlag = [bool]$IncludeBashTripwire
 
 # Dependency preflight, after every refusal above (the sidecar's included) and before the first
 # write, so a refusal here leaves the target untouched and -InstallDeps never installs anything
@@ -2197,13 +2223,13 @@ foreach ($dir in @($claudeDir, $agentsDst, $hooksDst, $scratchDst, $rulesHarness
 
 # Agents
 Get-ChildItem -LiteralPath $agentsSrc -Filter '*.md' -File | ForEach-Object {
-    if (Get-ComponentGate -Key "agents/$($_.Name)" -Layers $projectLayers -IncludeCeremonies $includeCeremoniesFlag) { return }
+    if (Get-ComponentGate -Key "agents/$($_.Name)" -Layers $projectLayers -IncludeCeremonies $includeCeremoniesFlag -IncludeBashTripwire $includeBashTripwireFlag) { return }
     Install-ManagedFile -SourcePath $_.FullName -DestPath (Join-Path $agentsDst $_.Name) -ManifestKey "agents/$($_.Name)"
 }
 
 # Hooks
 Get-ChildItem -LiteralPath $hooksSrc -File | Where-Object { $_.Name -ne '.gitkeep' } | ForEach-Object {
-    if (Get-ComponentGate -Key "hooks/$($_.Name)" -Layers $projectLayers -IncludeCeremonies $includeCeremoniesFlag) { return }
+    if (Get-ComponentGate -Key "hooks/$($_.Name)" -Layers $projectLayers -IncludeCeremonies $includeCeremoniesFlag -IncludeBashTripwire $includeBashTripwireFlag) { return }
     Install-ManagedFile -SourcePath $_.FullName -DestPath (Join-Path $hooksDst $_.Name) -ManifestKey "hooks/$($_.Name)"
 }
 
@@ -2324,7 +2350,7 @@ foreach ($eventType in $hooksTemplate.PSObject.Properties.Name) {
         $groupHooks = @($group.hooks | Where-Object {
             $named = [regex]::Match([string]$_.command, '/\.claude/hooks/([^/"''\s]+)')
             -not $named.Success -or
-                -not (Get-ComponentGate -Key "hooks/$($named.Groups[1].Value)" -Layers $projectLayers -IncludeCeremonies $includeCeremoniesFlag)
+                -not (Get-ComponentGate -Key "hooks/$($named.Groups[1].Value)" -Layers $projectLayers -IncludeCeremonies $includeCeremoniesFlag -IncludeBashTripwire $includeBashTripwireFlag)
         })
         if ($groupHooks.Count -gt 0) {
             $newGroup = [pscustomobject]@{}
