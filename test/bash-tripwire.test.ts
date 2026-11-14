@@ -230,40 +230,61 @@ describe("credential reads", () => {
 });
 
 describe("quoting, heredocs and substitutions", () => {
-  test("a heredoc body that talks about a dangerous command is not scanned", () => {
-    const cmd = ["cat > notes.md <<'EOF'", "rm -rf /", "git push --force", "cat .env", "EOF"].join("\n");
-    expect(action(cmd)).toBe("none");
+  // Every heredoc body is scanned with the rest of the command, whatever owns it. Telling a data
+  // heredoc from a script needs a parser that agrees with bash on who reads the body, and each
+  // attempt at one disagreed with bash in a new way. The accepted cost is a prompt on a body that
+  // only quotes a listed pattern as text.
+  test("a data heredoc that quotes a listed pattern prompts, the accepted cost", () => {
+    expect(action(nl("cat > notes.md <<'EOF'", "rm -rf /", "EOF"))).toBe("deny");
+    expect(action(nl("cat > notes.md <<'EOF'", "git push --force", "EOF"))).toBe("ask");
+    expect(action(nl("cat > notes.md <<'EOF'", "cat .env", "EOF"))).toBe("ask");
+    // A body line is read as a command, so a pattern that opens a line prompts.
+    expect(action(nl(`git commit -m "$(cat <<'EOF'`, "Docs for the tripwire", "", "git push --force needs a prompt", "EOF", `)"`))).toBe("ask");
+    expect(action(nl(`git commit -F - -m "ssh notes" <<'EOF'`, "rm -rf /", "EOF"))).toBe("deny");
   });
 
-  test("a heredoc body fed to a shell is a script and is scanned", () => {
+  test("a heredoc body fed to a shell is scanned", () => {
     expect(action(nl("bash <<'EOF'", "rm -rf /", "EOF"))).toBe("deny");
     expect(action(nl("sh -s <<EOF", "git push --force", "EOF"))).toBe("ask");
     expect(action(nl("cat <<EOF | bash", "rm -rf /", "EOF"))).toBe("deny");
-  });
-
-  test("a heredoc body sent over ssh is a remote script and is scanned", () => {
     expect(action(nl("ssh host bash -s <<'EOF'", "git push --force", "EOF"))).toBe("ask");
     expect(action(nl("ssh host <<'EOF'", "rm -rf /", "EOF"))).toBe("deny");
   });
 
-  test("a commit-message heredoc that mentions a dangerous command stays silent", () => {
-    const cmd = nl(`git commit -m "$(cat <<'EOF'`, "rm -rf /", "git push --force", "EOF", `)"`);
-    expect(action(cmd)).toBe("none");
+  // Shapes where a heredoc reaches a shell through a wrapper, a group, a comment or a line break.
+  test.each([
+    "timeout 60 bash <<'EOF'",
+    "sudo -u x timeout 5 bash <<'EOF'",
+    "timeout 60 ssh host <<'EOF'",
+    "xargs bash -c <<'EOF'",
+    "{ cat <<'EOF'; } | bash",
+    "(cat <<'EOF') | bash",
+    "if true; then bash; fi <<'EOF'",
+    "cat <<'EOF' | `#` bash",
+    "(cat <<'EOF' # ); true",
+    "cat <<'EOF' |",
+    "cat <<'EOF'",
+  ])("a heredoc body is scanned whatever owns it: %s", (first) => {
+    expect(action(nl(first, "rm -rf /", "EOF", ") | bash"))).toBe("deny");
+    expect(action(nl(first, "git push --force", "EOF", "bash"))).toBe("ask");
+  });
+
+  test("a heredoc whose body holds no listed pattern stays silent", () => {
+    expect(action(nl("cat > notes.md <<'EOF'", "hello world", "EOF"))).toBe("none");
+    expect(action(nl(`git commit -m "$(cat <<'EOF'`, "Add the tripwire hook", "EOF", `)"`))).toBe("none");
+    expect(action(nl("bash <<'EOF'", "ls -la", "EOF"))).toBe("none");
+    // An apostrophe in prose makes the body unreadable, and the raw-text fallback finds nothing.
+    expect(action(nl(`git commit -m "$(cat <<'EOF'`, "Don't merge yet, bash -n is fine", "EOF", `)"`))).toBe("none");
   });
 
   test("a command after a heredoc body is still scanned", () => {
-    const cmd = ["cat > notes.md <<'EOF'", "hello", "EOF", "git push --force"].join("\n");
-    expect(action(cmd)).toBe("ask");
-  });
-
-  test("a heredoc with no terminator is scanned rather than skipped", () => {
-    const cmd = ["cat <<'EOF'", "git push --force"].join("\n");
-    expect(action(cmd)).toBe("ask");
-  });
-
-  test("a heredoc inside a command substitution does not hide the rest of the command", () => {
-    const cmd = ['git commit -m "$(cat <<\'EOF\'', "don't panic (really)", "EOF", ')" && git push --force'].join("\n");
-    expect(action(cmd)).toBe("ask");
+    expect(action(nl("cat > notes.md <<'EOF'", "hello", "EOF", "git push --force"))).toBe("ask");
+    expect(action(nl("cat <<'EOF'", "git push --force"))).toBe("ask");
+    const prose = (first: string, after: string) => nl(first, "Don't merge yet", "EOF", `)" && ${after}`);
+    expect(action(prose(`bash -n x.sh && git commit -m "$(cat <<'EOF'`, "git push --force"))).toBe("ask");
+    expect(action(prose(`gh pr create --title "Fix Bash quoting" --body "$(cat <<'EOF'`, "git push --force"))).toBe("ask");
+    // The apostrophe leaves the command unreadable, so the raw-text fallback asks rather than denies.
+    expect(action(prose(`bash -n x.sh && git commit -m "$(cat <<'EOF'`, "rm -rf /"))).toBe("ask");
   });
 
   test("a single-quoted string is data, not a command", () => {
@@ -313,112 +334,6 @@ describe("quoting, heredocs and substitutions", () => {
     // raw-text fallback decides it, and it must not throw.
     expect(action(wrap(MAX_DEPTH + 1))).toBe("ask");
     expect(action(wrap(MAX_DEPTH + 1).replace("git push -f", "ls -la"))).toBe("none");
-  });
-
-  test("the heredoc owner, not a shell name elsewhere on the line, decides whether the body is code", () => {
-    // An apostrophe in a prose body must not hide what follows the heredoc.
-    const prose = (first: string, after: string) => nl(first, "Don't merge yet", "EOF", `)" && ${after}`);
-    expect(action(prose(`bash -n x.sh && git commit -m "$(cat <<'EOF'`, "git push --force"))).toBe("ask");
-    expect(action(prose(`gh pr create --title "Fix Bash quoting" --body "$(cat <<'EOF'`, "git push --force"))).toBe("ask");
-    // Read in full, so the delete is denied rather than only asked about by the fallback.
-    expect(action(prose(`bash -n x.sh && git commit -m "$(cat <<'EOF'`, "rm -rf /"))).toBe("deny");
-    // A shell named in a quoted argument does not make cat's body a script.
-    expect(action(nl(`git commit -F - -m "ssh notes" <<'EOF'`, "rm -rf /", "EOF"))).toBe("none");
-    // The owner is found through sudo and across a pipe.
-    expect(action(nl("sudo bash <<'EOF'", "rm -rf /", "EOF"))).toBe("deny");
-    expect(action(nl("cat <<'EOF' | sudo -u x bash", "rm -rf /", "EOF"))).toBe("deny");
-  });
-
-  // A shell or ssh named by any word of the pipeline that owns the heredoc makes the body code,
-  // whatever wrapper sits in front of it, and a group or substitution holding the heredoc joins the
-  // pipeline outside it.
-  test.each([
-    "timeout 60 bash <<'EOF'",
-    "nice bash <<'EOF'",
-    "nice -n 5 bash <<'EOF'",
-    "stdbuf -oL bash <<'EOF'",
-    "sudo -u x timeout 5 bash <<'EOF'",
-    "sudo timeout 5 bash <<'EOF'",
-    "timeout 60 ssh host <<'EOF'",
-    "timeout 60 ssh host bash -s <<'EOF'",
-    "xargs bash -c <<'EOF'",
-    "xargs -0 bash -c <<'EOF'",
-    "{ cat <<'EOF'; } | bash",
-    "(cat <<'EOF') | bash",
-    "cat <<'EOF' 2>&1 | bash",
-    "if true; then bash; fi <<'EOF'",
-    "if true; then echo fi; bash; fi <<'EOF'",
-    "if true; then while false; do :; done; bash; fi <<'EOF'",
-    "cat <<'EOF' | if true; then bash; fi",
-    "bash <(cat <<'EOF'",
-  ])("a heredoc behind a wrapper or in a group is scanned: %s", (first) => {
-    expect(action(nl(first, "git push --force", "EOF"))).toBe("ask");
-    expect(action(nl(first, "rm -rf /", "EOF"))).toBe("deny");
-  });
-
-  test("a group or substitution closed after the heredoc body still joins the outer pipeline", () => {
-    expect(action(nl("(cat <<'EOF'", "rm -rf /", "EOF", ") | bash"))).toBe("deny");
-    expect(action(nl("{ cat <<'EOF'", "rm -rf /", "EOF", "} | sudo bash"))).toBe("deny");
-    expect(action(nl("bash <(cat <<'EOF'", "rm -rf /", "EOF", ")"))).toBe("deny");
-    expect(action(nl(`bash -c "$(cat <<'EOF'`, "git push --force", "EOF", `)"`))).toBe("ask");
-    expect(action(nl(`ssh host "$(cat <<'EOF'`, "rm -rf /", "EOF", `)"`))).toBe("deny");
-  });
-
-  test("an owner pipeline too long to follow keeps the body", () => {
-    const filler = Array.from({ length: 20000 }, () => "echo x").join(" | ");
-    expect(action(nl("(cat <<'EOF'", "rm -rf /", "EOF", `${filler}) | bash`))).toBe("deny");
-    expect(action(nl("(cat <<'EOF'", "rm -rf /", "EOF", `${filler}) > notes.md`))).toBe("deny");
-  });
-
-  test("a pipe at the end of the heredoc line carries the pipeline past the body", () => {
-    const CR = String.fromCharCode(13);
-    expect(action(nl("cat <<'EOF' |", "rm -rf /", "EOF", "bash"))).toBe("deny");
-    expect(action(nl("cat <<'EOF' |&", "rm -rf /", "EOF", "bash"))).toBe("deny");
-    expect(action(nl("cat <<'EOF' |", "git push --force", "EOF", "", "bash"))).toBe("ask");
-    expect(action(nl("cat <<'EOF' | # feed the script", "rm -rf /", "EOF", "bash"))).toBe("deny");
-    expect(action(nl(`cat <<'EOF' |${CR}`, `rm -rf /${CR}`, `EOF${CR}`, `bash${CR}`))).toBe("deny");
-    // A line continuation after the pipe still leaves the pipe as the last token.
-    expect(action(nl(`cat <<'EOF' | ${BS}`, "bash", "rm -rf /", "EOF"))).toBe("deny");
-    // A dangling pipe with nothing after it keeps the body.
-    expect(action(nl("cat <<'EOF' |", "rm -rf /", "EOF"))).toBe("deny");
-  });
-
-  test("&& and || at the end of the heredoc line continue the line but end the pipeline", () => {
-    // The command after && or || is a new pipeline and does not read the heredoc.
-    expect(action(nl("cat <<'EOF' &&", "rm -rf /", "EOF", "bash -n x.sh"))).toBe("none");
-    expect(action(nl("cat <<'EOF' ||", "rm -rf /", "EOF", "bash -n x.sh"))).toBe("none");
-    // In a group piped to a shell the body is still code.
-    expect(action(nl("{ cat <<'EOF' &&", "rm -rf /", "EOF", "true; } | bash"))).toBe("deny");
-    expect(action(nl("{ cat <<'EOF' ||", "rm -rf /", "EOF", "true; } | bash"))).toBe("deny");
-    // Left dangling at the end of the input, they keep the body.
-    expect(action(nl("(cat <<'EOF' &&", "rm -rf /", "EOF"))).toBe("deny");
-    expect(action(nl("(cat <<'EOF' ||", "rm -rf /", "EOF"))).toBe("deny");
-  });
-
-  test("a data heredoc followed by a separate shell command stays silent", () => {
-    expect(action(nl("cat <<'EOF'", "rm -rf /", "EOF", "bash -n x.sh"))).toBe("none");
-    expect(action(nl("cat <<'EOF' | tee notes.md", "rm -rf /", "EOF", "bash -n x.sh"))).toBe("none");
-    // A comment is not a command, and an apostrophe in it hides nothing.
-    expect(action(nl("cat <<'EOF' > notes.md # don't pipe to bash", "rm -rf /", "EOF"))).toBe("none");
-  });
-
-  test.each(["cat <<'EOF' | `#` bash", "cat <<'EOF' | $(#) bash", "cat <<'EOF' | (#) bash"])(
-    "a # inside a substitution or subshell does not hide the rest of the line: %s",
-    (first) => {
-      expect(action(nl(first, "rm -rf /", "EOF"))).toBe("deny");
-    },
-  );
-
-  test("a long command after a data heredoc's pipeline has ended does not make the body code", () => {
-    const filler = Array.from({ length: 20000 }, () => "echo x").join("; ");
-    expect(action(nl(`git commit -m "$(cat <<'EOF'`, "rm -rf /", "EOF", `)" && ${filler}`))).toBe("none");
-  });
-
-  test("a data heredoc stays silent when the shell word is only in its body or in a later command", () => {
-    expect(action(nl("cat > notes.md <<'EOF'", "Don't pipe this to bash: rm -rf /", "EOF"))).toBe("none");
-    expect(action(nl("cat <<'EOF' | tee notes.md", "Don't run bash here: git push --force", "EOF"))).toBe("none");
-    expect(action(nl(`git commit -m "$(cat <<'EOF'`, "Don't merge yet, bash -c is broken", "rm -rf /", "EOF", `)" && bash -n x.sh`))).toBe("none");
-    expect(action(nl("(cat <<'EOF'", "rm -rf /", "EOF", ") > notes.md; bash -n x.sh"))).toBe("none");
   });
 
   test("a << inside a quoted string is not a heredoc and hides nothing", () => {
