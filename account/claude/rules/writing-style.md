@@ -171,7 +171,7 @@ a writer who reads it overrules the alert, and nothing in the toolchain will do 
 
 ## US English
 
-Write American English spelling on every surface the banned-vocabulary list binds, which is every surface except row 5 of the routing table. Operator directive, 2026-11-13.
+Write American English spelling on every surface the banned-vocabulary list binds, which is every surface except row 5 of the routing table. Operator directive, 2026-11-11.
 
 - `-ize` and `-ization` where US usage has the z: `organize`, `normalize`, `recognize`, `renormalization`.
 - `-or` for `-our`: `behavior`, `color`, `favor`, `honor`, `neighbor`.
