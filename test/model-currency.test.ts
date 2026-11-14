@@ -576,3 +576,94 @@ describe("run", () => {
     expect(r.output).not.toContain("example.invalid");
   });
 });
+
+describe("--aliases probe mode", () => {
+  const latestFile = (json: string): string => {
+    const p = join(tempRoot(), "latest.json");
+    writeFileSync(p, json);
+    return p;
+  };
+  const LATEST_ALL = '{"fable":"claude-fable-5","opus":"claude-opus-5","sonnet":"claude-sonnet-5","haiku":"claude-haiku-5"}'; // model-currency: ignore
+  const probeRows = (output: string): string[] => output.split("\n").slice(1);
+
+  test("each tier alias is probed once through claude -p --output-format json, with no file scan", async () => {
+    const calls: string[][] = [];
+    const d = deps(ALL_FOUR);
+    const inner = d.runClaude;
+    d.runClaude = (args) => (calls.push(args), inner(args));
+    const r = await run(["--aliases", "--latest", latestFile(LATEST_ALL)], d);
+    expect(calls.map((a) => a[a.indexOf("--model") + 1]).sort()).toEqual(["fable", "haiku", "opus", "sonnet"]);
+    for (const a of calls) {
+      expect(a[0]).toBe("-p");
+      expect(a[a.indexOf("--output-format") + 1]).toBe("json");
+    }
+    expect(r.output).not.toContain("scanned");
+    expect(r.exitCode).toBe(0);
+  });
+  test("every alias resolving to the latest is current, one row per alias with resolved and expected", async () => {
+    const r = await run(["--aliases", "--latest", latestFile(LATEST_ALL)], deps(ALL_FOUR));
+    expect(r.output.split("\n")[0]).toBe("latest source: file");
+    expect(probeRows(r.output)).toEqual([
+      "current\tfable\tclaude-fable-5\tclaude-fable-5", // model-currency: ignore
+      "current\topus\tclaude-opus-5\tclaude-opus-5", // model-currency: ignore
+      "current\tsonnet\tclaude-sonnet-5\tclaude-sonnet-5", // model-currency: ignore
+      "current\thaiku\tclaude-haiku-5\tclaude-haiku-5", // model-currency: ignore
+    ]);
+    expect(r.exitCode).toBe(0);
+  });
+  test("an alias resolving below the latest is stale-alias (exit 1)", async () => {
+    const r = await run(["--aliases", "--latest", latestFile(LATEST_ALL)], deps({ ...ALL_FOUR, opus: "claude-opus-4-5" })); // model-currency: ignore
+    expect(rowsOf(r.output, "stale-alias")).toEqual(["stale-alias\topus\tclaude-opus-4-5\tclaude-opus-5"]); // model-currency: ignore
+    expect(r.exitCode).toBe(1);
+  });
+  test("an alias the account is not served is not-served, shown with no resolved model (exit 2)", async () => {
+    const r = await run(["--aliases", "--latest", latestFile(LATEST_ALL)], deps({ ...ALL_FOUR, fable: null }));
+    expect(rowsOf(r.output, "not-served")).toEqual(["not-served\tfable\t-\tclaude-fable-5"]); // model-currency: ignore
+    expect(r.exitCode).toBe(2);
+  });
+  test("a stale alias outranks a not-served one for the exit code", async () => {
+    const r = await run(["--aliases", "--latest", latestFile(LATEST_ALL)], deps({ ...ALL_FOUR, fable: null, haiku: "claude-haiku-4-5" })); // model-currency: ignore
+    expect(r.exitCode).toBe(1);
+  });
+  test("with no latest source the resolved models are reported but never judged current (exit 2)", async () => {
+    const r = await run(["--aliases"], deps(ALL_FOUR));
+    expect(r.output.split("\n")[0]).toBe("latest source: none (latest unknown)");
+    expect(rowsOf(r.output, "unknown").length).toBe(4);
+    expect(r.output.split("\n").some((l) => l.startsWith("current"))).toBe(false);
+    expect(r.exitCode).toBe(2);
+  });
+  test("the Models API is the latest source when a key is set, and needs no files", async () => {
+    const api = (async () => new Response(JSON.stringify({ data: [{ id: "claude-sonnet-5-5" }] }))) as unknown as typeof fetch; // model-currency: ignore
+    const r = await run(["--aliases"], { ...deps({ sonnet: "claude-sonnet-5" }, { ANTHROPIC_API_KEY: "k" }), fetchImpl: api }); // model-currency: ignore
+    expect(r.output.split("\n")[0]).toBe("latest source: api");
+    expect(rowsOf(r.output, "stale-alias")).toEqual(["stale-alias\tsonnet\tclaude-sonnet-5\tclaude-sonnet-5-5"]); // model-currency: ignore
+    expect(rowsOf(r.output, "not-served").length).toBe(3);
+    expect(r.exitCode).toBe(1);
+  });
+  test("scan options are refused, since the mode reads no files", async () => {
+    for (const extra of [["--root", "."], ["--exclude", "x"], ["--no-resolve"]]) {
+      const r = await run(["--aliases", ...extra], deps(ALL_FOUR));
+      expect(r.exitCode).toBe(2);
+      expect(r.output).toContain("--aliases");
+    }
+  });
+  test("an unreadable --latest file is exit 2", async () => {
+    expect((await run(["--aliases", "--latest", join(tempRoot(), "missing.json")], deps(ALL_FOUR))).exitCode).toBe(2);
+  });
+  test("output never carries raw runner output", async () => {
+    const d = deps({});
+    d.runClaude = () => ({ code: 0, stdout: '{"account":"someone@example.invalid","modelUsage":{"claude-sonnet-5":{}}}' }); // model-currency: ignore
+    const r = await run(["--aliases", "--latest", latestFile(LATEST_ALL)], d);
+    expect(r.output).not.toContain("example.invalid");
+  });
+});
+
+describe("README documents the probe", () => {
+  test("the tool README and the root README row name --aliases", () => {
+    const root = join(import.meta.dir, "..");
+    expect(readFileSync(join(root, "tools", "model-currency", "README.md"), "utf8")).toContain("--aliases");
+    const row = readFileSync(join(root, "README.md"), "utf8").split(/\r?\n/).find((l) => l.startsWith("| `tools/model-currency/` |"));
+    expect(row).toBeDefined();
+    expect(row!).toContain("--aliases");
+  });
+});
