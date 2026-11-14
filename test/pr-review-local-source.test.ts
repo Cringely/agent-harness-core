@@ -117,6 +117,34 @@ describe("LocalGitSource.snapshot()", () => {
     const snap = await new LocalGitSource({ repoDir: dir, base: "HEAD~1", head: "HEAD", checks: "passed", policy }).snapshot();
     expect(snap.workflowText).toBe("OTHER WORKFLOW\n");
     expect(snap.checkRuns).toEqual([{ name: "ci", appSlug: "github-actions", status: "completed", conclusion: "success" }]);
+    expect(snap.extraWorkflowTexts).toEqual({});
+  });
+
+  // #349: a check's own workflow is read at the base commit beside ciWorkflowPath, null where absent.
+  test("reads each per-check workflow at the base commit", async () => {
+    const { dir, base } = makeRepo();
+    // Present only at the head, so reading the head instead of the base would find it.
+    write(dir, ".github/workflows/head-only.yml", "jobs: {}\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "head-only workflow");
+    const policy: RepoPolicy = {
+      repo: "owner/example",
+      ciWorkflowPath: ".github/workflows/test.yml",
+      requiredChecks: [
+        { name: "a", appSlug: "github-actions" },
+        { name: "b", appSlug: "github-actions", workflowPath: ".github/workflows/ci.yml" },
+        { name: "c", appSlug: "github-actions", workflowPath: ".github/workflows/head-only.yml" },
+      ],
+      pesterCoverage: false,
+    };
+    const snap = await new LocalGitSource({ repoDir: dir, base, head: "HEAD", checks: "passed", policy }).snapshot();
+    expect(snap.workflowText).toBe("jobs:\n");
+    expect(snap.extraWorkflowTexts).toEqual({ ".github/workflows/ci.yml": "OTHER WORKFLOW\n", ".github/workflows/head-only.yml": null });
+  });
+
+  test("refuses to construct with a per-check workflow path outside .github/workflows", () => {
+    const policy = { ...CORE_POLICY, requiredChecks: [{ name: "a", appSlug: "github-actions", workflowPath: "../x.yml" }] } as unknown as RepoPolicy;
+    expect(() => new LocalGitSource({ repoDir: ".", base: "HEAD~1", head: "HEAD", checks: "passed", policy })).toThrow();
   });
 
   test.each([
@@ -133,7 +161,7 @@ describe("syntheticCheckRuns()", () => {
     const verification = computeVerification({
       checkRuns: syntheticCheckRuns(state, CORE_POLICY.requiredChecks),
       changedFiles: ["README.md"],
-      workflowText: ["jobs:", ...CORE_POLICY.requiredChecks.map((c) => `    name: ${c.name}`)].join("\n"),
+      workflowText: ["jobs:", ...CORE_POLICY.requiredChecks.flatMap((c, i) => [`  job-${i}:`, `    name: ${c.name}`])].join("\n"),
       changedFilesComplete: true,
       policy: CORE_POLICY,
     });

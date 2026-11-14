@@ -80,6 +80,9 @@ export interface PrSnapshot {
   // checks them rather than obeys them.
   livingDocs: FileText[];
   workflowText: string | null;
+  // #349: every per-check workflow other than ciWorkflowPath, read at the BASE commit and keyed by
+  // path, null where the path is absent there. A path missing from this object reads as never read.
+  extraWorkflowTexts?: Record<string, string | null>;
   checkRuns: CheckRun[];
 }
 
@@ -145,7 +148,17 @@ export const LIVING_DOC_PATHS = ["README.md", "tools/pr-review/README.md"] as co
 export interface RequiredCheck {
   name: string;
   appSlug: string;
+  // #349: the workflow whose job this check must match at the base commit, when it is not the
+  // policy's ciWorkflowPath. Never set on a CODE_SCANNING_APP_SLUG check, which has no workflow.
+  workflowPath?: string;
 }
+
+// #349: the app GitHub reports for the CodeQL check of code scanning's default setup, read from the
+// `app.slug` of a live check run on 2026-11-13 (app id 57789, name GitHub Advanced Security). Its
+// configuration lives in the repository's settings, not in any
+// file a pull request can edit, so a check from it is verified by name and app on the head commit
+// alone. A run from this app never satisfies a check keyed to any other app.
+export const CODE_SCANNING_APP_SLUG = "github-advanced-security";
 
 export interface RepoPolicy {
   repo: string;
@@ -154,6 +167,10 @@ export interface RepoPolicy {
   // True only on CORE_POLICY. The policy file cannot set it, and the loader writes false on every
   // file entry. verdict.ts skips the Pester coverage rule only on a literal false.
   pesterCoverage: boolean;
+  // #349: repository-relative paths an edit to which withholds approval, on top of the fixed set in
+  // verdict.ts. An entry ending in "/" is a directory prefix, any other an exact path. It can only
+  // add: nothing here removes a path from the fixed set.
+  cannotVouchAdd?: readonly string[];
 }
 
 // Size caps. Each bounds what an attacker-sized pull request can make one review cost.

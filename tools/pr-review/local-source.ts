@@ -7,7 +7,7 @@
 // and syntheticCheckRuns() turns that statement into check runs with the policy's required names.
 // The policy (#318) also names the workflow read at the base commit.
 
-import { workflowPathProblem } from "./repo-policy";
+import { extraWorkflowPaths, workflowPathProblem } from "./repo-policy";
 import { selectHeadFiles } from "./snapshot";
 import {
   LIVING_DOC_PATHS,
@@ -59,6 +59,11 @@ export class LocalGitSource implements PrSource {
   constructor(private readonly options: LocalSourceOptions) {
     const problem = workflowPathProblem(options.policy?.ciWorkflowPath);
     if (problem !== null) throw new Error(`the policy's workflow path ${problem}`);
+    for (const check of options.policy.requiredChecks) {
+      if (check.workflowPath === undefined) continue;
+      const checkProblem = workflowPathProblem(check.workflowPath);
+      if (checkProblem !== null) throw new Error(`a check's workflow path ${checkProblem}`);
+    }
   }
 
   async snapshot(): Promise<PrSnapshot> {
@@ -92,6 +97,11 @@ export class LocalGitSource implements PrSource {
       if (content !== null) livingDocs.push({ path, content });
     }
 
+    const extraWorkflowTexts: Record<string, string | null> = {};
+    for (const path of extraWorkflowPaths(this.options.policy)) {
+      extraWorkflowTexts[path] = gitOrNull(repoDir, ["show", `${baseSha}:${path}`]);
+    }
+
     return {
       repo: "local",
       number: null,
@@ -111,6 +121,7 @@ export class LocalGitSource implements PrSource {
       trustedContext,
       livingDocs,
       workflowText: gitOrNull(repoDir, ["show", `${baseSha}:${this.options.policy.ciWorkflowPath}`]),
+      extraWorkflowTexts,
       checkRuns: syntheticCheckRuns(this.options.checks, this.options.policy.requiredChecks),
     };
   }
