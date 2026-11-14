@@ -24,9 +24,11 @@
 //
 // WHAT THIS IS NOT. It is a tripwire, not a sandbox. It reads the command text with a small shell
 // tokenizer, so it sees `bash -c "..."`, `eval`, `sudo`, `env` and `$(...)` wrappers. It skips
-// single-quoted strings, which are data, and heredoc bodies unless the command that owns the
-// heredoc, or a later stage of its pipeline, is a shell or ssh, where the body is a script. A `<<`
-// inside a quoted string on its line is not a heredoc. It does not expand variables, follow aliases or
+// single-quoted strings, which are data, and heredoc bodies unless any word of the pipeline that
+// owns the heredoc names a shell or ssh, where the body is a script. That holds behind any wrapper
+// (`timeout`, `nice`, `sudo`, `xargs`), and a group, subshell or substitution holding the heredoc
+// counts as one stage of the pipeline around it. A `<<` inside a quoted string on its line is not
+// a heredoc. It does not expand variables, follow aliases or
 // functions, resolve a path, or read a script a command runs. A command built to evade it will.
 // Its job is the accident and the habitual shortcut, where one prompt is the whole value.
 // Readers it does not know (grep, sed, awk, cp, scp) are not covered.
@@ -83,56 +85,198 @@ interface ScanState {
 // Tokenizer
 // ---------------------------------------------------------------------------
 
-/** Stands in for the `<<WORD` operator so the command that owns it can be found after tokenizing. */
+/** Stands in for the `<<WORD` operator so the pipeline that owns it can be found. */
 const HEREDOC_MARK = "__bash_tripwire_heredoc__";
 
+/** How far past the heredoc the owner scan reads before it gives up and calls the body code. */
+const HEREDOC_OWNER_SCAN = 1 << 16;
+
+const GROUP_OPENERS = new Set(["if", "while", "until", "for", "select", "case"]);
+const GROUP_CLOSERS = new Set(["fi", "done", "esac"]);
+const PREFIX_KEYWORDS = new Set(["then", "do", "else", "elif", "!", "time"]);
+
+function namesShell(word: string): boolean {
+  const base = baseName(word);
+  return SHELLS.has(base) || base === "ssh";
+}
+
+interface OwnerFrame {
+  /** `(` subshell or process substitution, `$(`, backtick, `{` group, or an if/while/for/case compound. */
+  kind: "top" | "paren" | "sub" | "tick" | "brace" | "compound";
+  /** Words of the pipeline being read in this frame. */
+  words: string[];
+  /** Every word read in this frame, which is what the frame contributes to its parent's pipeline. */
+  all: string[];
+  word: string;
+  quoted: boolean;
+  dq: boolean;
+  cmdPos: boolean;
+  /** The heredoc, or a frame holding it, is a stage of the pipeline being read here. */
+  target: boolean;
+  /** A pipeline of this frame held the heredoc and has ended, so the parent's pipeline now does. */
+  held: boolean;
+}
+
 /**
- * Whether the heredoc whose `<<` starts at `at` on `line` is code rather than data. It is code
- * when the command that owns the `<<`, or any stage of the same pipeline, is a shell interpreter
- * or ssh (whose remote login shell reads stdin). The owner is found by tokenizing the line from
- * the start of the innermost `$(`, backtick or subshell that holds the `<<`, so a shell named in an
- * earlier command or a quoted argument does not count. A `<<` inside a quoted string is not a
- * heredoc at all: the stand-in lands inside a quoted word, no command owns it, and the answer is
- * true. Anything else this cannot settle also answers true, which keeps the body in place to be
- * scanned.
+ * Whether the heredoc whose `<<` starts at `at` on `line` is code rather than data. `rest` is the
+ * command text after the heredoc's terminator line.
+ *
+ * It is code when any word of the pipeline that owns the `<<` names a shell or ssh (whose remote
+ * login shell reads stdin), with any path prefix stripped. Wrappers are not enumerated, so
+ * `timeout 5 bash`, `nice bash`, `sudo -u x stdbuf -oL bash` and `xargs bash -c` all count. A
+ * group, subshell, compound command or substitution is one stage of the pipeline around it, so the
+ * pipeline that owns a heredoc inside one runs on outward, past a closer that may sit after the
+ * body: `{ cat <<EOF; } | bash`, `(cat <<EOF ... EOF) | bash`, `bash -c "$(cat <<EOF ...)"`. A
+ * command after `;`, `&&`, `||` or `&` is a different pipeline and does not count, which is what
+ * keeps `bash -n x.sh && git commit -m "$(cat <<EOF` a data heredoc. Words in the body are never
+ * read here.
+ *
+ * Anything this cannot settle answers true, which keeps the body in place to be scanned: a `<<`
+ * inside a quoted string (not a heredoc at all), an unclosed single quote, or an owner pipeline
+ * that runs on past HEREDOC_OWNER_SCAN characters.
  */
-function heredocIsCode(line: string, at: number, opLen: number): boolean {
-  const frames = [{ start: 0, dq: false, tick: false }];
-  for (let i = 0; i < at; i++) {
-    const f = frames[frames.length - 1];
-    const c = line[i];
-    if (c === "\\") { i++; continue; }
-    if (c === "'" && !f.dq) {
-      const e = line.indexOf("'", i + 1);
-      if (e < 0) return true;
-      i = e;
-      continue;
+function heredocIsCode(line: string, at: number, opLen: number, rest: string): boolean {
+  const head = `${line.slice(0, at)} `;
+  const markAt = head.length;
+  const text = `${head}${HEREDOC_MARK} ${line.slice(at + opLen)}\n${rest}`;
+  const limit = markAt + HEREDOC_OWNER_SCAN;
+  const owner: string[] = [];
+  let marked = false;
+  const frame = (kind: OwnerFrame["kind"]): OwnerFrame =>
+    ({ kind, words: [], all: [], word: "", quoted: false, dq: false, cmdPos: true, target: false, held: false });
+  const frames: OwnerFrame[] = [frame("top")];
+  const top = () => frames[frames.length - 1];
+  const close = () => {
+    const child = frames.pop()!;
+    const parent = top();
+    if (child.target) owner.push(...child.words);
+    parent.words.push(...child.all);
+    parent.all.push(...child.all);
+    if (child.target || child.held) parent.target = true;
+    parent.cmdPos = false;
+  };
+  const endWord = () => {
+    const f = top();
+    const w = f.word;
+    const bare = !f.quoted;
+    f.word = "";
+    f.quoted = false;
+    if (w === "" && bare) return;
+    if (bare && w === HEREDOC_MARK) {
+      marked = true;
+      f.target = true;
+      return;
     }
-    if (c === '"') { f.dq = !f.dq; continue; }
-    if (c === "`") {
-      if (f.tick) frames.pop();
-      else frames.push({ start: i + 1, dq: false, tick: true });
-      continue;
+    if (bare && f.cmdPos) {
+      if (w === "{" || GROUP_OPENERS.has(w)) {
+        frames.push(frame(w === "{" ? "brace" : "compound"));
+        return;
+      }
+      if ((w === "}" && f.kind === "brace") || (GROUP_CLOSERS.has(w) && f.kind === "compound")) {
+        close();
+        return;
+      }
     }
-    if (c === "$" && line[i + 1] === "(") {
-      frames.push({ start: i + 2, dq: false, tick: false });
+    f.words.push(w);
+    f.all.push(w);
+    f.cmdPos = bare && PREFIX_KEYWORDS.has(w);
+  };
+  /** Ends the pipeline being read. True when that was the outermost pipeline holding the heredoc. */
+  const separator = (): boolean => {
+    endWord();
+    const f = top();
+    f.cmdPos = true;
+    if (f.target) {
+      owner.push(...f.words);
+      if (frames.length === 1) return true;
+      f.target = false;
+      f.held = true;
+    }
+    f.words = [];
+    return false;
+  };
+  let done = false;
+  for (let i = 0; i < text.length && !done; i++) {
+    if (i > limit) return true;
+    const f = top();
+    const c = text[i];
+    if (c === "\\") {
+      if (text[i + 1] !== "\n") {
+        f.word += text[i + 1] ?? "";
+        f.quoted = true;
+      }
       i++;
       continue;
     }
-    if (f.dq) continue;
-    if (c === "(") frames.push({ start: i + 1, dq: false, tick: false });
-    else if (c === ")" && frames.length > 1 && !f.tick) frames.pop();
+    if (c === "'" && !f.dq) {
+      const e = text.indexOf("'", i + 1);
+      if (e < 0) return true;
+      f.word += text.slice(i + 1, e);
+      f.quoted = true;
+      i = e;
+      continue;
+    }
+    if (c === '"') {
+      f.dq = !f.dq;
+      f.quoted = true;
+      continue;
+    }
+    if (c === "`") {
+      if (f.kind === "tick" && !f.dq) close();
+      else frames.push(frame("tick"));
+      continue;
+    }
+    if (c === "$" && text[i + 1] === "(") {
+      frames.push(frame("sub"));
+      i++;
+      continue;
+    }
+    if (f.dq) {
+      f.word += c;
+      continue;
+    }
+    if (c === "(") {
+      endWord();
+      frames.push(frame("paren"));
+    } else if (c === ")") {
+      endWord();
+      if (top().kind === "paren" || top().kind === "sub") close();
+    } else if (c === "|") {
+      endWord();
+      if (text[i + 1] === "|") {
+        i++;
+        done = separator();
+      } else {
+        if (text[i + 1] === "&") i++;
+        top().cmdPos = true;
+      }
+    } else if (c === "&") {
+      if (text[i - 1] === ">" || text[i - 1] === "<" || text[i + 1] === ">") {
+        endWord();
+      } else {
+        if (text[i + 1] === "&") i++;
+        done = separator();
+      }
+    } else if (c === ";" || c === "\n") {
+      done = separator();
+    } else if (c === " " || c === "\t" || c === "\r" || c === "<" || c === ">") {
+      endWord();
+    } else {
+      f.word += c;
+    }
   }
-  const top = frames[frames.length - 1];
-  const text = `${line.slice(top.start, at)} ${HEREDOC_MARK} ${line.slice(at + opLen)}`;
-  const cmds = tokenize(text, { unread: false });
-  const owner = cmds.find((c) => c.argv.includes(HEREDOC_MARK));
-  if (!owner) return true;
-  return cmds.some((c) => {
-    if (c.pipeline !== owner.pipeline) return false;
-    const r = resolve(c.argv.filter((w) => w !== HEREDOC_MARK), c.pipeline);
-    return r !== null && (SHELLS.has(r.name) || r.name === "ssh");
-  });
+  if (!done) {
+    // Frames left open at the end: each one is a stage of the pipeline around it.
+    endWord();
+    let inside = false;
+    for (let k = frames.length - 1; k >= 0; k--) {
+      const f = frames[k];
+      if (f.target || inside) owner.push(...f.words);
+      inside = inside || f.target || f.held;
+    }
+  }
+  if (!marked) return true;
+  return owner.some(namesShell);
 }
 
 /**
@@ -153,7 +297,6 @@ function stripHeredocBodies(src: string): string {
     i++;
     const m = /(?<!<)<<(-?)\s*(['"]?)([A-Za-z_][A-Za-z0-9_-]*)\2(?!<)/.exec(line);
     if (!m) continue;
-    if (heredocIsCode(line, m.index, m[0].length)) continue;
     const word = m[3];
     const dash = m[1] === "-";
     let end = -1;
@@ -165,6 +308,9 @@ function stripHeredocBodies(src: string): string {
       }
     }
     if (end < 0) continue;
+    let rest = "";
+    for (let j = end + 1; j < lines.length && rest.length <= HEREDOC_OWNER_SCAN; j++) rest += `${lines[j]}\n`;
+    if (heredocIsCode(line, m.index, m[0].length, rest)) continue;
     out.push(lines[end]);
     i = end + 1;
   }
@@ -518,12 +664,19 @@ function isShellFlagC(name: string, a: string): boolean {
   return /^-[A-Za-z]*c[A-Za-z]*$/.test(a);
 }
 
-function scan(src: string, depth: number, out: Finding[], st: ScanState): void {
+/**
+ * `strip` is false for the text of a substitution. The pass that read the text holding it already
+ * decided every heredoc in it, owner pipelines outside the substitution included, so a second pass
+ * over the substitution alone would see only the inner pipeline and drop a body fed to a shell
+ * outside it (`bash <(cat <<EOF ...)`). A `bash -c` or eval string is a new script, so it is
+ * stripped in its own right.
+ */
+function scan(src: string, depth: number, out: Finding[], st: ScanState, strip = true): void {
   if (depth > MAX_DEPTH) {
     st.unread = true;
     return;
   }
-  const text = stripHeredocBodies(src);
+  const text = strip ? stripHeredocBodies(src) : src;
   const resolved: Resolved[] = [];
   for (const cmd of tokenize(text, st)) {
     const r = resolve(cmd.argv, cmd.pipeline);
@@ -561,7 +714,7 @@ function scan(src: string, depth: number, out: Finding[], st: ScanState): void {
     }
   }
 
-  for (const inner of extractSubstitutions(text)) scan(inner, depth + 1, out, st);
+  for (const inner of extractSubstitutions(text)) scan(inner, depth + 1, out, st, false);
 }
 
 /** A shell interpreter's name as a word, for rawScan's check of a download in a substitution. */

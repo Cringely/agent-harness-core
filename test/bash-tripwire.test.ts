@@ -329,6 +329,59 @@ describe("quoting, heredocs and substitutions", () => {
     expect(action(nl("cat <<'EOF' | sudo -u x bash", "rm -rf /", "EOF"))).toBe("deny");
   });
 
+  // A shell or ssh named by any word of the pipeline that owns the heredoc makes the body code,
+  // whatever wrapper sits in front of it, and a group or substitution holding the heredoc joins the
+  // pipeline outside it.
+  test.each([
+    "timeout 60 bash <<'EOF'",
+    "nice bash <<'EOF'",
+    "nice -n 5 bash <<'EOF'",
+    "stdbuf -oL bash <<'EOF'",
+    "sudo -u x timeout 5 bash <<'EOF'",
+    "sudo timeout 5 bash <<'EOF'",
+    "timeout 60 ssh host <<'EOF'",
+    "timeout 60 ssh host bash -s <<'EOF'",
+    "xargs bash -c <<'EOF'",
+    "xargs -0 bash -c <<'EOF'",
+    "{ cat <<'EOF'; } | bash",
+    "(cat <<'EOF') | bash",
+    "cat <<'EOF' 2>&1 | bash",
+    "if true; then bash; fi <<'EOF'",
+    "if true; then echo fi; bash; fi <<'EOF'",
+    "if true; then while false; do :; done; bash; fi <<'EOF'",
+    "cat <<'EOF' | if true; then bash; fi",
+    "bash <(cat <<'EOF'",
+  ])("a heredoc behind a wrapper or in a group is scanned: %s", (first) => {
+    expect(action(nl(first, "git push --force", "EOF"))).toBe("ask");
+    expect(action(nl(first, "rm -rf /", "EOF"))).toBe("deny");
+  });
+
+  test("a group or substitution closed after the heredoc body still joins the outer pipeline", () => {
+    expect(action(nl("(cat <<'EOF'", "rm -rf /", "EOF", ") | bash"))).toBe("deny");
+    expect(action(nl("{ cat <<'EOF'", "rm -rf /", "EOF", "} | sudo bash"))).toBe("deny");
+    expect(action(nl("bash <(cat <<'EOF'", "rm -rf /", "EOF", ")"))).toBe("deny");
+    expect(action(nl(`bash -c "$(cat <<'EOF'`, "git push --force", "EOF", `)"`))).toBe("ask");
+    expect(action(nl(`ssh host "$(cat <<'EOF'`, "rm -rf /", "EOF", `)"`))).toBe("deny");
+  });
+
+  test("an owner pipeline too long to follow keeps the body", () => {
+    const filler = Array.from({ length: 20000 }, () => "echo x").join(" | ");
+    expect(action(nl("(cat <<'EOF'", "rm -rf /", "EOF", `${filler}) | bash`))).toBe("deny");
+    expect(action(nl("(cat <<'EOF'", "rm -rf /", "EOF", `${filler}) > notes.md`))).toBe("deny");
+  });
+
+  test("a long command after a data heredoc's pipeline has ended does not make the body code", () => {
+    const filler = Array.from({ length: 20000 }, () => "echo x").join("; ");
+    expect(action(nl(`git commit -m "$(cat <<'EOF'`, "rm -rf /", "EOF", `)" && ${filler}`))).toBe("none");
+  });
+
+  test("a data heredoc stays silent when the shell word is only in its body or in a later command", () => {
+    expect(action(nl("cat > notes.md <<'EOF'", "Don't pipe this to bash: rm -rf /", "EOF"))).toBe("none");
+    expect(action(nl("cat <<'EOF' | tee notes.md", "Don't run bash here: git push --force", "EOF"))).toBe("none");
+    expect(action(nl(`git commit -m "$(cat <<'EOF'`, "Don't merge yet, bash -c is broken", "rm -rf /", "EOF", `)" && bash -n x.sh`))).toBe("none");
+    expect(action(nl("(cat <<'EOF'", "rm -rf /", "EOF", ") > notes.md; bash -n x.sh"))).toBe("none");
+  });
+
   test("a << inside a quoted string is not a heredoc and hides nothing", () => {
     expect(action(nl('echo "a <<EOF b"', "git push --force", "EOF"))).toBe("ask");
     expect(action(nl("echo 'a <<EOF b'", "git push --force", "EOF"))).toBe("ask");
