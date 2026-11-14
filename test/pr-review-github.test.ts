@@ -496,4 +496,44 @@ describe("GitHubClient: the workflow read is the configured one (#318)", () => {
     expect(workflowFetches.map((c) => c.url.pathname)).toEqual(["/repos/owner/name/contents/.github/workflows/ci.yml"]);
     expect(workflowFetches[0]!.url.searchParams.get("ref")).toBe(BASE);
   });
+
+  test("with no extra workflow paths, extraWorkflowTexts is empty", async () => {
+    const snap = await client(fakeGitHub()).snapshot();
+    expect(snap.extraWorkflowTexts).toEqual({});
+  });
+
+  // #349: each per-check workflow is read at the base SHA too, and an absent one is null.
+  test("reads each extra workflow path at the base SHA, null where absent", async () => {
+    const fake = fakeGitHub();
+    const snap = await new GitHubClient({
+      repo: "owner/name",
+      pr: 7,
+      minter: countingMinter(),
+      workflowPath: ".github/workflows/test.yml",
+      extraWorkflowPaths: [".github/workflows/ci.yml", ".github/workflows/missing.yml"],
+      fetchImpl: fake.impl,
+    }).snapshot();
+    expect(snap.workflowText).toBe("jobs:\n");
+    expect(snap.extraWorkflowTexts).toEqual({ ".github/workflows/ci.yml": "OTHER WORKFLOW", ".github/workflows/missing.yml": null });
+    const extraFetches = fake.calls.filter((c) => c.url.pathname.includes("/contents/.github/workflows/") && !c.url.pathname.endsWith("/test.yml"));
+    expect(extraFetches.map((c) => c.url.searchParams.get("ref"))).toEqual([BASE, BASE]);
+  });
+
+  test.each([
+    ["a dot-dot segment", ".github/workflows/../../x.yml"],
+    ["outside .github/workflows", "ci/config.yml"],
+    ["not a string", 7],
+  ])("the constructor refuses an extra workflow path with %s", (_label, path) => {
+    expect(
+      () =>
+        new GitHubClient({
+          repo: "owner/name",
+          pr: 7,
+          minter: countingMinter(),
+          workflowPath: ".github/workflows/test.yml",
+          extraWorkflowPaths: [path as string],
+          fetchImpl: fakeGitHub().impl,
+        }),
+    ).toThrow();
+  });
 });

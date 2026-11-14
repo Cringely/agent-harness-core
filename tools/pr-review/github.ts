@@ -97,14 +97,27 @@ export class GitHubClient implements PrSource, ReviewPoster {
   // base had already changed.
   private baseline: { baseRef: string; baseSha: string; changedFiles: number | undefined } | null = null;
 
-  // workflowPath (#318) is the reviewed repository's own CI workflow, from its RepoPolicy. Checked
-  // here as well as in the policy loader, since it goes into a contents-API URL fetched with the
-  // installation token.
-  constructor(private readonly options: { repo: string; pr: number; minter: TokenMinter; workflowPath: string; fetchImpl?: typeof fetch }) {
+  // workflowPath (#318) is the reviewed repository's own CI workflow, from its RepoPolicy, and
+  // extraWorkflowPaths (#349) the per-check workflows beside it. Each is checked here as well as in
+  // the policy loader, since it goes into a contents-API URL fetched with the installation token.
+  constructor(
+    private readonly options: {
+      repo: string;
+      pr: number;
+      minter: TokenMinter;
+      workflowPath: string;
+      extraWorkflowPaths?: readonly string[];
+      fetchImpl?: typeof fetch;
+    },
+  ) {
     if (parseRepo(options.repo) === null) throw new Error("the repository must be given as owner/name");
     if (!Number.isInteger(options.pr) || options.pr < 1) throw new Error("the pull request number must be a positive integer");
     const workflowProblem = workflowPathProblem(options.workflowPath);
     if (workflowProblem !== null) throw new Error(`the workflow path ${workflowProblem}`);
+    for (const path of options.extraWorkflowPaths ?? []) {
+      const problem = workflowPathProblem(path);
+      if (problem !== null) throw new Error(`an extra workflow path ${problem}`);
+    }
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
@@ -265,6 +278,10 @@ export class GitHubClient implements PrSource, ReviewPoster {
       if (content !== null) livingDocs.push({ path, content });
     }
     const workflowText = await this.rawOrNull(contentsPath(repo, this.options.workflowPath, baseSha));
+    const extraWorkflowTexts: Record<string, string | null> = {};
+    for (const path of this.options.extraWorkflowPaths ?? []) {
+      extraWorkflowTexts[path] = await this.rawOrNull(contentsPath(repo, path, baseSha));
+    }
 
     const checkRuns = await this.fetchCheckRuns(repo, headSha);
 
@@ -286,6 +303,7 @@ export class GitHubClient implements PrSource, ReviewPoster {
       trustedContext,
       livingDocs,
       workflowText,
+      extraWorkflowTexts,
       checkRuns,
     };
   }
