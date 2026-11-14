@@ -87,7 +87,11 @@ describe("decideMerge(): merges", () => {
 // computeVerification itself, so every kind of reason the reviewer can give is covered.
 describe("decideMerge(): a COMMENT always refuses", () => {
   const NL = String.fromCharCode(10);
-  const WORKFLOW = CORE_POLICY.requiredChecks.map((check) => `    name: ${check.name}`).join(NL);
+  // A workflow with one job per required check, each reporting under the check's name, which is
+  // what computeVerification needs to read the checks as declared (#349).
+  const workflowOf = (checks: typeof CORE_POLICY.requiredChecks) =>
+    ["jobs:", ...checks.flatMap((check, i) => [`  job-${i}:`, `    name: ${check.name}`])].join(NL);
+  const WORKFLOW = workflowOf(CORE_POLICY.requiredChecks);
   const GREEN_RUNS: CheckRun[] = CORE_POLICY.requiredChecks.map((check) => ({ name: check.name, appSlug: check.appSlug, status: "completed", conclusion: "success" }));
   const verify = (overrides: Partial<Parameters<typeof computeVerification>[0]>) =>
     computeVerification({ checkRuns: GREEN_RUNS, changedFiles: ["README.md"], workflowText: WORKFLOW, changedFilesComplete: true, policy: CORE_POLICY, ...overrides });
@@ -101,7 +105,7 @@ describe("decideMerge(): a COMMENT always refuses", () => {
     ["a .ps1 change whose suite CI does not run", verify({ changedFiles: ["install/Uncovered.ps1"] })],
     ["a changed-file listing too long to read whole", verify({ changedFilesComplete: false })],
     ["a required check with no run on the head", verify({ checkRuns: GREEN_RUNS.slice(0, -1) })],
-    ["a required check the workflow does not declare", verify({ workflowText: WORKFLOW.split(NL).slice(1).join(NL) })],
+    ["a required check the workflow does not declare", verify({ workflowText: workflowOf(CORE_POLICY.requiredChecks.slice(1)) })],
     ["a required check still pending", verify({ checkRuns: pending })],
     ["no workflow at the base commit", verify({ workflowText: null })],
     ["an incomplete verification that gives no reason", { state: "incomplete", reasons: [] }],

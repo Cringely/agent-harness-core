@@ -727,3 +727,135 @@ describe("pre-commit hook — token-pattern secret scan", () => {
     expect(result.exitCode).toBe(0);
   }, SCAN_TIMEOUT_MS);
 });
+
+// The per-clone chain point (#75). The local git config harness.preCommitChain
+// names a POSIX sh script in the hook's own directory, which runs after every
+// gate in the hook has passed. The hook directory is where the installed hooks
+// live, so the chained script carries the same trust as the hook and never
+// comes from the branch being committed. This repository chains its account
+// payload check through it (test/account-payload-check.test.ts covers that
+// script).
+describe("pre-commit hook — per-clone chained check (harness.preCommitChain)", () => {
+  const CHAIN_PASS = "chain-pass.sh";
+  const CHAIN_FAIL = "chain-fail.sh";
+
+  /** Two chained scripts in the hook directory that each record that they ran, one exiting 0 and one exiting 1. */
+  function writeChainScripts(dir: string): string {
+    const marker = join(dir, ".git", "chain-ran");
+    const fwd = marker.split(String.fromCharCode(92)).join("/");
+    const hooks = join(dir, ".claude", "hooks");
+    writeFileSync(join(hooks, CHAIN_PASS), `#!/bin/sh\necho pass >> "${fwd}"\nexit 0\n`);
+    writeFileSync(join(hooks, CHAIN_FAIL), `#!/bin/sh\necho fail >> "${fwd}"\necho "chained check said no" >&2\nexit 1\n`);
+    return marker;
+  }
+
+  /** A script at the top of the work tree, where branch content lives, that records it ran. */
+  function writeTreeScript(dir: string, name: string, marker: string) {
+    const fwd = marker.split(String.fromCharCode(92)).join("/");
+    writeFileSync(join(dir, name), `#!/bin/sh\necho tree >> "${fwd}"\nexit 0\n`);
+  }
+
+  function cleanStage(dir: string) {
+    writeFileSync(join(dir, "app.js"), "console.log(1);\n");
+    git(["add", "app.js"], dir);
+  }
+
+  const noVale = () => ({ ...process.env, PATH: pathWithoutVale() });
+
+  test("unset: no chained script runs, exit 0", () => {
+    const dir = initRepo();
+    const marker = writeChainScripts(dir);
+    cleanStage(dir);
+
+    const result = runHook(dir, noVale());
+    expect(result.exitCode).toBe(0);
+    expect(existsSync(marker)).toBe(false);
+  }, HOOK_TIMEOUT_MS);
+
+  test("configured script that passes: it runs, exit 0", () => {
+    const dir = initRepo();
+    const marker = writeChainScripts(dir);
+    git(["config", "--local", "harness.preCommitChain", CHAIN_PASS], dir);
+    cleanStage(dir);
+
+    const result = runHook(dir, noVale());
+    expect(result.exitCode).toBe(0);
+    expect(readFileSync(marker, "utf8").trim()).toBe("pass");
+  }, HOOK_TIMEOUT_MS);
+
+  test("configured script that exits non-zero: refused, its message shown", () => {
+    const dir = initRepo();
+    const marker = writeChainScripts(dir);
+    git(["config", "--local", "harness.preCommitChain", CHAIN_FAIL], dir);
+    cleanStage(dir);
+
+    const result = runHook(dir, noVale());
+    expect(result.exitCode).toBe(1);
+    expect(readFileSync(marker, "utf8").trim()).toBe("fail");
+    expect(result.stderr.toString()).toContain("chained check said no");
+  }, HOOK_TIMEOUT_MS);
+
+  test("the script is taken from the hook directory, never from the work tree", () => {
+    const dir = initRepo();
+    const marker = writeChainScripts(dir);
+    writeTreeScript(dir, CHAIN_PASS, marker);
+    git(["config", "--local", "harness.preCommitChain", CHAIN_PASS], dir);
+    cleanStage(dir);
+
+    const result = runHook(dir, noVale());
+    expect(result.exitCode).toBe(0);
+    expect(readFileSync(marker, "utf8").trim()).toBe("pass");
+  }, HOOK_TIMEOUT_MS);
+
+  test("configured script missing from the hook directory: refused, even when the work tree has one", () => {
+    const dir = initRepo();
+    const marker = join(dir, ".git", "chain-ran");
+    writeTreeScript(dir, "not-in-hooks.sh", marker);
+    git(["config", "--local", "harness.preCommitChain", "not-in-hooks.sh"], dir);
+    cleanStage(dir);
+
+    const result = runHook(dir, noVale());
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain("harness.preCommitChain");
+    expect(existsSync(marker)).toBe(false);
+  }, HOOK_TIMEOUT_MS);
+
+  test("a value that is a path, not a file name: refused, nothing run", () => {
+    for (const value of [`./${CHAIN_PASS}`, `..${String.fromCharCode(92)}hooks${String.fromCharCode(92)}${CHAIN_PASS}`]) {
+      const dir = initRepo();
+      const marker = writeChainScripts(dir);
+      writeTreeScript(dir, CHAIN_PASS, marker);
+      git(["config", "--local", "harness.preCommitChain", value], dir);
+      cleanStage(dir);
+
+      const result = runHook(dir, noVale());
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr.toString()).toContain("harness.preCommitChain");
+      expect(existsSync(marker)).toBe(false);
+    }
+  }, HOOK_TIMEOUT_MS * 2);
+
+  test("configured but empty: refused", () => {
+    const dir = initRepo();
+    git(["config", "--local", "harness.preCommitChain", ""], dir);
+    cleanStage(dir);
+
+    const result = runHook(dir, noVale());
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain("harness.preCommitChain");
+  }, HOOK_TIMEOUT_MS);
+
+  test("a global value is ignored: only the clone's own config opts in", () => {
+    const dir = initRepo();
+    const marker = writeChainScripts(dir);
+    const globalDir = mkdtempSync(join(tmpdir(), "precommit-chain-global-"));
+    tempDirs.push(globalDir);
+    const globalConfig = join(globalDir, "gitconfig");
+    writeFileSync(globalConfig, `[harness]\n\tpreCommitChain = ${CHAIN_FAIL}\n`);
+    cleanStage(dir);
+
+    const result = runHook(dir, { ...noVale(), GIT_CONFIG_GLOBAL: globalConfig });
+    expect(result.exitCode).toBe(0);
+    expect(existsSync(marker)).toBe(false);
+  }, HOOK_TIMEOUT_MS);
+});

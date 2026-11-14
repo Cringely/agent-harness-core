@@ -611,6 +611,156 @@ Describe "Install-Harness" {
         $out | Should -Match "agents/task-reviewer\.md\s+project-modified"
     }
 
+    # Unknown agent frontmatter keys (#31). Claude Code ignores an unrecognised key without an
+    # error, so the audit is the only place a typo surfaces. Warn-only: the row counts as needing
+    # attention and nothing is written or refused.
+    It "audit flags an installed agent def whose frontmatter carries a misspelled key" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $def = "$script:target/.claude/agents/task-reviewer.md"
+        $text = Get-Content -LiteralPath $def -Raw
+        $text.StartsWith('---') | Should -BeTrue
+        # Insert the typo as the first frontmatter line, so it sits at column 0 in the block.
+        $first = $text.IndexOf("`n") + 1
+        Set-Content -LiteralPath $def -NoNewline -Value ($text.Insert($first, "reasoning_effort: low`n"))
+        $manifestBefore = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw
+
+        $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $out | Should -Match 'agents/task-reviewer[.]md\s+unknown-key [(]reasoning_effort[)]'
+        $out | Should -Not -Match 'All managed files in sync with core[.]'
+        (Get-Content "$script:target/.claude/.harness-manifest.json" -Raw) | Should -Be $manifestBefore
+
+        $quiet = @(& "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit -Quiet *>&1 | Out-String -Width 500)
+        ($quiet -join "`n") | Should -Match 'unknown-key [(]reasoning_effort[)]'
+    }
+
+    It "audit flags a misspelled key in a def the project wrote itself, and judges case" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        Set-Content -LiteralPath "$script:target/.claude/agents/mine.md" -Value "---`nname: mine`ndescription: x`nmodel: haiku`nEffort: low`n---`nbody"
+        $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $out | Should -Match 'agents/mine[.]md\s+unknown-key [(]Effort[)]'
+    }
+
+    It "audit does not flag platform keys, core's writeScope extension, effort on a haiku def, or indented and in-value colons" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $body = @(
+            '---', 'name: mine', 'description: Use when asked: anything', 'model: haiku', 'effort: low',
+            'disallowedTools: Write', 'maxTurns: 5', 'writeScope: scratch', 'hooks:', '  PreToolUse:',
+            '    - matcher: Bash', '---', 'body') -join "`n"
+        Set-Content -LiteralPath "$script:target/.claude/agents/mine.md" -Value $body
+        $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $out | Should -Not -Match 'agents/mine[.]md\s+unknown-key'
+    }
+
+    It "audit survives a zero-byte agent def and still reports a typo in another def" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        New-Item -ItemType File -Path "$script:target/.claude/agents/empty.md" | Out-Null
+        Set-Content -LiteralPath "$script:target/.claude/agents/typo.md" -Value "---`nname: typo`ndescription: x`nreasoning_effort: low`n---`nbody"
+        $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $out | Should -Match 'agents/typo[.]md\s+unknown-key [(]reasoning_effort[)]'
+        $out | Should -Not -Match 'Value cannot be null'
+        $out | Should -Not -Match 'agents/empty[.]md'
+    }
+
+    # A frontmatter line the extractor cannot place is a def whose keys were never checked, so it
+    # gets a row rather than a pass. Each shape below passed silently before.
+    It "audit reports a quoted misspelled key as unknown-key" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        Set-Content -LiteralPath "$script:target/.claude/agents/q.md" -Value "---`nname: q`ndescription: x`n'reasoning_effort': low`n---`nbody"
+        Set-Content -LiteralPath "$script:target/.claude/agents/dq.md" -Value "---`nname: dq`ndescription: x`n`"reasoning_effort`": low`n---`nbody"
+        $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $out | Should -Match 'agents/q[.]md\s+unknown-key [(]reasoning_effort[)]'
+        $out | Should -Match 'agents/dq[.]md\s+unknown-key [(]reasoning_effort[)]'
+    }
+
+    It "audit reports agent-keys-unparsed for a frontmatter line that is not a key, comment, blank or continuation" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $shapes = @{
+            'space' = "reasoning effort: low"
+            'dot'   = "reasoning.effort: low"
+            'stray' = "just some text"
+            'orphanindent' = "  indented: before any key"
+            'orphanitem'   = "- Read"
+        }
+        foreach ($name in $shapes.Keys) {
+            $body = if ($name -like 'orphan*') { "---`n$($shapes[$name])`nname: $name`n---`nbody" } else { "---`nname: $name`n$($shapes[$name])`ndescription: x`n---`nbody" }
+            Set-Content -LiteralPath "$script:target/.claude/agents/shape-$name.md" -Value $body
+        }
+        $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        foreach ($name in $shapes.Keys) {
+            $out | Should -Match "agents/shape-$name[.]md\s+agent-keys-unparsed"
+        }
+        $out | Should -Not -Match 'All managed files in sync with core[.]'
+        $out | Should -Match 'agent-keys-unparsed = the definition has a frontmatter line the check cannot place'
+        $quiet = @(& "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit -Quiet *>&1 | Out-String -Width 500)
+        ($quiet -join "`n") | Should -Match 'agent-keys-unparsed\s+agents/shape-stray[.]md'
+    }
+
+    It "audit reports agent-keys-unparsed when the frontmatter block cannot be located" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        Set-Content -LiteralPath "$script:target/.claude/agents/trail.md" -NoNewline -Value "---  `nname: trail`nreasoning_effort: low`n---`nbody"
+        Set-Content -LiteralPath "$script:target/.claude/agents/open.md" -NoNewline -Value "---`nname: open`nreasoning_effort: low`nbody with no closing marker"
+        Set-Content -LiteralPath "$script:target/.claude/agents/emptyblock.md" -NoNewline -Value "---`n---`nbody"
+        $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $out | Should -Match 'agents/trail[.]md\s+agent-keys-unparsed'
+        $out | Should -Match 'agents/open[.]md\s+agent-keys-unparsed'
+        $out | Should -Match 'agents/emptyblock[.]md\s+agent-keys-unparsed'
+    }
+
+    It "audit does not flag comments, blank lines, sequence items or continuations, and ignores a def with no frontmatter" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $body = @(
+            '---', '# a comment', 'name: mine', '', 'description: >', '  folded text', '  more text',
+            'tools:', '- Read', '- Grep', 'model: haiku', '---', 'body') -join "`n"
+        Set-Content -LiteralPath "$script:target/.claude/agents/mine.md" -Value $body
+        Set-Content -LiteralPath "$script:target/.claude/agents/plain.md" -Value "just a markdown file`nwith no frontmatter"
+        $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $out | Should -Not -Match 'agents/mine[.]md'
+        $out | Should -Not -Match 'agents/plain[.]md'
+    }
+
+    It "audit reports agent-keys-unreadable for a def that cannot be read, and keeps auditing" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        # A directory named like a def makes Get-ChildItem -File skip it, so lock a real file instead.
+        $locked = "$script:target/.claude/agents/locked.md"
+        Set-Content -LiteralPath $locked -Value "---`nname: locked`n---`nbody"
+        Set-Content -LiteralPath "$script:target/.claude/agents/typo.md" -Value "---`nname: typo`ndescription: x`nreasoning_effort: low`n---`nbody"
+        $fs = [System.IO.File]::Open($locked, 'Open', 'Read', 'None')
+        try {
+            $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        }
+        finally { $fs.Dispose() }
+        $out | Should -Match 'agents/locked[.]md\s+agent-keys-unreadable'
+        $out | Should -Match 'agent-keys-unreadable = the definition could not be read'
+        $out | Should -Match 'agents/typo[.]md\s+unknown-key [(]reasoning_effort[)]'
+    }
+
+    It "audit stays silent on unknown keys after a clean install of the shipped defs" {
+        & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
+        $out = & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+        $out | Should -Not -Match 'unknown-key\s*[(]'
+        $out | Should -Not -Match 'agent-keys-unchecked'
+        $out | Should -Not -Match 'agent-keys-unparsed'
+    }
+
+    It "audit says the key check did not run when the shipped allowlist file is missing, rather than passing every def" {
+        # The installer resolves core relative to its own location, so a copy of install/ and
+        # core/ in a scratch directory is the only way to remove the file without touching the
+        # real checkout.
+        $fake = Join-Path ([System.IO.Path]::GetTempPath()) ("harness-core-copy-" + [guid]::NewGuid())
+        try {
+            New-Item -ItemType Directory -Path $fake | Out-Null
+            Copy-Item -Recurse -LiteralPath "$PSScriptRoot/../install" -Destination "$fake/install"
+            Copy-Item -Recurse -LiteralPath "$PSScriptRoot/../core" -Destination "$fake/core"
+            & "$fake/install/Install-Harness.ps1" @script:dep -Target $script:target
+            Remove-Item -LiteralPath "$fake/core/claude/agent-frontmatter-keys.json"
+            $out = & "$fake/install/Install-Harness.ps1" @script:dep -Target $script:target -Audit *>&1 | Out-String -Width 500
+            $out | Should -Match 'agent-frontmatter-keys[.]json\s+agent-keys-unchecked'
+            $out | Should -Match 'agent-keys-unchecked = that file is missing, unparsable or empty.*restore core/claude/agent-frontmatter-keys[.]json'
+            $out | Should -Not -Match 'All managed files in sync with core[.]'
+        }
+        finally { Remove-Item -Recurse -Force -LiteralPath $fake -ErrorAction SilentlyContinue }
+    }
+
     It "audit classifies core-updated when core moved on but the project did not" {
         & "$PSScriptRoot/Install-Harness.ps1" @script:dep -Target $script:target
         # Simulate "core changed since install": rewrite the installed file AND its

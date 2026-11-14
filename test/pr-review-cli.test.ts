@@ -161,11 +161,14 @@ describe("summarizeSnapshot()", () => {
       linkedIssues: [{ number: 127, title: "ISSUE-TITLE", body: "ISSUE-BODY" }],
       trustedContext: [{ path: "CONTRIBUTING.md", content: "TRUSTED-TEXT" }],
       livingDocs: [{ path: "README.md", content: "LIVING-DOC-TEXT" }],
-      workflowText: ["jobs:", ...CORE_POLICY.requiredChecks.map((c) => `    name: ${c.name}`)].join("\n"),
+      workflowText: ["jobs:", ...CORE_POLICY.requiredChecks.flatMap((c, i) => [`  job-${i}:`, `    name: ${c.name}`])].join("\n"),
       checkRuns: syntheticCheckRuns("passed", CORE_POLICY.requiredChecks),
     };
     const summary = summarizeSnapshot(snapshot, CORE_POLICY);
     expect(summary.verification).toEqual({ state: "passed", reasons: [] });
+    expect(summary.extraWorkflowsPresent).toEqual({});
+    const extra = summarizeSnapshot({ ...snapshot, extraWorkflowTexts: { ".github/workflows/a.yml": "jobs: {}", ".github/workflows/b.yml": null } }, CORE_POLICY);
+    expect(extra.extraWorkflowsPresent).toEqual({ ".github/workflows/a.yml": true, ".github/workflows/b.yml": false });
     expect(Object.keys(summary)).not.toContain("policyRepo");
     expect(summary.linkedIssues).toEqual([127]);
     expect(summary.changedFilesComplete).toBe(true);
@@ -818,7 +821,22 @@ describe("main(): the repository policy (#318)", () => {
     { repo: "owner/other", ciWorkflowPath: ".github/workflows/ci.yml", requiredChecks: [{ name: "build", appSlug: "github-actions" }] },
     { repo: "owner/example", ciWorkflowPath: ".github/workflows/ci.yml", requiredChecks: [{ name: "build", appSlug: "github-actions" }] },
   ]);
-  const invalid = writePolicy("invalid.json", [{ repo: "owner/other", ciWorkflowPath: "../x.yml", requiredChecks: [] }]);
+  // An entry with no readable repo cannot be attributed to any repository, so the whole file refuses.
+  const invalid = writePolicy("invalid.json", [{ ciWorkflowPath: ".github/workflows/ci.yml", requiredChecks: [] }]);
+  // #349: one entry invalid on its own, beside a valid entry that reads two workflows.
+  const partlyInvalid = writePolicy("partly-invalid.json", [
+    { repo: "owner/other", ciWorkflowPath: "../x.yml", requiredChecks: [] },
+    {
+      repo: "owner/example",
+      ciWorkflowPath: ".github/workflows/ci.yml",
+      requiredChecks: [
+        { name: "build", appSlug: "github-actions" },
+        { name: "docs", appSlug: "github-actions", workflowPath: ".github/workflows/docs.yml" },
+        { name: "CodeQL", appSlug: "github-advanced-security" },
+      ],
+      cannotVouchAdd: ["scripts/"],
+    },
+  ]);
 
   // Every seam that would mean the run got past the policy records the call instead.
   function spyIo() {
@@ -895,6 +913,36 @@ describe("main(): the repository policy (#318)", () => {
     expect(result.out).not.toContain(POLICY_DIR);
     expect(calls.stdin).toBe(0);
     expect(calls.buildSource).toEqual([]);
+  });
+
+  test("an entry invalid on its own refuses its repository before the key is read, naming the entry's key path", async () => {
+    const { io, calls } = spyIo();
+    const result = await capture(["snapshot", ...base, "--repo", "owner/other", "--policy", partlyInvalid], io);
+    expect(result.code).toBe(2);
+    const refusal = JSON.parse(result.out).refusal as string;
+    expect(refusal).toContain("entry for this repository is invalid");
+    expect(refusal).toContain("repos[0].");
+    expect(refusal).not.toContain("owner/example");
+    expect(result.out).not.toContain(POLICY_DIR);
+    expect(calls.stdin).toBe(0);
+    expect(calls.buildSource).toEqual([]);
+  });
+
+  test("another repository's invalid entry does not stop this one, and the client gets its extra workflow paths", async () => {
+    const { io, calls } = spyIo();
+    const result = await capture(["snapshot", ...base, "--repo", "owner/example", "--policy", partlyInvalid], io);
+    expect(result.code).toBe(0);
+    expect(calls.buildSource.length).toBe(1);
+    expect(calls.buildSource[0]![4]).toBe(".github/workflows/ci.yml");
+    expect(calls.buildSource[0]![5]).toEqual([".github/workflows/docs.yml"]);
+  });
+
+  test("another repository's invalid entry does not stop the built-in repository", async () => {
+    const { io, calls } = spyIo();
+    const result = await capture(["snapshot", ...base, "--repo", CORE_POLICY.repo, "--policy", partlyInvalid], io);
+    expect(result.code).toBe(0);
+    expect(calls.buildSource[0]![4]).toBe(CORE_POLICY.ciWorkflowPath);
+    expect(calls.buildSource[0]![5]).toEqual([]);
   });
 
   test("a listed repository proceeds, and the client is built with that entry's workflow path", async () => {

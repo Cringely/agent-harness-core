@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-    Exports this workstation's ~/.claude account layer into account/claude/ in this repo.
+    Exports this workstation's ~/.claude account layer, and ccstatusline's own config file
+    (~/.config/ccstatusline/settings.json), into account/claude/ in this repo.
 
 .DESCRIPTION
     Runs on the canonical workstation only. Config is authored in ~/.claude here, exported
@@ -99,6 +100,12 @@
     excludeMcpServers is dropped before mcp-servers.json is written, and its mcp__<name> permission
     strings are dropped from settings.account.json.
 
+.PARAMETER CcstatuslineConfig
+    ccstatusline's own config, exported to ccstatusline/settings.json in the payload with its
+    strings folded the way mcpServers strings are. Defaults to $HOME/.config/ccstatusline/settings.json,
+    the path ccstatusline uses on every OS. Absent means a payload copy from an earlier export is
+    removed. A file that is not a JSON object refuses the export.
+
 .PARAMETER SkipSettings
     Skip the settings.account.json rewrite. Test seam.
 
@@ -144,6 +151,7 @@ param(
     [string]$AccountUser,
     [string]$IdentityFile,
     [string]$PersonalTermsFile,
+    [string]$CcstatuslineConfig,
     [switch]$SkipSettings,
     [switch]$SkipMcp,
     [switch]$Force
@@ -768,7 +776,7 @@ if (-not $SkipSettings) {
             # hazard these @() guard against is a single-match FILTERING pipeline result (a
             # Where-Object or ForEach-Object -First 1) unwrapping to a bare scalar, which would
             # then serialise `"hooks": {...} instead of "hooks": [...]`
-            # (install/Install-Harness.ps1:2312-2315). Nothing in this loop is a pipeline today, so
+            # (install/Install-Harness.ps1:2414-2417). Nothing in this loop is a pipeline today, so
             # removing either @() here currently changes nothing observable. Kept anyway, so a
             # future edit that does introduce a filtering step here does not reintroduce that
             # exact defect silently.
@@ -1106,6 +1114,50 @@ if (-not $SkipMcp) {
     }
 }
 
+# --- ccstatusline config (#293) ----------------------------------------------
+# Written here, before the whole-payload loop below, so the WSL, identity and personal-terms
+# gates scan it like every other payload file. Parsed and folded string by string rather than
+# text-replaced, for the reason settings.json is: JSON doubles every backslash, so a Windows path
+# in a custom-command widget would not match the fold's single-separator pattern. One traversal,
+# Update-AccountServerStrings, reaches every string at any depth. Every string it collects, key
+# names included, is checked against the scan hook's secret patterns before anything is written,
+# the way the mcpServers loop does. The whole-payload loop below has no secret-pattern pass, so
+# without this check a token pasted into a custom-command or custom-text widget would reach the
+# payload and only the pre-commit hook would catch it.
+#
+# The source is mirrored like an allowlisted tree: absent at source means a payload copy left by
+# an earlier export goes, so a receiver does not keep installing a layout the workstation dropped.
+#
+# A parse failure refuses without ConvertFrom-Json's own message, which can quote the text it
+# choked on, and no gate has read that text yet.
+if (-not $CcstatuslineConfig) {
+    $CcstatuslineConfig = Join-Path (Join-Path (Join-Path $HOME '.config') 'ccstatusline') 'settings.json'
+}
+$ccsPayload = Join-Path $OutputRoot $script:AccountCcstatuslinePayload
+if (Test-Path -LiteralPath $CcstatuslineConfig -PathType Leaf) {
+    try { $ccs = Get-Content -LiteralPath $CcstatuslineConfig -Raw | ConvertFrom-Json -ErrorAction Stop }
+    catch { throw "ccstatusline config '$CcstatuslineConfig' is not valid JSON. Fix it, or pass -CcstatuslineConfig; the parser's message is not printed because it can quote the file's text." }
+    if ($ccs -isnot [System.Management.Automation.PSCustomObject]) {
+        throw "ccstatusline config '$CcstatuslineConfig' is not a JSON object."
+    }
+    $ccsCollected = [System.Collections.Generic.List[string]]::new()
+    $null = Update-AccountServerStrings -Value $ccs -Folds $folds -Collected $ccsCollected
+    $ccsPatterns = @(Get-SecretPattern -ScanHookPath (Join-Path $ClaudeHome 'hooks/Scan-MemorySecrets.ps1'))
+    foreach ($s in $ccsCollected) {
+        $hits = @(Test-AccountSecret -Text $s -Patterns $ccsPatterns)
+        if ($hits.Count -gt 0) {
+            throw "Refusing to export $($script:AccountCcstatuslinePayload): $($hits -join ', ') in a widget string or key. Keep secrets out of the config, in 1Password or an environment variable."
+        }
+    }
+    $null = New-Item -ItemType Directory -Path (Split-Path $ccsPayload -Parent) -Force
+    $ccs | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $ccsPayload -Encoding utf8
+    Write-Host "  $($script:AccountCcstatuslinePayload): written$dryRun"
+}
+else {
+    Write-Warning "absent, skipping: $CcstatuslineConfig"
+    if (Test-Path -LiteralPath $ccsPayload) { Remove-Item -LiteralPath $ccsPayload -Force }
+}
+
 # --- residual WSL home, whole payload ----------------------------------------
 # The gate inside the mcpServers loop sees mcpServers strings and nothing else. Copy-AccountTree
 # copies every rules, agents, skills, hooks and tools/prose-lint file verbatim, and the two
@@ -1200,7 +1252,7 @@ if (-not $WhatIfPreference) {
     # case-insensitive default would widen the gate past the boundary this is here to add.
     #
     # $WslHome is already trimmed of whitespace and of a trailing '/' (`TrimEnd('/')`) by the
-    # validation at :230-236, which also refuses a supplied value that does not name an absolute
+    # validation at :237-243, which also refuses a supplied value that does not name an absolute
     # POSIX directory. So the only thing left to distinguish here is present from absent. A
     # trailing slash would otherwise make the escaped literal end in '/', the boundary would
     # demand a second separator that a real path never has ('/home/user//launcher.sh' does not

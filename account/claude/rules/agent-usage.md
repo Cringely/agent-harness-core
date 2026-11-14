@@ -116,7 +116,7 @@ Docker, PowerShell, and Bash each have a **skill** (knowledge injection, cheap) 
 
 `code-context` MCP server (tools: `search`, `sql`, `reindex`) gives hybrid keyword+semantic search over the current repo. When available:
 
-- Reach for `mcp__code-context__search` first for any code question in an indexed repo, including one where the exact string is already known. Operator directive 2026-07-19 withdrew the older carve-out that allowed plain Grep for exact known strings and one-shot matches in code. Hits are authoritative enough to cite without re-opening files.
+- Reach for the `search` tool first (`mcp__code-context__search` when registered with `claude mcp add`, `mcp__plugin_code-context_code-context__search` when installed as the `code-context@infino-ai` plugin) for any code question in an indexed repo, including one where the exact string is already known. Operator directive 2026-07-19 withdrew the older carve-out that allowed plain Grep for exact known strings and one-shot matches in code. Hits are authoritative enough to cite without re-opening files.
 - Use `sql` for aggregation questions ("how many callers of X", "which files mention Y most").
 - Surviving carve-outs are narrow. Grep still owns non-code text: docs, configs, logs. Glob still owns find-a-file-by-name. Absent-tools fallback is below.
 - First query on a repo auto-indexes (keyword results in seconds, semantic backfills ~2 min). A "partial index" flag in results means absence is not proof.

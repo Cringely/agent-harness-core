@@ -138,9 +138,16 @@ exit 0
         }
         $script:defaultTermsFile = New-PersonalTermsFile
         $PSDefaultParameterValues['Export-Account.ps1:PersonalTermsFile'] = $script:defaultTermsFile
+
+        # #293: the exporter reads ccstatusline's config from ~/.config by default. Every test gets
+        # a path that does not exist instead, so no test reads the operator's real file. The
+        # ccstatusline tests pass -CcstatuslineConfig explicitly.
+        $script:noCcstatusline = Join-Path ([System.IO.Path]::GetTempPath()) ("acct-noccs-" + [guid]::NewGuid() + '/settings.json')
+        $PSDefaultParameterValues['Export-Account.ps1:CcstatuslineConfig'] = $script:noCcstatusline
     }
 
     AfterAll {
+        $PSDefaultParameterValues.Remove('Export-Account.ps1:CcstatuslineConfig')
         $PSDefaultParameterValues.Remove('Export-Account.ps1:PersonalTermsFile')
         Remove-Item -LiteralPath $script:defaultTermsFile -Force -ErrorAction SilentlyContinue
     }
@@ -1179,7 +1186,7 @@ exit 0
     # functional assertions (acme's command, 1password's command, the top-level key set) would
     # leave the three secrecy assertions (userID/anonymousId/lastCost must not travel) unrun --
     # exactly the assertions that matter for this test's name. Shared BeforeAll/AfterAll, one It
-    # per independently-falsifiable claim, matching the file's own C1 convention at :205-250
+    # per independently-falsifiable claim, matching the file's own C1 convention at :212-257
     # (e.g. "a cloned skill's git internals are not the account layer the operator authors") and
     # the "folds all three quoting forms" Context above.
     Context "lifts only the mcpServers key out of claude.json" {
@@ -1275,7 +1282,7 @@ exit 0
 
     It "folds a trailing-slash -WslHome to a single separator in mcpServers, not a missing or doubled one" {
         # Issue #81: a prior fix normalised how the fold handles a trailing-slash -WslHome
-        # (`$WslHome.Trim().TrimEnd('/')` at the producer, Export-Account.ps1:232-238), but
+        # (`$WslHome.Trim().TrimEnd('/')` at the producer, Export-Account.ps1:239-245), but
         # nothing pinned the FOLD's own output shape. The trailing-slash rows already in this file
         # (the degenerate-value table above, and "still fails closed on a copied-file literal
         # when -WslHome carries a trailing slash" further down) both exercise the payload-wide
@@ -1675,8 +1682,8 @@ exit 0
         # and ":744-749", was never same-file -- checked against f47563e, the commit that wrote it,
         # both ranges landed on Export-Account.ps1's own boundary comments at those exact line
         # numbers, so the filename prefix was dropped by mistake, not drift. Repointed below.)
-        # Export-Account.ps1:1184-1186 ("a bare `/root` at end of line still fire") and
-        # Export-Account.ps1:1188-1193 ("the negated class now also excludes those") are the two
+        # Export-Account.ps1:1236-1238 ("a bare `/root` at end of line still fire") and
+        # Export-Account.ps1:1240-1245 ("the negated class now also excludes those") are the two
         # comments that assert ablation is caught; this It is what makes that true.
         $stand = New-StandInHome
         $out = New-OutputRoot
@@ -2700,5 +2707,175 @@ exit 0
             $m.mcpServers.remote.headers.'X-Client-Root' | Should -Be '{{CLAUDE_HOME}}/tools/srv'
         }
         finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+    }
+
+    # #293: ccstatusline keeps its widget layout in ~/.config/ccstatusline/settings.json, outside
+    # ~/.claude. The export carries it at ccstatusline/settings.json in the payload, folded like
+    # mcpServers strings and scanned by the same whole-payload gates as every other payload file.
+    Context "ccstatusline config (#293)" {
+        BeforeAll {
+            # Raw JSON rather than ConvertTo-Json: the nested and empty arrays are the shape a
+            # real config has, and a serialiser round trip of the fixture would hide whether the
+            # exporter preserves them.
+            function script:New-CcstatuslineSource {
+                param([string]$Dir, [string]$CommandPath = 'echo hi', [string]$Text = 'plain label')
+                $p = Join-Path $Dir 'ccstatusline-settings.json'
+                $cmd = $CommandPath | ConvertTo-Json
+                $txt = $Text | ConvertTo-Json
+                @"
+{
+  "version": 3,
+  "lines": [
+    [ { "id": "1", "type": "custom-command", "commandPath": $cmd } ],
+    [ { "id": "2", "type": "custom-text", "customText": $txt }, { "id": "3", "type": "model" } ],
+    []
+  ],
+  "flexMode": "full-until-compact"
+}
+"@ | Set-Content -LiteralPath $p
+                return $p
+            }
+
+            function script:Invoke-CcsExport {
+                param([string]$Stand, [string]$Out, [string]$Source, [string]$IdentityFile, [string]$TermsFile)
+                $extra = @{}
+                if ($IdentityFile) { $extra.IdentityFile = $IdentityFile }
+                if ($TermsFile) { $extra.PersonalTermsFile = $TermsFile }
+                & $script:export -ClaudeHome (Join-Path $Stand '.claude') -OutputRoot $Out `
+                    -CoreRepo 'E:/projects/agent-harness-core' -NpmGlobal 'C:/npm' `
+                    -VaultPath 'C:/vault' -SkipSettings -SkipMcp `
+                    -AccountUser $script:fixtureUser -CcstatuslineConfig $Source @extra | Out-Null
+            }
+        }
+
+        It "writes the config into the payload with a machine path folded to its token" {
+            $stand = New-StandInHome
+            $out = New-OutputRoot
+            try {
+                $chBack = (Join-Path $stand '.claude') -replace '/', '\'
+                $src = New-CcstatuslineSource -Dir $stand -CommandPath "pwsh -NoProfile -File $chBack\scripts\widget.ps1"
+                Invoke-CcsExport -Stand $stand -Out $out -Source $src
+
+                $payload = Join-Path $out 'ccstatusline/settings.json'
+                Test-Path -LiteralPath $payload | Should -BeTrue
+                $doc = Get-Content -LiteralPath $payload -Raw | ConvertFrom-Json
+                $doc.version | Should -Be 3
+                $doc.lines[0][0].commandPath | Should -Be 'pwsh -NoProfile -File {{CLAUDE_HOME}}/scripts/widget.ps1'
+                $doc.lines[1][0].customText | Should -Be 'plain label'
+                @($doc.lines).Count | Should -Be 3 -Because "an empty widget line is part of the layout"
+                @($doc.lines[2]).Count | Should -Be 0
+            }
+            finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+        }
+
+        It "refuses a declared name planted in the config, naming the payload file and never the value" {
+            $stand = New-StandInHome
+            $out = New-OutputRoot
+            $name = 'Zylric Quandsworth'
+            $ident = New-IdentityFile -Names @($name)
+            try {
+                $src = New-CcstatuslineSource -Dir $stand -Text "built by $name"
+                $err = $null
+                try { Invoke-CcsExport -Stand $stand -Out $out -Source $src -IdentityFile $ident }
+                catch { $err = $_ }
+
+                $err | Should -Not -BeNullOrEmpty -Because "an identifying string in the config must abort the export"
+                $err.Exception.Message | Should -Match ([regex]::Escape('ccstatusline/settings.json'))
+                $err.Exception.Message | Should -Match 'declared name'
+                $err.Exception.Message | Should -Not -Match ([regex]::Escape($name))
+                Test-Path -LiteralPath (Join-Path $out '.export-account-marker') | Should -BeFalse
+            }
+            finally { Remove-Item -Recurse -Force $stand, $out, $ident -ErrorAction SilentlyContinue }
+        }
+
+        It "refuses a personal term planted in the config, never printing the term" {
+            $stand = New-StandInHome
+            $out = New-OutputRoot
+            $terms = New-PersonalTermsFile -Terms @('Zorblax Quuxworks')
+            try {
+                $src = New-CcstatuslineSource -Dir $stand -CommandPath 'zorblax-quuxworks-status --short' -Text 'zorblax QUUXWORKS'
+                $msg = $null
+                try { Invoke-CcsExport -Stand $stand -Out $out -Source $src -TermsFile $terms }
+                catch { $msg = $_.Exception.Message }
+                $msg | Should -BeLike '*ccstatusline/settings.json*personal-terms list*'
+                ($msg -like '*zorblax*') | Should -BeFalse
+            }
+            finally { Remove-Item -Recurse -Force $stand, $out, $terms -ErrorAction SilentlyContinue }
+        }
+
+        It "refuses a token-shaped string in a widget, writes nothing, and never prints the value" -ForEach @(
+            @{ Label = 'custom-text'; Where = 'text' }
+            @{ Label = 'custom-command'; Where = 'command' }
+        ) {
+            # Every string in the config reaches a public payload, and a custom-command or
+            # custom-text widget is free text. The stand-in hook's table carries the sk_ rule.
+            $stand = New-StandInHome
+            $out = New-OutputRoot
+            $secret = 'sk_livetoken0123456789abcdef'
+            try {
+                $src = if ($Where -eq 'text') { New-CcstatuslineSource -Dir $stand -Text "key $secret" }
+                else { New-CcstatuslineSource -Dir $stand -CommandPath "curl -H 'x-key: $secret' example.invalid" }
+                $msg = $null
+                try { Invoke-CcsExport -Stand $stand -Out $out -Source $src }
+                catch { $msg = $_.Exception.Message }
+
+                $msg | Should -Not -BeNullOrEmpty -Because "a secret-shaped string must abort the export"
+                $msg | Should -Match 'ccstatusline'
+                $msg | Should -Match 'API token' -Because "the pattern name must come from the scan hook's table"
+                $msg | Should -Not -Match ([regex]::Escape($secret))
+                Test-Path -LiteralPath (Join-Path $out 'ccstatusline/settings.json') |
+                    Should -BeFalse -Because "a failed gate must leave nothing behind to commit"
+                Test-Path -LiteralPath (Join-Path $out 'ccstatusline') | Should -BeFalse
+            }
+            finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+        }
+
+        It "refuses a token-shaped property NAME in the config" {
+            $stand = New-StandInHome
+            $out = New-OutputRoot
+            try {
+                $src = Join-Path $stand 'ccstatusline-settings.json'
+                '{"version": 3, "lines": [], "sk_livetoken0123456789abcdef": true}' | Set-Content -LiteralPath $src
+                $msg = $null
+                try { Invoke-CcsExport -Stand $stand -Out $out -Source $src }
+                catch { $msg = $_.Exception.Message }
+                $msg | Should -Match 'API token'
+                $msg | Should -Not -Match 'sk_livetoken'
+                Test-Path -LiteralPath (Join-Path $out 'ccstatusline') | Should -BeFalse
+            }
+            finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+        }
+
+        It "removes the payload copy an earlier export wrote once the source config is gone" {
+            $stand = New-StandInHome
+            $out = New-OutputRoot
+            try {
+                $src = New-CcstatuslineSource -Dir $stand
+                Invoke-CcsExport -Stand $stand -Out $out -Source $src
+                Test-Path -LiteralPath (Join-Path $out 'ccstatusline/settings.json') | Should -BeTrue
+
+                Remove-Item -LiteralPath $src
+                Invoke-CcsExport -Stand $stand -Out $out -Source $src 3>$null
+                Test-Path -LiteralPath (Join-Path $out 'ccstatusline/settings.json') |
+                    Should -BeFalse -Because "the payload mirrors the source; a stale copy would keep installing"
+            }
+            finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+        }
+
+        It "refuses a source config that is not valid JSON without quoting its text" {
+            $stand = New-StandInHome
+            $out = New-OutputRoot
+            try {
+                $src = Join-Path $stand 'ccstatusline-settings.json'
+                '{"version": 3, "lines": [ zzleakyfragment' | Set-Content -LiteralPath $src
+                $msg = $null
+                try { Invoke-CcsExport -Stand $stand -Out $out -Source $src }
+                catch { $msg = $_.Exception.Message }
+                $msg | Should -Match 'not valid JSON'
+                $msg | Should -Not -Match 'zzleakyfragment' -Because "a parser message can quote the text it choked on, and the gates have not run yet"
+                Test-Path -LiteralPath (Join-Path $out 'ccstatusline/settings.json') | Should -BeFalse
+            }
+            finally { Remove-Item -Recurse -Force $stand, $out -ErrorAction SilentlyContinue }
+        }
     }
 }

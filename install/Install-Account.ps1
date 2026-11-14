@@ -28,6 +28,10 @@
     settings rewrite can reach (a Store path with an embedded version, a WSL launcher into
     another user's home) are here too (Task 11). Task 12 follows.
 
+    ccstatusline's own config file, ~/.config/ccstatusline/settings.json (-CcstatuslineConfig),
+    is installed from the payload's ccstatusline/settings.json, version-gated so an older
+    payload never replaces a newer receiver file.
+
     The update path is `git pull` then re-run this script. Install overwrites;
     settings.local.json is the per-machine escape hatch. A copy cannot remove anything, so the
     retire list (install/account-retired.json) is how a removal reaches a receiver: each listed
@@ -85,6 +89,12 @@
     stamp>, never deleted. The list is read and validated before the first copy, and one that
     cannot be read or parsed stops the install.
 
+.PARAMETER CcstatuslineConfig
+    Where ccstatusline's own config is installed. Defaults to $HOME/.config/ccstatusline/settings.json,
+    the path ccstatusline uses on every OS. The payload's copy replaces it only when the payload's
+    format version is known and at least the receiver's. Otherwise the receiver's file is kept and
+    the run warns. Skipped on the npm-absent branch.
+
 .EXAMPLE
     pwsh -NoProfile -File install/Install-Account.ps1
 #>
@@ -92,7 +102,7 @@
 # $WhatIfPreference for the whole run. No explicit $PSCmdlet.ShouldProcess call is needed to
 # act on it: every write below (New-Item, Copy-Item) is a built-in cmdlet that already
 # implements ShouldProcess itself and reads $WhatIfPreference from the calling scope, the same
-# way Export-Account.ps1:127-133 already established for its own copy loop, down to the same
+# way Export-Account.ps1:133-139 already established for its own copy loop, down to the same
 # "ablating it left the -WhatIf test green" measurement.
 [CmdletBinding(PositionalBinding = $false, SupportsShouldProcess)]
 param(
@@ -108,7 +118,8 @@ param(
     [switch]$InstallDeps,
     [string]$DepsManifestPath,
     [scriptblock]$DepsRunner,
-    [string]$RetiredListPath
+    [string]$RetiredListPath,
+    [string]$CcstatuslineConfig
 )
 
 $ErrorActionPreference = 'Stop'
@@ -127,7 +138,7 @@ $repoRoot = Split-Path $PSScriptRoot -Parent
 # environment variable or a failed lookup. ContainsKey distinguishes "passed empty" from
 # "omitted", the same test -NpmGlobal already uses below for the opposite reason: there, an
 # explicit empty is a real request rather than an error.
-foreach ($n in 'ClaudeHome', 'PayloadRoot', 'ClaudeJson', 'RetiredListPath') {
+foreach ($n in 'ClaudeHome', 'PayloadRoot', 'ClaudeJson', 'RetiredListPath', 'CcstatuslineConfig') {
     if ($PSBoundParameters.ContainsKey($n) -and -not $PSBoundParameters[$n]) {
         throw "-$n was passed empty. Omit it to take the default, or pass a real path."
     }
@@ -137,9 +148,12 @@ if (-not $ClaudeHome)  { $ClaudeHome = Join-Path $HOME '.claude' }
 if (-not $ClaudeJson)  { $ClaudeJson = Join-Path $HOME '.claude.json' }
 if (-not $PayloadRoot) { $PayloadRoot = Join-Path (Join-Path $repoRoot 'account') 'claude' }
 if (-not $RetiredListPath) { $RetiredListPath = Join-Path $PSScriptRoot 'account-retired.json' }
+if (-not $CcstatuslineConfig) {
+    $CcstatuslineConfig = Join-Path (Join-Path (Join-Path $HOME '.config') 'ccstatusline') 'settings.json'
+}
 
 # GetUnresolvedProviderPathFromPSPath, not [System.IO.Path]::GetFullPath: see
-# Export-Account.ps1:249-257 for the full reasoning (GetFullPath resolves a relative path
+# Export-Account.ps1:256-264 for the full reasoning (GetFullPath resolves a relative path
 # "against the .NET process current directory", which Set-Location does not move, while
 # Copy-Item and New-Item resolve against $PWD instead). Canonicalising both paths here, before
 # anything reads or writes through either, is what makes Copy-PayloadTree's
@@ -165,7 +179,7 @@ $ClaudeJson  = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFrom
 # Review round 2 addendum: -PayloadRoot and -ClaudeHome must not be the same directory, or
 # nested inside each other. Copy-PayloadTree reads recursively from -PayloadRoot while writing
 # into -ClaudeHome, so either direction of nesting means the copy walks a tree it is
-# concurrently writing into. Same failure class Export-Account.ps1:266-269 guards against for its
+# concurrently writing into. Same failure class Export-Account.ps1:274-277 guards against for its
 # own -OutputRoot/-ClaudeHome pair ("the mirror deletes each allowlisted directory"), though the
 # shape of the damage differs there (containment would delete the live account layer; here it
 # would make the copy read from inside its own destination).
@@ -507,7 +521,7 @@ try {
         # Round 3: `& $chmod.Source` is a native executable, not a cmdlet, so it does not read
         # $WhatIfPreference on its own the way New-Item and Copy-Item above do. A dry run used to
         # chmod the real target's hooks anyway, the one write in this script -WhatIf did not
-        # actually prevent. Gated the same way Export-Account.ps1:801-805 gates its own
+        # actually prevent. Gated the same way Export-Account.ps1:808-812 gates its own
         # "not a built-in cmdlet that already honours -WhatIf on its own" plain-script-logic step.
         if ($PSCmdlet.ShouldProcess($ClaudeHome, 'chmod +x .sh hooks')) {
             $chmodFailed = $false
@@ -658,7 +672,7 @@ function Convert-SettingsForTarget {
             #
             # Also wraps the pipeline OUTPUT: a single surviving hook unwraps to a bare scalar
             # and would serialise `"hooks": {...} instead of "hooks": [...]`
-            # (install/Install-Harness.ps1:2312-2315).
+            # (install/Install-Harness.ps1:2414-2417).
             $kept = @(@($group.hooks) | Where-Object {
                     $_ -and ($NpmPresent -or ($_.command -notmatch 'ccstatusline'))
                 })
@@ -1151,6 +1165,83 @@ if (Test-Path -LiteralPath $mcpSrc) {
     catch {
         # Item 20: the variant that names -ClaudeJson as well. Only this block writes it.
         Write-Warning $mcpMixedStateWarning
+        throw
+    }
+}
+
+# --- ccstatusline config (#293) ----------------------------------------------
+# ccstatusline rewrites its own config when its version moves on (a v3 file becomes v4 and the old
+# one is kept as settings.json.v3.bak), so a receiver that upgraded ccstatusline ahead of the
+# exporting workstation holds a newer format than the payload. A plain copy would downgrade it
+# under the newer program. The payload replaces the receiver's file only when the payload's format
+# version is known and at least the receiver's known version. Anything unknown keeps the
+# receiver's file:
+#
+#   payload unparseable, not an object, or without an integer version  -> not installed anywhere
+#   receiver absent                                                      -> installed
+#   receiver unreadable, unparseable, not an object, or unversioned      -> kept, warned
+#   receiver version newer than the payload's                            -> kept, warned
+#
+# The first row holds even where the receiver has no file. An unversioned payload is an export
+# that did not come from a ccstatusline config, and nothing about it says ccstatusline can read it.
+#
+# Tokens are expanded on the text before it is parsed, which is safe in JSON because every token
+# value is forward-slashed (Get-AccountTokenMap) and so carries nothing JSON would escape.
+#
+# Skipped where npm is absent: that branch drops the ccstatusline hooks and points statusLine at
+# the shipped script, so no ccstatusline would read this file.
+function Get-CcstatuslineVersion {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return @{ Version = $null; Problem = 'is empty' } }
+    try { $doc = $Text | ConvertFrom-Json -AsHashtable -ErrorAction Stop }
+    catch { return @{ Version = $null; Problem = 'is not valid JSON' } }
+    if ($doc -isnot [System.Collections.IDictionary]) { return @{ Version = $null; Problem = 'is not a JSON object' } }
+    $v = if ($doc.Contains('version')) { $doc['version'] } else { $null }
+    if ($v -isnot [int] -and $v -isnot [long]) { return @{ Version = $null; Problem = 'carries no integer version' } }
+    return @{ Version = [long]$v; Problem = $null }
+}
+
+$ccsSrc = Join-Path $PayloadRoot $script:AccountCcstatuslinePayload
+if (Test-Path -LiteralPath $ccsSrc -PathType Leaf) {
+    try {
+        if (-not $npmPresent) {
+            Write-Host "  ccstatusline config: skipped, npm is absent so no ccstatusline reads it"
+        }
+        else {
+            $ccsText = Expand-AccountToken -Text (Get-Content -LiteralPath $ccsSrc -Raw) -Tokens $tokens
+            $payloadVer = Get-CcstatuslineVersion -Text $ccsText
+            if ($null -eq $payloadVer.Version) {
+                Write-Warning "ccstatusline config in the payload $($payloadVer.Problem), so its format version is unknown. It was not installed, and '$CcstatuslineConfig' was left as it was."
+            }
+            else {
+                $install = $true
+                if (Test-Path -LiteralPath $CcstatuslineConfig) {
+                    $receiverText = $null
+                    try { $receiverText = Get-Content -LiteralPath $CcstatuslineConfig -Raw -ErrorAction Stop } catch { }
+                    $receiverVer = Get-CcstatuslineVersion -Text $receiverText
+                    if ($null -eq $receiverVer.Version) {
+                        $install = $false
+                        Write-Warning "ccstatusline config at '$CcstatuslineConfig' $($receiverVer.Problem), so its format version is unknown. Kept the receiver's file rather than replace it with the payload's format version $($payloadVer.Version). Fix or delete it to take the payload's layout."
+                    }
+                    elseif ($receiverVer.Version -gt $payloadVer.Version) {
+                        $install = $false
+                        Write-Warning "ccstatusline config at '$CcstatuslineConfig' carries format version $($receiverVer.Version), newer than the payload's version $($payloadVer.Version). Kept the receiver's file. Upgrade ccstatusline on the exporting workstation and re-export to carry its layout."
+                    }
+                }
+                if ($install) {
+                    $residual = Get-ResidualToken -Text $ccsText
+                    if ($residual.Count -gt 0) {
+                        Write-Warning "Unexpanded placeholder(s) in the ccstatusline config: $($residual -join ', '). Left verbatim; a widget command carrying one cannot run."
+                    }
+                    $null = New-Item -ItemType Directory -Path (Split-Path -Parent $CcstatuslineConfig) -Force
+                    Set-Content -LiteralPath $CcstatuslineConfig -Value $ccsText -NoNewline -Encoding utf8
+                    Write-Host "  ccstatusline config: installed, format version $($payloadVer.Version)$dryRun"
+                }
+            }
+        }
+    }
+    catch {
+        Write-Warning $mixedStateWarning
         throw
     }
 }

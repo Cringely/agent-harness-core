@@ -11,10 +11,11 @@ import {
   computeEvent,
   computeVerification,
   verificationOf,
-  workflowDeclaresName,
+  workflowJobMatch,
 } from "../tools/pr-review/verdict";
 import {
   BELOW_FLOOR_SEVERITIES,
+  CODE_SCANNING_APP_SLUG,
   LOAD_BEARING_SEVERITIES,
   type CheckRun,
   type PrSnapshot,
@@ -85,7 +86,7 @@ describe("CORE_POLICY's required checks are tied to the workflow they measure", 
   test.each(REQUIRED_CHECKS.map((c) => c.name))("the workflow has a name: line for %p", (name) => {
     const lines = REAL_WORKFLOW.split(/\r?\n/).map((line) => line.trim());
     expect(lines).toContain(`name: ${name}`);
-    expect(workflowDeclaresName(REAL_WORKFLOW, name)).toBe(true);
+    expect(workflowJobMatch(REAL_WORKFLOW, name)).toBe("declared");
   });
 
   test("CORE_POLICY verifies against its real workflow as passed when every check is green", () => {
@@ -544,20 +545,23 @@ describe("computeVerification() under a repository's own policy (#318)", () => {
 
   // Critique item 11: a green run with the right name from some other workflow, while the
   // configured workflow never declares that job, does not vouch for anything.
-  test("a green required check whose name is not a name: line in the base-commit workflow: incomplete", () => {
+  test("a green required check that matches no job in the base-commit workflow: incomplete", () => {
     const other = ["jobs:", "  ci:", "    name: something else"].join("\n");
     const result = verify(greenFor(FOREIGN.requiredChecks), ["src/a.ts"], other, true, FOREIGN);
     expect(result.state).toBe("incomplete");
-    expect(result.reasons.join("\n")).toContain('required check "ci" does not appear as a name: line in the CI workflow at the base commit');
+    expect(result.reasons.join("\n")).toContain('required check "ci" matches no job in .github/workflows/ci.yml at the base commit');
   });
 
-  test("a step's `- name:` line naming the check does not count as a name: line", () => {
+  test("a step's `- name:` line naming the check does not count as a job", () => {
     const stepOnly = ["jobs:", "  build:", "    steps:", "      - name: ci"].join("\n");
     expect(verify(greenFor(FOREIGN.requiredChecks), ["src/a.ts"], stepOnly, true, FOREIGN).state).toBe("incomplete");
   });
 
-  test("under CORE_POLICY, a workflow missing one core check's name: line: incomplete, naming it", () => {
-    const missing = WORKFLOW.split("\r\n").filter((line) => line.trim() !== `name: ${REQUIRED_CHECKS[3]!.name}`).join("\r\n");
+  test("under CORE_POLICY, a workflow missing one core check's job name: incomplete, naming it", () => {
+    // The job stays, without its name, so it reports under its id instead.
+    const missing = WORKFLOW.split("\r\n")
+      .map((line) => (line.trim() === `name: ${REQUIRED_CHECKS[3]!.name}` ? "    runs-on: ubuntu-latest" : line))
+      .join("\r\n");
     const result = verify(green(), ["README.md"], missing);
     expect(result.state).toBe("incomplete");
     expect(result.reasons.join("\n")).toContain(REQUIRED_CHECKS[3]!.name);
@@ -600,5 +604,233 @@ describe("an edit under .github/actions/ is a CI-definition edit (#318)", () => 
 
   test("a CODEOWNERS edit stays approvable", () => {
     expect(verify(green(), [".github/CODEOWNERS"]).state).toBe("passed");
+  });
+});
+
+// #349: a check names its workflow job by the job's name: value, or by the job id when the job has
+// no name: key (GitHub's own naming). A check may read its own workflow file, a check from the
+// code-scanning app has no workflow at all, and a repository may add cannot-vouch paths.
+describe("job matching, per-check workflows, code-scanning checks and cannotVouchAdd (#349)", () => {
+  const CI = ".github/workflows/ci.yml";
+  const DOCS = ".github/workflows/docs-gate.yml";
+  const policyWith = (requiredChecks: RequiredCheck[], extra: Partial<RepoPolicy> = {}): RepoPolicy => ({
+    repo: "owner/example",
+    ciWorkflowPath: CI,
+    requiredChecks,
+    pesterCoverage: false,
+    ...extra,
+  });
+  const run = (
+    policy: RepoPolicy,
+    workflowText: string | null,
+    extraWorkflowTexts: Record<string, string | null> | undefined = undefined,
+    checkRuns: CheckRun[] = greenFor(policy.requiredChecks),
+    changedFiles: string[] = ["src/a.ts"],
+  ) => computeVerification({ checkRuns, changedFiles, workflowText, extraWorkflowTexts, changedFilesComplete: true, policy });
+
+  const BUILD = policyWith([{ name: "build", appSlug: "github-actions" }]);
+
+  test("a job with no name: key is matched by its job id", () => {
+    const text = ["on: pull_request", "jobs:", "  build:", "    runs-on: ubuntu-latest"].join("\n");
+    expect(run(BUILD, text)).toEqual({ state: "passed", reasons: [] });
+  });
+
+  test("a job that has a name: key is not matched by its id", () => {
+    const text = ["jobs:", "  build:", "    name: Unit tests", "    runs-on: ubuntu-latest"].join("\n");
+    const result = run(BUILD, text);
+    expect(result.state).toBe("incomplete");
+    expect(result.reasons.join("\n")).toContain('required check "build" matches no job in .github/workflows/ci.yml at the base commit');
+  });
+
+  test("the workflow's own top-level name: is not a job", () => {
+    const text = ["name: build", "jobs:", "  compile:", "    runs-on: ubuntu-latest"].join("\n");
+    expect(run(BUILD, text).state).toBe("incomplete");
+  });
+
+  test("a quoted job name matches, since YAML reads it as the same string", () => {
+    const text = ["jobs:", "  compile:", '    name: "build"'].join("\n");
+    expect(run(BUILD, text).state).toBe("passed");
+  });
+
+  test("two jobs mapping to one check name: incomplete, never matched to either", () => {
+    const text = ["jobs:", "  build:", "    runs-on: x", "  other:", "    name: build"].join("\n");
+    const result = run(BUILD, text);
+    expect(result.state).toBe("incomplete");
+    expect(result.reasons.join("\n")).toContain('required check "build" matches more than one job');
+  });
+
+  test.each([
+    ["not YAML", "jobs: [unclosed"],
+    ["no jobs mapping", "name: build\non: push"],
+    ["a job that is not a mapping", "jobs:\n  build: 3"],
+    ["a job whose name is not a string", "jobs:\n  build:\n    name: 7"],
+    ["a job whose name is empty", "jobs:\n  build:\n    name:"],
+  ])("a workflow with %s: incomplete", (_label, text) => {
+    const result = run(BUILD, text);
+    expect(result.state).toBe("incomplete");
+    expect(result.reasons.join("\n")).toContain(".github/workflows/ci.yml at the base commit cannot be read as a workflow with jobs");
+  });
+
+  test("workflowJobMatch reports each outcome", () => {
+    expect(workflowJobMatch("jobs:\n  a:\n    name: x", "x")).toBe("declared");
+    expect(workflowJobMatch("jobs:\n  a:\n    name: x", "a")).toBe("undeclared");
+    expect(workflowJobMatch("jobs:\n  x: {}\n  a:\n    name: x", "x")).toBe("ambiguous");
+    expect(workflowJobMatch("jobs: 1", "x")).toBe("unreadable");
+  });
+
+  describe("a check with its own workflowPath", () => {
+    const MULTI = policyWith([
+      { name: "build", appSlug: "github-actions" },
+      { name: "doc-size", appSlug: "github-actions", workflowPath: DOCS },
+    ]);
+    const CI_TEXT = "jobs:\n  build:\n    runs-on: x\n";
+    const DOCS_TEXT = "jobs:\n  doc-size:\n    runs-on: x\n";
+
+    test("declared in its own workflow and green: passed", () => {
+      expect(run(MULTI, CI_TEXT, { [DOCS]: DOCS_TEXT })).toEqual({ state: "passed", reasons: [] });
+    });
+
+    test("declared only in ciWorkflowPath, not in its own workflow: incomplete", () => {
+      const both = "jobs:\n  build:\n    runs-on: x\n  doc-size:\n    runs-on: x\n";
+      const result = run(MULTI, both, { [DOCS]: "jobs:\n  other:\n    runs-on: x\n" });
+      expect(result.state).toBe("incomplete");
+      expect(result.reasons.join("\n")).toContain(`required check "doc-size" matches no job in ${DOCS}`);
+    });
+
+    test("its workflow absent at the base commit: incomplete, naming the path", () => {
+      const result = run(MULTI, CI_TEXT, { [DOCS]: null });
+      expect(result.state).toBe("incomplete");
+      expect(result.reasons.join("\n")).toContain(`${DOCS} is absent at the base commit`);
+    });
+
+    test.each([
+      ["no extra workflow texts at all", undefined],
+      ["texts that leave its path out", {}],
+    ])("its workflow never read (%s): incomplete", (_label, extra) => {
+      const result = run(MULTI, CI_TEXT, extra as Record<string, string | null> | undefined);
+      expect(result.state).toBe("incomplete");
+      expect(result.reasons.join("\n")).toContain(`${DOCS} was not read at the base commit`);
+    });
+
+    test("an inherited key on the texts object does not count as read", () => {
+      const inherited = Object.create({ [DOCS]: DOCS_TEXT }) as Record<string, string | null>;
+      expect(run(MULTI, CI_TEXT, inherited).state).toBe("incomplete");
+    });
+
+    test("the same check name declared in two of the policy's workflows: incomplete", () => {
+      const ciAlso = "jobs:\n  build:\n    runs-on: x\n  doc-size:\n    runs-on: x\n";
+      const result = run(MULTI, ciAlso, { [DOCS]: DOCS_TEXT });
+      expect(result.state).toBe("incomplete");
+      expect(result.reasons.join("\n")).toContain('required check "doc-size" matches more than one job');
+    });
+  });
+
+  describe("a code-scanning check", () => {
+    const WITH_CODEQL = policyWith([
+      { name: "build", appSlug: "github-actions" },
+      { name: "CodeQL", appSlug: CODE_SCANNING_APP_SLUG },
+    ]);
+    const CI_TEXT = "jobs:\n  build:\n    runs-on: x\n";
+
+    test("needs no workflow job: green on name and app, passed", () => {
+      expect(run(WITH_CODEQL, CI_TEXT)).toEqual({ state: "passed", reasons: [] });
+    });
+
+    test("a github-actions run named CodeQL does not satisfy it", () => {
+      const runs: CheckRun[] = [
+        { name: "build", appSlug: "github-actions", status: "completed", conclusion: "success" },
+        { name: "CodeQL", appSlug: "github-actions", status: "completed", conclusion: "success" },
+      ];
+      const result = run(WITH_CODEQL, CI_TEXT, undefined, runs);
+      expect(result.state).toBe("incomplete");
+      expect(result.reasons.join("\n")).toContain('required check "CodeQL" has no run on the head commit');
+    });
+
+    test("a code-scanning run never satisfies a github-actions check of the same name", () => {
+      const runs: CheckRun[] = [
+        { name: "build", appSlug: CODE_SCANNING_APP_SLUG, status: "completed", conclusion: "success" },
+        { name: "CodeQL", appSlug: CODE_SCANNING_APP_SLUG, status: "completed", conclusion: "success" },
+      ];
+      expect(run(WITH_CODEQL, CI_TEXT, undefined, runs).state).toBe("incomplete");
+    });
+
+    test("a failing code-scanning run: failed", () => {
+      const runs = greenFor(WITH_CODEQL.requiredChecks).map((r) => (r.name === "CodeQL" ? { ...r, conclusion: "failure" } : r));
+      expect(run(WITH_CODEQL, CI_TEXT, undefined, runs).state).toBe("failed");
+    });
+
+    test("a hand-built code-scanning check that names a workflow: incomplete", () => {
+      const policy = policyWith([
+        { name: "build", appSlug: "github-actions" },
+        { name: "CodeQL", appSlug: CODE_SCANNING_APP_SLUG, workflowPath: DOCS },
+      ]);
+      expect(run(policy, CI_TEXT, { [DOCS]: "jobs:\n  CodeQL: {}\n" }).state).toBe("incomplete");
+    });
+  });
+
+  describe("cannotVouchAdd", () => {
+    const CI_TEXT = "jobs:\n  build:\n    runs-on: x\n";
+    const ADDED = policyWith([{ name: "build", appSlug: "github-actions" }], { cannotVouchAdd: ["scripts/", "Dockerfile"] });
+
+    test.each([["scripts/deploy.sh"], ["Scripts/Deploy.sh"], ["scripts/nested/x.ts"], ["Dockerfile"], ["dockerfile"]])(
+      "an edit to %s: incomplete, naming it",
+      (path) => {
+        const result = run(ADDED, CI_TEXT, undefined, undefined, ["src/a.ts", path]);
+        expect(result.state).toBe("incomplete");
+        expect(result.reasons.join("\n")).toContain(`this repository's policy lists as paths its own checks cannot vouch for: ${path}`);
+      },
+    );
+
+    test.each([["scripts-old/x.sh"], ["Dockerfile.dev"], ["spike/Dockerfile"], ["src/scripts/x.ts"]])("an edit to %s stays approvable", (path) => {
+      expect(run(ADDED, CI_TEXT, undefined, undefined, [path]).state).toBe("passed");
+    });
+
+    test.each([["src/scheduler"], ["src/scheduler/token.ts"], ["SRC/Scheduler/deep/x.ts"]])(
+      "a slash-less item covers the path itself and everything under it: %s is incomplete",
+      (path) => {
+        const policy = policyWith([{ name: "build", appSlug: "github-actions" }], { cannotVouchAdd: ["src/scheduler"] });
+        expect(run(policy, CI_TEXT, undefined, undefined, [path]).state).toBe("incomplete");
+      },
+    );
+
+    test.each([["src/scheduler2/x.ts"], ["src/scheduler.ts"]])("a slash-less item does not cover sibling %s", (path) => {
+      const policy = policyWith([{ name: "build", appSlug: "github-actions" }], { cannotVouchAdd: ["src/scheduler"] });
+      expect(run(policy, CI_TEXT, undefined, undefined, [path]).state).toBe("passed");
+    });
+
+    test("a hand-built cannotVouchAdd that is not an array: incomplete", () => {
+      const policy = { ...ADDED, cannotVouchAdd: "scripts/" } as unknown as RepoPolicy;
+      expect(run(policy, CI_TEXT).state).toBe("incomplete");
+    });
+  });
+
+  test("verificationOf() passes extraWorkflowTexts through", () => {
+    const policy = policyWith([
+      { name: "build", appSlug: "github-actions" },
+      { name: "doc-size", appSlug: "github-actions", workflowPath: DOCS },
+    ]);
+    const snap: PrSnapshot = {
+      repo: "owner/example",
+      number: 1,
+      title: "",
+      body: "",
+      baseSha: "a".repeat(40),
+      headSha: "b".repeat(40),
+      isOpen: true,
+      diff: "",
+      changedFiles: ["src/a.ts"],
+      changedFilesComplete: true,
+      commitMessages: [],
+      headFiles: [],
+      omittedFiles: [],
+      linkedIssues: [],
+      trustedContext: [],
+      livingDocs: [],
+      workflowText: "jobs:\n  build: {}\n",
+      extraWorkflowTexts: { [DOCS]: "jobs:\n  doc-size: {}\n" },
+      checkRuns: greenFor(policy.requiredChecks),
+    };
+    expect(verificationOf(snap, policy)).toEqual({ state: "passed", reasons: [] });
+    expect(verificationOf({ ...snap, extraWorkflowTexts: {} }, policy).state).toBe("incomplete");
   });
 });

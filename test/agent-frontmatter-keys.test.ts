@@ -11,19 +11,12 @@
 // matched at column 0 so an indented continuation or a `key:` substring
 // inside a description value never false-positives.
 //
-// The allowlist is platform keys PLUS core's own declared extensions, kept
-// narrow rather than guessed:
-//   - name, description, model, effort, tools — every key actually used
-//     across the five defs on master today.
-//   - memory — not currently used by any def, but agent-worktree-gate.ts
-//     parses it (`^memory\s*:\s*\S/i`, auto-grants Read/Write/Edit per the
-//     platform's persistent-memory docs), so it is a documented platform key
-//     regardless of current usage.
-//   - writeScope — core's OWN extension, not a platform key. Declared on
-//     research-scout.md and read by core/claude/hooks/agent-write-scope.ts to
-//     scope a subagent's writes to a scratch directory. It belongs on the
-//     allowlist for the opposite reason memory does: leaving it off would
-//     fail a key that works exactly as designed.
+// The allowlist lives in core/claude/agent-frontmatter-keys.json, shared with
+// `Install-Harness.ps1 -Audit`, which runs the same check against a project's
+// installed defs. It holds every key Claude Code accepts in agent frontmatter
+// (source URL and retrieval date in the file) plus core's own `writeScope`
+// extension, which core/claude/hooks/agent-write-scope.ts reads. Leaving a
+// working key off it would fail a def that behaves exactly as designed.
 //
 // Two cases, kept separate on purpose (see issue #11):
 //   - a key not in ALLOWED_KEYS -> hard failure, one test per offending file.
@@ -52,17 +45,12 @@ import { VALID_TIERS } from "../core/claude/hooks/model-tier-gate";
 const REPO_ROOT = join(import.meta.dir, "..");
 const AGENTS_DIR = join(REPO_ROOT, "core/claude/agents");
 
-/** Platform keys actually in use, plus `memory` (parsed by the worktree gate
- * even though no current def declares it), plus core's own `writeScope`. */
-const ALLOWED_KEYS = new Set([
-  "name",
-  "description",
-  "model",
-  "effort",
-  "tools",
-  "memory",
-  "writeScope",
-]);
+const KEYS_FILE = join(REPO_ROOT, "core/claude/agent-frontmatter-keys.json");
+const KEYS = JSON.parse(readFileSync(KEYS_FILE, "utf8")) as {
+  platformKeys: string[];
+  extensionKeys: string[];
+};
+const ALLOWED_KEYS = new Set([...KEYS.platformKeys, ...KEYS.extensionKeys]);
 
 function agentDefPaths(): string[] {
   return readdirSync(AGENTS_DIR)
@@ -107,6 +95,27 @@ const DEF_PATHS = agentDefPaths();
 describe("agent def discovery", () => {
   test("at least one definition file is found under core/claude/agents", () => {
     expect(DEF_PATHS.length).toBeGreaterThan(0);
+  });
+});
+
+describe("the shared allowlist file", () => {
+  test("names the keys the shipped defs and gates depend on", () => {
+    // `memory` is parsed by agent-worktree-gate.ts, `writeScope` by agent-write-scope.ts.
+    for (const k of ["name", "description", "model", "effort", "tools", "memory", "writeScope"]) {
+      expect(ALLOWED_KEYS.has(k)).toBe(true);
+    }
+  });
+
+  test("covers the platform keys beyond the five defs' own usage", () => {
+    for (const k of ["disallowedTools", "permissionMode", "maxTurns", "skills", "mcpServers", "hooks", "isolation", "color"]) {
+      expect(ALLOWED_KEYS.has(k)).toBe(true);
+    }
+  });
+
+  test("lists no key twice and no misspelling of effort", () => {
+    const all = [...KEYS.platformKeys, ...KEYS.extensionKeys];
+    expect(new Set(all).size).toBe(all.length);
+    expect(all.filter((k) => /effort/i.test(k))).toEqual(["effort"]);
   });
 });
 

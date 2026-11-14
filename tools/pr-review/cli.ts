@@ -41,7 +41,7 @@ import { GitHubClient } from "./github";
 import { findIdentityHits, loadIdentity, type IdentityDecl, type IdentityLoad } from "./identity";
 import { runReview, type ReviewOutcome } from "./pipeline";
 import { PremergeReadError, evaluatePremerge, formatPremerge, ghPremergeSource, loadTerms, type PremergeSource } from "./premerge";
-import { CORE_POLICY, resolvePolicy } from "./repo-policy";
+import { CORE_POLICY, extraWorkflowPaths, resolvePolicy } from "./repo-policy";
 import { ClaudeCliRunner } from "./runner";
 import { REPO_ROOT, toolState } from "./tool-state";
 import { RefusalError, SHA_RE, parseRepo, type PrSnapshot, type PrSource, type RepoPolicy, type ReviewPoster } from "./types";
@@ -236,6 +236,10 @@ export function summarizeSnapshot(snapshot: PrSnapshot, policy: RepoPolicy): Rec
     trustedContext: snapshot.trustedContext.map((file) => file.path),
     livingDocs: snapshot.livingDocs.map((file) => file.path),
     workflowPresent: snapshot.workflowText !== null,
+    // #349: each per-check workflow other than ciWorkflowPath, by path, and whether it was present.
+    extraWorkflowsPresent: Object.fromEntries(
+      Object.entries(snapshot.extraWorkflowTexts ?? {}).map(([path, text]) => [path, text !== null]),
+    ),
     checkRuns: snapshot.checkRuns,
     // cv3: the one place that draws computeVerification's four fields out of a PrSnapshot, so this
     // call site and pipeline.ts's cannot drift apart the way the plan's own duplicates already had.
@@ -370,8 +374,15 @@ export function reportRefusal(message: string, json: boolean): number {
 // added as a fourth required CliIo field: every existing test that builds a partial CliIo (the
 // BUN-CWD and stdin-refusal tests below) never reaches this call, so requiring it there would
 // break them for no reason.
-function realBuildSource(repo: string, pr: number, appId: string, key: KeyObject, workflowPath: string): PrSource & ReviewPoster {
-  return new GitHubClient({ repo, pr, workflowPath, minter: new AppTokenMinter({ appId, key, repo }) });
+function realBuildSource(
+  repo: string,
+  pr: number,
+  appId: string,
+  key: KeyObject,
+  workflowPath: string,
+  extraWorkflowPaths: readonly string[],
+): PrSource & ReviewPoster {
+  return new GitHubClient({ repo, pr, workflowPath, extraWorkflowPaths, minter: new AppTokenMinter({ appId, key, repo }) });
 }
 
 // A seam over process-level effects (the real stdin read, and process.exit itself), so main() can be
@@ -381,7 +392,14 @@ interface CliIo {
   cwd: () => string;
   exit: (code: number) => never;
   stdin: { isTTY: boolean; read: () => Promise<string> };
-  buildSource?: (repo: string, pr: number, appId: string, key: KeyObject, workflowPath: string) => PrSource & ReviewPoster;
+  buildSource?: (
+    repo: string,
+    pr: number,
+    appId: string,
+    key: KeyObject,
+    workflowPath: string,
+    extraWorkflowPaths: readonly string[],
+  ) => PrSource & ReviewPoster;
   // #195: same optional-and-defaulted shape as buildSource above. loadIdentity() already takes an
   // options bag that overrides the real profile (identity.ts), so a test that needs a chosen
   // IdentityDecl calls it itself and hands the closure here, rather than main() always reading the
@@ -480,7 +498,14 @@ export async function main(argv: string[], io: CliIo = REAL_IO): Promise<number>
     // means nothing downstream can end up waiting on that dangling read first.
     io.exit(2);
   }
-  const github = (io.buildSource ?? realBuildSource)(parsed.repo, parsed.pr, parsed.appId, key.key, policy.ciWorkflowPath);
+  const github = (io.buildSource ?? realBuildSource)(
+    parsed.repo,
+    parsed.pr,
+    parsed.appId,
+    key.key,
+    policy.ciWorkflowPath,
+    extraWorkflowPaths(policy),
+  );
 
   // #167: wraps both commands, not only review's own runReview() call below -- github.snapshot()
   // can itself throw RefusalError (a fork or deleted-repo pull request, one not targeting the
