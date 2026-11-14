@@ -847,9 +847,9 @@ Decision-log entry for the operator's ruling of 2026-11-14, appended in Step 3 w
 ```markdown
 ## 2026-11-14: the merge guard classifies a push before it reads, and reads an unlisted repository's field from local refs (#146)
 
-- Choice: the merge guard first decides whether a push could name the default branch, and a push that cannot is no merge form and reads nothing more. For a repository the operator-only list names, the default branch name and the manifest's enrolled field come from the API. For any other repository they come from the checkout's remote-tracking refs, with the API as the fallback when no local ref exists. A field found locally can only add a denial.
+- Choice: the merge guard first decides whether a push could name the default branch, and a push that cannot is no merge form and reads nothing more. For a repository the operator-only list names, the default branch name and the manifest's enrolled field come from the API. For any other repository they come from the checkout's remote-tracking refs, with the API as the fallback when no local ref exists. While the list is readable, a push to a remote whose repository cannot be identified reads nothing and denies whenever it could name the default branch. A field found locally can only add a denial.
 - Rejected: reading both through the API for every recognized form, because a session with no `gh` login, or a repository the read account cannot see, then has every default-branch push and merge denied, and a broken source denies feature-branch pushes too. Reading nothing while the operator-only source is absent, because a manifest field then goes unenforced wherever the source is absent.
-- Accepted: in a repository the list does not name, a remote-tracking ref fetched before the field was added, or before the default branch was renamed, lets a default-branch push or merge through until the next fetch or `git remote set-head <remote> --auto`.
+- Accepted: in a repository the list does not name, and in every repository while the list is broken, a remote-tracking ref fetched before the field was added, or a remote HEAD naming a branch other than the default (left from before a rename, or set by `git remote set-head`), lets a default-branch push or merge through until the next fetch or `git remote set-head <remote> --auto`.
 - Drafted by: coordinator. Decided by: operator.
 ```
 
@@ -1119,13 +1119,13 @@ test.each([
 - When the hook's own environment sets `GH_REPO` or `GH_HOST` to a non-empty value, every gh form's `repo` is null and its `remotes` are every remote of `dir`, because the tool's shell may carry the same variable.
 - `gh-api-merge`: the repository in its path, with `remotes` every remote of `dir` whose fetch URL names it.
 - `gh-graphql-merge`: a null `repo`, since the mutation names a pull request by node id, with `remotes` every remote of `dir`.
-- `git-push`: a `url` target gives `githubRepoOfUrl(url)` with no `remotes`. A `remote` target gives each push URL `remote -v` lists for that name, never `origin`'s, with `remotes` that one name, and a name it does not list gives a null `repo` with no `remotes`. An `unnamed` target gives one target per remote, from that remote's push URLs and with that remote's name, a superset of where git would push. A non-GitHub URL, an SSH host alias included, gives a null `repo` and keeps the remote's name, so its remote-tracking refs are still read.
+- `git-push`: a `url` target gives `githubRepoOfUrl(url)` with no `remotes`. A `remote` target gives each push URL `remote -v` lists for that name, never `origin`'s, with `remotes` that one name, and a name it does not list gives a null `repo` with no `remotes`. An `unnamed` target gives one target per remote, from that remote's push URLs and with that remote's name, a superset of where git would push. A non-GitHub URL, an SSH host alias included, gives a null `repo` and keeps the remote's name, so its remote-tracking refs are still read while the source is absent or broken.
 - `mcp-merge` and `mcp-write`: their `repo`, with `remotes` every remote of the payload `cwd` whose fetch URL names it, and none when `repo` is null.
 - A failed or timed-out `remote -v` gives a null `repo` with no `remotes`.
 
 **Classification first.** Each target is classified before anything else is read for it, so a push that cannot reach the default branch is no merge form and reads nothing more (operator ruling 2026-11-14). The steps run in this order, per target:
 
-1. Default names, `defaultNamesFor`. For a target `isListed` holds for, the API's `defaultBranch(repo)` gives `{ via: "api" }`, and local refs are never consulted. For any other target (an unlisted repository, a null `repo`, a source that is absent or broken), each name in `remotes` is read with `remoteHead(dir, remote)`, and the non-null results give `{ via: "local" }`. When none gives a name, a non-null `repo` falls back to the API's `defaultBranch(repo)` (`{ via: "api" }`), and a null `repo` gives `{ via: "none" }`.
+1. Default names, `defaultNamesFor`. For a target `isListed` holds for, the API's `defaultBranch(repo)` gives `{ via: "api" }`, and local refs are never consulted. With the source `ok`, a null `repo` gives `{ via: "none" }` and local refs are never consulted either, so every form may name the default and `decideEnforcement` denies: a repository that cannot be identified may be a listed one. For any other target (an unlisted repository with the source `ok`, or any target while the source is absent or broken), each name in `remotes` is read with `remoteHead(dir, remote)`, and the non-null results give `{ via: "local" }`. When none gives a name, a non-null `repo` falls back to the API's `defaultBranch(repo)` (`{ via: "api" }`), and a null `repo` gives `{ via: "none" }`.
 2. Classification, `mayNameDefault(form, names, local)`, with `names` the distinct default names from step 1 (empty for `via: "none"`). `gh-pr-merge`, `gh-api-merge`, `gh-graphql-merge` and `mcp-merge` are merge forms and always give true. An empty `names` gives true for every form, since nothing rules the default out. Names compare case-insensitively after `refs/heads/` or `heads/` is stripped from a destination, and a destination equal to any name in `names` names the default. A `git-push` gives true on any of these:
    - `noRefspec` or `all`
    - a `dest` naming the default, a delete included
@@ -1143,11 +1143,13 @@ A form passes only when every one of its targets passes, and a call passes only 
 
 The field is never read from the working tree. Remote-tracking refs move only on a fetch, or on a deliberate `update-ref` by someone who could as easily delete the hook, so a branch-local edit cannot strip the field. A field found locally can only add a denial, never lift one: a listed target never reads it locally, and for any other target a present field only turns `skip` into `deny`.
 
-**Where the local reads fail open.** The guard reads local refs only for a target the operator-only list does not name, so every repository with enforcement on, or listed with it off, reads its default name and its field from the API, and a stale local ref there cannot open anything. For an unlisted target, a stale ref fails open in two ways, and the ruling of 2026-11-14 accepts both:
+**Where the local reads fail open.** With the source `ok`, the guard reads local refs only for a resolved repository the operator-only list does not name. A listed repository reads its default name and its field from the API, and a target whose repository cannot be identified (an SSH host alias, a non-GitHub URL, an ambiguous gh form) reads nothing and denies any push that may name the default, so with the source `ok` a stale local ref cannot open a listed repository. Local refs are read for every other target: an unlisted repository, and any target at all while the source is absent or broken. There a stale ref fails open in two ways, and the ruling of 2026-11-14 accepts both:
 - A remote-tracking ref fetched before enrollment step 10 merged the field lets a default-branch push or merge through while the source is absent (an outsider's session, or an operator session without the config). For a push, git's own fast-forward check still refuses it unless it is forced, because the field's merge moved the remote branch past the local ref. A `--force-with-lease` with no expected value is refused the same way.
 - A `refs/remotes/<remote>/HEAD` naming a default branch that has since been renamed upstream makes a push to the new name look like a feature push, so it passes without the field being read. Git sets that ref at clone time and a plain fetch does not update it (checked on git 2.53, after renaming the upstream default). `git remote set-head <remote> --auto` does. A `fetch --prune` deletes the old branch's ref and leaves `HEAD` dangling, which `remoteHead` reads as null, so the guard then falls back to the API.
 
-Both are accepted because the field is a tripwire for agents, not a barrier (spec, Approval enforcement), and reading the API instead brings back the denial of every default-branch push for a session with no `gh` login or a repository the read account cannot see. The opposite staleness, a local ref still carrying a field that has since been removed upstream, denies, which fails closed. Task 24's tests pin all three.
+The second also covers a `refs/remotes/<remote>/HEAD` an agent set to another branch with `git remote set-head <remote> <branch>` in an earlier call. While the source is broken it applies to listed repositories too, since a broken source names none: a stale or reset remote HEAD then lets a default-branch push to an enforcing repository through as a feature push. A broken source opens no more than an absent one, where the same holds for every repository, and treating every target as unidentified would bring back the denial of every feature-branch push under a broken source.
+
+All of these are accepted because the field is a tripwire for agents, not a barrier (spec, Approval enforcement), and reading the API instead brings back the denial of every default-branch push for a session with no `gh` login or a repository the read account cannot see. The opposite staleness, a local ref still carrying a field that has since been removed upstream, denies, which fails closed. Task 24's tests pin each case.
 
 **Under `enforce`:**
 - `gh pr merge` passes only with an explicit pull request, `matchHead`, `squash` or `merge`, no `--auto`, `--rebase` or `--admin`, and the three live conditions: the SHA the command gives is the head, the latest App review by `botUserId` is `APPROVED` on that head, and `behindBy(default, head)` is 0.
@@ -1170,8 +1172,8 @@ Both are accepted because the field is a tripwire for agents, not a barrier (spe
 **Residuals.** The README's hook row states these:
 - A git or gh alias (`git config alias.p push`, `gh alias set`) hides the trigger word from the PreToolUse layer. The pre-push layer still catches an aliased git push unless `--no-verify` is used too. Nothing catches an aliased gh merge.
 - An MCP server or tool outside the matcher that can run a shell or call the API is not covered.
-- With the source present, a gh form in a checkout whose remotes name more than one repository denies, and so does a push to a non-GitHub remote or an SSH host alias that may name the default branch. A feature push to such a remote passes when its `refs/remotes/<remote>/HEAD` names another branch. These follow from failing closed.
-- In a repository the operator-only list does not name, the default branch name and the manifest field come from remote-tracking refs. A ref fetched before the field was added, or a `refs/remotes/<remote>/HEAD` left naming a renamed default, lets a default-branch push or merge through until the next fetch or `git remote set-head <remote> --auto` (operator ruling 2026-11-14). Listed repositories read both from the API.
+- With the source present, a gh form in a checkout whose remotes name more than one repository denies. With the source `ok`, every push to a non-GitHub remote or an SSH host alias denies, feature pushes included, because its repository cannot be identified and a local `refs/remotes/<remote>/HEAD` is not trusted for it. With the source broken, a feature push to such a remote passes when that ref names another branch. These follow from failing closed.
+- In a repository the operator-only list does not name, and in every repository while the list is broken, the default branch name and the manifest field come from remote-tracking refs. A ref fetched before the field was added, or a `refs/remotes/<remote>/HEAD` naming a branch other than the default (left from before a rename, or set by `git remote set-head`), lets a default-branch push or merge through until the next fetch or `git remote set-head <remote> --auto` (operator ruling 2026-11-14). With the list readable, listed repositories read both from the API and unidentified ones read neither.
 - Where a remote has no `refs/remotes/<remote>/HEAD`, the guard asks the API for the default branch, so a session with no `gh` login denies every push to that remote, feature pushes included. `git remote set-head <remote> --auto` fixes it.
 
 - [ ] **Step 1: Write the failing tests**
@@ -1203,7 +1205,7 @@ test("a gh api placeholder path denies with the source present", async () => {})
 
 // classification first, then local reads for unlisted targets
 // API_DOWN(upstream?): a GuardApi whose every method throws and records the call. Its argument only documents what the upstream holds.
-// API(values): a GuardApi answering with those values. LOCAL(remotes): a LocalGit fake with remoteHead and manifestAt per remote, counting calls.
+// API(values): a GuardApi answering with those values. LOCAL(remotes): a LocalGit fake with remoteHead and manifestAt per remote, counting calls. An entry's optional url sets that remote's fetch and push URL.
 test.each([["absent", ABSENT], ["broken", BROKEN], ["ok, listing another repository", ok({ "owner/other": { enforce: true, botUserId: 1001 } })]])(
   "with the source %s, git push origin feature to an unlisted repository whose local HEAD names main passes with no API call", async (_n, source) => {
     const api = API_DOWN();
@@ -1216,7 +1218,12 @@ test("a repository the read account cannot see: source ok and unlisted, every AP
 test("an unreadable local manifest denies, and a field found in any one of two remotes naming the target denies", async () => {});
 test("a remote with no local HEAD ref falls back to the API's default branch and manifest, and an API error then denies a feature push too", async () => {});
 test("a remote HEAD left pointing at a pruned branch reads as no local ref and falls back to the API", async () => {});
-test("a feature push to an SSH host-alias remote passes with the source present when that remote's local HEAD names another branch", async () => {});
+test("with the source ok, a push to an SSH host-alias remote denies with no local read, and with the source broken a feature push to it passes when its local HEAD names another branch", async () => {});
+test("with the source ok, git push alias main to an SSH host-alias remote whose local HEAD names master denies, with no remoteHead call", async () => {
+  const git = LOCAL({ alias: { url: "git@gh-alias:owner/example.git", head: "master", manifest: null } });
+  const r = await evaluateCommand(push("git push alias main"), ctx({ source: ON, api: API_DOWN(), git }));
+  expect([r.decision, git.calls.remoteHead]).toEqual(["deny", 0]);
+});
 test("an SSH host-alias remote whose local default branch carries the field denies a default-branch push with the source absent", async () => {});
 test("gh api graphql mergePullRequest with the source absent reads every remote of the directory, and denies when any carries the field", async () => {});
 
@@ -1239,6 +1246,11 @@ test("accepted fail-open: with the source absent, a local ref fetched before the
 test("accepted fail-open: in an unlisted repository, a local HEAD still naming master lets git push origin main through as a feature push", async () => {
   const api = API_DOWN({ defaultBranch: "main" });
   const r = await evaluateCommand(push("git push origin main"), ctx({ source: ABSENT, api, git: LOCAL({ origin: { head: "master", manifest: '{"enrolled":true}' } }) }));
+  expect([r.decision, api.calls]).toEqual(["allow", []]);
+});
+test("accepted fail-open: with the source broken, a local HEAD naming master lets git push origin main to the enforcing owner/example through as a feature push", async () => {
+  const api = API_DOWN({ defaultBranch: "main" });
+  const r = await evaluateCommand(push("git push origin main"), ctx({ source: BROKEN, api, git: LOCAL({ origin: { head: "master", manifest: '{"enrolled":true}' } }) }));
   expect([r.decision, api.calls]).toEqual(["allow", []]);
 });
 
@@ -1377,7 +1389,7 @@ test("an enroll mint refuses a granted set that adds anything to the enroll prof
 - [ ] **Step 3: Implement**, and append the decision-log entry above to `docs/decision-log.md`.
 - [ ] **Step 4: Run** `bun test test/pr-review-*.test.ts`. Expected: PASS.
 - [ ] **Step 5: Commit** `feat(pr-review): code-only enrollment readers for steps 2 to 5 (#146)`.
-- [ ] **Step 6 (coordinator-run, after the pull request carrying this task merges):** Bring the harness checkout the operator's runner starts `hub.ts` from (`<abs>` in Task 21) up to the merge, then confirm it: `git -C <abs> merge-base --is-ancestor <merge commit> HEAD`. Expected: exit 0. The App is not changed yet.
+- [ ] **Step 6 (coordinator-run, after the pull request carrying this task merges):** Bring the harness checkout the operator's runner starts `hub.ts` from (`<abs>` in Task 21) up to the merge, then set `harness.pin` in the operator-only hub config (Task 21 Step 1) to the output of `git -C <abs> rev-parse HEAD`, since Task 18's `preflight` refuses a tool checkout that is not clean at `harness.pin`. Confirm all three: `git -C <abs> rev-parse HEAD` prints the pin, `git -C <abs> status --porcelain` prints nothing, and `git -C <abs> merge-base --is-ancestor <merge commit> <pin>` exits 0. The App is not changed yet.
 - [ ] **Step 7 (coordinator-run, live):** Through the operator's runner, run `bun <abs>/tools/pr-review/hub.ts enroll installation --config <abs> --app <name> --repo <this repository>`. Expected: `{ step: "installation", ok: true, code: "ok" }`, which shows the new code mints with the App's current permissions. Any other result stops here, and the App is left unchanged.
 - [ ] **Step 8 (operator, web UI):** Only after Step 7 passes, the operator adds `administration: read` and `secrets: read` to the App and accepts them on each installation. The App-level check reads `GET /app` (`app-auth.ts:150`), which shows the new permissions at once. Read and post mints are unaffected, and an enroll mint for a repository whose installation has not accepted them yet fails with a 422.
 - [ ] **Step 9 (coordinator-run, live):** Run Step 7's command again, then `bun <abs>/tools/pr-review/hub.ts enroll actions-settings --config <abs> --app <name> --repo <this repository>`. Expected: the first gives `ok: true`, and the second prints a validated result whose `code` is not `"api-error"`. Report both result lines to the operator, and write neither into a file in this repository.
