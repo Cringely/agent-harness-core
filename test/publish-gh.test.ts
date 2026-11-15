@@ -111,6 +111,35 @@ describe("lookups", () => {
     }
     expect(answer("contact_links: []\n")).toBe(false);
   });
+
+  // Fail closed: a config naming the key in any form the line grammar does not read counts as
+  // disabling blank issues, since GitHub's YAML parser may read that form as false.
+  test("blankIssuesDisabled reads an unrecognized mention of the key as disabled", () => {
+    const answer = (text: string): boolean =>
+      gh(
+        new FakeRunner([
+          TOKEN,
+          on(["gh", "api", "-H", "Accept: application/vnd.github.raw", `repos/${REPO}/contents/.github/ISSUE_TEMPLATE/config.yml?ref=main`], { stdout: text }),
+        ]),
+      ).blankIssuesDisabled(REPO, "main");
+    const bom = String.fromCharCode(0xfeff);
+    expect(answer(bom + "blank_issues_enabled: false\n")).toBe(true);
+    expect(answer(bom + "blank_issues_enabled: true\n")).toBe(false);
+    for (const text of [
+      "blank_issues_enabled : false\n",
+      "blank_issues_enabled\t: true\n",
+      '"blank_issues_enabled": true\n',
+      "'blank_issues_enabled': true\n",
+      "Blank_Issues_Enabled: true\n",
+      "BLANK_ISSUES_ENABLED: true\n",
+      "{blank_issues_enabled: false}\n",
+      "{ blank_issues_enabled: true }\n",
+      "  blank_issues_enabled: true\n",
+      "blank_issues_enabled: true\nblank_issues_enabled : false\n",
+    ]) {
+      expect(answer(text)).toBe(true);
+    }
+  });
 });
 
 describe("prView()", () => {
