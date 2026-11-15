@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertNeutralCwd, main, parseCommand, realDeps, type CliDeps } from "../tools/publish/cli";
 import { parsePublishConfig } from "../tools/publish/config";
-import { PublishRefusal, UsageError } from "../tools/publish/errors";
+import { AfterWriteError, PublishRefusal, UsageError } from "../tools/publish/errors";
 import { childEnv, realRunner } from "../tools/publish/exec";
 import { FakeRunner, on, REPO } from "./publish-fakes";
 
@@ -244,6 +244,16 @@ describe("main()", () => {
     });
     expect(await main(CREATE, d)).toBe(2);
     expect(read).toBe(false);
+  });
+
+  test("a stop after a GitHub write exits 4, apart from a refusal's 2, naming what was written", async () => {
+    const d = deps({
+      loadConfig: () => {
+        throw new AfterWriteError(["the App review on #9", "the merge of #9"], "gh failed while confirming the merge");
+      },
+    });
+    expect(await main(CREATE, d)).toBe(4);
+    expect(d.lines.err).toEqual(["error after a GitHub write: already written to GitHub: the App review on #9, the merge of #9. Then stopped: gh failed while confirming the merge"]);
   });
 
   test("an unexpected error prints its class and never its message", async () => {

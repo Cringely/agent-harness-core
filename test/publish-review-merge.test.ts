@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { parsePublishConfig } from "../tools/publish/config";
-import { PublishError, PublishRefusal } from "../tools/publish/errors";
+import { AfterWriteError, PublishError, PublishRefusal } from "../tools/publish/errors";
 import type { PipedResult, RunResult } from "../tools/publish/exec";
 import { CORE_POLICY } from "../tools/pr-review/repo-policy";
 import { remoteMatches, reviewerPolicyArgs, reviewMerge, type ReviewMergeArgs, type ReviewMergeContext } from "../tools/publish/review-merge";
@@ -200,6 +200,9 @@ function withReviewer(runner: FakeRunner, result: PipedResult): FakeRunner {
   return runner;
 }
 
+// A refusal before the reviewer posts is a PublishRefusal (exit 2, nothing new published). Once a
+// reviewer that exited 0 has posted its review, the same refusal is an AfterWriteError (exit 4) that
+// names the review ahead of the cause.
 async function refusal(run: Promise<unknown>, runner: FakeRunner, fragment: string, reviewerRan: boolean): Promise<void> {
   let error: unknown;
   try {
@@ -207,7 +210,12 @@ async function refusal(run: Promise<unknown>, runner: FakeRunner, fragment: stri
   } catch (caught) {
     error = caught;
   }
-  expect(error).toBeInstanceOf(PublishRefusal);
+  if (reviewerRan && runner.pipedResult.consumer.code === 0) {
+    expect(error).toBeInstanceOf(AfterWriteError);
+    expect((error as Error).message).toStartWith("already written to GitHub: the App review on #9. Then stopped: ");
+  } else {
+    expect(error).toBeInstanceOf(PublishRefusal);
+  }
   expect((error as Error).message).toContain(fragment);
   expect(runner.publishing()).toEqual([]);
   expect(runner.piped.length > 0).toBe(reviewerRan);
@@ -744,8 +752,8 @@ Thanks, Fixture Person.
     await refusal(reviewMerge(ctx(runner), ARGS), runner, "changed after the closing-keyword audit", true);
   });
 
-  // A refusal exits 2, which says nothing was published, so every check that can refuse runs before
-  // the bypass reason is posted.
+  // Every check that can refuse runs before the bypass reason is posted, so a refused bypass leaves
+  // only the App review behind.
   test("an administrator bypass whose body was edited between the audit and the merge posts no reason", async () => {
     const blocked = { ...VIEW, mergeStateStatus: "BLOCKED" };
     const runner = withReviewer(
@@ -767,15 +775,17 @@ Thanks, Fixture Person.
       reviewerSays(APPROVE_OUTPUT),
     );
     const error = await reviewMerge(ctx(runner), ADMIN_ARGS).catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(PublishError);
-    expect((error as Error).message).toContain("bypass reason was posted");
+    expect(error).toBeInstanceOf(AfterWriteError);
+    expect((error as AfterWriteError).written).toEqual(["the App review on #9", "the bypass reason comment on #9"]);
+    expect((error as Error).message).toContain("the bypass reason comment on #9. Then stopped: gh failed while merging");
   });
 
   test("a merged pull request GitHub links to close an undeclared issue is an error naming the merge", async () => {
     const ref = { number: 8, repository: { name: "fixture-repo", owner: { login: "fixture-owner" } } };
     const runner = withReviewer(scenario({ closing: [ref] }), reviewerSays(APPROVE_OUTPUT));
     const error = await reviewMerge(ctx(runner), ARGS).catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(PublishError);
+    expect(error).toBeInstanceOf(AfterWriteError);
+    expect((error as AfterWriteError).written).toEqual(["the App review on #9", "the merge of #9"]);
     expect((error as Error).message).toContain(`merged #9 at ${MERGE_SHA.slice(0, 7)}`);
     expect((error as Error).message).toContain(`${REPO}#8`);
     expect(runner.publishing().map((argv) => argv[2])).toEqual(["merge"]);
@@ -784,14 +794,14 @@ Thanks, Fixture Person.
   test("a merged pull request missing a declared closing link is an error", async () => {
     const runner = withReviewer(scenario({ views: [{ ...VIEW, body: "Closes #8" }] }), reviewerSays(APPROVE_OUTPUT));
     const error = await reviewMerge(ctx(runner), { ...ARGS, closes: [8] }).catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(PublishError);
+    expect(error).toBeInstanceOf(AfterWriteError);
     expect((error as Error).message).toContain("close none where --closes named #8");
   });
 
   test("closing links GitHub returns unreadable after the merge are an error", async () => {
     const runner = withReviewer(scenario({ closing: undefined }), reviewerSays(APPROVE_OUTPUT));
     const error = await reviewMerge(ctx(runner), ARGS).catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(PublishError);
+    expect(error).toBeInstanceOf(AfterWriteError);
     expect((error as Error).message).toContain("could not be read");
   });
 
@@ -803,7 +813,46 @@ Thanks, Fixture Person.
 
   test("a merge gh accepted that did not land is an error, not a success", async () => {
     const runner = withReviewer(scenario({ merged: "OPEN" }), reviewerSays(APPROVE_OUTPUT));
-    await expect(reviewMerge(ctx(runner), ARGS)).rejects.toBeInstanceOf(PublishError);
+    await expect(reviewMerge(ctx(runner), ARGS)).rejects.toBeInstanceOf(AfterWriteError);
+  });
+
+  // Exit 2 says nothing new was published, so once the reviewer has posted, a refusal is reported
+  // as what it is: a stop after a write, naming the write.
+  test("a refusal after the review was posted names the review and is not a PublishRefusal", async () => {
+    const runner = withReviewer(scenario({ views: [VIEW, VIEW, { ...VIEW, isDraft: true }] }), reviewerSays(APPROVE_OUTPUT));
+    const error = await reviewMerge(ctx(runner), ARGS).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AfterWriteError);
+    expect(error).not.toBeInstanceOf(PublishRefusal);
+    expect((error as AfterWriteError).written).toEqual(["the App review on #9"]);
+    expect((error as Error).message).toBe("already written to GitHub: the App review on #9. Then stopped: the pull request is a draft");
+    expect(runner.publishing()).toEqual([]);
+  });
+
+  test("a gh failure confirming the merge names the merge", async () => {
+    const runner = withReviewer(
+      scenario({ extra: [on(["gh", "pr", "view", "9", `--repo=${REPO}`, "--json=state,mergeCommit,closingIssuesReferences"], { code: 1, stderr: "HTTP 502" })] }),
+      reviewerSays(APPROVE_OUTPUT),
+    );
+    const error = await reviewMerge(ctx(runner), ARGS).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AfterWriteError);
+    expect((error as AfterWriteError).written).toEqual(["the App review on #9", "the merge of #9"]);
+    expect((error as Error).message).toContain("the merge of #9. Then stopped: gh failed while confirming the merge");
+    expect(runner.publishing().map((argv) => argv[2])).toEqual(["merge"]);
+  });
+
+  test("reviewer output with no posted review says a review may be posted", async () => {
+    const unposted = JSON.stringify({ ...JSON.parse(APPROVE_OUTPUT), posted: null });
+    const runner = withReviewer(scenario({ views: [VIEW, VIEW, { ...VIEW, isDraft: true }] }), reviewerSays(unposted));
+    const error = await reviewMerge(ctx(runner), ARGS).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AfterWriteError);
+    expect((error as AfterWriteError).written).toEqual(["an App review may be posted on #9"]);
+  });
+
+  test("a refusal before the reviewer runs is still a PublishRefusal", async () => {
+    const runner = withReviewer(scenario({ views: [{ ...VIEW, isDraft: true }] }), reviewerSays(APPROVE_OUTPUT));
+    const error = await reviewMerge(ctx(runner), ARGS).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(PublishRefusal);
+    expect(runner.piped).toEqual([]);
   });
 
   test("reviewer output that is not JSON is an error", async () => {
