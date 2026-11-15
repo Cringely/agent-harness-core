@@ -1,7 +1,11 @@
 // Tests for tools/publish/exec.ts (#274). These start real child processes, using the bun binary
 // running this suite (process.execPath) as the child, so they need no gh, git or key.
 
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { toolState } from "../tools/pr-review/tool-state";
 import { childEnv, realRunner } from "../tools/publish/exec";
 
 const BUN = process.execPath;
@@ -18,6 +22,72 @@ describe("childEnv()", () => {
 
   test("skips undefined values", () => {
     expect(childEnv({ A: undefined, B: "2" })).toEqual({ B: "2" });
+  });
+
+  test("drops every variable git reads to find, redirect or reconfigure a repository, whatever its case", () => {
+    const redirecting = [
+      "GIT_DIR",
+      "GIT_WORK_TREE",
+      "GIT_COMMON_DIR",
+      "GIT_INDEX_FILE",
+      "GIT_OBJECT_DIRECTORY",
+      "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+      "GIT_NAMESPACE",
+      "GIT_CEILING_DIRECTORIES",
+      "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+      "GIT_CONFIG",
+      "GIT_CONFIG_GLOBAL",
+      "GIT_CONFIG_SYSTEM",
+      "GIT_CONFIG_COUNT",
+      "GIT_CONFIG_KEY_0",
+      "GIT_CONFIG_VALUE_0",
+      "GIT_CONFIG_KEY_12",
+      "GIT_CONFIG_PARAMETERS",
+      "git_dir",
+      "Git_Work_Tree",
+      "git_config_key_3",
+    ];
+    const base: Record<string, string> = { PATH: "x", GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: "ssh" };
+    for (const name of redirecting) base[name] = "/elsewhere";
+    expect(childEnv(base)).toEqual({ PATH: "x", GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: "ssh" });
+  });
+});
+
+// git exports GIT_DIR inside every hook. A child that inherited one naming another repository
+// would read that repository's origin and HEAD instead of the directory -C names.
+describe("git children under an inherited GIT_DIR", () => {
+  const root = mkdtempSync(join(tmpdir(), "publish-gitenv-"));
+  afterAll(() => rmSync(root, { recursive: true, force: true }));
+  const clean = childEnv(process.env);
+  function repo(name: string, origin: string): { dir: string; head: string } {
+    const dir = join(root, name);
+    const git = (...args: string[]) => {
+      const result = realRunner.run(["git", "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "-C", dir, ...args], { env: clean });
+      if (result.code !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
+      return result.stdout.trim();
+    };
+    realRunner.run(["git", "init", "-q", dir], { env: clean });
+    git("remote", "add", "origin", origin);
+    git("commit", "-q", "--allow-empty", "-m", name);
+    return { dir, head: git("rev-parse", "HEAD") };
+  }
+  const target = repo("target", "https://github.com/fixture/target.git");
+  const other = repo("other", "https://github.com/fixture/other.git");
+  const inherited = { ...process.env, GIT_DIR: join(other.dir, ".git"), GIT_WORK_TREE: other.dir };
+
+  test("the origin read answers for the -C directory", () => {
+    const result = realRunner.run(["git", "-C", target.dir, "remote", "get-url", "origin"], { env: childEnv(inherited) });
+    expect(result.stdout.trim()).toBe("https://github.com/fixture/target.git");
+  });
+
+  test("the checkout pin answers for the -C directory", () => {
+    expect(toolState(target.dir, childEnv(inherited))).toEqual({ revision: target.head, dirty: false });
+  });
+
+  // The pin above passes only if toolState hands git the env it was given: this one shows it does,
+  // since the GIT_DIR left in on purpose here wins over -C.
+  test("toolState runs git with exactly the env it is given", () => {
+    expect(toolState(target.dir, { ...clean, GIT_DIR: join(other.dir, ".git") }).revision).toBe(other.head);
   });
 });
 

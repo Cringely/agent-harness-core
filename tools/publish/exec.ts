@@ -6,6 +6,12 @@
 // configured account. That is what keeps the active gh account (a different identity on the
 // operator's workstation) out of every call.
 //
+// childEnv also drops every variable git reads to find, redirect or reconfigure a repository, so a
+// git child answers for the directory its -C names and nothing else. git exports GIT_DIR inside
+// every hook, and GIT_DIR or GIT_WORK_TREE inherited from one would make the checkout-pin and origin
+// checks in review-merge.ts read another repository. gh resolves its repository through git, so
+// its children get the same environment.
+//
 // runPiped moves the key command's stdout straight into the reviewer's stdin. The key passes
 // through this process as a byte stream Bun forwards, and is never held in a variable here.
 
@@ -46,10 +52,35 @@ export interface Runner {
 
 const TOKEN_VARS = new Set(["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]);
 
+// Compared in upper case: Windows treats environment names without case.
+const REPO_VARS = new Set([
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_COMMON_DIR",
+  "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_NAMESPACE",
+  "GIT_CEILING_DIRECTORIES",
+  "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+  "GIT_CONFIG",
+  "GIT_CONFIG_GLOBAL",
+  "GIT_CONFIG_SYSTEM",
+  "GIT_CONFIG_COUNT",
+  "GIT_CONFIG_PARAMETERS",
+]);
+// GIT_CONFIG_KEY_<n> and GIT_CONFIG_VALUE_<n>, the pairs GIT_CONFIG_COUNT numbers.
+const REPO_VAR_PAIR_RE = /^GIT_CONFIG_(?:KEY|VALUE)_/;
+
+function dropped(name: string): boolean {
+  const upper = name.toUpperCase();
+  return TOKEN_VARS.has(upper) || REPO_VARS.has(upper) || REPO_VAR_PAIR_RE.test(upper);
+}
+
 export function childEnv(base: Record<string, string | undefined>, extra: Record<string, string> = {}): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [name, value] of Object.entries(base)) {
-    if (value === undefined || TOKEN_VARS.has(name.toUpperCase())) continue;
+    if (value === undefined || dropped(name)) continue;
     env[name] = value;
   }
   return { ...env, ...extra };

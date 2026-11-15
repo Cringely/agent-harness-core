@@ -215,15 +215,12 @@ export function assertNeutralCwd(cwd: string, workDir: string, runner: Runner, e
 // path ("not a git repository: '<path>'") comes from GIT_DIR and proves nothing about the parents.
 const OUTSIDE_EVERY_TREE = /^fatal: not a git repository \(or any of the parent directories\)/m;
 
-// Variables that point git at another repository or stop its upward search early, either of which
-// makes the probe answer "not a git repository" for a directory inside a checkout. Windows treats
-// environment names without case, so they are matched without case.
-const PROBE_STRIPPED = new Set(["GIT_DIR", "GIT_WORK_TREE", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_COMMON_DIR"]);
-
+// childEnv drops the variables that would point the probe at another repository or change how far
+// its upward search goes (exec.ts), either of which could make it answer "not a git repository" for
+// a directory inside a checkout. The C locale keeps the message OUTSIDE_EVERY_TREE matches in
+// English.
 export function probeEnv(env: Record<string, string | undefined>): Record<string, string> {
-  const kept: Record<string, string | undefined> = {};
-  for (const [name, value] of Object.entries(env)) if (!PROBE_STRIPPED.has(name.toUpperCase())) kept[name] = value;
-  return childEnv(kept, { LC_ALL: "C", LANGUAGE: "C" });
+  return childEnv(env, { LC_ALL: "C", LANGUAGE: "C" });
 }
 
 export interface CliDeps {
@@ -255,7 +252,8 @@ export function realDeps(): CliDeps {
     loadIdentity: () => loadIdentity(),
     readBody: (path) => readFileSync(path, "utf8"),
     exists: realExists,
-    toolState: (root) => toolState(root),
+    // The same environment as every other git child, so an inherited GIT_DIR cannot answer for root.
+    toolState: (root) => toolState(root, childEnv(process.env)),
     sleep: (ms) => Bun.sleepSync(ms),
     bunPath: process.execPath,
     out: (line) => console.log(line),
