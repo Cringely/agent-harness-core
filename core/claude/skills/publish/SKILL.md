@@ -9,7 +9,7 @@ Every issue, pull request and merge goes through `tools/publish/cli.ts` in agent
 
 ## Running it
 
-The tool holds a GitHub token and, for review-merge, streams the reviewer App's key. It runs only from its own empty work directory, named with `bun --cwd`, and refuses anywhere else.
+The tool holds a GitHub token and, for review-merge, streams the reviewer App's key. It runs only from its own work directory, named with `bun --cwd`, which must hold no `bunfig.toml` or `.env` file, and refuses anywhere else.
 
 `<core>` below is the agent-harness-core checkout this project was installed from: the `coreRepo` value in `.claude/.harness-manifest.local.json`. When that file or value is missing, stop and ask the operator rather than guessing a path.
 
@@ -46,10 +46,10 @@ Pass the full commit id the third line printed as `--tool-head`. Start the fourt
 
 - 0: done. The last line on stdout is the URL or the merge result.
 - 2: refused, and nothing new was published. The message names the class of problem, such as `body: Co-Authored-By line` or `closing keywords do not match --closes (undeclared: 1, missing: 0)`, and never the text that tripped it. Fix the body or the arguments and run again. Never disguise a name or a link to get it past a gate, since a disguised one still publishes it.
-- 1: a usage error, or a dependency failed partway. When the message says a review may already have been posted, look at the pull request before running again.
+- 1: a usage error, or a dependency failed partway. The message says which step may already have happened.
 - 4: review-merge stopped, by a refusal or an error, after it had already written to GitHub. The message opens with `already written to GitHub:` and lists what it wrote (the App review, the bypass reason comment, the merge), then the cause. Look at the pull request before running again. When the merge is on the list, it happened: report it to the operator, and when the cause says GitHub links it to close issues other than `--closes`, reopen any issue it should not have closed.
 
-Every review-merge stop printed after its `review:` line exits 4, because the App's review is already posted.
+Once the reviewer has run and has not refused, every review-merge stop exits 4, because the App's review may already be posted. That includes a reviewer that failed or ran out of time and reviewer output the tool cannot read.
 
 ## Closing keywords
 
