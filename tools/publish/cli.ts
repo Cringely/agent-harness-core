@@ -1,9 +1,20 @@
 #!/usr/bin/env bun
 // tools/publish (#274): the one route by which an agent files an issue, opens or edits a pull
 // request, or reviews and merges one. Every gate fails closed and every refusal exits 2 with a
-// class-only message. See tools/publish/README.md.
+// class-only message.
 //
 //   bun --cwd <home>/.claude-publish/work <absolute path>/tools/publish/cli.ts <command> ...
+//
+// UNWIRED at this commit: nothing in this repository invokes it yet, and agents can still reach gh
+// directly. Part 4 of #274 wires it, with the publish skill (core/claude/skills/publish/SKILL.md)
+// that sends agents to the invocation above and tools/publish/README.md for the config, and with
+// Install-Harness.ps1 merging core/claude/templates/settings.permissions.json into each project's
+// .claude/settings.json. Registration as part 4 lands it, the same rules for PowerShell(...):
+//
+//   "permissions": { "deny": [
+//     "Bash(gh pr create *)", "Bash(gh issue create *)", "Bash(gh pr merge *)",
+//     "Bash(gh pr * create *)", "Bash(gh issue * create *)", "Bash(gh pr * merge *)",
+//     "Bash(gh alias set *)" ] }
 //
 // BUN-CWD: Bun loads bunfig.toml and .env files from the working directory before any code runs,
 // and `bun --cwd <dir>` moves that load to <dir> (measured on Bun 1.3.14: a preload and a .env in
@@ -196,11 +207,28 @@ export function assertNeutralCwd(cwd: string, workDir: string, runner: Runner, e
     );
   }
   if (cwdHasAutoloadFile(cwd)) throw new PublishRefusal("the work directory holds a bunfig.toml or .env file. Empty it");
-  const probe = runner.run(["git", "-C", cwd, "rev-parse", "--is-inside-work-tree"], { env: childEnv(env, { LC_ALL: "C", LANGUAGE: "C" }) });
+  const probe = runner.run(["git", "-C", cwd, "rev-parse", "--is-inside-work-tree"], { env: probeEnv(env) });
   if (probe.spawnError) throw new PublishRefusal("git is not on PATH");
-  if (probe.stdout.trim() === "true" || !/not a git repository/i.test(probe.stderr)) {
-    throw new PublishRefusal("the work directory sits inside a git work tree. Move it outside every checkout");
+  // Only git's own answer after searching every parent proves the directory is outside every work
+  // tree. Any other outcome (inside, a different error, a killed probe, a zero exit) refuses.
+  if (probe.code === null || probe.code === 0 || probe.stdout.trim() === "true" || !OUTSIDE_EVERY_TREE.test(probe.stderr)) {
+    throw new PublishRefusal("the work directory could not be shown to sit outside every git work tree. Move it outside every checkout");
   }
+}
+
+// The message git prints when its upward search found no repository. The form naming an explicit
+// path ("not a git repository: '<path>'") comes from GIT_DIR and proves nothing about the parents.
+const OUTSIDE_EVERY_TREE = /^fatal: not a git repository \(or any of the parent directories\)/m;
+
+// Variables that point git at another repository or stop its upward search early, either of which
+// makes the probe answer "not a git repository" for a directory inside a checkout. Windows treats
+// environment names without case, so they are matched without case.
+const PROBE_STRIPPED = new Set(["GIT_DIR", "GIT_WORK_TREE", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_COMMON_DIR"]);
+
+export function probeEnv(env: Record<string, string | undefined>): Record<string, string> {
+  const kept: Record<string, string | undefined> = {};
+  for (const [name, value] of Object.entries(env)) if (!PROBE_STRIPPED.has(name.toUpperCase())) kept[name] = value;
+  return childEnv(kept, { LC_ALL: "C", LANGUAGE: "C" });
 }
 
 export interface CliDeps {

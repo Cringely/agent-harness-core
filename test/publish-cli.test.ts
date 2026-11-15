@@ -133,6 +133,42 @@ describe("assertNeutralCwd()", () => {
     assertNeutralCwd(WORK, WORK, runner, {});
     expect(runner.calls[0]!.options.env?.LC_ALL).toBe("C");
   });
+
+  // GIT_DIR at a missing path, or GIT_CEILING_DIRECTORIES above the work directory, makes git
+  // answer "not a git repository" without having searched the directory's parents.
+  test("strips the variables that redirect or stop git's repository search from the probe", () => {
+    const runner = new FakeRunner([NOT_A_REPO]);
+    const redirecting = {
+      PATH: "x",
+      GIT_DIR: "/missing/.git",
+      GIT_WORK_TREE: "/elsewhere",
+      GIT_CEILING_DIRECTORIES: "/",
+      GIT_DISCOVERY_ACROSS_FILESYSTEM: "1",
+      GIT_COMMON_DIR: "/missing",
+      git_dir: "/missing/lower",
+    };
+    assertNeutralCwd(WORK, WORK, runner, redirecting);
+    const env = runner.calls[0]!.options.env!;
+    for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_COMMON_DIR", "git_dir"]) {
+      expect(env[name]).toBeUndefined();
+    }
+    expect(env.PATH).toBe("x");
+  });
+
+  test("refuses a not-a-repository answer that names an explicit git directory", () => {
+    const pointed = on(["git", "-C"], { code: 128, stderr: "fatal: not a git repository: '/missing/.git'" });
+    expect(() => assertNeutralCwd(WORK, WORK, new FakeRunner([pointed]), {})).toThrow(PublishRefusal);
+  });
+
+  test("refuses a probe that exits 0 without saying it is inside a work tree", () => {
+    const silent = on(["git", "-C"], { code: 0, stderr: "fatal: not a git repository (or any of the parent directories): .git" });
+    expect(() => assertNeutralCwd(WORK, WORK, new FakeRunner([silent]), {})).toThrow(PublishRefusal);
+  });
+
+  test("refuses a probe killed at a timeout or by a signal", () => {
+    const killed = on(["git", "-C"], { code: null, stderr: "fatal: not a git repository (or any of the parent directories): .git" });
+    expect(() => assertNeutralCwd(WORK, WORK, new FakeRunner([killed]), {})).toThrow(PublishRefusal);
+  });
 });
 
 describe("main()", () => {

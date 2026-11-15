@@ -6,12 +6,16 @@
 //      --tool-head is that repository's default branch head, because the code that holds the token
 //      and makes the merge decision must be reviewed code. A fork's default branch head is not
 //      reviewed code, so any other origin refuses
-//   2. config names a reviewer for the repository. With --allow-admin, the reason file reads and
-//      passes the same text gates as a body. The reviewer checkout holds tools/pr-review/cli.ts
+//   2. config names a reviewer for the repository, with a policy file for any repository but the
+//      reviewer's built-in one (tools/pr-review refuses those without --policy). With
+//      --allow-admin, the reason file reads and passes the same text gates as a body. The reviewer
+//      checkout holds tools/pr-review/cli.ts
 //   3. the pull request is open, not a draft, from this repository, and into the default branch.
 //      Its head is pinned here as the head to review
 //   4. closing keywords in the title, the body and every commit message equal --closes (early, so
-//      a mismatch costs no model run). The title counts because a --merge merge commit carries it
+//      a mismatch costs no model run). The title counts because a --merge merge commit carries it.
+//      For --merge, the title and body also pass the identity scan a published body passes,
+//      because the merge commit carries both onto the default branch
 //   5. `gh pr checks --watch`, bounded by --checks-timeout-min. Then every check must have
 //      succeeded on the pinned head, which must not have moved
 //   6. the reviewer checkout must be cloned from the repository this tool comes from, never from the
@@ -20,7 +24,8 @@
 //      owner's token, so a checkout of the reviewed repository would hand both to whatever anyone who
 //      can write to that repository's default branch put there
 //   7. the reviewer runs from the work directory, outside every checkout, with the key piped from
-//      the configured key command, --expect-head pinned, --post and --json
+//      the configured key command, --expect-head pinned, --post, --json and, for any repository
+//      but the reviewer's built-in one, --policy
 //   8. the pull request is read again (waiting out an UNKNOWN merge state), the closing-keyword
 //      audit repeats, and decideMerge rules. With --allow-admin, what the bypass needs is read
 //      first: .github/CODEOWNERS at the default branch head (the base, never the pull request's
@@ -36,9 +41,11 @@
 //  10. for an administrator-bypass merge, the reason is posted as a pull request comment first
 //      (CONTRIBUTING.md has every bypass say why)
 //  11. the title and body are read once more and must equal the ones step 8 audited, or nothing is
-//      merged. Then gh pr merge with --match-head-commit and, for --merge, an explicit subject and
-//      body built from that audited text, so the merge commit never carries GitHub's default message
-//      built from whatever the title and body say at merge time
+//      merged. For --merge, the subject and body built from that audited text pass the identity scan
+//      again, since this is the text that lands in git history and no push hook sees a commit
+//      GitHub writes. Then gh pr merge with --match-head-commit and, for --merge, that explicit
+//      subject and body, so the merge commit never carries GitHub's default message built from
+//      whatever the title and body say at merge time
 //  12. the merge is confirmed, and the issues GitHub links the merged pull request to close must be
 //      exactly --closes. A mismatch is an error naming the merge: it has already happened, so the
 //      tool reports it rather than claiming anything was undone
@@ -50,6 +57,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { stripControlChars } from "../pr-review/cli";
 import type { IdentityLoad } from "../pr-review/identity";
+import { CORE_POLICY } from "../pr-review/repo-policy";
 import { ownerIdentity, reviewerConfig, type OwnerIdentity, type PublishConfig, type ReviewerConfig } from "./config";
 import { PublishError, PublishRefusal } from "./errors";
 import { parseRepo } from "../pr-review/types";
@@ -122,6 +130,27 @@ function auditClosing(gh: Gh, repo: string, view: PrState, declared: number[]): 
 export function mergeMessage(pr: number, audited: PrState): { subject: string; body: string } {
   const body = audited.body.trim() === "" ? audited.title : `${audited.title}\n\n${audited.body}`;
   return { subject: `Merge pull request #${pr}`, body };
+}
+
+// The merge commit message lands in the default branch's history, where only a history rewrite
+// removes it, so it is scanned like any published text. A rebase merge writes no message of its own.
+function assertMergeMessageClean(ctx: ReviewMergeContext, args: ReviewMergeArgs, view: PrState): void {
+  if (args.method !== "merge") return;
+  const message = mergeMessage(args.pr, view);
+  assertClean(ctx, [
+    { label: "merge subject", text: message.subject },
+    { label: "merge body", text: message.body },
+  ]);
+}
+
+// tools/pr-review reviews its built-in repository without --policy and refuses every other one
+// without it. It compares the name exactly, so this does too.
+export function reviewerPolicyArgs(repo: string, reviewer: Pick<ReviewerConfig, "policyFile">): string[] {
+  if (repo === CORE_POLICY.repo) return [];
+  if (reviewer.policyFile === null) {
+    throw new PublishRefusal("the publish config's reviewer entry for this repository names no policyFile, which the reviewer needs for any repository but its built-in one");
+  }
+  return ["--policy", reviewer.policyFile];
 }
 
 // True when GitHub's closing links for the merged pull request are exactly --closes, all in repo.
@@ -216,10 +245,11 @@ function assertToolCurrent(ctx: ReviewMergeContext, gh: Gh, owner: OwnerIdentity
 }
 
 async function runReviewer(ctx: ReviewMergeContext, reviewer: ReviewerConfig, cli: string, repo: string, pr: number, head: string): Promise<ReviewResult> {
+  const policy = reviewerPolicyArgs(repo, reviewer);
   const run = await ctx.runner.runPiped(
     { argv: reviewer.keyCommand, cwd: ctx.workDir, env: childEnv(ctx.env, reviewer.keyCommandEnv) },
     {
-      argv: [ctx.bunPath, "--cwd", ctx.workDir, cli, "review", "--pr", String(pr), "--repo", repo, "--key-stdin", "--post", "--json", "--expect-head", head],
+      argv: [ctx.bunPath, "--cwd", ctx.workDir, cli, "review", "--pr", String(pr), "--repo", repo, "--key-stdin", "--post", "--json", "--expect-head", head, ...policy],
       cwd: ctx.workDir,
       env: childEnv(ctx.env, { PR_REVIEW_APP_ID: reviewer.appId }),
       timeoutMs: REVIEWER_TIMEOUT_MS,
@@ -328,6 +358,7 @@ export async function reviewMerge(ctx: ReviewMergeContext, args: ReviewMergeArgs
     if (findClosingRefs(adminReason, args.repo).length > 0) throw new PublishRefusal("the admin reason carries a closing keyword");
   }
   const reviewer = reviewerConfig(ctx.config, args.repo);
+  reviewerPolicyArgs(args.repo, reviewer);
   const cli = join(reviewer.checkout, "tools", "pr-review", "cli.ts");
   if (!ctx.exists(cli)) throw new PublishRefusal("the reviewer checkout holds no tools/pr-review/cli.ts");
 
@@ -336,6 +367,7 @@ export async function reviewMerge(ctx: ReviewMergeContext, args: ReviewMergeArgs
   assertReviewable(first, defaultBranch);
   const head = first.headRefOid;
   auditClosing(gh, args.repo, first, args.closes);
+  assertMergeMessageClean(ctx, args, first);
 
   if (gh.watchChecks(args.repo, args.pr, args.checksTimeoutMin * 60_000) === "timed-out") {
     throw new PublishRefusal(`checks did not finish within ${args.checksTimeoutMin} minutes. Nothing was reviewed or merged`);
@@ -379,6 +411,7 @@ export async function reviewMerge(ctx: ReviewMergeContext, args: ReviewMergeArgs
   if (latest.title !== final.title || latest.body !== final.body) {
     throw new PublishRefusal("the title or body changed after the closing-keyword audit. Nothing was merged");
   }
+  assertMergeMessageClean(ctx, args, final);
   gh.mergePr(args.repo, args.pr, head, args.method, decision.admin, mergeMessage(args.pr, final));
   const merged = gh.mergedState(args.repo, args.pr);
   if (merged.state !== "MERGED" || merged.mergeSha === null) {
