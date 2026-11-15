@@ -11,15 +11,25 @@ Every issue, pull request and merge goes through `tools/publish/cli.ts` in agent
 
 The tool holds a GitHub token and, for review-merge, streams the reviewer App's key. It runs only from its own work directory, named with `bun --cwd`, which must hold no `bunfig.toml` or `.env` file, and refuses anywhere else.
 
-`<core>` below is the agent-harness-core checkout this project was installed from: the `coreRepo` value in `.claude/.harness-manifest.local.json`. When that file or value is missing, stop and ask the operator rather than guessing a path.
+The tool lives in the agent-harness-core checkout this project was installed from, the `coreRepo` value in `.claude/.harness-manifest.local.json`. A project can write that file, so never run code from the path it names directly. Resolve it first with the helper beside this skill, with `<project>` the absolute path of this project's root:
 
 Bash:
 
-    bun --cwd "${USERPROFILE:-$HOME}/.claude-publish/work" <core>/tools/publish/cli.ts <command> ...
+    bun --cwd "${USERPROFILE:-$HOME}/.claude-publish/work" "<project>/.claude/skills/publish/resolve-core.ts" "<project>"
 
 PowerShell:
 
-    bun --cwd "$HOME/.claude-publish/work" <core>/tools/publish/cli.ts <command> ...
+    bun --cwd "$HOME/.claude-publish/work" "<project>/.claude/skills/publish/resolve-core.ts" "<project>"
+
+It prints the absolute path of `tools/publish/cli.ts` only when `coreRepo` is outside this project and listed in the per-user checkout allowlist, `~/.claude/harness-core-checkouts` (or the file `HARNESS_CORE_ALLOWLIST` names), which the installer appends to. Otherwise it prints nothing on stdout, a reason on stderr, and exits 1. On any exit but 0, or empty output, stop and ask the operator. Never fall back to the raw `coreRepo` value or to a path you guess. `<cli>` below is the path it printed:
+
+Bash:
+
+    bun --cwd "${USERPROFILE:-$HOME}/.claude-publish/work" "<cli>" <command> ...
+
+PowerShell:
+
+    bun --cwd "$HOME/.claude-publish/work" "<cli>" <command> ...
 
 Commands:
 

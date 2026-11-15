@@ -297,8 +297,10 @@ checkout is also listed in `~/.claude/harness-core-checkouts` (one absolute path
 user profile, outside every repo). A sidecar can be written by a project, so the path it names is
 not trusted on its own. A full install appends the checkout it runs from, and a project installed
 before this check needs one re-run of the installer. Until then the hook prints one
-"not on the checkout allowlist" line at session start. `HARNESS_CORE_ALLOWLIST` points both at a
-different file. When the sidecar is missing but the committed
+"not on the checkout allowlist" line at session start. The publish skill holds `coreRepo` to the same
+list: its helper, `.claude/skills/publish/resolve-core.ts`, prints the path of `tools/publish/cli.ts`
+only for a listed checkout outside the project, and the skill stops otherwise.
+`HARNESS_CORE_ALLOWLIST` points all three at a different file. When the sidecar is missing but the committed
 manifest exists (an install ran, but the write was refused), the hook prints one line saying so
 instead of going quiet, and points at a plain installer run, which says why the write was refused.
 `-Audit` reports it too, except on the legacy shape below, where it compares against the values
@@ -734,7 +736,7 @@ Merges go through `tools/publish/cli.ts review-merge`, which waits for CI, runs 
 and merges only on the App's APPROVE of the reviewed head. On an owned path it takes the
 administrator bypass under `--allow-admin`, once it has found a changed file owned under
 `.github/CODEOWNERS` at the base commit, the App's approval as the latest review, and every other
-active rule on `master` shown met, and posts the bypass rationale first. Under the current rulesets
+active rule on `master` shown met, and posts the bypass rationale just before the merge, after every check that can refuse. Under the current rulesets
 it cannot show that, so it refuses and the operator merges those by hand. A COMMENT makes it
 refuse, whatever its reasons: merging that pull request is an operator override, done by hand with a
 bypass-rationale comment. The project installer denies raw `gh pr merge` in the Bash and PowerShell tools

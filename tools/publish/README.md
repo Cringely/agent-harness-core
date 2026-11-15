@@ -8,6 +8,8 @@ This is the route by which agents file issues, open and edit pull requests, and 
 bun --cwd <home>/.claude-publish/work <absolute path>/tools/publish/cli.ts <command> ...
 ```
 
+In an installed project the publish skill does not take `<absolute path>` from the sidecar's `coreRepo` as it stands. It first runs `.claude/skills/publish/resolve-core.ts`, which prints the cli path only when `coreRepo` sits outside the project and is listed in the per-user checkout allowlist (`~/.claude/harness-core-checkouts`, or the file `HARNESS_CORE_ALLOWLIST` names), and refuses otherwise.
+
 The `--cwd` is not optional. Bun loads `bunfig.toml` and `.env` files from the working directory before any code runs, and this process holds a GitHub token and, for `review-merge`, streams the reviewer App's key. Measured on Bun 1.3.14 on 2026-10-06, a `bunfig.toml` preload and a `.env` in the launch directory both stayed unloaded under `bun --cwd <other dir>`, so `--cwd` moves the load to the work directory. `tools/pr-review/cli.ts` carries the same rule (BUN-CWD) and meets it with a shell `cd`. The flag does the same job without one, which lets a single plain command run from an isolated worktree.
 
 The work directory must hold no `bunfig.toml` or `.env*` file and sit outside every git work tree. Other files in it are not checked. The tool refuses to run from anywhere else, and refuses when the directory holds either file. The work-tree check runs `git rev-parse --is-inside-work-tree` with every variable git reads to find or redirect a repository removed from its environment (the list in the next paragraph), since such a variable can make git answer "not a git repository" without searching the directory's parents. It passes only on git's own answer after that search, with a non-zero exit. Any other answer, a killed probe or a missing git refuses.
@@ -65,7 +67,7 @@ issue create  --repo <owner/name> --title <t> --body-file <abs path>
 issue edit    --repo <owner/name> --issue <n> [--title <t>] [--body-file <abs path>]
 pr create     --repo <owner/name> --base <branch> --head <branch> --title <t> --body-file <abs path> [--closes <n,n>] [--draft]
 pr edit       --repo <owner/name> --pr <n> --base <branch> [--title <t>] [--body-file <abs path> [--closes <n,n>]]
-review-merge  --repo <owner/name> --pr <n> [--closes <n,n>] [--allow-admin --admin-reason-file <abs path>] [--method merge|rebase] [--checks-timeout-min <1-180>]
+review-merge  --repo <owner/name> --pr <n> --tool-head <commit> [--closes <n,n>] [--allow-admin --admin-reason-file <abs path>] [--method merge|rebase] [--checks-timeout-min <1-180>]
 ```
 
 Each line follows the `bun --cwd <home>/.claude-publish/work <absolute path>/tools/publish/cli.ts` prefix. `USAGE` in `tools/publish/cli.ts` is the source, and `help` prints it. A body comes only from a file, never from an argument or stdin.

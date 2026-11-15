@@ -526,6 +526,9 @@ Describe "Install-Harness" {
             Should -Be (Get-FileHash "$PSScriptRoot/../core/claude/skills/publish/SKILL.md" -Algorithm SHA256).Hash
         $m = Get-Content "$script:target/.claude/.harness-manifest.json" -Raw | ConvertFrom-Json -AsHashtable
         $m['files'].Contains('skills/publish/SKILL.md') | Should -BeTrue
+        # The skill runs this helper before any publish command, so it ships beside SKILL.md.
+        Test-Path "$script:target/.claude/skills/publish/resolve-core.ts" | Should -BeTrue
+        $m['files'].Contains('skills/publish/resolve-core.ts') | Should -BeTrue
     }
 
     It "builds matcher groups from scratch, one per template matcher, when the target has no hooks key at all" {
