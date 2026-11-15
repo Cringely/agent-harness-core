@@ -200,7 +200,7 @@ and a target inside a repository gets a warning with that command and a `FAILED`
 `git:core.hooksPath`. The Claude Code hooks take the other path:
 `core/claude/templates/settings.hooks.json` is merged into the project's `.claude/settings.json`.
 So is `core/claude/templates/settings.permissions.json`, whose deny rules for raw `gh pr create`,
-`gh issue create`, `gh pr merge`, `gh alias set` and related forms are added to the project's own (#274). A project whose committed manifest records `allowRawPrMerge` with a risk sentence keeps every rule except the two canonical `gh pr merge` ones, which lets its coordinator merge an App-approved pull request with `gh pr merge --admin --match-head-commit` (see `tools/publish/README.md`). They stay in the project:
+`gh issue create`, `gh pr merge`, `gh alias set` and related forms are added to the project's own (#274). A project whose committed manifest records `allowRawPrMerge` with a risk sentence keeps every rule except the two canonical `gh pr merge` ones, which lets its coordinator merge with `gh pr merge --admin --match-head-commit` once the App's latest review on that head is APPROVE, a `premerge` run with `--expect-head` passes on it, and the bypass-rationale comment is posted, as CONTRIBUTING.md requires (see `tools/publish/README.md`). They stay in the project:
 the account installer ships no such rule. A fragment that cannot be read or lists no rule, or a
 project `permissions` block the rules cannot be added to, stops the install before it writes.
 
@@ -750,7 +750,9 @@ refuse, whatever its reasons: merging that pull request is an operator override,
 bypass-rationale comment. The project installer denies raw `gh pr merge` in the Bash and PowerShell tools
 of each project it installs into, which makes the tool the default route. A project that records
 `allowRawPrMerge` in its manifest drops only the canonical merge rule, so its coordinator can merge
-an App-approved pull request with `gh pr merge --admin --match-head-commit`. It does not change the point above: the deny list is
+with `gh pr merge --admin --match-head-commit`, and only with the App's latest review on that head an
+APPROVE, a passing `premerge` run with `--expect-head` on it, and the bypass-rationale comment posted
+first, the conditions CONTRIBUTING.md sets. It does not change the point above: the deny list is
 a tripwire against the common direct forms, not enforcement. `gh api` writes, the edit and comment
 subcommands and shell wrappers such as `bash -c` are not matched, and an agent shell that can mint
 the operator's token can still run `gh pr merge --admin` by one of those routes.
