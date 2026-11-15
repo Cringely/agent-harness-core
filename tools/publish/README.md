@@ -10,7 +10,7 @@ bun --cwd <home>/.claude-publish/work <absolute path>/tools/publish/cli.ts <comm
 
 The `--cwd` is not optional. Bun loads `bunfig.toml` and `.env` files from the working directory before any code runs, and this process holds a GitHub token and, for `review-merge`, streams the reviewer App's key. Measured on Bun 1.3.14 on 2026-10-06, a `bunfig.toml` preload and a `.env` in the launch directory both stayed unloaded under `bun --cwd <other dir>`, so `--cwd` moves the load to the work directory. `tools/pr-review/cli.ts` carries the same rule (BUN-CWD) and meets it with a shell `cd`. The flag does the same job without one, which lets a single plain command run from an isolated worktree.
 
-The work directory must be empty and outside every git work tree. The tool refuses to run from anywhere else, and refuses when the directory holds a `bunfig.toml` or a `.env*` file.
+The work directory must be empty and outside every git work tree. The tool refuses to run from anywhere else, and refuses when the directory holds a `bunfig.toml` or a `.env*` file. The work-tree check runs `git rev-parse --is-inside-work-tree` with `GIT_DIR`, `GIT_WORK_TREE`, `GIT_CEILING_DIRECTORIES`, `GIT_DISCOVERY_ACROSS_FILESYSTEM` and `GIT_COMMON_DIR` removed from its environment, since each can make git answer "not a git repository" without searching the directory's parents. It passes only on git's own answer after that search, with a non-zero exit. Any other answer, a killed probe or a missing git refuses.
 
 ## Setup
 
@@ -27,7 +27,8 @@ Local configuration lives in `~/.claude-publish/config.json`, outside every repo
       "keyCommand": ["pwsh", "-NoProfile", "-File", "<absolute path>/read-reviewer-key.ps1"],
       "keyCommandEnv": { "OP_BIOMETRIC_UNLOCK_ENABLED": "false" },
       "checkout": "<absolute path to a dedicated clone of agent-harness-core>",
-      "termsFile": "<absolute path to the personal-term list, outside every checkout>"
+      "termsFile": "<absolute path to the personal-term list, outside every checkout>",
+      "policyFile": "<absolute path to the reviewer's policy file, for any repository but agent-harness-core>"
     }
   }
 }
@@ -39,7 +40,7 @@ The reviewer checkout must be a clone of agent-harness-core, the repository this
 
 `termsFile` is the personal-term list `premerge` reads (`tools/pr-review/README.md`, "Premerge hygiene check"), usually the file the local git config `harness.personalTermsFile` names. `review-merge` runs `premerge` before every merge, so a reviewer entry without it refuses.
 
-`review-merge` serves only agent-harness-core for now. `tools/pr-review/cli.ts` reviews any other repository only with `--policy` (#318), and a reviewer entry here has no field to name that policy file, so a reviewer configured for another repository refuses and nothing merges. That refusal comes from agent-harness-core's own `cli.ts` at the pin, never from code in the other repository.
+`policyFile` is the policy file `tools/pr-review/cli.ts` reads with `--policy` (#318, `tools/pr-review/README.md`, "Other repositories"). The reviewer has agent-harness-core's policy built in and refuses any other repository without one, so `review-merge` passes `--policy` for every repository but agent-harness-core and refuses before anything runs when the entry names no `policyFile`. The name is compared exactly, as the reviewer compares it. Whatever the repository, the reviewer still runs from agent-harness-core's own `cli.ts` at the pin, never from code in the other repository.
 
 ### The key command
 
@@ -92,16 +93,16 @@ A `review-merge` refusal that follows its `review:` line means the App's review 
 `review-merge` waits for CI, runs the App reviewer, and merges only on what the merge rule allows. Its steps, in the order of the header of `tools/publish/review-merge.ts`:
 
 1. The config names an owner identity. This tool's own checkout is clean, cloned from agent-harness-core (a fork's origin refuses, since a fork's default branch is not reviewed code), and at `--tool-head`, and `--tool-head` is agent-harness-core's default branch head, because the code that holds the token and makes the merge decision must be reviewed code.
-2. The config names a reviewer for the repository. With `--allow-admin`, the reason file reads and passes the same text gates as a body. The reviewer checkout holds `tools/pr-review/cli.ts`.
+2. The config names a reviewer for the repository, with a `policyFile` for any repository but agent-harness-core. With `--allow-admin`, the reason file reads and passes the same text gates as a body. The reviewer checkout holds `tools/pr-review/cli.ts`.
 3. The pull request is open, not a draft, from this repository, and into the default branch. Its head is pinned here as the head to review.
-4. Closing keywords in the title, the body and every commit message equal `--closes`. This runs early so a mismatch costs no model run.
+4. Closing keywords in the title, the body and every commit message equal `--closes`. For `--merge`, the merge commit's subject and body, built from the title and body, pass the identity, session-link and attribution scan that a published body passes. Both run early so a refusal costs no model run.
 5. `gh pr checks --watch` runs, bounded by `--checks-timeout-min`. Then every check must have succeeded on the pinned head, which must not have moved.
 6. The reviewer checkout must be cloned from agent-harness-core, never from the repository under review, and be clean and at exactly `--tool-head`. It is never fetched or moved here.
-7. The reviewer runs from the work directory, outside every checkout, with the key piped from the configured key command, `--expect-head` pinned, `--post` and `--json`.
+7. The reviewer runs from the work directory, outside every checkout, with the key piped from the configured key command, `--expect-head` pinned, `--post`, `--json` and, for any repository but agent-harness-core, `--policy`.
 8. The pull request is read again, waiting out an `UNKNOWN` merge state, and the closing-keyword audit repeats. With `--allow-admin`, what the bypass needs is read next: `.github/CODEOWNERS` at the default branch head (the base, never the pull request's head, which the pull request could edit), the whole changed-file list, the pull request's reviews, and the default branch's active rules. Then the merge rule rules.
 9. `premerge` runs from the reviewer checkout on the pinned head, with `--closes`, the owner identity and the configured `termsFile`, and must print `PREMERGE OK` for this pull request and head. It checks what the diff does not carry: closing references GitHub links outside the text, every commit's author and committer, and personal terms in commit messages, title and body. Its channel lines are logged. CONTRIBUTING.md requires it for a bypass merge, and it runs before every merge here.
 10. For an administrator-bypass merge, the reason is posted as a pull request comment first.
-11. The title and body are read once more and must equal the ones step 8 audited, or nothing is merged. Then `gh pr merge` runs with `--match-head-commit` and, for `--merge`, an explicit `--subject` and body built from that audited title and body, so the merge commit never carries GitHub's default message built from whatever the pull request says at merge time.
+11. The title and body are read once more and must equal the ones step 8 audited, or nothing is merged. For `--merge`, the merge commit's subject and body pass the step 4 scan again on this last read, because they are written into the default branch's history, where no push hook sees a commit GitHub writes and only a history rewrite removes them. Then `gh pr merge` runs with `--match-head-commit` and, for `--merge`, an explicit `--subject` and body built from that audited title and body, so the merge commit never carries GitHub's default message built from whatever the pull request says at merge time.
 12. The merge is confirmed, and the issues GitHub links the merged pull request to close (`closingIssuesReferences`) must be exactly `--closes`. A mismatch, or a list that cannot be read, exits 1 with a message naming the merge commit: the merge has already happened, so the tool reports it and undoes nothing.
 
 The merge rule, from the header of `tools/publish/merge-decision.ts`, is a pure function of the reviewer's `--json` output and the pull request's state, which under `--allow-admin` includes CODEOWNERS at the base commit, the changed files, the reviews and the base branch's rules. No model prose is parsed. A pull request merges only on the App's `APPROVE` with passing verification, in one of two cases and no other:

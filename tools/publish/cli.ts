@@ -5,16 +5,11 @@
 //
 //   bun --cwd <home>/.claude-publish/work <absolute path>/tools/publish/cli.ts <command> ...
 //
-// UNWIRED at this commit: nothing in this repository invokes it yet, and agents can still reach gh
-// directly. Part 4 of #274 wires it, with the publish skill (core/claude/skills/publish/SKILL.md)
-// that sends agents to the invocation above and tools/publish/README.md for the config, and with
-// Install-Harness.ps1 merging core/claude/templates/settings.permissions.json into each project's
-// .claude/settings.json. Registration as part 4 lands it, the same rules for PowerShell(...):
-//
-//   "permissions": { "deny": [
-//     "Bash(gh pr create *)", "Bash(gh issue create *)", "Bash(gh pr merge *)",
-//     "Bash(gh pr * create *)", "Bash(gh issue * create *)", "Bash(gh pr * merge *)",
-//     "Bash(gh alias set *)" ] }
+// Wired by the publish skill (core/claude/skills/publish/SKILL.md), which sends agents to the
+// invocation above, and by Install-Harness.ps1, which merges
+// core/claude/templates/settings.permissions.json into each project's .claude/settings.json to deny
+// raw gh pr create, gh issue create, gh pr merge and gh alias set. tools/publish/README.md covers
+// the config and every gate.
 //
 // BUN-CWD: Bun loads bunfig.toml and .env files from the working directory before any code runs,
 // and `bun --cwd <dir>` moves that load to <dir> (measured on Bun 1.3.14: a preload and a .env in
