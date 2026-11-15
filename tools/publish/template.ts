@@ -91,7 +91,8 @@ function visibleProse(text: string): string {
     previous = current;
     current = stripMarkupOnce(previous);
   } while (current !== previous);
-  return current;
+  // Angle brackets are neither letters nor numbers, so dropping any left over changes no verdict.
+  return current.replace(/[<>]/g, "");
 }
 
 function stripMarkupOnce(text: string): string {
