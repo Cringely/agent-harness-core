@@ -52,8 +52,9 @@
 //      exactly --closes. A mismatch is an error naming the merge: it has already happened, so the
 //      tool reports it rather than claiming anything was undone
 //
-// Step 7 is the first GitHub write: the reviewer posts its review. Anything that stops the run from
-// there on, a refusal or an error, is an AfterWriteError (exit 4) naming every write so far (the
+// Step 7 is the first GitHub write: the reviewer posts its review. Once it has run with --post and not
+// refused (exit 2), anything that stops the run, a refusal, an error, unreadable reviewer output or an
+// unexpected throw, is an AfterWriteError (exit 4) naming every write so far (the
 // review, the bypass reason comment, the merge), never a PublishRefusal, whose exit 2 says nothing
 // new was published.
 //
@@ -251,7 +252,12 @@ function assertToolCurrent(ctx: ReviewMergeContext, gh: Gh, owner: OwnerIdentity
   }
 }
 
-async function runReviewer(ctx: ReviewMergeContext, reviewer: ReviewerConfig, cli: string, repo: string, pr: number, head: string): Promise<ReviewResult> {
+// The reviewer's contract (tools/pr-review/README.md): exit 2 is a refusal with nothing posted, and
+// a --post run that ends any other way, exit 0, exit 1 or killed at its timeout, may have posted a
+// review. So this refuses only where nothing can have been posted: neither process started, or the
+// reviewer exited 2. Every other end is handed back, with the reason it cannot proceed, for
+// reviewMerge to report as a stop after a write.
+async function runReviewer(ctx: ReviewMergeContext, reviewer: ReviewerConfig, cli: string, repo: string, pr: number, head: string): Promise<{ stdout: string; failure: string | null }> {
   const policy = reviewerPolicyArgs(repo, reviewer);
   const run = await ctx.runner.runPiped(
     { argv: reviewer.keyCommand, cwd: ctx.workDir, env: childEnv(ctx.env, reviewer.keyCommandEnv) },
@@ -264,11 +270,8 @@ async function runReviewer(ctx: ReviewMergeContext, reviewer: ReviewerConfig, cl
   );
   if (run.producerSpawnError) throw new PublishRefusal("the configured key command could not be started");
   if (run.consumer.spawnError) throw new PublishRefusal("bun could not start the reviewer");
-  if (run.consumer.timedOut) {
-    throw new PublishError("the reviewer did not finish in time. Check the pull request for a posted review before running again");
-  }
-  if (run.producerCode !== 0) throw new PublishRefusal("the configured key command failed. Nothing was merged");
-  if (run.consumer.code === 2) {
+  if (!run.consumer.timedOut && run.consumer.code === 2) {
+    if (run.producerCode !== 0) throw new PublishRefusal("the configured key command failed. Nothing was merged");
     let detail = "";
     try {
       const parsed = JSON.parse(run.consumer.stdout) as { refusal?: unknown };
@@ -278,10 +281,11 @@ async function runReviewer(ctx: ReviewMergeContext, reviewer: ReviewerConfig, cl
     }
     throw new PublishRefusal(`the reviewer refused${detail}. Nothing was merged`);
   }
-  if (run.consumer.code !== 0) {
-    throw new PublishError("the reviewer exited with an error. A review may already have been posted, so check the pull request before running again");
-  }
-  return parseReviewOutput(run.consumer.stdout);
+  const check = "Check the pull request for a posted review before running again";
+  if (run.consumer.timedOut) return { stdout: "", failure: `the reviewer did not finish in time. ${check}` };
+  if (run.consumer.code !== 0) return { stdout: "", failure: `the reviewer exited with an error. ${check}` };
+  if (run.producerCode !== 0) return { stdout: "", failure: `the configured key command failed after the reviewer exited 0. ${check}` };
+  return { stdout: run.consumer.stdout, failure: null };
 }
 
 // Runs premerge from the reviewer checkout, which assertReviewerPinned found clean at --tool-head,
@@ -389,13 +393,17 @@ export async function reviewMerge(ctx: ReviewMergeContext, args: ReviewMergeArgs
   }
 
   assertReviewerPinned(ctx, gh, owner, reviewer, args.toolHead);
-  const review = await runReviewer(ctx, reviewer, cli, args.repo, args.pr, head);
-  ctx.log(`review: status=${enumText(review.status)} event=${enumText(review.event)} findings=${review.severities.length}`);
-  // The reviewer ran with --post, so from here GitHub holds something this run wrote, and a refusal
-  // exit (2, nothing new published) would be false. Every write is recorded as it lands, and
-  // whatever stops the run after the first one leaves as an AfterWriteError naming them (exit 4).
-  const written: string[] = [review.postedUrl === null ? `an App review may be posted on #${args.pr}` : `the App review on #${args.pr}`];
+  const reviewed = await runReviewer(ctx, reviewer, cli, args.repo, args.pr, head);
+  // The reviewer ran with --post and did not refuse, so from here GitHub may hold a review this run
+  // wrote, and a refusal exit (2, nothing new published) would be false. Every stop from here,
+  // reading the reviewer's output included, leaves as an AfterWriteError naming the writes (exit 4).
+  // Each write is recorded as it lands.
+  const written: string[] = [`an App review may be posted on #${args.pr}`];
   try {
+    if (reviewed.failure !== null) throw new PublishError(reviewed.failure);
+    const review = parseReviewOutput(reviewed.stdout);
+    if (review.postedUrl !== null) written[0] = `the App review on #${args.pr}`;
+    ctx.log(`review: status=${enumText(review.status)} event=${enumText(review.event)} findings=${review.severities.length}`);
     return await afterReview(ctx, gh, owner, reviewer, cli, args, defaultBranch, head, review, adminReason, written);
   } catch (error) {
     if (error instanceof PublishRefusal || error instanceof PublishError) throw new AfterWriteError(written, error.message);

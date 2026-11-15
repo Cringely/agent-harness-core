@@ -94,7 +94,7 @@ describe("parseCommand()", () => {
 });
 
 describe("assertNeutralCwd()", () => {
-  test("passes in the empty work directory outside any work tree", () => {
+  test("passes in a work directory with no bunfig.toml or .env, outside any work tree", () => {
     expect(() => assertNeutralCwd(WORK, WORK, new FakeRunner([NOT_A_REPO]), {})).not.toThrow();
   });
 

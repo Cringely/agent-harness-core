@@ -19,7 +19,8 @@
 // and `bun --cwd <dir>` moves that load to <dir> (measured on Bun 1.3.14: a preload and a .env in
 // the launch directory both stayed unloaded under --cwd). This process holds a GitHub token and,
 // for review-merge, streams the reviewer App's key, so it refuses to run anywhere but the
-// dedicated, empty work directory, outside every git work tree. A run started without --cwd from
+// dedicated work directory, which must hold no bunfig.toml or .env file and sit outside every git
+// work tree. A run started without --cwd from
 // inside a checkout has already loaded that checkout's config by the time this check refuses,
 // which is why the documented invocation always carries --cwd.
 //
@@ -206,7 +207,7 @@ export function assertNeutralCwd(cwd: string, workDir: string, runner: Runner, e
       "run this tool as bun --cwd <home>/.claude-publish/work <path>/tools/publish/cli.ts: it holds credentials, and Bun loads bunfig.toml and .env files from the working directory",
     );
   }
-  if (cwdHasAutoloadFile(cwd)) throw new PublishRefusal("the work directory holds a bunfig.toml or .env file. Empty it");
+  if (cwdHasAutoloadFile(cwd)) throw new PublishRefusal("the work directory holds a bunfig.toml or .env file, and it must hold neither. Remove them");
   const probe = runner.run(["git", "-C", cwd, "rev-parse", "--is-inside-work-tree"], { env: probeEnv(env) });
   if (probe.spawnError) throw new PublishRefusal("git is not on PATH");
   // Only git's own answer after searching every parent proves the directory is outside every work
