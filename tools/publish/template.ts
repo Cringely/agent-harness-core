@@ -34,14 +34,18 @@
 // because every CommonMark construct it approximates is a place a heading can hide. After a
 // byte-order mark is stripped and CRLF and lone CR become LF, every template line is one of these:
 //   - blank
-//   - a column-0 ATX heading: 1 to 6 "#", one space, then text holding no "<"
+//   - a column-0 ATX heading: 1 to 6 "#", one space, then text
 //   - part of an HTML comment that opens at column 0 with "<!--" and whose first "-->" ends a
-//     line, with nothing else on the opening or closing line
-//   - YAML front matter fenced by "---" lines at the very top
+//     line, with nothing else on the opening or closing line, and whose body holds neither
+//     "--!>" (where HTML5 also ends a comment) nor a second "<!--"
+//   - YAML front matter fenced by "---" lines at the very top, with no line in it starting with
+//     "#"
 //   - a prose line starting with a letter, number, backtick, quote mark or "(", or with a list
 //     marker ("-", "*", "+", or digits and "." or ")"), a space, then one of those or "["
-// A template holding any other line, such as one starting with an HTML tag, a blockquote marker,
-// leading whitespace, a pipe, a fence or a setext underline, refuses with PublishRefusal. The
+// Outside a comment and front matter, no line may hold "<" or ">" anywhere, because GitHub
+// renders raw HTML mid-line, a heading tag included. A template holding any other line, such as
+// one starting with an HTML tag, a blockquote marker, leading whitespace, a pipe, a fence or a
+// setext underline, refuses with PublishRefusal. The
 // grammar is drawn so that a line is a heading in GitHub's rendering when and only when it is a
 // heading here, so no template section goes unrequired. Body text is read as described above, so
 // in a body an indented ATX heading or a setext heading is neither a section nor content.
@@ -270,6 +274,7 @@ const LIST_MARKER_RE = /^(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)/;
 const FENCE_RE = /^`{3,}/;
 const COMMENT_OPEN = "<!--";
 const COMMENT_CLOSE = "-->";
+const COMMENT_ALT_CLOSE = "--!>";
 
 function refuseLine(lineNumber: number, what: string): never {
   throw new PublishRefusal(
@@ -286,7 +291,11 @@ export function templateSections(template: string): TemplateSection[] {
   let i = 0;
   if (lines.length > 0 && FRONT_MATTER_FENCE_RE.test(lines[0]!)) {
     i = 1;
-    while (i < lines.length && !FRONT_MATTER_FENCE_RE.test(lines[i]!)) i++;
+    while (i < lines.length && !FRONT_MATTER_FENCE_RE.test(lines[i]!)) {
+      // Where front matter is not stripped, GitHub renders a "#" line in it as a heading.
+      if (lines[i]!.startsWith("#")) refuseLine(i + 1, 'a front matter line starting with "#"');
+      i++;
+    }
     if (i === lines.length) refuseLine(1, "front matter that never closes");
     i++;
   }
@@ -306,13 +315,23 @@ export function templateSections(template: string): TemplateSection[] {
       if (j === i && at < COMMENT_OPEN.length) refuseLine(n, "an HTML comment closed inside its own opener");
       if (closing.slice(at + COMMENT_CLOSE.length).trim() !== "")
         refuseLine(j + 1, "an HTML comment with text after its close");
+      // HTML5 also ends a comment at "--!>", and a nested opener invites the same confusion over
+      // where it ends, so a body holding either could show text as rendered markup.
+      const body =
+        j === i
+          ? line.slice(COMMENT_OPEN.length, at)
+          : [line.slice(COMMENT_OPEN.length), ...lines.slice(i + 1, j), closing.slice(0, at)].join("\n");
+      if (body.includes(COMMENT_ALT_CLOSE)) refuseLine(n, 'an HTML comment holding "--!>"');
+      if (body.includes(COMMENT_OPEN)) refuseLine(n, "an HTML comment holding a second opener");
       i = j;
       continue;
     }
+    // GitHub renders raw HTML anywhere in a line, a heading tag included, so outside a comment no
+    // template line may hold an angle bracket.
+    if (/[<>]/.test(line)) refuseLine(n, "a line holding an angle bracket");
     const heading = TEMPLATE_HEADING_RE.exec(line);
     if (heading) {
       const text = heading[2]!.replace(/[ \t]+#+[ \t]*$/, "").replace(/^#+[ \t]*$/, "");
-      if (text.includes("<")) refuseLine(n, "a heading holding markup");
       const key = headingKey(text);
       if (key === "") refuseLine(n, "an empty heading");
       sections.push({ level: heading[1]!.length, key });
