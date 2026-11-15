@@ -2,6 +2,7 @@
 // PR or issue template.
 
 import { describe, expect, test } from "bun:test";
+import { PublishRefusal } from "../tools/publish/errors";
 import { templateSections, unfilledSections } from "../tools/publish/template";
 
 const TEMPLATE = [
@@ -219,5 +220,73 @@ describe("unfilledSections()", () => {
   test("an HTML block of any tag runs to a blank line, and a heading after that counts", () => {
     expect(unfilledSections(AB, "## A\n<div>\n## B\nfiller\n\n## B\n")).toEqual([2]);
     expect(unfilledSections(AB, "## A\n<div>x</div>\n\n## B\nok\n")).toEqual([]);
+  });
+});
+
+describe("template heading subset", () => {
+  // GitHub renders each of these as a heading. The gate reads only a column-0 "#" heading as a
+  // section, so a template holding any of them refuses rather than dropping that section.
+  const refused: Array<[string, string]> = [
+    ["an ATX heading indented one space", "## Source\n\n #  Testing\n"],
+    ["an ATX heading indented three spaces", "## Source\n\n   ## Testing\n"],
+    ["a setext heading underlined with =", "## Source\n\nTesting\n=======\n"],
+    ["a setext heading underlined with -", "## Source\n\nTesting\n-------\n"],
+    ["an indented setext underline with trailing spaces", "Testing\n   ---  \n"],
+    ["a setext underline under a two-line paragraph", "Testing\nmore\n-\n"],
+    ["a template written only in setext headings", "Source\n======\n\nTesting\n------\n"],
+  ];
+  for (const [name, template] of refused) {
+    test(`refuses ${name}`, () => {
+      expect(() => templateSections(template)).toThrow(PublishRefusal);
+      expect(() => unfilledSections(template, "## Source\n\nx\n\n## Testing\n\ny\n")).toThrow(PublishRefusal);
+    });
+  }
+
+  const accepted: Array<[string, string, number]> = [
+    ["a thematic break after a blank line", "## Source\n\ntext\n\n---\n\n## Testing\n", 2],
+    ["a thematic break directly under a heading", "## Source\n---\n## Testing\n", 2],
+    ["heading forms inside a fence", "## Source\n\n```\n   ## Testing\nTesting\n---\n```\n", 1],
+    ["heading forms inside a closed comment", "## Source\n<!--\n   ## Testing\nTesting\n---\n-->\n", 1],
+    ["an ATX heading indented four spaces, which is code", "## Source\n\n    ## Testing\n", 1],
+  ];
+  for (const [name, template, count] of accepted) {
+    test(`accepts ${name}`, () => {
+      expect(templateSections(template)).toHaveLength(count);
+    });
+  }
+
+  test("accepts every template this repository ships", () => {
+    const dir = new URL("../.github/ISSUE_TEMPLATE/", import.meta.url);
+    const fs = require("node:fs") as typeof import("node:fs");
+    const files = fs.readdirSync(dir).filter((f: string) => f.toLowerCase().endsWith(".md"));
+    expect(files.length).toBeGreaterThan(0);
+    for (const file of files) {
+      expect(templateSections(fs.readFileSync(new URL(file, dir), "utf8")).length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("body headings outside the subset", () => {
+  const TWO = "## Source\n\n## Testing\n";
+
+  test("an indented ATX heading in the body is not the section it names", () => {
+    expect(unfilledSections(TWO, "## Source\n\npath\n\n   ## Testing\n\nran it\n")).toEqual([2]);
+  });
+
+  test("a setext heading in the body is not the section it names", () => {
+    expect(unfilledSections(TWO, "## Source\n\npath\n\nTesting\n-------\n\nran it\n")).toEqual([2]);
+    expect(unfilledSections(TWO, "## Source\n\npath\n\nTesting\n=======\n\nran it\n")).toEqual([2]);
+  });
+
+  test("an indented ATX heading does not fill the section above it", () => {
+    expect(unfilledSections(TWO, "## Source\n\n   ### Notes\n\n## Testing\n\nran it\n")).toEqual([1]);
+  });
+
+  test("a setext heading's text does not fill the section above it", () => {
+    expect(unfilledSections(TWO, "## Source\nNotes\nand more\n---\n\n## Testing\n\nran it\n")).toEqual([1]);
+  });
+
+  test("a thematic break after a blank line leaves the paragraph above it as content", () => {
+    expect(unfilledSections(TWO, "## Source\n\npath\n\n---\n\n## Testing\n\nran it\n")).toEqual([]);
   });
 });

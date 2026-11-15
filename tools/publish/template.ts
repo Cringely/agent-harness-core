@@ -30,7 +30,15 @@
 // one body section never fills two template sections. The template's own instruction comments are
 // stripped first, so leaving them in place does not count as filling the section.
 //
+// Headings are a literal subset of what GitHub renders: only an ATX heading starting at column 0
+// is a section. A template holding a line that CommonMark could read as any other heading, an ATX
+// heading indented 1 to 3 spaces or a setext underline under a paragraph line, refuses with
+// PublishRefusal, so no template section goes unrequired. In a body those forms are neither a
+// section nor content.
+//
 // Only section indexes come back, never heading or body text.
+
+import { PublishRefusal } from "./errors";
 
 export interface TemplateSection {
   level: number;
@@ -45,6 +53,10 @@ interface Line {
 }
 
 const HEADING_RE = /^(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$/;
+// Heading forms outside the subset. Four spaces or more is indented code, not a heading.
+const INDENTED_ATX_RE = /^ {1,3}#{1,6}(?:[ \t]|$)/;
+const SETEXT_UNDERLINE_RE = /^ {0,3}(?:=+|-+)[ \t]*$/;
+const INDENTED_CODE_RE = /^(?: {4}|\t)/;
 // CommonMark fences: a backtick info string holds no backtick, and a closing fence repeats the
 // opening character at least as many times with nothing after it but spaces and tabs.
 const FENCE_OPEN_RE = /^ {0,3}(`{3,}(?=[^`]*$)|~{3,})/;
@@ -156,9 +168,17 @@ function outsideComments(raw: string, state: { open: boolean }): string {
 
 // Each line's heading, if any, and the text it shows. Text is empty for a fence line, for a line
 // hidden by a comment, and for every line of a fence that never closes. Lines of a closed fence
-// carry code: true. No line inside an HTML block is a heading.
-function splitLines(text: string, readComments = true): Line[] {
+// carry code: true. No line inside an HTML block is a heading. A heading outside the subset
+// throws when `strict` is set (the template), and otherwise shows no text (the body).
+function splitLines(text: string, readComments = true, strict = false): Line[] {
   const out: Line[] = [];
+  // Index of the first line of the open paragraph, or -1 when none is open.
+  let paragraph = -1;
+  const outsideSubset = (lineNumber: number): never => {
+    throw new PublishRefusal(
+      `the template's line ${lineNumber} is a heading form this tool does not read: only a "#" heading starting at column 0 is a section`,
+    );
+  };
   const comment = { open: false };
   let fence: { mark: string; length: number; first: number } | null = null;
   let html: HtmlBlock | null = null;
@@ -179,6 +199,7 @@ function splitLines(text: string, readComments = true): Line[] {
     if (html !== null) {
       if ("blank" in html && raw.trim() === "") {
         html = null;
+        paragraph = -1;
       } else {
         out.push({ heading: null, text: readComments ? outsideComments(raw, comment) : raw, code: false });
         if ("end" in html && html.end.test(raw)) html = null;
@@ -188,6 +209,7 @@ function splitLines(text: string, readComments = true): Line[] {
     // An info string is not parsed for comments, so a fence opens even with "<!--" after it.
     const open = startsInComment ? null : FENCE_OPEN_RE.exec(raw);
     if (open) {
+      paragraph = -1;
       fence = { mark: open[1]![0]!, length: open[1]!.length, first: out.length + 1 };
       out.push({ heading: null, text: "", code: false });
       continue;
@@ -195,6 +217,7 @@ function splitLines(text: string, readComments = true): Line[] {
     const block = startsInComment || /^ {0,3}<!--/.test(raw) ? null : htmlBlockStart(raw);
     const visible = readComments ? outsideComments(raw, comment) : raw;
     if (block) {
+      paragraph = -1;
       out.push({ heading: null, text: visible, code: false });
       // A block whose end marker follows its opening tag on the same line closes there. The tag is
       // cut first so that "<pre>" does not read as its own end and "<?" as a "?>".
@@ -202,8 +225,28 @@ function splitLines(text: string, readComments = true): Line[] {
       if (!("end" in block && block.end.test(afterStart))) html = block;
       continue;
     }
+    if (visible.trim() === "") {
+      paragraph = -1;
+      out.push({ heading: null, text: visible, code: false });
+      continue;
+    }
+    if (!startsInComment && INDENTED_ATX_RE.test(visible)) {
+      if (strict) outsideSubset(out.length + 1);
+      paragraph = -1;
+      out.push({ heading: null, text: "", code: false });
+      continue;
+    }
+    if (!startsInComment && paragraph !== -1 && SETEXT_UNDERLINE_RE.test(visible)) {
+      if (strict) outsideSubset(out.length + 1);
+      for (let i = paragraph; i < out.length; i++) out[i]!.text = "";
+      paragraph = -1;
+      out.push({ heading: null, text: "", code: false });
+      continue;
+    }
     const heading = startsInComment ? null : HEADING_RE.exec(visible);
     const key = heading ? headingKey(heading[2]!) : "";
+    if (heading) paragraph = -1;
+    else if (paragraph === -1 && !INDENTED_CODE_RE.test(visible)) paragraph = out.length;
     out.push({ heading: heading && key !== "" ? { level: heading[1]!.length, key } : null, text: visible, code: false });
   }
   if (fence !== null)
@@ -217,7 +260,7 @@ function splitLines(text: string, readComments = true): Line[] {
 export function templateSections(template: string): TemplateSection[] {
   // Only closed template comments are removed. One left open hides no later template heading, so
   // every heading outside a closed comment stays a required section.
-  return splitLines(stripComments(stripFrontMatter(template)), false).flatMap((line) => (line.heading ? [line.heading] : []));
+  return splitLines(stripComments(stripFrontMatter(template)), false, true).flatMap((line) => (line.heading ? [line.heading] : []));
 }
 
 // 1-based indexes of the template's sections that the body lacks or leaves empty.
