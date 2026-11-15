@@ -54,7 +54,7 @@ export class FakeRunner implements Runner {
 }
 
 // The read-side gh answers a healthy repository gives: a token, a default branch "main", both
-// branches present, and no templates anywhere.
+// branches present, and no repository files anywhere.
 export function healthyRepo(): Responder[] {
   return [
     on(["gh", "auth", "token", "-u", "fixture-owner"], { stdout: "fake-token\n" }),

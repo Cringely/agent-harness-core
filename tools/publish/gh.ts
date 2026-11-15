@@ -6,7 +6,7 @@
 // token for the account, is a refusal.
 //
 // Read failures are PublishError (exit 1). A 404 on a lookup that can legitimately be absent (a
-// template, a branch) is reported as null instead. Titles and bodies go to gh as `--title=<value>`
+// file, a branch) is reported as null instead. Titles and bodies go to gh as `--title=<value>`
 // and on stdin through `--body-file -`, so a value starting with "-" is never read as a flag and a
 // body is never written to a temp file between the scan and the publish.
 
@@ -40,7 +40,6 @@ const PR_FIELDS = "number,state,isDraft,baseRefName,headRefName,headRefOid,isCro
 const PR_URL_RE = /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+$/;
 const ISSUE_URL_RE = /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/issues\/\d+$/;
 const NOT_FOUND_RE = /HTTP 404/;
-const LEADING_BOM_RE = new RegExp("^" + String.fromCharCode(0xfeff));
 export const BRANCH_RE = /^[A-Za-z0-9._/-]+$/;
 
 const REVIEWS_QUERY =
@@ -119,64 +118,13 @@ export class Gh {
     return sha;
   }
 
-  fileAt(repo: string, path: string, ref: string, what = "reading a template file"): string | null {
+  fileAt(repo: string, path: string, ref: string, what: string): string | null {
     const result = this.call(["api", "-H", "Accept: application/vnd.github.raw", `repos/${repo}/contents/${path}?ref=${encodeURIComponent(ref)}`]);
     if (result.code !== 0) {
       if (NOT_FOUND_RE.test(result.stderr)) return null;
       throw new PublishError(`gh failed while ${what}`);
     }
     return result.stdout;
-  }
-
-  listFiles(repo: string, dir: string, ref: string): string[] | null {
-    const path = dir === "" ? "" : `/${dir}`;
-    const result = this.call(["api", `repos/${repo}/contents${path}?ref=${encodeURIComponent(ref)}`, "--jq", '.[] | select(.type == "file") | .name']);
-    if (result.code !== 0) {
-      if (NOT_FOUND_RE.test(result.stderr)) return null;
-      throw new PublishError("gh failed while listing template locations");
-    }
-    return result.stdout.split(/\r?\n/).map((line) => line.trim()).filter((line) => line !== "");
-  }
-
-  // GitHub's three single-template locations, .github first.
-  prTemplate(repo: string, ref: string): string | null {
-    for (const dir of [".github", "", "docs"]) {
-      const name = this.listFiles(repo, dir, ref)?.find((file) => file.toLowerCase() === "pull_request_template.md");
-      if (name === undefined) continue;
-      const text = this.fileAt(repo, dir === "" ? name : `${dir}/${name}`, ref);
-      if (text === null) throw new PublishError("the pull request template disappeared while it was being read");
-      return text;
-    }
-    return null;
-  }
-
-  issueTemplate(repo: string, ref: string, name: string): string {
-    if (!/^[A-Za-z0-9._-]+\.md$/i.test(name)) {
-      throw new PublishRefusal("--template must name a Markdown file in .github/ISSUE_TEMPLATE. Issue forms are not supported");
-    }
-    const text = this.fileAt(repo, `.github/ISSUE_TEMPLATE/${name}`, ref);
-    if (text === null) throw new PublishRefusal("the named issue template does not exist on the default branch");
-    return text;
-  }
-
-  blankIssuesDisabled(repo: string, ref: string): boolean {
-    for (const name of ["config.yml", "config.yaml"]) {
-      const text = this.fileAt(repo, `.github/ISSUE_TEMPLATE/${name}`, ref);
-      if (text === null) continue;
-      // Fail closed: blank issues count as enabled only when every line naming the key, in any
-      // case, is the plain top-level form "blank_issues_enabled: <value>" with a YAML true value,
-      // in any case, quoted or not. A present key with any other value (False, no, off, "false")
-      // disables, and so does any other line naming it, such as a quoted key, a space before the
-      // colon or a flow mapping, because GitHub's YAML parser may read that form as false. A
-      // leading byte-order mark (Windows PowerShell 5.1's Set-Content writes one) is stripped
-      // first so that it does not hide a first-line key.
-      const lines = text.replace(LEADING_BOM_RE, "").split(/\r?\n|\r/).filter((line) => /blank_issues_enabled/i.test(line));
-      return lines.some((line) => {
-        const value = /^blank_issues_enabled:[ \t]*(.*?)[ \t]*(?:#.*)?$/.exec(line)?.[1];
-        return value === undefined || !/^(["']?)(true|yes|on|y)\1$/i.test(value);
-      });
-    }
-    return false;
   }
 
   prView(repo: string, pr: number): PrState {

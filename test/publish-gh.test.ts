@@ -55,90 +55,14 @@ describe("lookups", () => {
     expect(runner.calls).toHaveLength(1);
   });
 
-  test("prTemplate finds the file case-insensitively in .github first", () => {
-    const runner = new FakeRunner([
-      TOKEN,
-      on(["gh", "api", `repos/${REPO}/contents/.github?ref=main`], { stdout: "CODEOWNERS\nPULL_REQUEST_TEMPLATE.md\n" }),
-      on(["gh", "api", "-H", "Accept: application/vnd.github.raw", `repos/${REPO}/contents/.github/PULL_REQUEST_TEMPLATE.md?ref=main`], {
-        stdout: "## Summary\n",
-      }),
-    ]);
-    expect(gh(runner).prTemplate(REPO, "main")).toBe("## Summary\n");
-  });
-
-  test("prTemplate returns null when no location holds one", () => {
-    const runner = new FakeRunner([TOKEN, on(["gh", "api"], NOT_FOUND)]);
-    expect(gh(runner).prTemplate(REPO, "main")).toBeNull();
-  });
-
-  test("prTemplate throws when a listing fails for a reason other than absence", () => {
-    const runner = new FakeRunner([TOKEN, on(["gh", "api"], { code: 1, stderr: "HTTP 500" })]);
-    expect(() => gh(runner).prTemplate(REPO, "main")).toThrow(PublishError);
-  });
-
-  test("issueTemplate refuses an issue form without reading it, and a missing file", () => {
-    const form = new FakeRunner([TOKEN, on(["gh", "api"], { stdout: "name: Bug" })]);
-    expect(() => gh(form).issueTemplate(REPO, "main", "bug.yml")).toThrow(PublishRefusal);
-    expect(form.calls).toHaveLength(1);
+  test("fileAt returns the raw file, null on a 404, and throws on any other failure", () => {
+    const path = `repos/${REPO}/contents/.github/CODEOWNERS?ref=main`;
+    const present = new FakeRunner([TOKEN, on(["gh", "api", "-H", "Accept: application/vnd.github.raw", path], { stdout: "* @owner\n" })]);
+    expect(gh(present).fileAt(REPO, ".github/CODEOWNERS", "main", "reading CODEOWNERS")).toBe("* @owner\n");
     const missing = new FakeRunner([TOKEN, on(["gh", "api"], NOT_FOUND)]);
-    expect(() => gh(missing).issueTemplate(REPO, "main", "absent.md")).toThrow(PublishRefusal);
-  });
-
-  test("blankIssuesDisabled reads config.yml", () => {
-    const runner = new FakeRunner([
-      TOKEN,
-      on(["gh", "api", "-H", "Accept: application/vnd.github.raw", `repos/${REPO}/contents/.github/ISSUE_TEMPLATE/config.yml?ref=main`], {
-        stdout: "blank_issues_enabled: false\n",
-      }),
-    ]);
-    expect(gh(runner).blankIssuesDisabled(REPO, "main")).toBe(true);
-  });
-
-  // Fail closed: only a YAML true leaves blank issues enabled, whatever the spelling or quoting.
-  test("blankIssuesDisabled reads any false spelling as disabled and any true spelling as enabled", () => {
-    const answer = (text: string): boolean =>
-      gh(
-        new FakeRunner([
-          TOKEN,
-          on(["gh", "api", "-H", "Accept: application/vnd.github.raw", `repos/${REPO}/contents/.github/ISSUE_TEMPLATE/config.yml?ref=main`], { stdout: text }),
-        ]),
-      ).blankIssuesDisabled(REPO, "main");
-    for (const value of ["False", "FALSE", "no", "off", '"false"', "'false'", "false # on purpose", "nope"]) {
-      expect(answer(`blank_issues_enabled: ${value}\n`)).toBe(true);
-    }
-    for (const value of ["true", "True", "yes", '"true"', "true # default"]) {
-      expect(answer(`blank_issues_enabled: ${value}\n`)).toBe(false);
-    }
-    expect(answer("contact_links: []\n")).toBe(false);
-  });
-
-  // Fail closed: a config naming the key in any form the line grammar does not read counts as
-  // disabling blank issues, since GitHub's YAML parser may read that form as false.
-  test("blankIssuesDisabled reads an unrecognized mention of the key as disabled", () => {
-    const answer = (text: string): boolean =>
-      gh(
-        new FakeRunner([
-          TOKEN,
-          on(["gh", "api", "-H", "Accept: application/vnd.github.raw", `repos/${REPO}/contents/.github/ISSUE_TEMPLATE/config.yml?ref=main`], { stdout: text }),
-        ]),
-      ).blankIssuesDisabled(REPO, "main");
-    const bom = String.fromCharCode(0xfeff);
-    expect(answer(bom + "blank_issues_enabled: false\n")).toBe(true);
-    expect(answer(bom + "blank_issues_enabled: true\n")).toBe(false);
-    for (const text of [
-      "blank_issues_enabled : false\n",
-      "blank_issues_enabled\t: true\n",
-      '"blank_issues_enabled": true\n',
-      "'blank_issues_enabled': true\n",
-      "Blank_Issues_Enabled: true\n",
-      "BLANK_ISSUES_ENABLED: true\n",
-      "{blank_issues_enabled: false}\n",
-      "{ blank_issues_enabled: true }\n",
-      "  blank_issues_enabled: true\n",
-      "blank_issues_enabled: true\nblank_issues_enabled : false\n",
-    ]) {
-      expect(answer(text)).toBe(true);
-    }
+    expect(gh(missing).fileAt(REPO, ".github/CODEOWNERS", "main", "reading CODEOWNERS")).toBeNull();
+    const broken = new FakeRunner([TOKEN, on(["gh", "api"], { code: 1, stderr: "HTTP 502" })]);
+    expect(() => gh(broken).fileAt(REPO, ".github/CODEOWNERS", "main", "reading CODEOWNERS")).toThrow(PublishError);
   });
 });
 
