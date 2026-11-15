@@ -277,6 +277,15 @@ describe("template heading subset", () => {
     ["front matter that never closes", "---\nname: x\n## Source\n"],
     ["front matter not at the very top", "\n---\nname: x\n---\n## Source\n"],
     ["a CR-only template with an inline tag line", "## Source\r<b>x</b>\r## Testing\r"],
+    // GitHub renders a raw HTML heading tag anywhere in a line as an extra heading.
+    ["a heading tag inside a prose line", "Intro text <h2>Hidden</h2> more\n\n## Summary\n"],
+    ["a heading tag inside a list item", "- item <h3>Hidden</h3>\n\n## Summary\n"],
+    ["a closing angle bracket in prose", "## Source\na > b\n"],
+    // HTML5 also ends a comment at "--!>", so whatever follows it on the page renders.
+    ["a comment closed early by --!> on one line", "<!-- x --!> <h2>Hidden</h2> -->\n\n## Summary\n"],
+    ["a comment closed early by --!> over three lines", "<!-- x --!>\n<h2>Hidden</h2>\n-->\n\n## Summary\n"],
+    ["a second comment opener inside a comment", "<!-- x\n<!-- y\n-->\n## Summary\n"],
+    ["a hash line inside front matter", "---\n# Hidden\n---\n## Summary\n"],
   ];
   for (const [name, template] of refused) {
     test(`refuses ${name}`, () => {
