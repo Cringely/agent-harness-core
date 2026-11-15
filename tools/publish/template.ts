@@ -1,17 +1,34 @@
 // Checks a body against a repository's PR or issue template (#274). Every heading in the template
-// is a section the body must carry, by heading text at any level, with text GitHub would show
-// under it. Whitespace, HTML comments (a body comment never closed hides the rest of the body,
-// headings included), fence lines and every line of a fence that never closes do not count. A
-// closed fence holding a non-blank line counts, because GitHub shows that line as code. A body
-// section ends at the next heading at its own level or above, and also at the next heading that
-// names any template section other than one nested under it in the template. Body heading depth
-// is the author's choice, so without that second boundary a body using a shallower heading would
-// swallow the next template section's content and an empty section would read as filled. The nth
-// template section with a given heading matches the nth body heading with that text, so one body
-// section never fills two template sections. The template's own instruction comments are
-// stripped first, so leaving them in place does not count as filling the section. Headings inside
-// fenced code are not headings, and a fence closes only on a line of the same character, at least
-// as long, with nothing after it.
+// is a section the body must carry, by heading text at any level, with something a reader can see
+// under it.
+//
+// Scope: this catches a template section an honest author left unfilled or forgot. It is not a
+// security boundary. Hostile markup crafted to make an empty section look filled is out of scope,
+// because an author who wants past the gate can type filler text anyway.
+//
+// Filled is a positive rule. Once HTML comments, script and style elements, processing
+// instructions, CDATA, declarations, HTML tags, HTML entities, link destinations and link
+// reference definitions are removed, the section must still hold at least one Unicode letter or
+// number (classes L and N). Markdown syntax characters, whitespace, format characters such as the
+// zero-width space, and the Hangul filler letters never count. A closed fence counts when a line in
+// it holds a letter or number, read as written, because GitHub shows that line as code. Fence lines
+// themselves and every line of a fence that never closes do not count. A comment never closed
+// hides the rest of the body, headings included.
+//
+// A heading is a line outside any fence, comment and HTML block. An HTML block approximates
+// CommonMark's start conditions 1 to 7: it starts at a line beginning with an HTML tag, "<?" or
+// "<!", and ends at a blank line, or for pre, textarea, script and style at the line holding the
+// matching close tag, or at the "?>", ">" or "]]>" ending a processing instruction, declaration or
+// CDATA. A fence closes only on a line of the same character, at least as long, with nothing after
+// it.
+//
+// A body section ends at the next heading at its own level or above, and also at the next heading
+// that names any template section other than one nested under it in the template. Body heading
+// depth is the author's choice, so without that second boundary a body using a shallower heading
+// would swallow the next template section's content and an empty section would read as filled.
+// The nth template section with a given heading matches the nth body heading with that text, so
+// one body section never fills two template sections. The template's own instruction comments are
+// stripped first, so leaving them in place does not count as filling the section.
 //
 // Only section indexes come back, never heading or body text.
 
@@ -23,6 +40,8 @@ export interface TemplateSection {
 interface Line {
   heading: TemplateSection | null;
   text: string;
+  // A line inside a closed fence. Its text is read as written, with no markup removed.
+  code: boolean;
 }
 
 const HEADING_RE = /^(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$/;
@@ -30,6 +49,51 @@ const HEADING_RE = /^(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$/;
 // opening character at least as many times with nothing after it but spaces and tabs.
 const FENCE_OPEN_RE = /^ {0,3}(`{3,}(?=[^`]*$)|~{3,})/;
 const FENCE_CLOSE_RE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+
+// HTML block starts, after CommonMark's start conditions. Condition 2, the comment, is read by
+// outsideComments instead. Conditions 6 and 7 merge into any opening or closing tag at the start
+// of a line, which ends at a blank line.
+const HTML_RAW_RE = /^ {0,3}<(pre|script|style|textarea)(?=[\s>]|$)/i;
+const HTML_PI_RE = /^ {0,3}<\?/;
+const HTML_CDATA_RE = /^ {0,3}<!\[CDATA\[/;
+const HTML_DECL_RE = /^ {0,3}<![A-Za-z]/;
+const HTML_TAG_RE = /^ {0,3}<\/?[A-Za-z][A-Za-z0-9-]*(?=[\s/>]|$)/;
+
+type HtmlBlock = { end: RegExp } | { blank: true };
+
+function htmlBlockStart(raw: string): HtmlBlock | null {
+  const rawTag = HTML_RAW_RE.exec(raw);
+  if (rawTag) return { end: new RegExp("</" + rawTag[1] + "[\\s]*>", "i") };
+  if (HTML_PI_RE.test(raw)) return { end: /\?>/ };
+  if (HTML_CDATA_RE.test(raw)) return { end: /\]\]>/ };
+  if (HTML_DECL_RE.test(raw)) return { end: />/ };
+  if (HTML_TAG_RE.test(raw)) return { blank: true };
+  return null;
+}
+
+// Letters the Unicode database classes as L that render as blank space: the Hangul choseong and
+// jungseong fillers, the Hangul filler and the halfwidth Hangul filler.
+const FILLER_RE = new RegExp("[" + String.fromCharCode(0x115f, 0x1160, 0x3164, 0xffa0) + "]", "g");
+const LETTER_OR_NUMBER_RE = /[\p{L}\p{N}]/u;
+
+function hasLetterOrNumber(text: string): boolean {
+  return LETTER_OR_NUMBER_RE.test(text.replace(FILLER_RE, ""));
+}
+
+// Prose with its markup removed, judged only for whether a letter or number is left. Markdown
+// syntax characters need no removal, being neither. An autolink such as "<https://x>" is not a tag
+// here, since a colon follows its first word.
+function visibleProse(text: string): string {
+  return stripComments(text)
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, "")
+    .replace(/<\?[\s\S]*?(?:\?>|$)/g, "")
+    .replace(/<!\[CDATA\[[\s\S]*?(?:\]\]>|$)/g, "")
+    .replace(/<![A-Za-z][^>]*>?/g, "")
+    .replace(/<\/?[A-Za-z][A-Za-z0-9-]*(?:[\s/][^>]*)?>/g, "")
+    .replace(/&(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]*);/g, "")
+    .replace(/^ {0,3}\[[^\]\n]+\]:[ \t]*\S.*$/gm, "")
+    .replace(/\]\([^)\n]*\)/g, "]");
+}
 
 function stripComments(text: string): string {
   // Repeat until nothing changes: one pass over "<!<!---->--" would leave a fresh "<!--" behind.
@@ -79,12 +143,13 @@ function outsideComments(raw: string, state: { open: boolean }): string {
 }
 
 // Each line's heading, if any, and the text it shows. Text is empty for a fence line, for a line
-// hidden by a comment, and for every line of a fence that never closes. A closed fence counts as
-// content when a line in it holds something other than whitespace, since GitHub shows it as code.
+// hidden by a comment, and for every line of a fence that never closes. Lines of a closed fence
+// carry code: true. No line inside an HTML block is a heading.
 function splitLines(text: string, readComments = true): Line[] {
   const out: Line[] = [];
   const comment = { open: false };
   let fence: { mark: string; length: number; first: number } | null = null;
+  let html: HtmlBlock | null = null;
   // A leading byte-order mark (Windows PowerShell 5.1's Set-Content writes one) would otherwise
   // hide a heading on the first line.
   for (const raw of text.replace(/^\uFEFF/, "").split(/\r?\n/)) {
@@ -92,26 +157,48 @@ function splitLines(text: string, readComments = true): Line[] {
       const close = FENCE_CLOSE_RE.exec(raw);
       if (close && close[1]![0] === fence.mark && close[1]!.length >= fence.length) {
         fence = null;
-        out.push({ heading: null, text: "" });
+        out.push({ heading: null, text: "", code: false });
       } else {
-        out.push({ heading: null, text: raw });
+        out.push({ heading: null, text: raw, code: true });
       }
       continue;
     }
     const startsInComment = comment.open;
+    if (html !== null) {
+      if ("blank" in html && raw.trim() === "") {
+        html = null;
+      } else {
+        out.push({ heading: null, text: readComments ? outsideComments(raw, comment) : raw, code: false });
+        if ("end" in html && html.end.test(raw)) html = null;
+        continue;
+      }
+    }
     // An info string is not parsed for comments, so a fence opens even with "<!--" after it.
     const open = startsInComment ? null : FENCE_OPEN_RE.exec(raw);
     if (open) {
       fence = { mark: open[1]![0]!, length: open[1]!.length, first: out.length + 1 };
-      out.push({ heading: null, text: "" });
+      out.push({ heading: null, text: "", code: false });
       continue;
     }
+    const block = startsInComment || /^ {0,3}<!--/.test(raw) ? null : htmlBlockStart(raw);
     const visible = readComments ? outsideComments(raw, comment) : raw;
+    if (block) {
+      out.push({ heading: null, text: visible, code: false });
+      // A block whose end marker follows its opening tag on the same line closes there. The tag is
+      // cut first so that "<pre>" does not read as its own end and "<?" as a "?>".
+      const afterStart = raw.replace(/^ {0,3}<[!?/]?[A-Za-z0-9[]*/, "");
+      if (!("end" in block && block.end.test(afterStart))) html = block;
+      continue;
+    }
     const heading = startsInComment ? null : HEADING_RE.exec(visible);
     const key = heading ? headingKey(heading[2]!) : "";
-    out.push({ heading: heading && key !== "" ? { level: heading[1]!.length, key } : null, text: visible });
+    out.push({ heading: heading && key !== "" ? { level: heading[1]!.length, key } : null, text: visible, code: false });
   }
-  if (fence !== null) for (let i = fence.first; i < out.length; i++) out[i]!.text = "";
+  if (fence !== null)
+    for (let i = fence.first; i < out.length; i++) {
+      out[i]!.text = "";
+      out[i]!.code = false;
+    }
   return out;
 }
 
@@ -148,14 +235,16 @@ export function unfilledSections(template: string, body: string): number[] {
     for (let j = index + 1; j < sections.length && sections[j]!.level > section.level; j++) nested.add(j);
     const stopKeys = new Set(sections.filter((_, j) => !nested.has(j)).map((s) => s.key));
     const level = lines[start]!.heading!.level;
-    let content = "";
+    let prose = "";
+    let code = "";
     for (let i = start + 1; i < lines.length; i++) {
-      const heading = lines[i]!.heading;
-      if (heading && (heading.level <= level || stopKeys.has(heading.key))) break;
-      if (heading) continue;
-      content += lines[i]!.text;
+      const line = lines[i]!;
+      if (line.heading && (line.heading.level <= level || stopKeys.has(line.heading.key))) break;
+      if (line.heading) continue;
+      if (line.code) code += line.text + "\n";
+      else prose += line.text + "\n";
     }
-    if (content.trim() === "") unfilled.push(index + 1);
+    if (!hasLetterOrNumber(code) && !hasLetterOrNumber(visibleProse(prose))) unfilled.push(index + 1);
   });
   return unfilled;
 }
