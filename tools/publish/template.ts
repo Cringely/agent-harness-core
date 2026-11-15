@@ -39,7 +39,8 @@
 //     line, with nothing else on the opening or closing line, and whose body holds neither
 //     "--!>" (where HTML5 also ends a comment) nor a second "<!--"
 //   - YAML front matter fenced by "---" lines at the very top, with no line in it starting with
-//     "#"
+//     "#". Front matter is read as issue-template metadata, which GitHub strips before it renders
+//     the issue, so its lines never count as sections. PR templates carry no front matter.
 //   - a prose line starting with a letter, number, backtick, quote mark or "(", or with a list
 //     marker ("-", "*", "+", or digits and "." or ")"), a space, then one of those or "["
 // Outside a comment and front matter, no line may hold "<" or ">" anywhere, because GitHub
