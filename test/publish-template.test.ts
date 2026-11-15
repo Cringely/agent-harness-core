@@ -163,4 +163,61 @@ describe("unfilledSections()", () => {
     expect(unfilledSections(AB, "## A\n<!--\n-->## B\nx\n")).toEqual([2]);
     expect(unfilledSections(AB, "## A\nx\n<!-- c --> ## B\n")).toEqual([2]);
   });
+
+  // A section is filled only by a letter or number left once markup is removed. Characters are
+  // built from code points so the fixtures hold exactly the bytes named.
+  const ch = (...codes: number[]) => String.fromCharCode(...codes);
+  const EMPTY_CONTENT: [string, string][] = [
+    ["a zero-width space", ch(0x200b)],
+    ["a word joiner", ch(0x2060)],
+    ["a Hangul filler", ch(0x3164)],
+    ["a braille blank", ch(0x2800)],
+    ["a no-break space entity", "&nbsp;"],
+    ["a zero-width space entity", "&#8203;"],
+    ["a hex zero-width space entity", "&#x200B;"],
+    ["a link reference definition", "[ref]: https://example.invalid/page"],
+    ["a lone blockquote marker", ">"],
+    ["a lone list marker", "-"],
+    ["a thematic break", "\n---"],
+    ["a bare heading marker", "###"],
+    ["a heading whose text is only a comment", "### <!-- note -->"],
+    ["a br tag", "<br>"],
+    ["an empty link", "[](https://example.invalid/x)"],
+    ["an empty details element", "<details></details>"],
+    ["a style element", "<style>p { color: red }</style>"],
+    ["a processing instruction", "<?xml version ?>"],
+    ["a CDATA section", "<![CDATA[ hidden ]]>"],
+    ["a declaration", "<!DOCTYPE html>"],
+    ["a closed fence holding only a zero-width space", "```\n" + ch(0x200b) + "\n```"],
+  ];
+  test.each(EMPTY_CONTENT)("a section holding only %s is unfilled", (_name, content) => {
+    expect(unfilledSections(AB, "## A\n" + content + "\n\n## B\nok\n")).toEqual([1]);
+  });
+
+  const REAL_CONTENT: [string, string][] = [
+    ["a word", "ok"],
+    ["a number", "42"],
+    ["a non-Latin word", ch(0x6e2c, 0x8a66)],
+    ["a closed fence with a letter", "```\nx\n```"],
+    ["an autolink", "<https://example.invalid/x>"],
+    ["a link with text", "[docs](https://example.invalid/x)"],
+    ["text inside a details element", "<details><summary>Log</summary></details>"],
+  ];
+  test.each(REAL_CONTENT)("a section holding %s is filled", (_name, content) => {
+    expect(unfilledSections(AB, "## A\n" + content + "\n\n## B\nok\n")).toEqual([]);
+  });
+
+  test.each(["pre", "textarea"])("a heading inside an HTML %s block is not a heading", (tag) => {
+    const body = "## A\nsee below\n<" + tag + ">\n## B\nfiller\n</" + tag + ">\n\n## B\n";
+    expect(unfilledSections(AB, body)).toEqual([2]);
+  });
+
+  test("a pre block runs past a blank line to its close tag", () => {
+    expect(unfilledSections(AB, "## A\nsee below\n<pre>\n\n## B\nfiller\n</pre>\n\n## B\n")).toEqual([2]);
+  });
+
+  test("an HTML block of any tag runs to a blank line, and a heading after that counts", () => {
+    expect(unfilledSections(AB, "## A\n<div>\n## B\nfiller\n\n## B\n")).toEqual([2]);
+    expect(unfilledSections(AB, "## A\n<div>x</div>\n\n## B\nok\n")).toEqual([]);
+  });
 });
