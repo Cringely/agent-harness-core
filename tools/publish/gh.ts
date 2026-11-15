@@ -60,6 +60,7 @@ const PR_FIELDS = "number,state,isDraft,baseRefName,headRefName,headRefOid,isCro
 const PR_URL_RE = /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+$/;
 const ISSUE_URL_RE = /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/issues\/\d+$/;
 const NOT_FOUND_RE = /HTTP 404/;
+const LEADING_BOM_RE = new RegExp("^" + String.fromCharCode(0xfeff));
 export const BRANCH_RE = /^[A-Za-z0-9._/-]+$/;
 
 const REVIEWS_QUERY =
@@ -182,10 +183,18 @@ export class Gh {
     for (const name of ["config.yml", "config.yaml"]) {
       const text = this.fileAt(repo, `.github/ISSUE_TEMPLATE/${name}`, ref);
       if (text === null) continue;
-      // Fail closed: blank issues count as enabled only when the key reads as a YAML true, in any
-      // case, quoted or not. A present key with any other value (False, no, off, "false") disables.
-      const value = /^blank_issues_enabled:[ \t]*(.*?)[ \t]*(?:#.*)?\r?$/m.exec(text)?.[1];
-      return value !== undefined && !/^(["']?)(true|yes|on|y)\1$/i.test(value);
+      // Fail closed: blank issues count as enabled only when every line naming the key, in any
+      // case, is the plain top-level form "blank_issues_enabled: <value>" with a YAML true value,
+      // in any case, quoted or not. A present key with any other value (False, no, off, "false")
+      // disables, and so does any other line naming it, such as a quoted key, a space before the
+      // colon or a flow mapping, because GitHub's YAML parser may read that form as false. A
+      // leading byte-order mark (Windows PowerShell 5.1's Set-Content writes one) is stripped
+      // first so that it does not hide a first-line key.
+      const lines = text.replace(LEADING_BOM_RE, "").split(/\r?\n|\r/).filter((line) => /blank_issues_enabled/i.test(line));
+      return lines.some((line) => {
+        const value = /^blank_issues_enabled:[ \t]*(.*?)[ \t]*(?:#.*)?$/.exec(line)?.[1];
+        return value === undefined || !/^(["']?)(true|yes|on|y)\1$/i.test(value);
+      });
     }
     return false;
   }

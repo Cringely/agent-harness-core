@@ -42,6 +42,39 @@ describe("templateSections()", () => {
 });
 
 describe("unfilledSections()", () => {
+  describe("template prose left in the body", () => {
+    const PROMPTED = "## Summary\n\nDescribe the change.\n- [ ] Tests pass\n\n## Testing\n\nDescribe how you tested.\n";
+
+    test("a body equal to the template fills nothing", () => {
+      expect(unfilledSections(PROMPTED, PROMPTED)).toEqual([1, 2]);
+    });
+
+    test("untouched prompt lines read unfilled, with whitespace around them ignored", () => {
+      const body = "## Summary\n\n  Describe the change.\t\n- [ ] Tests pass  \n\n## Testing\n\nDescribe how you tested.\n";
+      expect(unfilledSections(PROMPTED, body)).toEqual([1, 2]);
+    });
+
+    test("a prompt kept beside new text reads filled", () => {
+      const body = "## Summary\n\nDescribe the change.\nAdds a gate.\n\n## Testing\n\nDescribe how you tested.\nRan the suite.\n";
+      expect(unfilledSections(PROMPTED, body)).toEqual([]);
+    });
+
+    test("a prompt edited slightly reads filled", () => {
+      const body = "## Summary\n\nDescribe the change, done.\n\n## Testing\n\n- [x] Tests pass\n\nDescribe how you tested it.\n";
+      expect(unfilledSections(PROMPTED, body)).toEqual([]);
+    });
+
+    test("a nested section's prompt does not fill the section above it", () => {
+      const nested = "## Summary\n\n### Risk\n\nName the risk.\n\n## Testing\n";
+      expect(unfilledSections(nested, "## Summary\n\n### Risk\n\nName the risk.\n\n## Testing\n\nran it\n")).toEqual([1, 2]);
+      expect(unfilledSections(nested, "## Summary\n\n### Risk\n\nNone.\n\n## Testing\n\nran it\n")).toEqual([]);
+    });
+
+    test("a prompt from another section still counts as text", () => {
+      expect(unfilledSections(PROMPTED, "## Summary\n\nDescribe how you tested.\n\n## Testing\n\nDescribe the change.\n")).toEqual([]);
+    });
+  });
+
   test("accepts a body that fills every section, at any heading level and case", () => {
     const body = "# SOURCE\n\npath/to/file\n\n## Why it transfers\n\nIt checks a contract.\n\n### Detail\n\nMore.\n";
     expect(unfilledSections(TEMPLATE, body)).toEqual([]);
