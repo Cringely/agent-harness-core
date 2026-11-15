@@ -86,7 +86,7 @@ A `review-merge` refusal that follows its `review:` line means the App's review 
 5. gh is present and holds the configured account's token.
 6. Closing keywords appear only on a pull request into the default branch.
 7. Both branches exist on the remote (`pr create`), or the pull request's base is the `--base` given (`pr edit`).
-8. The repository's template, if it has one, has every section filled.
+8. The repository's template, if it has one, has every section filled. Comments and lines left unchanged from the template's own prose under that heading do not count. When `.github/ISSUE_TEMPLATE/config.yml` names `blank_issues_enabled` in any form other than a plain top-level key set to true, blank issues read as disabled.
 
 ## review-merge
 
