@@ -16,9 +16,10 @@ const HIDDEN_INDEX_TAG_RE = /^[a-zS]/;
 
 // A git error fails closed on both fields: an unreadable revision throws, and a status or ls-files
 // read that cannot be read counts as dirty.
-// `root` is a test seam; cli.ts and the acceptance harness never pass it. `env`, when given, is the
-// whole environment of every git child. tools/publish passes one with the repository-redirecting
-// variables removed. Left out, the children inherit this process's environment.
+// tools/pr-review/cli.ts and the acceptance harness never pass `root`, so they read this checkout.
+// tools/publish passes `root` and `env` for the checkouts it pins. `env`, when given, is the whole
+// environment of every git child, and tools/publish's has the repository-redirecting variables
+// removed. Left out, the children inherit this process's environment.
 export function toolState(root: string = REPO_ROOT, env?: Record<string, string>): { revision: string; dirty: boolean } {
   const rev = Bun.spawnSync(["git", "-C", root, "rev-parse", "HEAD"], { env, stdout: "pipe", stderr: "pipe" });
   const revision = rev.stdout.toString().trim();
