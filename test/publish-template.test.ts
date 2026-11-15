@@ -47,6 +47,19 @@ describe("unfilledSections()", () => {
     expect(unfilledSections(TEMPLATE, body)).toEqual([]);
   });
 
+  test("reads a heading ending in a hash the same way in template and body", () => {
+    const template = "## Notes on C#\n\n## Testing\n";
+    expect(unfilledSections(template, "## Notes on C#\n\nnotes\n\n## Testing\n\nran it\n")).toEqual([]);
+    expect(unfilledSections(template, "## Notes on C\n\nnotes\n\n## Testing\n\nran it\n")).toEqual([1]);
+  });
+
+  test("strips a closing sequence the same way in template and body", () => {
+    const template = "## Source ##\n\n## Testing\t#\n";
+    expect(unfilledSections(template, "## Source\n\npath\n\n## Testing ###  \n\nran it\n")).toEqual([]);
+    expect(unfilledSections("## Source\n", "## Source #\n\npath\n")).toEqual([]);
+    expect(unfilledSections("## Source #\n", "## Source\n\npath\n")).toEqual([]);
+  });
+
   test("reports a missing section by index", () => {
     const body = "## Source\n\npath\n\n### Detail\n\nMore.\n";
     expect(unfilledSections(TEMPLATE, body)).toEqual([2]);
