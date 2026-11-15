@@ -44,13 +44,18 @@
 //      GitHub writes
 //  11. for an administrator-bypass merge, the reason is posted as a pull request comment
 //      (CONTRIBUTING.md has every bypass say why). It is the last write before the merge, after
-//      every check that can refuse, since a refusal reports that nothing new was published. Then gh
+//      every check that can refuse, so a refused bypass leaves only the App review behind. Then gh
 //      pr merge with --match-head-commit and, for --merge, that explicit subject and body, so the
 //      merge commit never carries GitHub's default message built from whatever the title and body
-//      say at merge time. A merge that fails after the reason was posted is an error naming it
+//      say at merge time
 //  12. the merge is confirmed, and the issues GitHub links the merged pull request to close must be
 //      exactly --closes. A mismatch is an error naming the merge: it has already happened, so the
 //      tool reports it rather than claiming anything was undone
+//
+// Step 7 is the first GitHub write: the reviewer posts its review. Anything that stops the run from
+// there on, a refusal or an error, is an AfterWriteError (exit 4) naming every write so far (the
+// review, the bypass reason comment, the merge), never a PublishRefusal, whose exit 2 says nothing
+// new was published.
 //
 // Every git call names the configured identity and a credential helper that answers with the
 // configured account's token from the child environment, never the active gh account.
@@ -61,7 +66,7 @@ import { stripControlChars } from "../pr-review/cli";
 import type { IdentityLoad } from "../pr-review/identity";
 import { CORE_POLICY } from "../pr-review/repo-policy";
 import { ownerIdentity, reviewerConfig, type OwnerIdentity, type PublishConfig, type ReviewerConfig } from "./config";
-import { PublishError, PublishRefusal } from "./errors";
+import { AfterWriteError, PublishError, PublishRefusal } from "./errors";
 import { parseRepo } from "../pr-review/types";
 import { childEnv, type RunResult, type Runner } from "./exec";
 import { Gh, type ClosingRef, type PrState } from "./gh";
@@ -386,7 +391,33 @@ export async function reviewMerge(ctx: ReviewMergeContext, args: ReviewMergeArgs
   assertReviewerPinned(ctx, gh, owner, reviewer, args.toolHead);
   const review = await runReviewer(ctx, reviewer, cli, args.repo, args.pr, head);
   ctx.log(`review: status=${enumText(review.status)} event=${enumText(review.event)} findings=${review.severities.length}`);
+  // The reviewer ran with --post, so from here GitHub holds something this run wrote, and a refusal
+  // exit (2, nothing new published) would be false. Every write is recorded as it lands, and
+  // whatever stops the run after the first one leaves as an AfterWriteError naming them (exit 4).
+  const written: string[] = [review.postedUrl === null ? `an App review may be posted on #${args.pr}` : `the App review on #${args.pr}`];
+  try {
+    return await afterReview(ctx, gh, owner, reviewer, cli, args, defaultBranch, head, review, adminReason, written);
+  } catch (error) {
+    if (error instanceof PublishRefusal || error instanceof PublishError) throw new AfterWriteError(written, error.message);
+    // A library error can quote its input, so only its class is carried.
+    throw new AfterWriteError(written, `unexpected failure (${error instanceof Error ? error.name : typeof error})`);
+  }
+}
 
+// Everything after the App review is posted. Each GitHub write is pushed onto written once it lands.
+async function afterReview(
+  ctx: ReviewMergeContext,
+  gh: Gh,
+  owner: OwnerIdentity,
+  reviewer: ReviewerConfig,
+  cli: string,
+  args: ReviewMergeArgs,
+  defaultBranch: string,
+  head: string,
+  review: ReviewResult,
+  adminReason: string | null,
+  written: string[],
+): Promise<string> {
   const final = settledView(ctx, gh, args.repo, args.pr);
   assertReviewable(final, defaultBranch);
   auditClosing(gh, args.repo, final, args.closes);
@@ -411,19 +442,14 @@ export async function reviewMerge(ctx: ReviewMergeContext, args: ReviewMergeArgs
     throw new PublishRefusal("the title or body changed after the closing-keyword audit. Nothing was merged");
   }
   assertMergeMessageClean(ctx, args, final);
-  // A refusal means nothing new was published, so the bypass reason is the last write before the
-  // merge, after every check that can refuse. A merge that fails after it says the reason is up.
+  // The bypass reason is the last write before the merge, after every check that can refuse, so a
+  // refused bypass leaves only the review behind. A merge that fails after it names the reason too.
   if (decision.admin) {
     gh.commentPr(args.repo, args.pr, adminReason!);
-    try {
-      gh.mergePr(args.repo, args.pr, head, args.method, true, mergeMessage(args.pr, final));
-    } catch (error) {
-      if (!(error instanceof PublishRefusal || error instanceof PublishError)) throw error;
-      throw new PublishError(`the bypass reason was posted on #${args.pr}, but the merge did not complete (${error.message}). Check the pull request before running again`);
-    }
-  } else {
-    gh.mergePr(args.repo, args.pr, head, args.method, false, mergeMessage(args.pr, final));
+    written.push(`the bypass reason comment on #${args.pr}`);
   }
+  gh.mergePr(args.repo, args.pr, head, args.method, decision.admin, mergeMessage(args.pr, final));
+  written.push(`the merge of #${args.pr}`);
   const merged = gh.mergedState(args.repo, args.pr);
   if (merged.state !== "MERGED" || merged.mergeSha === null) {
     throw new PublishError("gh reported no error, but the pull request is not merged. Check it for auto-merge before running again");

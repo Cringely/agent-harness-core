@@ -1,7 +1,6 @@
 #!/usr/bin/env bun
 // tools/publish (#274): the one route by which an agent files an issue, opens or edits a pull
-// request, or reviews and merges one. Every gate fails closed and every refusal exits 2 with a
-// class-only message.
+// request, or reviews and merges one. Every gate fails closed, and every message is class-only.
 //
 //   bun --cwd <home>/.claude-publish/work <absolute path>/tools/publish/cli.ts <command> ...
 //
@@ -19,7 +18,8 @@
 // inside a checkout has already loaded that checkout's config by the time this check refuses,
 // which is why the documented invocation always carries --cwd.
 //
-// Exit codes: 0 done, 2 refused (nothing new published), 1 usage or runtime error.
+// Exit codes: 0 done, 2 refused (nothing new published), 1 usage or runtime error, 4 review-merge
+// stopped by a refusal or an error after it had written to GitHub (the message names each write).
 
 import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
@@ -30,7 +30,7 @@ import { CORE_POLICY } from "../pr-review/repo-policy";
 import { toolState } from "../pr-review/tool-state";
 import { parseRepo, SHA_RE } from "../pr-review/types";
 import { loadPublishConfig, WORK_DIR, type PublishConfig } from "./config";
-import { PublishError, PublishRefusal, UsageError } from "./errors";
+import { AfterWriteError, PublishError, PublishRefusal, UsageError } from "./errors";
 import { childEnv, realRunner, type Runner } from "./exec";
 import { BRANCH_RE } from "./gh";
 import { issueCreate, issueEdit, prCreate, prEdit, type IssueCreateArgs, type IssueEditArgs, type PrCreateArgs, type PrEditArgs } from "./publish";
@@ -320,6 +320,10 @@ export async function main(argv: readonly string[], deps: CliDeps): Promise<numb
     }
     return 0;
   } catch (error) {
+    if (error instanceof AfterWriteError) {
+      deps.err(`error after a GitHub write: ${stripControlChars(error.message)}`);
+      return 4;
+    }
     if (error instanceof PublishRefusal) {
       deps.err(`refused: ${stripControlChars(error.message)}`);
       return 2;
