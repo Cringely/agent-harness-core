@@ -84,6 +84,17 @@ function hasLetterOrNumber(text: string): boolean {
 // syntax characters need no removal, being neither. An autolink such as "<https://x>" is not a tag
 // here, since a colon follows its first word.
 function visibleProse(text: string): string {
+  // Repeat until nothing changes: removing one tag can join its neighbors into a new one.
+  let previous: string;
+  let current = text;
+  do {
+    previous = current;
+    current = stripMarkupOnce(previous);
+  } while (current !== previous);
+  return current;
+}
+
+function stripMarkupOnce(text: string): string {
   return stripComments(text)
     .replace(/<(script|style)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, "")
     .replace(/<\?[\s\S]*?(?:\?>|$)/g, "")
