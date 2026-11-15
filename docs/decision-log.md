@@ -58,6 +58,14 @@ One entry per consequential choice, written when the choice is made. Roles only,
 - Flips if: a reviewed repository gains a writer the operator does not control, or stage 1's process split lands, which removes the accepted residual.
 - Drafted by: coordinator. Decided by: operator.
 
+## 2026-11-12: publish deny rules and skill ship through the project installer (#274)
+
+- Choice: `install/Install-Harness.ps1` merges the deny of raw `gh pr create`, `gh issue create`, `gh pr merge`, `gh alias set` and related forms (14 rules) from `core/claude/templates/settings.permissions.json` into each project's `.claude/settings.json`, and installs the `publish` skill from `core/claude/skills/` into `.claude/skills/`. Both apply to every installed project, whatever its layers. The skill finds the tool through the `coreRepo` value in the project's gitignored sidecar, so no machine path is committed.
+- Rejected: user-level deny rules and the skill shipped through the account layer, as the plan first proposed. Gating the rules on the code layer, since a documents project files issues too.
+- Accepted: a project whose repository owner has no entry in the publish tool's local configuration can neither run raw gh publishing nor use the tool until one is added.
+- Flips if: an installed project has to publish through raw gh, which would call for a per-project opt-out.
+- Drafted by: coordinator (deny scope), the agent that built it (skill route and layer scope). Decided by: operator for the deny scope, 2026-11-11. The skill route and the layer scope are coordinator defaults the operator may overturn.
+
 ## 2026-11-12: the portable PR reviewer spec is approved, stage 2 on hold (#146)
 
 - Choice: `docs/superpowers/specs/2026-11-11-portable-pr-review-design.md`, revision 2, becomes the plan of record. Stage 1 gets an implementation plan next, starting with the split that keeps the App key out of the process that reads writer text.
@@ -92,3 +100,11 @@ One entry per consequential choice, written when the choice is made. Roles only,
 - Rejected: keeping the tracked copies and teaching the installer to accept a tracked rule that matches core's source, which would add code for a case nothing needs.
 - Accepted: top-level `claude --worktree` sessions in this repo do not get the installed rules.
 - Drafted by: coordinator. Decided by: operator.
+
+## 2026-11-14: per-project opt-in to raw gh pr merge (#274)
+
+- Choice: a project whose committed `.claude/.harness-manifest.json` records `allowRawPrMerge` with a non-empty risk sentence gets the publish deny fragment without its two canonical `gh pr merge` rules, and any copy of them already in its deny list is removed. The default install still denies them everywhere. The flag-first `gh pr * merge *` rules and every create and alias rule stay in both cases.
+- Rejected: a new `-AllowRawPrMerge` installer switch, which would need its own sticky-or-not rule across re-installs and could relax the deny from a command line nobody reviews. The manifest key follows the `allowUnpinnedPlugins` precedent, is committed with the project, and names its risk.
+- Rejected: removing `gh pr merge` from the shared fragment, which would relax it for every project.
+- Accepted: Claude Code deny rules match by prefix, so the opt-in allows every `gh pr merge` form that starts with the subcommand, not only `--admin --match-head-commit`.
+- Drafted by: general-purpose lane agent. Decided by: operator (option C, 2026-11-14). The manifest-key shape is a coordinator default the operator may overturn.

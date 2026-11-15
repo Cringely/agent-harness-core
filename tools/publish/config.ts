@@ -46,7 +46,8 @@ export interface PublishConfig {
 export const GH_USER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const ENV_KEY_RE = /^[A-Z_][A-Z0-9_]*$/;
 // keyCommandEnv sits in this file as plain text, so a credential the key command needs must not
-// live there: the key command fetches its own. A name pattern cannot tell a session key or a
+// live there: the key command fetches its own (tools/publish/README.md shows a wrapper that
+// decrypts one into its child's environment). A name pattern cannot tell a session key or a
 // passphrase from a setting, so keyCommandEnv accepts only these non-secret settings and refuses
 // every other name.
 export const KEY_COMMAND_ENV_NAMES: readonly string[] = ["OP_BIOMETRIC_UNLOCK_ENABLED", "OP_ACCOUNT", "NO_COLOR"];
@@ -151,7 +152,7 @@ export function loadPublishConfig(path: string = CONFIG_PATH): PublishConfig {
   try {
     raw = readFileSync(path, "utf8");
   } catch {
-    throw new PublishRefusal("no publish config could be read at ~/.claude-publish/config.json");
+    throw new PublishRefusal("no publish config could be read at ~/.claude-publish/config.json (see tools/publish/README.md)");
   }
   return parsePublishConfig(raw);
 }

@@ -19,7 +19,7 @@ const REPO_ROOT = join(import.meta.dir, "..");
 
 // Floor on the register's size. A register edit that adds or removes a control updates this too, so
 // a truncated file cannot pass just because what is left is self-consistent.
-export const MIN_ROWS = 13;
+export const MIN_ROWS = 15;
 
 export type Row = { control: string; files: string[]; tests: string[] };
 
