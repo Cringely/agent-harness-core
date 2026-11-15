@@ -19,16 +19,16 @@ const TEMPLATE = [
   "",
   "## Why it transfers",
   "",
-  "```",
-  "## not a section, inside a fence",
-  "```",
+  "<!--",
+  "## not a section, inside a comment",
+  "-->",
   "",
   "### Detail",
   "",
 ].join("\n");
 
 describe("templateSections()", () => {
-  test("lists headings outside front matter, comments and fences", () => {
+  test("lists headings outside front matter and comments", () => {
     expect(templateSections(TEMPLATE)).toEqual([
       { level: 2, key: "source" },
       { level: 2, key: "why it transfers" },
@@ -145,11 +145,8 @@ describe("unfilledSections()", () => {
     expect(unfilledSections(AB, "## A\nx\n```js <!-- note -->\n## B\nfake\n")).toEqual([2]);
   });
 
-  test("a template comment left open still leaves later template headings required", () => {
-    expect(templateSections("## A\n<!-- open\n## B\n")).toEqual([
-      { level: 2, key: "a" },
-      { level: 2, key: "b" },
-    ]);
+  test("a template comment left open refuses, and a closed one hides only its own lines", () => {
+    expect(() => templateSections("## A\n<!-- open\n## B\n")).toThrow(PublishRefusal);
     expect(templateSections("## A\n<!--\n## Example\n-->\n## B\n")).toEqual([
       { level: 2, key: "a" },
       { level: 2, key: "b" },
@@ -224,8 +221,9 @@ describe("unfilledSections()", () => {
 });
 
 describe("template heading subset", () => {
-  // GitHub renders each of these as a heading. The gate reads only a column-0 "#" heading as a
-  // section, so a template holding any of them refuses rather than dropping that section.
+  // Each refused template holds a line outside the narrow template grammar. Many of them hold a
+  // heading GitHub renders that a CommonMark approximation could drop, so refusing keeps every
+  // rendered section required.
   const refused: Array<[string, string]> = [
     ["an ATX heading indented one space", "## Source\n\n #  Testing\n"],
     ["an ATX heading indented three spaces", "## Source\n\n   ## Testing\n"],
@@ -234,6 +232,51 @@ describe("template heading subset", () => {
     ["an indented setext underline with trailing spaces", "Testing\n   ---  \n"],
     ["a setext underline under a two-line paragraph", "Testing\nmore\n-\n"],
     ["a template written only in setext headings", "Source\n======\n\nTesting\n------\n"],
+    // GitHub renders a heading after each of these, which a CommonMark approximation can miss.
+    ["a heading after a line opening with a b tag", "## Source\n<b>note</b>\n## Testing\n"],
+    ["a heading after a line opening with an em tag", "## Source\n<em>note</em>\n## Testing\n"],
+    ["a heading after a line opening with an a tag", "## Source\n<a href=\"x\">note</a>\n## Testing\n"],
+    ["a heading after a line opening with a span tag", "## Source\n<span>note</span>\n## Testing\n"],
+    ["a setext heading under a line opening with an inline tag", "## Source\n<span>Testing</span>\n---\n"],
+    ["a heading inside a blockquote", "## Source\n\n> ## Testing\n"],
+    ["a heading inside a dash list item", "## Source\n\n- ## Testing\n"],
+    ["a heading inside a star list item", "## Source\n\n* # Testing\n"],
+    ["a heading inside a plus list item after two spaces", "## Source\n\n+  ## Testing\n"],
+    ["a heading inside an ordered list item", "## Source\n\n1. ## Testing\n"],
+    ["a heading inside an ordered list item with a paren", "## Source\n\n2) ## Testing\n"],
+    ["a blockquote inside a list item", "## Source\n\n- > ## Testing\n"],
+    ["a nested list marker", "## Source\n\n- - ## Testing\n"],
+    ["a list item opening with a tag", "## Source\n\n- <b>x</b>\n## Testing\n"],
+    ["a line opening with a block tag", "## Source\n<div>\n## Testing\n</div>\n"],
+    ["a backtick fence", "## Source\n\n```\n## Testing\n```\n"],
+    ["a tilde fence", "## Source\n\n~~~\ncode\n~~~\n"],
+    ["a pipe table", "## Source\n\n| a | b |\n"],
+    ["a prose line with leading spaces", "## Source\n\n  indented\n"],
+    ["a prose line with a leading tab", "## Source\n\n\tindented\n"],
+    ["a thematic break after a blank line", "## Source\n\ntext\n\n---\n\n## Testing\n"],
+    ["a thematic break directly under a heading", "## Source\n---\n## Testing\n"],
+    ["a star thematic break", "## Source\n\n***\n"],
+    ["a list marker with no space", "## Source\n\n-x\n"],
+    ["a heading with no space after the hashes", "#Source\n"],
+    ["seven hashes", "####### Source\n"],
+    ["an empty heading", "## Source\n\n##\n"],
+    ["a heading holding only a space", "## Source\n\n## \n"],
+    ["a heading holding only a closing sequence", "## Source\n\n## ##\n"],
+    ["a heading holding a comment", "## Source <!-- note -->\n"],
+    ["a heading holding a tag", "## <b>Source</b>\n"],
+    ["an escaped hash", "## Source\n\n" + String.fromCharCode(92) + "## Testing\n"],
+    ["a link at the start of a line", "## Source\n\n[link](x) text\n"],
+    ["a comment that never closes", "## A\n<!-- open\n## B\n"],
+    ["text after a single-line comment", "## A\n<!-- note --> ## B\n"],
+    ["text after a multi-line comment closes", "## A\n<!--\nnote\n--> ## B\n"],
+    ["a second comment on the same line", "## A\n<!-- one --> <!-- two -->\n"],
+    ["a comment closed inside its opener, <!-->", "## A\n<!-->\n## B\n"],
+    ["a comment closed inside its opener, <!--->", "## A\n<!--->\n## B\n"],
+    ["a comment opening mid-line", "## A\ntext <!-- note\n## B\n-->\n"],
+    ["a comment opening after leading spaces", "## A\n  <!-- note -->\n"],
+    ["front matter that never closes", "---\nname: x\n## Source\n"],
+    ["front matter not at the very top", "\n---\nname: x\n---\n## Source\n"],
+    ["a CR-only template with an inline tag line", "## Source\r<b>x</b>\r## Testing\r"],
   ];
   for (const [name, template] of refused) {
     test(`refuses ${name}`, () => {
@@ -243,11 +286,22 @@ describe("template heading subset", () => {
   }
 
   const accepted: Array<[string, string, number]> = [
-    ["a thematic break after a blank line", "## Source\n\ntext\n\n---\n\n## Testing\n", 2],
-    ["a thematic break directly under a heading", "## Source\n---\n## Testing\n", 2],
-    ["heading forms inside a fence", "## Source\n\n```\n   ## Testing\nTesting\n---\n```\n", 1],
     ["heading forms inside a closed comment", "## Source\n<!--\n   ## Testing\nTesting\n---\n-->\n", 1],
-    ["an ATX heading indented four spaces, which is code", "## Source\n\n    ## Testing\n", 1],
+    ["a single-line comment", "## Source\n<!-- note -->\n## Testing\n", 2],
+    ["a comment closed with trailing spaces", "## Source\n<!-- note -->  \n## Testing\n", 2],
+    ["a comment opening with text on its line", "## Source\n<!-- note\nmore\n-->\n## Testing\n", 2],
+    ["a heading with a closing sequence", "## Source ##\n## Testing\n", 2],
+    ["headings at every level", "# A\n## B\n### C\n#### D\n##### E\n###### F\n", 6],
+    ["front matter", "---\nname: x\ntitle: \"## Not a heading\"\n---\n## Source\n", 1],
+    ["prose opening with a letter, number, backtick, quote or paren",
+      "## Source\nText\n2026 notes\n`code` here\n\"quoted\"\n'single'\n(aside)\nUber\n## Testing\n", 2],
+    ["prose opening with a non-ASCII letter", "## Source\n" + String.fromCharCode(0xdc) + "ber\n", 1],
+    ["list items opening with text", "## Source\n- one\n* two\n+ three\n1. four\n12) five\n- `x`\n## Testing\n", 2],
+    ["task list items", "## Source\n- [ ] tested\n- [x] linted\n## Testing\n", 2],
+    ["a byte-order mark and CRLF", String.fromCharCode(0xfeff) + "## Source\r\n\r\ntext\r\n## Testing\r\n", 2],
+    ["CR-only line endings", "## Source\r\rtext\r## Testing\r", 2],
+    ["a mix of CR, LF and CRLF", "## A\r## B\n## C\r\n## D", 4],
+    ["blank lines holding spaces and tabs", "## Source\n \t \n## Testing\n", 2],
   ];
   for (const [name, template, count] of accepted) {
     test(`accepts ${name}`, () => {
@@ -268,6 +322,11 @@ describe("template heading subset", () => {
 
 describe("body headings outside the subset", () => {
   const TWO = "## Source\n\n## Testing\n";
+
+  test("a body with CR-only line endings is read line by line", () => {
+    expect(unfilledSections(TWO, "## Source\rpath\r\r## Testing\r")).toEqual([2]);
+    expect(unfilledSections(TWO, "## Source\rpath\r## Testing\rran it\r")).toEqual([]);
+  });
 
   test("an indented ATX heading in the body is not the section it names", () => {
     expect(unfilledSections(TWO, "## Source\n\npath\n\n   ## Testing\n\nran it\n")).toEqual([2]);

@@ -27,14 +27,24 @@
 // depth is the author's choice, so without that second boundary a body using a shallower heading
 // would swallow the next template section's content and an empty section would read as filled.
 // The nth template section with a given heading matches the nth body heading with that text, so
-// one body section never fills two template sections. The template's own instruction comments are
-// stripped first, so leaving them in place does not count as filling the section.
+// one body section never fills two template sections. Comments in a body never count, so leaving
+// the template's instruction comments in place does not fill a section.
 //
-// Headings are a literal subset of what GitHub renders: only an ATX heading starting at column 0
-// is a section. A template holding a line that CommonMark could read as any other heading, an ATX
-// heading indented 1 to 3 spaces or a setext underline under a paragraph line, refuses with
-// PublishRefusal, so no template section goes unrequired. In a body those forms are neither a
-// section nor content.
+// The template side reads a deliberately narrow line grammar rather than approximating CommonMark,
+// because every CommonMark construct it approximates is a place a heading can hide. After a
+// byte-order mark is stripped and CRLF and lone CR become LF, every template line is one of these:
+//   - blank
+//   - a column-0 ATX heading: 1 to 6 "#", one space, then text holding no "<"
+//   - part of an HTML comment that opens at column 0 with "<!--" and whose first "-->" ends a
+//     line, with nothing else on the opening or closing line
+//   - YAML front matter fenced by "---" lines at the very top
+//   - a prose line starting with a letter, number, backtick, quote mark or "(", or with a list
+//     marker ("-", "*", "+", or digits and "." or ")"), a space, then one of those or "["
+// A template holding any other line, such as one starting with an HTML tag, a blockquote marker,
+// leading whitespace, a pipe, a fence or a setext underline, refuses with PublishRefusal. The
+// grammar is drawn so that a line is a heading in GitHub's rendering when and only when it is a
+// heading here, so no template section goes unrequired. Body text is read as described above, so
+// in a body an indented ATX heading or a setext heading is neither a section nor content.
 //
 // Only section indexes come back, never heading or body text.
 
@@ -130,10 +140,6 @@ function stripComments(text: string): string {
   return current;
 }
 
-function stripFrontMatter(text: string): string {
-  return text.replace(/^\uFEFF?---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/, "");
-}
-
 function headingKey(text: string): string {
   return text.trim().replace(/\s+/g, " ").toLowerCase();
 }
@@ -168,23 +174,16 @@ function outsideComments(raw: string, state: { open: boolean }): string {
 
 // Each line's heading, if any, and the text it shows. Text is empty for a fence line, for a line
 // hidden by a comment, and for every line of a fence that never closes. Lines of a closed fence
-// carry code: true. No line inside an HTML block is a heading. A heading outside the subset
-// throws when `strict` is set (the template), and otherwise shows no text (the body).
-function splitLines(text: string, readComments = true, strict = false): Line[] {
+// carry code: true. No line inside an HTML block is a heading. A heading outside the subset shows
+// no text.
+function splitLines(text: string): Line[] {
   const out: Line[] = [];
   // Index of the first line of the open paragraph, or -1 when none is open.
   let paragraph = -1;
-  const outsideSubset = (lineNumber: number): never => {
-    throw new PublishRefusal(
-      `the template's line ${lineNumber} is a heading form this tool does not read: only a "#" heading starting at column 0 is a section`,
-    );
-  };
   const comment = { open: false };
   let fence: { mark: string; length: number; first: number } | null = null;
   let html: HtmlBlock | null = null;
-  // A leading byte-order mark (Windows PowerShell 5.1's Set-Content writes one) would otherwise
-  // hide a heading on the first line.
-  for (const raw of text.replace(/^\uFEFF/, "").split(/\r?\n/)) {
+  for (const raw of normalize(text).split("\n")) {
     if (fence !== null) {
       const close = FENCE_CLOSE_RE.exec(raw);
       if (close && close[1]![0] === fence.mark && close[1]!.length >= fence.length) {
@@ -201,7 +200,7 @@ function splitLines(text: string, readComments = true, strict = false): Line[] {
         html = null;
         paragraph = -1;
       } else {
-        out.push({ heading: null, text: readComments ? outsideComments(raw, comment) : raw, code: false });
+        out.push({ heading: null, text: outsideComments(raw, comment), code: false });
         if ("end" in html && html.end.test(raw)) html = null;
         continue;
       }
@@ -215,7 +214,7 @@ function splitLines(text: string, readComments = true, strict = false): Line[] {
       continue;
     }
     const block = startsInComment || /^ {0,3}<!--/.test(raw) ? null : htmlBlockStart(raw);
-    const visible = readComments ? outsideComments(raw, comment) : raw;
+    const visible = outsideComments(raw, comment);
     if (block) {
       paragraph = -1;
       out.push({ heading: null, text: visible, code: false });
@@ -231,13 +230,11 @@ function splitLines(text: string, readComments = true, strict = false): Line[] {
       continue;
     }
     if (!startsInComment && INDENTED_ATX_RE.test(visible)) {
-      if (strict) outsideSubset(out.length + 1);
       paragraph = -1;
       out.push({ heading: null, text: "", code: false });
       continue;
     }
     if (!startsInComment && paragraph !== -1 && SETEXT_UNDERLINE_RE.test(visible)) {
-      if (strict) outsideSubset(out.length + 1);
       for (let i = paragraph; i < out.length; i++) out[i]!.text = "";
       paragraph = -1;
       out.push({ heading: null, text: "", code: false });
@@ -257,10 +254,79 @@ function splitLines(text: string, readComments = true, strict = false): Line[] {
   return out;
 }
 
+// A leading byte-order mark (Windows PowerShell 5.1's Set-Content writes one) would otherwise
+// hide a heading on the first line. GitHub reads a lone CR as a line ending, as it does CRLF.
+function normalize(text: string): string {
+  return text.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
+}
+
+const TEMPLATE_HEADING_RE = /^(#{1,6}) (.*)$/;
+const FRONT_MATTER_FENCE_RE = /^---[ \t]*$/;
+// What may open a prose line, and what may follow a list marker and its space.
+const PROSE_RE = /^[\p{L}\p{N}`"'(]/u;
+// A task list item's "[ ]" is safe after a list marker: no block construct opens with "[".
+const LIST_ITEM_RE = /^(?:[-*+]|[0-9]{1,9}[.)]) [\p{L}\p{N}`"'([]/u;
+const LIST_MARKER_RE = /^(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)/;
+const FENCE_RE = /^`{3,}/;
+const COMMENT_OPEN = "<!--";
+const COMMENT_CLOSE = "-->";
+
+function refuseLine(lineNumber: number, what: string): never {
+  throw new PublishRefusal(
+    `the template's line ${lineNumber} is ${what}, outside the narrow grammar this tool reads templates with: blank lines, "#" headings at column 0, whole-line HTML comments, front matter and plain prose`,
+  );
+}
+
+// The template's sections, read under the line grammar in the header. Throws PublishRefusal on
+// any line outside it.
 export function templateSections(template: string): TemplateSection[] {
-  // Only closed template comments are removed. One left open hides no later template heading, so
-  // every heading outside a closed comment stays a required section.
-  return splitLines(stripComments(stripFrontMatter(template)), false, true).flatMap((line) => (line.heading ? [line.heading] : []));
+  const lines = normalize(template).split("\n");
+  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  const sections: TemplateSection[] = [];
+  let i = 0;
+  if (lines.length > 0 && FRONT_MATTER_FENCE_RE.test(lines[0]!)) {
+    i = 1;
+    while (i < lines.length && !FRONT_MATTER_FENCE_RE.test(lines[i]!)) i++;
+    if (i === lines.length) refuseLine(1, "front matter that never closes");
+    i++;
+  }
+  for (; i < lines.length; i++) {
+    const line = lines[i]!;
+    const n = i + 1;
+    if (/^[ \t]*$/.test(line)) continue;
+    if (line.startsWith(COMMENT_OPEN)) {
+      // GitHub ends the comment at the first "-->", which may overlap the opener as in "<!-->".
+      let at = line.indexOf(COMMENT_CLOSE, 2);
+      let j = i;
+      while (at === -1) {
+        if (++j === lines.length) refuseLine(n, "an HTML comment that never closes");
+        at = lines[j]!.indexOf(COMMENT_CLOSE);
+      }
+      const closing = lines[j]!;
+      if (j === i && at < COMMENT_OPEN.length) refuseLine(n, "an HTML comment closed inside its own opener");
+      if (closing.slice(at + COMMENT_CLOSE.length).trim() !== "")
+        refuseLine(j + 1, "an HTML comment with text after its close");
+      i = j;
+      continue;
+    }
+    const heading = TEMPLATE_HEADING_RE.exec(line);
+    if (heading) {
+      const text = heading[2]!.replace(/[ \t]+#+[ \t]*$/, "").replace(/^#+[ \t]*$/, "");
+      if (text.includes("<")) refuseLine(n, "a heading holding markup");
+      const key = headingKey(text);
+      if (key === "") refuseLine(n, "an empty heading");
+      sections.push({ level: heading[1]!.length, key });
+      continue;
+    }
+    if (FENCE_RE.test(line)) refuseLine(n, "a code fence");
+    if (LIST_MARKER_RE.test(line)) {
+      if (!LIST_ITEM_RE.test(line)) refuseLine(n, "a list item that does not open with plain text");
+      continue;
+    }
+    if (PROSE_RE.test(line)) continue;
+    refuseLine(n, "a line that opens with neither text nor a heading");
+  }
+  return sections;
 }
 
 // 1-based indexes of the template's sections that the body lacks or leaves empty.
