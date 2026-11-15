@@ -16,9 +16,12 @@ const HIDDEN_INDEX_TAG_RE = /^[a-zS]/;
 
 // A git error fails closed on both fields: an unreadable revision throws, and a status or ls-files
 // read that cannot be read counts as dirty.
-// `root` is a test seam; cli.ts and the acceptance harness never pass it.
-export function toolState(root: string = REPO_ROOT): { revision: string; dirty: boolean } {
-  const rev = Bun.spawnSync(["git", "-C", root, "rev-parse", "HEAD"], { stdout: "pipe", stderr: "pipe" });
+// tools/pr-review/cli.ts and the acceptance harness never pass `root`, so they read this checkout.
+// tools/publish passes `root` and `env` for the checkouts it pins. `env`, when given, is the whole
+// environment of every git child, and tools/publish's has the repository-redirecting variables
+// removed. Left out, the children inherit this process's environment.
+export function toolState(root: string = REPO_ROOT, env?: Record<string, string>): { revision: string; dirty: boolean } {
+  const rev = Bun.spawnSync(["git", "-C", root, "rev-parse", "HEAD"], { env, stdout: "pipe", stderr: "pipe" });
   const revision = rev.stdout.toString().trim();
   if (rev.exitCode !== 0 || !SHA_RE.test(revision)) throw new Error("the reviewer must run from a git checkout");
 
@@ -28,14 +31,14 @@ export function toolState(root: string = REPO_ROOT): { revision: string; dirty: 
   // submodule.*.ignore setting that would otherwise hide a real change from this check (A8.5).
   const status = Bun.spawnSync(
     ["git", "-C", root, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"],
-    { stdout: "pipe", stderr: "pipe" },
+    { env, stdout: "pipe", stderr: "pipe" },
   );
   const statusDirty = status.exitCode !== 0 || status.stdout.toString().trim() !== "";
 
   // status --porcelain says nothing about a tracked file the index itself marks assume-unchanged or
   // skip-worktree: git treats those as unchanged by definition, so a real edit underneath one is
   // invisible to the check above (A8.5).
-  const lsFiles = Bun.spawnSync(["git", "-C", root, "ls-files", "-v"], { stdout: "pipe", stderr: "pipe" });
+  const lsFiles = Bun.spawnSync(["git", "-C", root, "ls-files", "-v"], { env, stdout: "pipe", stderr: "pipe" });
   const hiddenIndexBits =
     lsFiles.exitCode !== 0 || lsFiles.stdout.toString().split(/\r?\n/).some((line) => HIDDEN_INDEX_TAG_RE.test(line));
 

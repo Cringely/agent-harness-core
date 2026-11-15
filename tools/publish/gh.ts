@@ -36,6 +36,26 @@ export interface PrState {
   checks: CheckEntry[];
 }
 
+// An issue GitHub links a pull request to close, as owner/name and number.
+export interface ClosingRef {
+  repo: string;
+  number: number;
+}
+
+function parseClosingRefs(value: unknown): ClosingRef[] | null {
+  if (!Array.isArray(value)) return null;
+  const refs: ClosingRef[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) return null;
+    const ref = entry as { number?: unknown; repository?: { name?: unknown; owner?: { login?: unknown } | null } | null };
+    const owner = ref.repository?.owner?.login;
+    const name = ref.repository?.name;
+    if (typeof ref.number !== "number" || !Number.isSafeInteger(ref.number) || typeof owner !== "string" || typeof name !== "string") return null;
+    refs.push({ repo: `${owner}/${name}`, number: ref.number });
+  }
+  return refs;
+}
+
 const PR_FIELDS = "number,state,isDraft,baseRefName,headRefName,headRefOid,isCrossRepository,mergeStateStatus,title,body,statusCheckRollup";
 const PR_URL_RE = /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+$/;
 const ISSUE_URL_RE = /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/issues\/\d+$/;
@@ -339,20 +359,31 @@ export class Gh {
     this.ok(["pr", "comment", String(pr), `--repo=${repo}`, "--body-file=-"], "commenting on the pull request", body);
   }
 
-  mergePr(repo: string, pr: number, headSha: string, method: "merge" | "rebase", admin: boolean): void {
+  // A --merge merge commit gets the given subject and body, so its message is text the caller
+  // scanned rather than GitHub's default, which it builds from the pull request's title and body as
+  // they stand at merge time. A rebase makes no merge commit, so it takes neither.
+  mergePr(repo: string, pr: number, headSha: string, method: "merge" | "rebase", admin: boolean, message: { subject: string; body: string }): void {
     const args = ["pr", "merge", String(pr), `--repo=${repo}`, `--${method}`, `--match-head-commit=${headSha}`];
+    if (method === "merge") args.push(`--subject=${message.subject}`, "--body-file=-");
     if (admin) args.push("--admin");
-    this.ok(args, "merging the pull request");
+    this.ok(args, "merging the pull request", method === "merge" ? message.body : undefined);
   }
 
-  mergedState(repo: string, pr: number): { state: string; mergeSha: string | null } {
-    const out = this.ok(["pr", "view", String(pr), `--repo=${repo}`, "--json=state,mergeCommit"], "confirming the merge");
+  // closing is null when gh's closingIssuesReferences is missing or not in the expected shape, so
+  // the caller cannot read an unreadable list as "closes nothing".
+  mergedState(repo: string, pr: number): { state: string; mergeSha: string | null; closing: ClosingRef[] | null } {
+    const out = this.ok(["pr", "view", String(pr), `--repo=${repo}`, "--json=state,mergeCommit,closingIssuesReferences"], "confirming the merge");
+    let raw: { state?: unknown; mergeCommit?: { oid?: unknown } | null; closingIssuesReferences?: unknown };
     try {
-      const raw = JSON.parse(out) as { state?: unknown; mergeCommit?: { oid?: unknown } | null };
-      const oid = raw.mergeCommit?.oid;
-      return { state: String(raw.state ?? ""), mergeSha: typeof oid === "string" && SHA_RE.test(oid) ? oid : null };
+      raw = JSON.parse(out) as typeof raw;
     } catch {
       throw new PublishError("gh returned merge data that is not JSON");
     }
+    const oid = raw.mergeCommit?.oid;
+    return {
+      state: String(raw.state ?? ""),
+      mergeSha: typeof oid === "string" && SHA_RE.test(oid) ? oid : null,
+      closing: parseClosingRefs(raw.closingIssuesReferences),
+    };
   }
 }

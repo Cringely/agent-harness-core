@@ -262,13 +262,38 @@ describe("publishing calls", () => {
     expect(() => gh(runner).createIssue(REPO, "t", "b")).toThrow(PublishError);
   });
 
-  test("mergePr pins the head and adds --admin only when asked", () => {
+  test("mergePr pins the head, sets a --merge commit's message, and adds --admin only when asked", () => {
     const runner = new FakeRunner([TOKEN, on(["gh", "pr", "merge"], {})]);
     const client = gh(runner);
-    client.mergePr(REPO, 7, HEAD, "merge", false);
-    client.mergePr(REPO, 7, HEAD, "rebase", true);
-    expect(runner.calls[1]!.argv).toEqual(["gh", "pr", "merge", "7", `--repo=${REPO}`, "--merge", `--match-head-commit=${HEAD}`]);
+    const message = { subject: "Merge pull request #7", body: "title" };
+    client.mergePr(REPO, 7, HEAD, "merge", false, message);
+    client.mergePr(REPO, 7, HEAD, "rebase", true, message);
+    expect(runner.calls[1]!.argv).toEqual([
+      "gh",
+      "pr",
+      "merge",
+      "7",
+      `--repo=${REPO}`,
+      "--merge",
+      `--match-head-commit=${HEAD}`,
+      "--subject=Merge pull request #7",
+      "--body-file=-",
+    ]);
+    expect(runner.calls[1]!.options.stdin).toBe("title");
     expect(runner.calls[2]!.argv).toEqual(["gh", "pr", "merge", "7", `--repo=${REPO}`, "--rebase", `--match-head-commit=${HEAD}`, "--admin"]);
+    expect(runner.calls[2]!.options.stdin).toBeUndefined();
+  });
+
+  test("mergedState reads the closing references, and an unreadable list as null", () => {
+    const answer = (closing: unknown) =>
+      new FakeRunner([
+        TOKEN,
+        on(["gh", "pr", "view", "7"], { stdout: JSON.stringify({ state: "MERGED", mergeCommit: { oid: HEAD }, closingIssuesReferences: closing }) }),
+      ]);
+    const ref = { number: 3, repository: { name: "fixture-repo", owner: { login: "fixture-owner" } } };
+    expect(gh(answer([ref])).mergedState(REPO, 7)).toEqual({ state: "MERGED", mergeSha: HEAD, closing: [{ repo: REPO, number: 3 }] });
+    expect(gh(answer(undefined)).mergedState(REPO, 7).closing).toBeNull();
+    expect(gh(answer([{ number: "3" }])).mergedState(REPO, 7).closing).toBeNull();
   });
 
   test("watchChecks reports a timeout", () => {

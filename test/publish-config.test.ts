@@ -47,7 +47,7 @@ describe("parsePublishConfig()", () => {
   test("parses a full config and looks owners and repos up case-insensitively", () => {
     const parsed = parsePublishConfig(config());
     expect(ownerIdentity(parsed, "Fixture-Owner/fixture-repo")).toEqual(OWNER);
-    expect(reviewerConfig(parsed, "FIXTURE-OWNER/Fixture-Repo")).toEqual(REVIEWER);
+    expect(reviewerConfig(parsed, "FIXTURE-OWNER/Fixture-Repo")).toEqual({ ...REVIEWER, policyFile: null });
   });
 
   test("accepts a config with no reviewers", () => {
@@ -141,6 +141,14 @@ describe("parsePublishConfig()", () => {
     const { termsFile: _omitted, ...withoutTerms } = REVIEWER;
     expect(refusal(config({ reviewers: { "fixture-owner/fixture-repo": withoutTerms } }))).toContain("termsFile");
     expect(refusal(config({ reviewers: { "fixture-owner/fixture-repo": { ...REVIEWER, termsFile: "terms.json" } } }))).toContain("termsFile");
+  });
+
+  test("reads an optional absolute policyFile, and refuses a relative one", () => {
+    const policyFile = join(tmpdir(), "fixture-policy.json");
+    const parsed = parsePublishConfig(config({ reviewers: { "fixture-owner/fixture-repo": { ...REVIEWER, policyFile } } }));
+    expect(parsed.reviewers["fixture-owner/fixture-repo"]!.policyFile).toBe(policyFile);
+    expect(parsePublishConfig(config()).reviewers["fixture-owner/fixture-repo"]!.policyFile).toBeNull();
+    expect(refusal(config({ reviewers: { "fixture-owner/fixture-repo": { ...REVIEWER, policyFile: "policy.json" } } }))).toContain("policyFile");
   });
 
   test("refuses a reviewers key that is not owner/name", () => {
