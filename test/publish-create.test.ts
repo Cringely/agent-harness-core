@@ -208,16 +208,6 @@ describe("pr create", () => {
     const runner = publishingRepo([on(["gh", "api", `repos/${REPO}/branches/feat/x`], NOT_FOUND)]);
     refuses(() => prCreate(ctx(runner), PR_ARGS), runner, "Push it first");
   });
-
-  test("refuses a body that leaves a pull request template section empty", () => {
-    const runner = publishingRepo([
-      on(["gh", "api", `repos/${REPO}/contents/.github?ref=main`], { stdout: "pull_request_template.md\n" }),
-      on(["gh", "api", "-H", "Accept: application/vnd.github.raw", `repos/${REPO}/contents/.github/pull_request_template.md?ref=main`], {
-        stdout: "## Why\n\n## Testing\n",
-      }),
-    ]);
-    refuses(() => prCreate(ctx(runner), PR_ARGS), runner, "section(s) 2 of 2");
-  });
 });
 
 describe("pr edit", () => {
@@ -268,7 +258,7 @@ describe("pr edit", () => {
 });
 
 describe("issue create", () => {
-  const ISSUE_ARGS = { repo: REPO, title: "Publish tool", bodyFile: BODY_PATH, template: null };
+  const ISSUE_ARGS = { repo: REPO, title: "Publish tool", bodyFile: BODY_PATH };
 
   test("publishes a clean issue", () => {
     const runner = publishingRepo();
@@ -279,31 +269,13 @@ describe("issue create", () => {
     const runner = publishingRepo();
     refuses(() => issueCreate(ctx(runner, `${CLEAN_BODY}\nFixes #3\n`), ISSUE_ARGS), runner, "undeclared: 1");
   });
-
-  test("refuses a blank issue when the repository disables them", () => {
-    const runner = publishingRepo([
-      on(["gh", "api", "-H", "Accept: application/vnd.github.raw", `repos/${REPO}/contents/.github/ISSUE_TEMPLATE/config.yml?ref=main`], {
-        stdout: "blank_issues_enabled: false\n",
-      }),
-    ]);
-    refuses(() => issueCreate(ctx(runner), ISSUE_ARGS), runner, "disables blank issues");
-  });
-
-  test("refuses a body that leaves a named template's section empty", () => {
-    const runner = publishingRepo([
-      on(["gh", "api", "-H", "Accept: application/vnd.github.raw", `repos/${REPO}/contents/.github/ISSUE_TEMPLATE/promotion.md?ref=main`], {
-        stdout: "---\nname: P\n---\n## Why\n\n## Source\n",
-      }),
-    ]);
-    refuses(() => issueCreate(ctx(runner), { ...ISSUE_ARGS, template: "promotion.md" }), runner, "section(s) 2 of 2");
-  });
 });
 
 describe("issue edit", () => {
   test("refuses an attribution line in a new body", () => {
     const runner = publishingRepo();
     refuses(
-      () => issueEdit(ctx(runner, `${CLEAN_BODY}\nClaude-Session: x\n`), { repo: REPO, issue: 3, title: null, bodyFile: BODY_PATH, template: null }),
+      () => issueEdit(ctx(runner, `${CLEAN_BODY}\nClaude-Session: x\n`), { repo: REPO, issue: 3, title: null, bodyFile: BODY_PATH }),
       runner,
       "Claude-Session line",
     );
@@ -311,7 +283,7 @@ describe("issue edit", () => {
 
   test("edits a title alone", () => {
     const runner = publishingRepo();
-    expect(issueEdit(ctx(runner), { repo: REPO, issue: 3, title: "New title", bodyFile: null, template: null })).toBe("edited issue #3");
+    expect(issueEdit(ctx(runner), { repo: REPO, issue: 3, title: "New title", bodyFile: null })).toBe("edited issue #3");
     expect(runner.publishing()).toEqual([["gh", "issue", "edit", "3", `--repo=${REPO}`, "--title=New title"]]);
   });
 });

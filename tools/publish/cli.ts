@@ -32,8 +32,8 @@ import { realExists, reviewMerge, type ReviewMergeArgs } from "./review-merge";
 import { parseClosesList } from "./scan";
 
 export const USAGE = [
-  "bun --cwd <home>/.claude-publish/work <abs>/tools/publish/cli.ts issue create --repo <owner/name> --title <t> --body-file <abs path> [--template <file.md>]",
-  "bun --cwd <home>/.claude-publish/work <abs>/tools/publish/cli.ts issue edit --repo <owner/name> --issue <n> [--title <t>] [--body-file <abs path> [--template <file.md>]]",
+  "bun --cwd <home>/.claude-publish/work <abs>/tools/publish/cli.ts issue create --repo <owner/name> --title <t> --body-file <abs path>",
+  "bun --cwd <home>/.claude-publish/work <abs>/tools/publish/cli.ts issue edit --repo <owner/name> --issue <n> [--title <t>] [--body-file <abs path>]",
   "bun --cwd <home>/.claude-publish/work <abs>/tools/publish/cli.ts pr create --repo <owner/name> --base <branch> --head <branch> --title <t> --body-file <abs path> [--closes <n,n>] [--draft]",
   "bun --cwd <home>/.claude-publish/work <abs>/tools/publish/cli.ts pr edit --repo <owner/name> --pr <n> --base <branch> [--title <t>] [--body-file <abs path> [--closes <n,n>]]",
   "bun --cwd <home>/.claude-publish/work <abs>/tools/publish/cli.ts review-merge --repo <owner/name> --pr <n> --tool-head <commit> [--closes <n,n>] [--allow-admin --admin-reason-file <abs path>] [--method merge|rebase] [--checks-timeout-min <1-180>]",
@@ -102,19 +102,17 @@ export function parseCommand(argv: readonly string[]): Command {
 
   if (first === "issue" && (second === "create" || second === "edit")) {
     if (second === "create") {
-      const v = parse(rest, ["repo", "title", "body-file", "template"]);
+      const v = parse(rest, ["repo", "title", "body-file"]);
       return {
         kind: "issue-create",
         repo: repoOf(v),
         title: titleOf(v, true)!,
         bodyFile: bodyFileOf(v, true)!,
-        template: typeof v.template === "string" ? v.template : null,
       };
     }
-    const v = parse(rest, ["repo", "issue", "title", "body-file", "template"]);
-    const args = { repo: repoOf(v), issue: numberOf(v, "issue"), title: titleOf(v, false), bodyFile: bodyFileOf(v, false), template: typeof v.template === "string" ? v.template : null };
+    const v = parse(rest, ["repo", "issue", "title", "body-file"]);
+    const args = { repo: repoOf(v), issue: numberOf(v, "issue"), title: titleOf(v, false), bodyFile: bodyFileOf(v, false) };
     if (args.title === null && args.bodyFile === null) throw new UsageError("issue edit needs --title, --body-file or both");
-    if (args.template !== null && args.bodyFile === null) throw new UsageError("--template applies only with --body-file");
     return { kind: "issue-edit", ...args };
   }
 
