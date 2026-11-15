@@ -38,14 +38,16 @@
 //      GitHub links outside the text (an issue linked from the sidebar still closes on merge),
 //      every commit's author and committer, and personal terms in commit messages, title and body.
 //      CONTRIBUTING.md requires it for a bypass merge, and it runs before every merge here
-//  10. for an administrator-bypass merge, the reason is posted as a pull request comment first
-//      (CONTRIBUTING.md has every bypass say why)
-//  11. the title and body are read once more and must equal the ones step 8 audited, or nothing is
+//  10. the title and body are read once more and must equal the ones step 8 audited, or nothing is
 //      merged. For --merge, the subject and body built from that audited text pass the identity scan
 //      again, since this is the text that lands in git history and no push hook sees a commit
-//      GitHub writes. Then gh pr merge with --match-head-commit and, for --merge, that explicit
-//      subject and body, so the merge commit never carries GitHub's default message built from
-//      whatever the title and body say at merge time
+//      GitHub writes
+//  11. for an administrator-bypass merge, the reason is posted as a pull request comment
+//      (CONTRIBUTING.md has every bypass say why). It is the last write before the merge, after
+//      every check that can refuse, since a refusal reports that nothing new was published. Then gh
+//      pr merge with --match-head-commit and, for --merge, that explicit subject and body, so the
+//      merge commit never carries GitHub's default message built from whatever the title and body
+//      say at merge time. A merge that fails after the reason was posted is an error naming it
 //  12. the merge is confirmed, and the issues GitHub links the merged pull request to close must be
 //      exactly --closes. A mismatch is an error naming the merge: it has already happened, so the
 //      tool reports it rather than claiming anything was undone
@@ -401,10 +403,7 @@ export async function reviewMerge(ctx: ReviewMergeContext, args: ReviewMergeArgs
   if (decision.action === "refuse") throw new PublishRefusal(`not merged: ${decision.reason}`);
 
   runPremerge(ctx, gh, owner, reviewer, cli, args, head);
-  if (decision.admin) {
-    if (adminReason === null) throw new PublishRefusal("an administrator-bypass merge needs a reason");
-    gh.commentPr(args.repo, args.pr, adminReason);
-  }
+  if (decision.admin && adminReason === null) throw new PublishRefusal("an administrator-bypass merge needs a reason");
   // GitHub links closing issues from the body as it stands at merge, so an edit after the audit
   // would close what --closes never named. Re-read as late as possible and refuse on any change.
   const latest = gh.prView(args.repo, args.pr);
@@ -412,7 +411,19 @@ export async function reviewMerge(ctx: ReviewMergeContext, args: ReviewMergeArgs
     throw new PublishRefusal("the title or body changed after the closing-keyword audit. Nothing was merged");
   }
   assertMergeMessageClean(ctx, args, final);
-  gh.mergePr(args.repo, args.pr, head, args.method, decision.admin, mergeMessage(args.pr, final));
+  // A refusal means nothing new was published, so the bypass reason is the last write before the
+  // merge, after every check that can refuse. A merge that fails after it says the reason is up.
+  if (decision.admin) {
+    gh.commentPr(args.repo, args.pr, adminReason!);
+    try {
+      gh.mergePr(args.repo, args.pr, head, args.method, true, mergeMessage(args.pr, final));
+    } catch (error) {
+      if (!(error instanceof PublishRefusal || error instanceof PublishError)) throw error;
+      throw new PublishError(`the bypass reason was posted on #${args.pr}, but the merge did not complete (${error.message}). Check the pull request before running again`);
+    }
+  } else {
+    gh.mergePr(args.repo, args.pr, head, args.method, false, mergeMessage(args.pr, final));
+  }
   const merged = gh.mergedState(args.repo, args.pr);
   if (merged.state !== "MERGED" || merged.mergeSha === null) {
     throw new PublishError("gh reported no error, but the pull request is not merged. Check it for auto-merge before running again");

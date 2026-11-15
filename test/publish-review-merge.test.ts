@@ -744,6 +744,33 @@ Thanks, Fixture Person.
     await refusal(reviewMerge(ctx(runner), ARGS), runner, "changed after the closing-keyword audit", true);
   });
 
+  // A refusal exits 2, which says nothing was published, so every check that can refuse runs before
+  // the bypass reason is posted.
+  test("an administrator bypass whose body was edited between the audit and the merge posts no reason", async () => {
+    const blocked = { ...VIEW, mergeStateStatus: "BLOCKED" };
+    const runner = withReviewer(
+      scenario({ views: [VIEW, VIEW, blocked, { ...blocked, body: "## Why\n\nEdited after the audit.\n" }], extra: [on(["gh", "pr", "comment"], {})] }),
+      reviewerSays(APPROVE_OUTPUT),
+    );
+    await refusal(reviewMerge(ctx(runner), ADMIN_ARGS), runner, "changed after the closing-keyword audit", true);
+  });
+
+  test("an administrator bypass whose merge message fails the identity scan posts no reason", async () => {
+    const dirty = { ...VIEW, mergeStateStatus: "BLOCKED", body: `${VIEW.body}\nThanks, Fixture Person.\n` };
+    const runner = withReviewer(scenario({ views: [VIEW, VIEW, dirty], extra: [on(["gh", "pr", "comment"], {})] }), reviewerSays(APPROVE_OUTPUT));
+    await refusal(reviewMerge(ctx(runner), ADMIN_ARGS), runner, "refusing to publish", true);
+  });
+
+  test("an administrator-bypass merge that fails after the reason was posted is an error that says so", async () => {
+    const runner = withReviewer(
+      scenario({ views: [VIEW, VIEW, { ...VIEW, mergeStateStatus: "BLOCKED" }], extra: [on(["gh", "pr", "comment"], {}), on(["gh", "pr", "merge"], { code: 1, stderr: "HTTP 405" })] }),
+      reviewerSays(APPROVE_OUTPUT),
+    );
+    const error = await reviewMerge(ctx(runner), ADMIN_ARGS).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(PublishError);
+    expect((error as Error).message).toContain("bypass reason was posted");
+  });
+
   test("a merged pull request GitHub links to close an undeclared issue is an error naming the merge", async () => {
     const ref = { number: 8, repository: { name: "fixture-repo", owner: { login: "fixture-owner" } } };
     const runner = withReviewer(scenario({ closing: [ref] }), reviewerSays(APPROVE_OUTPUT));
