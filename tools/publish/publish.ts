@@ -13,7 +13,6 @@
 //   6. closing keywords only on a pull request into the default branch
 //   7. both branches exist on the remote (pr create), or the pull request's base is the --base
 //      given (pr edit)
-//   8. the repository's template, if any, has every section filled (template.ts)
 //
 // Every refusal is a PublishRefusal naming a class, never the text that tripped it.
 
@@ -24,7 +23,6 @@ import { PublishRefusal, UsageError } from "./errors";
 import type { Runner } from "./exec";
 import { Gh } from "./gh";
 import { compareClosing, findClosingRefs, scanText, type TextField } from "./scan";
-import { templateSections, unfilledSections } from "./template";
 
 export interface PublishContext {
   runner: Runner;
@@ -38,7 +36,6 @@ export interface IssueCreateArgs {
   repo: string;
   title: string;
   bodyFile: string;
-  template: string | null;
 }
 
 export interface IssueEditArgs {
@@ -46,7 +43,6 @@ export interface IssueEditArgs {
   issue: number;
   title: string | null;
   bodyFile: string | null;
-  template: string | null;
 }
 
 export interface PrCreateArgs {
@@ -123,25 +119,6 @@ function closingGate(texts: readonly string[], declared: number[], repo: string)
   return found.length;
 }
 
-function templateGate(template: string, body: string): void {
-  const unfilled = unfilledSections(template, body);
-  if (unfilled.length > 0) {
-    throw new PublishRefusal(
-      `refusing to publish: template section(s) ${unfilled.join(", ")} of ${templateSections(template).length} are missing or empty`,
-    );
-  }
-}
-
-function issueTemplateGate(gh: Gh, repo: string, ref: string, template: string | null, body: string, requireWhenBlankDisabled: boolean): void {
-  if (template === null) {
-    if (requireWhenBlankDisabled && gh.blankIssuesDisabled(repo, ref)) {
-      throw new PublishRefusal("this repository disables blank issues. Pass --template naming one of its issue templates");
-    }
-    return;
-  }
-  templateGate(gh.issueTemplate(repo, ref, template), body);
-}
-
 export function issueCreate(ctx: PublishContext, args: IssueCreateArgs): string {
   const body = loadBody(ctx, args.bodyFile);
   const owner = localGates(ctx, args.repo, [
@@ -150,8 +127,6 @@ export function issueCreate(ctx: PublishContext, args: IssueCreateArgs): string 
   ]);
   closingGate([body], [], args.repo);
   const gh = Gh.forUser(ctx.runner, owner.ghUser, ctx.env);
-  const defaultBranch = gh.defaultBranch(args.repo);
-  issueTemplateGate(gh, args.repo, defaultBranch, args.template, body, true);
   return gh.createIssue(args.repo, args.title, body);
 }
 
@@ -163,9 +138,6 @@ export function issueEdit(ctx: PublishContext, args: IssueEditArgs): string {
   const owner = localGates(ctx, args.repo, fields);
   if (body !== null) closingGate([body], [], args.repo);
   const gh = Gh.forUser(ctx.runner, owner.ghUser, ctx.env);
-  if (body !== null && args.template !== null) {
-    issueTemplateGate(gh, args.repo, gh.defaultBranch(args.repo), args.template, body, false);
-  }
   gh.editIssue(args.repo, args.issue, args.title, body);
   return `edited issue #${args.issue}`;
 }
@@ -185,8 +157,6 @@ export function prCreate(ctx: PublishContext, args: PrCreateArgs): string {
   }
   if (gh.branchHead(args.repo, args.base) === null) throw new PublishRefusal("the base branch does not exist on the remote");
   if (gh.branchHead(args.repo, args.head) === null) throw new PublishRefusal("the head branch is not on the remote. Push it first");
-  const template = gh.prTemplate(args.repo, defaultBranch);
-  if (template !== null) templateGate(template, body);
   return gh.createPr(args.repo, args.base, args.head, args.title, body, args.draft);
 }
 
@@ -206,10 +176,6 @@ export function prEdit(ctx: PublishContext, args: PrEditArgs): string {
   const defaultBranch = gh.defaultBranch(args.repo);
   if (args.base !== defaultBranch && closing > 0) {
     throw new PublishRefusal("refusing to publish: closing keywords act only on a pull request into the default branch, and this one targets another base");
-  }
-  if (body !== null) {
-    const template = gh.prTemplate(args.repo, defaultBranch);
-    if (template !== null) templateGate(template, body);
   }
   gh.editPr(args.repo, args.pr, args.title, body);
   return `edited pull request #${args.pr}`;
