@@ -21,7 +21,7 @@ PowerShell:
 
     bun --cwd "$HOME/.claude-publish/work" "<project>/.claude/skills/publish/resolve-core.ts" "<project>"
 
-It prints the absolute path of `tools/publish/cli.ts` only when `coreRepo` is outside this project and listed in the per-user checkout allowlist, `~/.claude/harness-core-checkouts` (or the file `HARNESS_CORE_ALLOWLIST` names), which the installer appends to. Otherwise it prints nothing on stdout, a reason on stderr, and exits 1. On any exit but 0, or empty output, stop and ask the operator. Never fall back to the raw `coreRepo` value or to a path you guess. `<cli>` below is the path it printed:
+It prints the absolute path of `tools/publish/cli.ts` only when the real path of `coreRepo` (links and junctions followed) is outside this project and listed in the per-user checkout allowlist, `~/.claude/harness-core-checkouts`, which the installer appends to. No environment variable moves that list for this helper, and a relative, UNC or device-path `coreRepo` is refused. Otherwise it prints nothing on stdout, a reason on stderr, and exits 1. On any exit but 0, or empty output, stop and ask the operator. Never fall back to the raw `coreRepo` value or to a path you guess. `<cli>` below is the path it printed:
 
 Bash:
 

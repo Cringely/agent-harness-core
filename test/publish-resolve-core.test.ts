@@ -5,9 +5,9 @@
 // case below keeps a cli.ts in place, so a pass means the allowlist refused it, not a missing file.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { resolveCore } from "../core/claude/skills/publish/resolve-core";
 
 const HELPER = join(import.meta.dir, "..", "core", "claude", "skills", "publish", "resolve-core.ts");
@@ -47,8 +47,8 @@ describe("resolveCore", () => {
     const d = scratch();
     const core = makeCore(d);
     const project = makeProject(d, core);
-    const r = resolveCore(project, { HARNESS_CORE_ALLOWLIST: allowlist(d, ["", core]) });
-    expect(r).toEqual({ ok: true, cli: join(resolve(core), "tools", "publish", "cli.ts") });
+    const r = resolveCore(project, {}, allowlist(d, ["", core]));
+    expect(r).toEqual({ ok: true, cli: join(realpathSync.native(core), "tools", "publish", "cli.ts") });
   });
 
   test("refuses a coreRepo that is not on the allowlist", () => {
@@ -56,7 +56,7 @@ describe("resolveCore", () => {
     const core = makeCore(d);
     const other = makeCore(d, "other");
     const project = makeProject(d, core);
-    const r = resolveCore(project, { HARNESS_CORE_ALLOWLIST: allowlist(d, [other]) });
+    const r = resolveCore(project, {}, allowlist(d, [other]));
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toContain("not on the checkout allowlist");
   });
@@ -65,7 +65,7 @@ describe("resolveCore", () => {
     const d = scratch();
     const core = makeCore(d);
     const project = makeProject(d, core);
-    const r = resolveCore(project, { HARNESS_CORE_ALLOWLIST: join(d, "missing") });
+    const r = resolveCore(project, {}, join(d, "missing"));
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toContain("cannot be read");
   });
@@ -84,7 +84,7 @@ describe("resolveCore", () => {
     const project = makeProject(d, "placeholder");
     const inner = makeCore(project, "vendored");
     writeFileSync(join(project, ".claude", ".harness-manifest.local.json"), JSON.stringify({ coreRepo: inner }));
-    const r = resolveCore(project, { HARNESS_CORE_ALLOWLIST: allowlist(d, [inner]) });
+    const r = resolveCore(project, {}, allowlist(d, [inner]));
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toContain("inside this project");
   });
@@ -93,7 +93,7 @@ describe("resolveCore", () => {
     const d = scratch();
     makeCore(d);
     const project = makeProject(d, "../core");
-    const r = resolveCore(project, { HARNESS_CORE_ALLOWLIST: allowlist(d, ["../core"]) });
+    const r = resolveCore(project, {}, allowlist(d, ["../core"]));
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toContain("not an absolute path");
   });
@@ -103,8 +103,113 @@ describe("resolveCore", () => {
     const core = join(d, "empty");
     mkdirSync(core);
     const project = makeProject(d, core);
-    const r = resolveCore(project, { HARNESS_CORE_ALLOWLIST: allowlist(d, [core]) });
+    const r = resolveCore(project, {}, allowlist(d, [core]));
     expect(r.ok).toBe(false);
+  });
+
+  test("ignores HARNESS_CORE_ALLOWLIST: a planted list that names coreRepo does not admit it", () => {
+    const d = scratch();
+    const core = makeCore(d);
+    const project = makeProject(d, core);
+    const planted = allowlist(d, [core]);
+    const home = join(d, "home");
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    writeFileSync(join(home, ".claude", "harness-core-checkouts"), "");
+    const r = resolveCore(project, { HARNESS_CORE_ALLOWLIST: planted, USERPROFILE: home, HOME: home });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("not on the checkout allowlist");
+  });
+
+  test("refuses a listed alias outside the project whose real path is inside it", () => {
+    const d = scratch();
+    const project = makeProject(d, "placeholder");
+    const inner = makeCore(project, "vendored");
+    const alias = join(d, "alias");
+    try {
+      symlinkSync(inner, alias, process.platform === "win32" ? "junction" : "dir");
+    } catch (e) {
+      console.warn(`skipped: this OS cannot create a directory link here (${(e as Error).message})`);
+      return;
+    }
+    writeFileSync(join(project, ".claude", ".harness-manifest.local.json"), JSON.stringify({ coreRepo: alias }));
+    const r = resolveCore(project, {}, allowlist(d, [alias]));
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("inside this project");
+  });
+
+  test("matches the allowlist by real path, so a listed link to the checkout admits it", () => {
+    const d = scratch();
+    const core = makeCore(d);
+    const link = join(d, "core-link");
+    try {
+      symlinkSync(core, link, process.platform === "win32" ? "junction" : "dir");
+    } catch (e) {
+      console.warn(`skipped: this OS cannot create a directory link here (${(e as Error).message})`);
+      return;
+    }
+    const project = makeProject(d, link);
+    const r = resolveCore(project, {}, allowlist(d, [core]));
+    expect(r).toEqual({ ok: true, cli: join(realpathSync.native(core), "tools", "publish", "cli.ts") });
+  });
+
+  test("matches the allowlist by real path, so a listed link admits the checkout it points at", () => {
+    const d = scratch();
+    const core = makeCore(d);
+    const link = join(d, "listed-link");
+    try {
+      symlinkSync(core, link, process.platform === "win32" ? "junction" : "dir");
+    } catch (e) {
+      console.warn(`skipped: this OS cannot create a directory link here (${(e as Error).message})`);
+      return;
+    }
+    const project = makeProject(d, core);
+    expect(resolveCore(project, {}, allowlist(d, [link])).ok).toBe(true);
+  });
+
+  test("refuses a coreRepo inside the project when the project root is passed through a link", () => {
+    const d = scratch();
+    const project = makeProject(d, "placeholder");
+    const inner = makeCore(project, "vendored");
+    writeFileSync(join(project, ".claude", ".harness-manifest.local.json"), JSON.stringify({ coreRepo: inner }));
+    const projectLink = join(d, "project-link");
+    try {
+      symlinkSync(project, projectLink, process.platform === "win32" ? "junction" : "dir");
+    } catch (e) {
+      console.warn(`skipped: this OS cannot create a directory link here (${(e as Error).message})`);
+      return;
+    }
+    const r = resolveCore(projectLink, {}, allowlist(d, [inner]));
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("inside this project");
+  });
+
+  test("refuses a UNC or device-path coreRepo", () => {
+    const d = scratch();
+    for (const unc of ["\\\\server\\share\\core", "//server/share/core", "\\\\?\\C:\\core", "\\\\.\\C:\\core", "//?/C:/core"]) {
+      const project = makeProject(d, unc);
+      const r = resolveCore(project, {}, allowlist(d, [unc]));
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.reason).toContain("UNC");
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+
+  test("refuses a coreRepo whose real path cannot be resolved", () => {
+    const d = scratch();
+    const project = makeProject(d, join(d, "gone"));
+    const r = resolveCore(project, {}, allowlist(d, [join(d, "gone")]));
+    expect(r.ok).toBe(false);
+  });
+
+  test("refuses a relative or UNC allowlist location", () => {
+    const d = scratch();
+    const core = makeCore(d);
+    const project = makeProject(d, core);
+    for (const home of ["relative-home", "\\\\server\\share\\home", "//server/share/home"]) {
+      const r = resolveCore(project, { USERPROFILE: home, HOME: home });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.reason).toContain("allowlist location");
+    }
   });
 
   test("refuses a missing sidecar, a non-string coreRepo and an unparsable sidecar", () => {
@@ -113,11 +218,11 @@ describe("resolveCore", () => {
     const list = allowlist(d, [core]);
     const bare = join(d, "bare");
     mkdirSync(bare);
-    expect(resolveCore(bare, { HARNESS_CORE_ALLOWLIST: list }).ok).toBe(false);
+    expect(resolveCore(bare, {}, list).ok).toBe(false);
     const project = makeProject(d, 7);
-    expect(resolveCore(project, { HARNESS_CORE_ALLOWLIST: list }).ok).toBe(false);
+    expect(resolveCore(project, {}, list).ok).toBe(false);
     writeFileSync(join(project, ".claude", ".harness-manifest.local.json"), "{not json");
-    expect(resolveCore(project, { HARNESS_CORE_ALLOWLIST: list }).ok).toBe(false);
+    expect(resolveCore(project, {}, list).ok).toBe(false);
   });
 });
 
@@ -126,18 +231,33 @@ describe("resolve-core.ts as a command", () => {
     const d = scratch();
     const core = makeCore(d);
     const project = makeProject(d, core);
+    // The command reads only the profile allowlist, so each run gets its own profile.
+    const home = join(d, "home");
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    writeFileSync(join(home, ".claude", "harness-core-checkouts"), `${core}\n`);
     const okRun = Bun.spawnSync([process.execPath, HELPER, project], {
-      env: { ...process.env, HARNESS_CORE_ALLOWLIST: allowlist(d, [core]) },
+      env: { ...process.env, USERPROFILE: home, HOME: home },
     });
     expect(okRun.exitCode).toBe(0);
-    expect(okRun.stdout.toString()).toBe(`${join(resolve(core), "tools", "publish", "cli.ts")}\n`);
+    expect(okRun.stdout.toString()).toBe(`${join(realpathSync.native(core), "tools", "publish", "cli.ts")}\n`);
 
     const badRun = Bun.spawnSync([process.execPath, HELPER, project], {
-      env: { ...process.env, HARNESS_CORE_ALLOWLIST: join(d, "missing") },
+      env: { ...process.env, USERPROFILE: join(d, "nohome"), HOME: join(d, "nohome") },
     });
     expect(badRun.exitCode).toBe(1);
     expect(badRun.stdout.toString()).toBe("");
     expect(badRun.stderr.toString()).toContain("resolve-core:");
+  });
+
+  test("ignores a planted HARNESS_CORE_ALLOWLIST and exits 1 with empty stdout", () => {
+    const d = scratch();
+    const core = makeCore(d);
+    const project = makeProject(d, core);
+    const run = Bun.spawnSync([process.execPath, HELPER, project], {
+      env: { ...process.env, HARNESS_CORE_ALLOWLIST: allowlist(d, [core]), USERPROFILE: join(d, "nohome"), HOME: join(d, "nohome") },
+    });
+    expect(run.exitCode).toBe(1);
+    expect(run.stdout.toString()).toBe("");
   });
 
   test("exits 1 without a project argument", () => {

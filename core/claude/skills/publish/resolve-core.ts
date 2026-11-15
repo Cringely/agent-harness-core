@@ -11,20 +11,41 @@
 // list session-start-drift-check.sh requires and Install-Harness.ps1 appends to. The check lives
 // here and not in cli.ts, because a check inside the checkout being vetted is skipped by any
 // checkout that leaves it out.
+// Residual: this file and the SKILL.md that runs it ship inside the project, so a project that rewrites them skips the check.
 //
-// Fails closed: an unreadable sidecar or allowlist, a relative or missing coreRepo, one inside
-// this project, or one without tools/publish/cli.ts prints a reason on stderr, nothing on
-// stdout, and exits 1. No imports beyond node builtins, so it runs from any project tree.
+// The allowlist is always ~/.claude/harness-core-checkouts. No environment variable moves it,
+// because the session that runs this helper is the one a project would set that variable in.
+// Every path is compared by its real path, so a symlink or junction cannot alias a checkout into
+// the allowlist or a project directory out of the project.
+//
+// Fails closed: an unreadable sidecar or allowlist, a relative, UNC or unresolvable coreRepo, one
+// whose real path is inside this project, or one without tools/publish/cli.ts prints a reason on
+// stderr, nothing on stdout, and exits 1. No imports beyond node builtins, so it runs from any
+// project tree.
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve, sep } from "node:path";
 
 export type Resolved = { ok: true; cli: string } | { ok: false; reason: string };
 
 type Env = Record<string, string | undefined>;
 
+// A leading pair of slashes, in either direction, is a UNC share or a Windows device path
+// (\\?\, \\.\). Either can reach a network host or bypass normal path parsing, so neither is
+// accepted for coreRepo or the allowlist location.
+function isUnc(p: string): boolean {
+  return /^[\\/]{2}/.test(p);
+}
+
+function real(p: string): string | null {
+  try {
+    return realpathSync.native(resolve(p));
+  } catch {
+    return null;
+  }
+}
+
 export function allowlistPath(env: Env): string | null {
-  if (env.HARNESS_CORE_ALLOWLIST) return env.HARNESS_CORE_ALLOWLIST;
   const home = env.USERPROFILE || env.HOME;
   return home ? join(home, ".claude", "harness-core-checkouts") : null;
 }
@@ -37,7 +58,8 @@ function isDir(p: string): boolean {
   }
 }
 
-export function resolveCore(projectRoot: string, env: Env): Resolved {
+// `allowlistOverride` is a test seam: the command entry point below never passes it.
+export function resolveCore(projectRoot: string, env: Env, allowlistOverride?: string): Resolved {
   const sidecar = join(projectRoot, ".claude", ".harness-manifest.local.json");
   let coreRepo: unknown;
   try {
@@ -46,30 +68,34 @@ export function resolveCore(projectRoot: string, env: Env): Resolved {
     return { ok: false, reason: "the sidecar .claude/.harness-manifest.local.json is missing or unreadable" };
   }
   if (typeof coreRepo !== "string" || coreRepo === "") return { ok: false, reason: "the sidecar names no coreRepo" };
+  if (isUnc(coreRepo)) return { ok: false, reason: "coreRepo is a UNC or device path" };
   if (!isAbsolute(coreRepo)) return { ok: false, reason: "coreRepo is not an absolute path" };
-  const core = resolve(coreRepo);
+  const core = real(coreRepo);
+  if (!core || isUnc(core)) return { ok: false, reason: "coreRepo does not resolve to a local real path" };
   if (!isDir(core)) return { ok: false, reason: "coreRepo is not a directory" };
 
   // Case-folded, as in session-start-drift-check.sh: on Windows a case variant of the project
   // root resolves, and an exact compare would miss a path that is genuinely inside it.
-  const root = resolve(projectRoot);
+  const root = real(projectRoot);
+  if (!root) return { ok: false, reason: "the project root does not resolve to a real path" };
   const fold = (p: string) => (p.endsWith(sep) ? p : p + sep).toLowerCase();
   if (fold(core).startsWith(fold(root))) return { ok: false, reason: "coreRepo is inside this project" };
 
-  const list = allowlistPath(env);
-  if (!list) return { ok: false, reason: "no checkout allowlist location (HARNESS_CORE_ALLOWLIST, USERPROFILE and HOME are all unset)" };
+  const list = allowlistOverride ?? allowlistPath(env);
+  if (!list) return { ok: false, reason: "no checkout allowlist location (USERPROFILE and HOME are both unset)" };
+  if (isUnc(list) || !isAbsolute(list)) return { ok: false, reason: "the checkout allowlist location is relative or a UNC path" };
   let text: string;
   try {
     text = readFileSync(list, "utf8");
   } catch {
     return { ok: false, reason: "the checkout allowlist cannot be read" };
   }
-  // Exact compare after the same normalization on both sides, no case fold: the installer wrote
-  // the sidecar and the allowlist entry from one string, and a miss fails closed.
+  // Exact compare of real paths on both sides, no case fold. The native real path already
+  // carries the on-disk case, and a miss fails closed.
   const listed = text
     .split(/\r?\n/)
-    .filter((l) => l !== "" && isAbsolute(l))
-    .some((l) => resolve(l) === core);
+    .filter((l) => l !== "" && isAbsolute(l) && !isUnc(l))
+    .some((l) => real(l) === core);
   if (!listed) return { ok: false, reason: "coreRepo is not on the checkout allowlist (re-run install/Install-Harness.ps1 from your core checkout)" };
 
   const cli = join(core, "tools", "publish", "cli.ts");

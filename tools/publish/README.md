@@ -8,7 +8,7 @@ This is the route by which agents file issues, open and edit pull requests, and 
 bun --cwd <home>/.claude-publish/work <absolute path>/tools/publish/cli.ts <command> ...
 ```
 
-In an installed project the publish skill does not take `<absolute path>` from the sidecar's `coreRepo` as it stands. It first runs `.claude/skills/publish/resolve-core.ts`, which prints the cli path only when `coreRepo` sits outside the project and is listed in the per-user checkout allowlist (`~/.claude/harness-core-checkouts`, or the file `HARNESS_CORE_ALLOWLIST` names), and refuses otherwise.
+In an installed project the publish skill does not take `<absolute path>` from the sidecar's `coreRepo` as it stands. It first runs `.claude/skills/publish/resolve-core.ts`, which prints the cli path only when the real path of `coreRepo` sits outside the project and is listed in the per-user checkout allowlist (`~/.claude/harness-core-checkouts`, which `HARNESS_CORE_ALLOWLIST` does not move for this helper), and refuses otherwise, including for a relative, UNC or device-path `coreRepo`.
 
 The `--cwd` is not optional. Bun loads `bunfig.toml` and `.env` files from the working directory before any code runs, and this process holds a GitHub token and, for `review-merge`, streams the reviewer App's key. Measured on Bun 1.3.14 on 2026-10-06, a `bunfig.toml` preload and a `.env` in the launch directory both stayed unloaded under `bun --cwd <other dir>`, so `--cwd` moves the load to the work directory. `tools/pr-review/cli.ts` carries the same rule (BUN-CWD) and meets it with a shell `cd`. The flag does the same job without one, which lets a single plain command run from an isolated worktree.
 

@@ -299,8 +299,11 @@ not trusted on its own. A full install appends the checkout it runs from, and a 
 before this check needs one re-run of the installer. Until then the hook prints one
 "not on the checkout allowlist" line at session start. The publish skill holds `coreRepo` to the same
 list: its helper, `.claude/skills/publish/resolve-core.ts`, prints the path of `tools/publish/cli.ts`
-only for a listed checkout outside the project, and the skill stops otherwise.
-`HARNESS_CORE_ALLOWLIST` points all three at a different file. When the sidecar is missing but the committed
+only for a listed checkout outside the project, and the skill stops otherwise. It compares real paths, so a
+link or junction cannot alias a checkout onto the list or a project directory out of the project.
+`HARNESS_CORE_ALLOWLIST` points the hook and the installer at a different file. The publish helper ignores
+it and always reads `~/.claude/harness-core-checkouts`, because a project can set that variable in the
+session that runs the helper. When the sidecar is missing but the committed
 manifest exists (an install ran, but the write was refused), the hook prints one line saying so
 instead of going quiet, and points at a plain installer run, which says why the write was refused.
 `-Audit` reports it too, except on the legacy shape below, where it compares against the values
