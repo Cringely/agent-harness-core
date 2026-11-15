@@ -1,6 +1,6 @@
 ---
 name: publish
-description: Use before filing a GitHub issue, opening or editing a pull request, or merging one. Every publish goes through tools/publish in agent-harness-core, which refuses identifying strings, session links, attribution lines, undeclared closing keywords and unfilled templates. Carries the pull request and issue body shapes and the rule for when an issue gets filed.
+description: Use before filing a GitHub issue, opening or editing a pull request, or merging one. Every publish goes through tools/publish in agent-harness-core, which refuses identifying strings, session links, attribution lines and undeclared closing keywords. Carries the pull request and issue body shapes and the rule for when an issue gets filed.
 ---
 
 # Publish
@@ -23,8 +23,8 @@ PowerShell:
 
 Commands:
 
-    issue create  --repo <owner/name> --title <t> --body-file <abs path> [--template <file.md>]
-    issue edit    --repo <owner/name> --issue <n> [--title <t>] [--body-file <abs path> [--template <file.md>]]
+    issue create  --repo <owner/name> --title <t> --body-file <abs path>
+    issue edit    --repo <owner/name> --issue <n> [--title <t>] [--body-file <abs path>]
     pr create     --repo <owner/name> --base <branch> --head <branch> --title <t> --body-file <abs path> [--closes <n,n>] [--draft]
     pr edit       --repo <owner/name> --pr <n> --base <branch> [--title <t>] [--body-file <abs path> [--closes <n,n>]]
     review-merge  --repo <owner/name> --pr <n> --tool-head <commit> [--closes <n,n>] [--allow-admin --admin-reason-file <abs path>] [--method merge|rebase] [--checks-timeout-min <1-180>]
@@ -72,7 +72,7 @@ The shape follows the scannable-structure row of writing-style.md: an opening se
     Closes #<n>
     Docs: README still accurate: <what was checked>
 
-The `Closes` line appears only with a matching `--closes`. In agent-harness-core the Docs line is required, in one of the two forms CONTRIBUTING.md defines. When the repository has a pull request template, fill every one of its sections instead, since the tool refuses a body that leaves one empty.
+The `Closes` line appears only with a matching `--closes`. In agent-harness-core the Docs line is required, in one of the two forms CONTRIBUTING.md defines. When the repository has a pull request template, follow it instead.
 
 When a later push changes what the body claims, update the body with `pr edit` before running review-merge.
 
@@ -92,7 +92,7 @@ When a later push changes what the body claims, update the body with `pr edit` b
     **Done when**
     - <The checkable condition that closes it.>
 
-When one of the repository's issue templates applies, pass `--template <file.md>` and fill every section of it instead.
+When one of the repository's issue templates applies, follow it instead.
 
 ## When an issue gets filed
 

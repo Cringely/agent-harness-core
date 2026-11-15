@@ -58,8 +58,8 @@ exit $LASTEXITCODE
 ## Commands
 
 ```
-issue create  --repo <owner/name> --title <t> --body-file <abs path> [--template <file.md>]
-issue edit    --repo <owner/name> --issue <n> [--title <t>] [--body-file <abs path> [--template <file.md>]]
+issue create  --repo <owner/name> --title <t> --body-file <abs path>
+issue edit    --repo <owner/name> --issue <n> [--title <t>] [--body-file <abs path>]
 pr create     --repo <owner/name> --base <branch> --head <branch> --title <t> --body-file <abs path> [--closes <n,n>] [--draft]
 pr edit       --repo <owner/name> --pr <n> --base <branch> [--title <t>] [--body-file <abs path> [--closes <n,n>]]
 review-merge  --repo <owner/name> --pr <n> [--closes <n,n>] [--allow-admin --admin-reason-file <abs path>] [--method merge|rebase] [--checks-timeout-min <1-180>]
@@ -86,7 +86,6 @@ A `review-merge` refusal that follows its `review:` line means the App's review 
 5. gh is present and holds the configured account's token.
 6. Closing keywords appear only on a pull request into the default branch.
 7. Both branches exist on the remote (`pr create`), or the pull request's base is the `--base` given (`pr edit`).
-8. The repository's template, if it has one, has every section filled. Comments and lines left unchanged from the template's own prose under that heading do not count. When `.github/ISSUE_TEMPLATE/config.yml` names `blank_issues_enabled` in any form other than a plain top-level key set to true, blank issues read as disabled.
 
 ## review-merge
 
@@ -152,7 +151,6 @@ Then poll the log with a bounded wait until the exit line appears. Do not wait o
 - Closing keywords inside code spans and fences count.
 - A pull request with more commits than GitHub's commits endpoint returns (250) is refused, since an unread commit message could still close an issue.
 - Only a `SUCCESS` conclusion counts as a passing check. `SKIPPED` and `NEUTRAL` block.
-- Issue forms (`.yml`) are not supported. `--template` names a Markdown file.
 - A body line opening with "Generated with", after any punctuation or emoji, is refused. A legitimate line that opens that way is refused too. Mid-sentence prose passes.
 
 ## The permission rule
