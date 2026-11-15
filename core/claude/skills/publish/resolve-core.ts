@@ -81,9 +81,11 @@ export function resolveCore(projectRoot: string, env: Env, allowlistOverride?: s
   const fold = (p: string) => (p.endsWith(sep) ? p : p + sep).toLowerCase();
   if (fold(core).startsWith(fold(root))) return { ok: false, reason: "coreRepo is inside this project" };
 
+  // Check the raw home before join(): on POSIX, join() collapses a leading // and hides a UNC form.
+  const home = allowlistOverride ?? (env.USERPROFILE || env.HOME);
   const list = allowlistOverride ?? allowlistPath(env);
-  if (!list) return { ok: false, reason: "no checkout allowlist location (USERPROFILE and HOME are both unset)" };
-  if (isUnc(list) || !isAbsolute(list)) return { ok: false, reason: "the checkout allowlist location is relative or a UNC path" };
+  if (!home || !list) return { ok: false, reason: "no checkout allowlist location (USERPROFILE and HOME are both unset)" };
+  if (isUnc(home) || !isAbsolute(home)) return { ok: false, reason: "the checkout allowlist location is relative or a UNC path" };
   let text: string;
   try {
     text = readFileSync(list, "utf8");
