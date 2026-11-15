@@ -89,6 +89,65 @@ describe("resolveCore", () => {
     if (!r.ok) expect(r.reason).toContain("inside this project");
   });
 
+  // A self-install (Install-Harness.ps1 -Target .) records the project root as coreRepo. That
+  // checkout's cli.ts is whatever the current branch holds, so the helper resolves to the pinned
+  // tool clone in the profile instead, and refuses when that clone is absent or inside the project.
+  function selfInstalled(d: string): { project: string; home: string } {
+    const project = makeCore(d, "project");
+    mkdirSync(join(project, ".claude"), { recursive: true });
+    writeFileSync(join(project, ".claude", ".harness-manifest.local.json"), JSON.stringify({ coreRepo: project }));
+    const home = join(d, "home");
+    mkdirSync(home, { recursive: true });
+    return { project, home };
+  }
+
+  test("resolves a coreRepo equal to the project root to the pinned tool clone", () => {
+    const d = scratch();
+    const { project, home } = selfInstalled(d);
+    const clone = makeCore(join(home, ".claude-publish"), "tool");
+    const r = resolveCore(project, { USERPROFILE: home, HOME: home });
+    expect(r).toEqual({ ok: true, cli: join(realpathSync.native(clone), "tools", "publish", "cli.ts") });
+  });
+
+  test("refuses a coreRepo equal to the project root when the pinned tool clone is missing", () => {
+    const d = scratch();
+    const { project, home } = selfInstalled(d);
+    const r = resolveCore(project, { USERPROFILE: home, HOME: home });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain(".claude-publish/tool");
+  });
+
+  test("refuses a coreRepo equal to the project root when the pinned tool clone holds no cli.ts", () => {
+    const d = scratch();
+    const { project, home } = selfInstalled(d);
+    mkdirSync(join(home, ".claude-publish", "tool"), { recursive: true });
+    const r = resolveCore(project, { USERPROFILE: home, HOME: home });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("no tools/publish/cli.ts");
+  });
+
+  test("refuses a coreRepo equal to the project root when the pinned tool clone is inside the project", () => {
+    const d = scratch();
+    const { project } = selfInstalled(d);
+    const home = join(project, "home");
+    makeCore(join(home, ".claude-publish"), "tool");
+    const r = resolveCore(project, { USERPROFILE: home, HOME: home });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("inside this project");
+  });
+
+  test("still refuses a coreRepo strictly inside the project when a pinned tool clone exists", () => {
+    const d = scratch();
+    const project = makeProject(d, "placeholder");
+    const inner = makeCore(project, "vendored");
+    writeFileSync(join(project, ".claude", ".harness-manifest.local.json"), JSON.stringify({ coreRepo: inner }));
+    const home = join(d, "home");
+    makeCore(join(home, ".claude-publish"), "tool");
+    const r = resolveCore(project, { USERPROFILE: home, HOME: home });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("coreRepo is inside this project");
+  });
+
   test("refuses a relative coreRepo", () => {
     const d = scratch();
     makeCore(d);

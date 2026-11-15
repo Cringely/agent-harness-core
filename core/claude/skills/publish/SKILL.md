@@ -21,7 +21,7 @@ PowerShell:
 
     bun --cwd "$HOME/.claude-publish/work" "<project>/.claude/skills/publish/resolve-core.ts" "<project>"
 
-It prints the absolute path of `tools/publish/cli.ts` only when the real path of `coreRepo` (links and junctions followed) is outside this project and listed in the per-user checkout allowlist, `~/.claude/harness-core-checkouts`, which the installer appends to. No environment variable moves that list for this helper, and a relative, UNC or device-path `coreRepo` is refused. Otherwise it prints nothing on stdout, a reason on stderr, and exits 1. On any exit but 0, or empty output, stop and ask the operator. Never fall back to the raw `coreRepo` value or to a path you guess. `<cli>` below is the path it printed:
+It prints the absolute path of `tools/publish/cli.ts` only when the real path of `coreRepo` (links and junctions followed) is outside this project and listed in the per-user checkout allowlist, `~/.claude/harness-core-checkouts`, which the installer appends to. That list follows `USERPROFILE`, or `HOME` when it is unset, and `HARNESS_CORE_ALLOWLIST` does not move it. A session able to set those variables can already register hooks. A relative, UNC or device-path `coreRepo` is refused, and so is one strictly inside this project. When `coreRepo` is this project itself, as in agent-harness-core installed on itself, it prints the cli of the pinned clone at `~/.claude-publish/tool` instead, and only when that clone's real path is outside the project and holds `tools/publish/cli.ts`. Otherwise it prints nothing on stdout, a reason on stderr, and exits 1. On any exit but 0, or empty output, stop and ask the operator. Never fall back to the raw `coreRepo` value or to a path you guess. `<cli>` below is the path it printed:
 
 Bash:
 
@@ -107,7 +107,7 @@ When one of the repository's issue templates applies, follow it instead.
 
 ## When an issue gets filed
 
-From "Discovery is not commitment, and not a filing either" in fix-quality.md:
+From "Discovery is not commitment, and not a filing either" in bounded-review.md:
 
 - An issue is filed for an operator instruction that names work, for a correctness or security gap outside the scope of the pull request under review, or for a decision that belongs to the operator. The operator is told each time one is filed.
 - A finding below the review's severity floor stays in the review comment and does not become an issue.

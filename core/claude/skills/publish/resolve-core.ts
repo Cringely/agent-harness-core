@@ -13,13 +13,16 @@
 // checkout that leaves it out.
 // Residual: this file and the SKILL.md that runs it ship inside the project, so a project that rewrites them skips the check.
 //
-// The allowlist is always ~/.claude/harness-core-checkouts. No environment variable moves it,
-// because the session that runs this helper is the one a project would set that variable in.
+// The allowlist is ~/.claude/harness-core-checkouts under USERPROFILE, or HOME when that is unset.
+// HARNESS_CORE_ALLOWLIST does not move it, because the session that runs this helper is the one a
+// project would set that variable in. USERPROFILE and HOME do move it, and a session able to set
+// those can already register hooks, so following them widens nothing.
 // Every path is compared by its real path, so a symlink or junction cannot alias a checkout into
 // the allowlist or a project directory out of the project.
 //
 // Fails closed: an unreadable sidecar or allowlist, a relative, UNC or unresolvable coreRepo, one
-// whose real path is inside this project, or one without tools/publish/cli.ts prints a reason on
+// whose real path is strictly inside this project, a coreRepo equal to the project without a
+// usable pinned clone, or one without tools/publish/cli.ts prints a reason on
 // stderr, nothing on stdout, and exits 1. No imports beyond node builtins, so it runs from any
 // project tree.
 
@@ -58,6 +61,25 @@ function isDir(p: string): boolean {
   }
 }
 
+// A self-install (Install-Harness.ps1 -Target . in agent-harness-core) records the project root as
+// coreRepo. That checkout's cli.ts is whatever branch is checked out, so it is never run. The
+// helper resolves to the pinned tool clone review-merge already runs from, <home>/.claude-publish/tool,
+// and only when that clone's real path is outside the project and holds tools/publish/cli.ts.
+const PINNED = "<home>/.claude-publish/tool";
+
+function pinnedClone(root: string, env: Env, fold: (p: string) => string): Resolved {
+  const home = env.USERPROFILE || env.HOME;
+  if (!home || isUnc(home) || !isAbsolute(home)) {
+    return { ok: false, reason: `coreRepo is this project, and the pinned clone ${PINNED} cannot be located (USERPROFILE and HOME are unset, relative or UNC)` };
+  }
+  const clone = real(join(home, ".claude-publish", "tool"));
+  if (!clone || isUnc(clone) || !isDir(clone)) return { ok: false, reason: `coreRepo is this project, and the pinned clone ${PINNED} does not exist` };
+  if (fold(clone).startsWith(fold(root))) return { ok: false, reason: `coreRepo is this project, and the pinned clone ${PINNED} is inside this project` };
+  const cli = join(clone, "tools", "publish", "cli.ts");
+  if (!existsSync(cli)) return { ok: false, reason: `coreRepo is this project, and the pinned clone ${PINNED} holds no tools/publish/cli.ts` };
+  return { ok: true, cli };
+}
+
 // `allowlistOverride` is a test seam: the command entry point below never passes it.
 export function resolveCore(projectRoot: string, env: Env, allowlistOverride?: string): Resolved {
   const sidecar = join(projectRoot, ".claude", ".harness-manifest.local.json");
@@ -79,6 +101,7 @@ export function resolveCore(projectRoot: string, env: Env, allowlistOverride?: s
   const root = real(projectRoot);
   if (!root) return { ok: false, reason: "the project root does not resolve to a real path" };
   const fold = (p: string) => (p.endsWith(sep) ? p : p + sep).toLowerCase();
+  if (fold(core) === fold(root)) return pinnedClone(root, env, fold);
   if (fold(core).startsWith(fold(root))) return { ok: false, reason: "coreRepo is inside this project" };
 
   // Check the raw home before join(): on POSIX, join() collapses a leading // and hides a UNC form.

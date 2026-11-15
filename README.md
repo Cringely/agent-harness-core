@@ -302,8 +302,9 @@ list: its helper, `.claude/skills/publish/resolve-core.ts`, prints the path of `
 only for a listed checkout outside the project, and the skill stops otherwise. It compares real paths, so a
 link or junction cannot alias a checkout onto the list or a project directory out of the project.
 `HARNESS_CORE_ALLOWLIST` points the hook and the installer at a different file. The publish helper ignores
-it and always reads `~/.claude/harness-core-checkouts`, because a project can set that variable in the
-session that runs the helper. When the sidecar is missing but the committed
+it, because a project can set that variable in the session that runs the helper, and reads
+`~/.claude/harness-core-checkouts` under `USERPROFILE`, or `HOME` when that is unset. Those two do move
+the list, and a session able to set them can already register hooks. When the sidecar is missing but the committed
 manifest exists (an install ran, but the write was refused), the hook prints one line saying so
 instead of going quiet, and points at a plain installer run, which says why the write was refused.
 `-Audit` reports it too, except on the legacy shape below, where it compares against the values
@@ -441,6 +442,10 @@ hooks fire on every commit and push here.
 ```bash
 pwsh install/Install-Harness.ps1 -Target .
 ```
+
+That install records this checkout as its own `coreRepo`, and the publish helper never runs the cli of a
+checkout whose branch is the work in progress. It resolves to the pinned clone at
+`~/.claude-publish/tool` instead, the one `review-merge` runs from, and refuses until that clone exists.
 
 Worth knowing before relying on that. Vale's prose pass inside `pre-commit` still only reports. Its
 own check ends in an unconditional `exit 0`, documented in the file as advisory because of the
