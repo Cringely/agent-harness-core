@@ -246,6 +246,17 @@ describe("computeVerification()", () => {
     expect(verify(green(), ["account/claude/hooks/Scan-MemorySecrets.PS1"], REAL_WORKFLOW).state).toBe("passed");
   });
 
+  // account/claude/tools/prose-lint/Build-CringelyStyle.ps1 has no sibling suite.
+  // install/Account-Hooks.Tests.ps1 runs it in a sandbox and compares what it writes against the
+  // committed style files, and that suite runs in the real workflow. A workflow naming no such
+  // suite stays incomplete.
+  test("Build-CringelyStyle.ps1 is covered by its declared suite on the real workflow", () => {
+    expect(verify(green(), ["account/claude/tools/prose-lint/Build-CringelyStyle.ps1"], REAL_WORKFLOW).state).toBe("passed");
+  });
+  test("Build-CringelyStyle.ps1 is incomplete when its declared suite does not run", () => {
+    expect(verify(green(), ["account/claude/tools/prose-lint/Build-CringelyStyle.ps1"]).state).toBe("incomplete");
+  });
+
   test("no workflow file at the base commit: incomplete", () => {
     expect(verify(green(), ["README.md"], null).state).toBe("incomplete");
   });

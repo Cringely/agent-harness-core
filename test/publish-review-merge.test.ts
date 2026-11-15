@@ -7,7 +7,8 @@ import { join } from "node:path";
 import { parsePublishConfig } from "../tools/publish/config";
 import { PublishError, PublishRefusal } from "../tools/publish/errors";
 import type { PipedResult, RunResult } from "../tools/publish/exec";
-import { remoteMatches, reviewMerge, type ReviewMergeArgs, type ReviewMergeContext } from "../tools/publish/review-merge";
+import { CORE_POLICY } from "../tools/pr-review/repo-policy";
+import { remoteMatches, reviewerPolicyArgs, reviewMerge, type ReviewMergeArgs, type ReviewMergeContext } from "../tools/publish/review-merge";
 import { BASE_HEAD, FakeRunner, HEAD, on, REPO, type Responder } from "./publish-fakes";
 
 const CHECKOUT = process.platform === "win32" ? "C:/fixture/reviewer-checkout" : "/fixture/reviewer-checkout";
@@ -18,12 +19,10 @@ const TOOL_ROOT = process.platform === "win32" ? "C:/fixture/tool-checkout" : "/
 const TOOL_REPO = "fixture-owner/fixture-tool";
 const TOOL_HEAD = "f".repeat(40);
 const TERMS = process.platform === "win32" ? "C:/fixture/terms.json" : "/fixture/terms.json";
-const CONFIG = parsePublishConfig(
-  JSON.stringify({
-    owners: { "fixture-owner": { gitName: "fixture-owner", gitEmail: "fixture-owner@users.noreply.example.test", ghUser: "fixture-owner" } },
-    reviewers: { [REPO]: { appId: "1", keyCommand: ["fixture-key-cmd"], keyCommandEnv: { OP_BIOMETRIC_UNLOCK_ENABLED: "false" }, checkout: CHECKOUT, termsFile: TERMS } },
-  }),
-);
+const POLICY = process.platform === "win32" ? "C:/fixture/policy.json" : "/fixture/policy.json";
+const REVIEWER_ENTRY = { appId: "1", keyCommand: ["fixture-key-cmd"], keyCommandEnv: { OP_BIOMETRIC_UNLOCK_ENABLED: "false" }, checkout: CHECKOUT, termsFile: TERMS };
+const OWNERS = { "fixture-owner": { gitName: "fixture-owner", gitEmail: "fixture-owner@users.noreply.example.test", ghUser: "fixture-owner" } };
+const CONFIG = parsePublishConfig(JSON.stringify({ owners: OWNERS, reviewers: { [REPO]: { ...REVIEWER_ENTRY, policyFile: POLICY } } }));
 const PREMERGE_CLI = join(CHECKOUT, "tools", "pr-review", "cli.ts");
 const ARGS: ReviewMergeArgs = {
   repo: REPO,
@@ -255,6 +254,8 @@ describe("review-merge: merges", () => {
       "--json",
       "--expect-head",
       HEAD,
+      "--policy",
+      POLICY,
     ]);
     expect(consumer.cwd).toBe(WORK);
     expect(consumer.env.PR_REVIEW_APP_ID).toBe("1");
@@ -369,6 +370,29 @@ describe("review-merge: merges", () => {
 });
 
 describe("review-merge: refuses before the reviewer runs", () => {
+  // tools/pr-review refuses any repository but its built-in one without --policy, so a reviewer
+  // entry for another repository must name the policy file, or every run would end in a refusal
+  // after the checks wait.
+  test("a reviewer entry for a repository other than the built-in one that names no policyFile", async () => {
+    const runner = scenario();
+    const config = parsePublishConfig(JSON.stringify({ owners: OWNERS, reviewers: { [REPO]: REVIEWER_ENTRY } }));
+    await refusal(reviewMerge(ctx(runner, { config }), ARGS), runner, "policyFile", false);
+    expect(runner.calls.some((call) => call.argv[1] === "pr")).toBe(false);
+  });
+
+  // A --merge merge commit carries the title and body onto the default branch, where only a
+  // history rewrite removes them, so they pass the same identity scan a body does when published.
+  for (const [name, view] of [
+    ["a declared name in the body", { ...VIEW, body: `${VIEW.body}
+Thanks, Fixture Person.
+` }],
+    ["a session link in the title", { ...VIEW, title: "fix: see https://claude.ai/code/session_0123456789abcdef" }],
+  ] as const) {
+    test(`a --merge whose title and body carry ${name}`, async () => {
+      const runner = withReviewer(scenario({ views: [view] }), reviewerSays(APPROVE_OUTPUT));
+      await refusal(reviewMerge(ctx(runner), ARGS), runner, "refusing to publish", false);
+    });
+  }
   // The checkout this tool runs from holds the token and the merge rule, so it meets the reviewer
   // checkout's bar: clean, and at its origin's default branch head.
   test("this tool's own checkout carrying uncommitted changes", async () => {
@@ -542,6 +566,17 @@ describe("review-merge: refuses before the reviewer runs", () => {
 });
 
 describe("review-merge: refuses after the reviewer runs", () => {
+  // The title and body can change while the reviewer runs. The last read before the merge is the
+  // text the merge commit carries, so the scan repeats on it.
+  test("a --merge whose title and body gained an identifying string after the first read", async () => {
+    const dirty = { ...VIEW, body: `${VIEW.body}
+Thanks, Fixture Person.
+` };
+    const runner = withReviewer(scenario({ views: [VIEW, VIEW, dirty] }), reviewerSays(APPROVE_OUTPUT));
+    await refusal(reviewMerge(ctx(runner), ARGS), runner, "refusing to publish", true);
+    expect(runner.calls.some((call) => isPremerge(call.argv))).toBe(true);
+  });
+
   test("a key command that failed", async () => {
     const runner = withReviewer(scenario(), reviewerSays("", 2, 1));
     await refusal(reviewMerge(ctx(runner), ARGS), runner, "key command failed", true);
@@ -730,6 +765,29 @@ describe("review-merge: refuses after the reviewer runs", () => {
     const runner = withReviewer(scenario(), reviewerSays("status=posted event=APPROVE"));
     await expect(reviewMerge(ctx(runner), ARGS)).rejects.toBeInstanceOf(PublishError);
     expect(runner.publishing()).toEqual([]);
+  });
+});
+
+describe("reviewerPolicyArgs()", () => {
+  test("passes no --policy for the reviewer's built-in repository", () => {
+    expect(reviewerPolicyArgs(CORE_POLICY.repo, { policyFile: null })).toEqual([]);
+    expect(reviewerPolicyArgs(CORE_POLICY.repo, { policyFile: POLICY })).toEqual([]);
+  });
+
+  test("passes --policy for any other repository, and refuses one with no policyFile", () => {
+    expect(reviewerPolicyArgs(REPO, { policyFile: POLICY })).toEqual(["--policy", POLICY]);
+    expect(() => reviewerPolicyArgs(REPO, { policyFile: null })).toThrow(PublishRefusal);
+    // tools/pr-review compares the built-in repository's name exactly, so a case-shifted name is another repository.
+    expect(() => reviewerPolicyArgs(CORE_POLICY.repo.toUpperCase(), { policyFile: null })).toThrow(PublishRefusal);
+  });
+});
+
+describe("review-merge: rebase", () => {
+  test("a rebase merge writes no merge message, so its title and body are not held to the merge-message scan", async () => {
+    const runner = withReviewer(scenario({ views: [{ ...VIEW, body: `${VIEW.body}
+Thanks, Fixture Person.
+` }] }), reviewerSays(APPROVE_OUTPUT));
+    expect(await reviewMerge(ctx(runner), { ...ARGS, method: "rebase" })).toContain("merged #9");
   });
 });
 

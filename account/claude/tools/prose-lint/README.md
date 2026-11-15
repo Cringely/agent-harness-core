@@ -50,6 +50,10 @@ pwsh -NoProfile -File "$HOME\.claude\tools\prose-lint\Build-CringelyStyle.ps1"
 
 **slop-forensics outcome (2026-07-10)**: the script originally also merged in the top-100 words from `sam-paech/slop-forensics`' `data/slop_list.json`, intending to add corporate AI-tell vocabulary beyond the canonical list. That data is derived from the repo's default creative-writing benchmark corpus and is dominated by fantasy character names (`adira`, `aethelgard`, `azazel`) and dialogue verbs (`barked`, `bellowed`, `blared`) — fiction-domain slop, not technical/business AI-tell vocabulary, and a false-positive risk against real infra/security prose. Neither `sam-paech/slop-forensics` nor `sam-paech/slop-score` ships a non-fiction/business/general-prose variant of this list; producing one requires re-running the profiling pipeline against a different corpus, which is out of scope for this generator. The script now ships **canonical-only** (`$slopWords = @()`, with the reasoning recorded inline). Revisit if/when an upstream non-fiction slop list appears.
 
+### US Spelling
+
+`styles/Cringely/UsSpelling.yml` is a Vale substitution rule (`Cringely.UsSpelling`, warning) for the common British spellings: `-ise`/`-isation` stems, `-our`, `-re`, `licence`, `judgement`, doubled `l` before a suffix, and a short list of one-off pairs. The pairs live in the US English section of `rules/writing-style.md`. `Build-CringelyStyle.ps1` generates the file from them and it must never be hand-edited. The generator lists stems explicitly rather than matching `-ise`, because a pattern would flag `exercise`, `premise` and `promise`. Vale masks inline code and fenced blocks, so identifiers and commands keep their spelling. A quoted directive in running prose takes `<!-- vale Cringely.UsSpelling = NO -->`.
+
 ### Disabling Rules
 
 Two escape hatches exist:
@@ -76,9 +80,10 @@ Rule names are shown in the vale output (e.g., `ai-tells.EmDashUsage`).
 
 ## Fixtures
 
-Two fixture files are used for verification:
+Three fixture files are used for verification:
 
 - `fixtures/sloppy.md` — triggers multiple findings (EmDashUsage, ContrastiveFormulas, OverusedVocabulary, HedgingPhrases)
 - `fixtures/clean.md` — passes cleanly with zero errors/warnings
+- `fixtures/us-spelling.md` — each line states how many `Cringely.UsSpelling` alerts it must raise (9 alerts in total). Check with `vale --output=line fixtures/us-spelling.md`
 
 These fixtures are reused by the prose-lint skill and skillgrade grader test (Task 4).

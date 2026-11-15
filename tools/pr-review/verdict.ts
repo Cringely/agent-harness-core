@@ -59,6 +59,9 @@ const SHARED_MODULE_SUITES: ReadonlyMap<string, readonly string[]> = new Map([
   ["account/claude/hooks/Lint-DocumentProse.ps1", ["install/Account-Hooks.Tests.ps1"]],
   ["account/claude/hooks/Scan-MemorySecrets.ps1", ["install/Account-Hooks.Tests.ps1"]],
   ["account/claude/hooks/Sync-MemoryToObsidian.ps1", ["install/Account-Hooks.Tests.ps1"]],
+  // The prose-lint style generator: install/Account-Hooks.Tests.ps1 runs it in a sandbox and
+  // requires every file it writes to match the committed copy under styles/Cringely/.
+  ["account/claude/tools/prose-lint/Build-CringelyStyle.ps1", ["install/Account-Hooks.Tests.ps1"]],
 ]);
 
 // A changed .ps1 counts as covered when its own sibling suite runs in CI, or, for a module
