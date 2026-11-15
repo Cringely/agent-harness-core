@@ -86,4 +86,81 @@ describe("unfilledSections()", () => {
     const body = "```\n## Source\nfilled?\n```\n\n## Why it transfers\n\nYes.\n\n### Detail\n\nMore.\n";
     expect(unfilledSections(TEMPLATE, body)).toEqual([1]);
   });
+
+  // GitHub renders a section as empty when all it holds is hidden by a comment or sits in code
+  // that never closes, so the gate must read those sections as empty too.
+  const AB = "## A\n\n## B\n";
+
+  test("a comment never closed hides the rest of the body, headings included", () => {
+    expect(unfilledSections("## Summary\n\n## Testing\n", "## Summary\n<!-- note\n## Testing\nRan it.\n")).toEqual([1, 2]);
+    expect(unfilledSections(AB, "## A\n\ntext <!-- unclosed\n\n## B\n\nmore\n")).toEqual([2]);
+    expect(unfilledSections(AB, "## A\n\n   <!-- indented and unclosed\n## B\nmore\n")).toEqual([1, 2]);
+  });
+
+  test("a multi-line comment hides its lines and any heading inside it", () => {
+    expect(unfilledSections(AB, "## A\n<!--\nhidden\n## B\nhidden\n-->\n")).toEqual([1, 2]);
+    expect(unfilledSections(AB, "## A\n<!--\nhidden\n-->\n## B\nshown\n")).toEqual([1]);
+  });
+
+  test("several comments on one line leave nothing visible", () => {
+    expect(unfilledSections(AB, "## A\n<!-- one --> <!-- two -->\t<!-- three -->\n## B\nx\n")).toEqual([1]);
+    expect(unfilledSections(AB, "## A\n<!-- one --> shown <!-- two -->\n## B\nx\n")).toEqual([]);
+  });
+
+  test("removing one comment does not expose another one formed around it", () => {
+    expect(unfilledSections(AB, "## A\n<!<!---->-- still hidden -->\n## B\nx\n")).toEqual([1]);
+  });
+
+  test("blank and whitespace-only lines do not fill a section", () => {
+    expect(unfilledSections(AB, "## A\n\n   \n\t\n \t \n## B\nx\n")).toEqual([1]);
+  });
+
+  test("a shorter fence does not close a longer one", () => {
+    const body = "## A\n\n````\n```\n## B\nfake\n```\n````\n\n## B\n\n";
+    expect(unfilledSections(AB, body)).toEqual([2]);
+  });
+
+  test("a fence line with an info string does not close a fence", () => {
+    const body = "## A\n\n```\n```js\n## B\nfake\n```\n\n## B\n\n";
+    expect(unfilledSections(AB, body)).toEqual([2]);
+  });
+
+  test("a fence of the other character does not close a fence", () => {
+    const body = "## A\n\n~~~\n```\n## B\nfake\n~~~\n\n## B\n\n";
+    expect(unfilledSections(AB, body)).toEqual([2]);
+  });
+
+  test("a closed fence with real lines is content, an empty one is not", () => {
+    expect(unfilledSections(AB, "## A\n```js\nconst x = 1;\n```\n## B\nx\n")).toEqual([]);
+    expect(unfilledSections(AB, "## A\n```\n\n   \n```\n## B\nx\n")).toEqual([1]);
+  });
+
+  test("a fence never closed is not content, and its headings are not headings", () => {
+    expect(unfilledSections(AB, "## A\nx\n## B\n```\ncode never closed\n")).toEqual([2]);
+    expect(unfilledSections(AB, "## A\n```\n## B\nlooks filled\n")).toEqual([1, 2]);
+  });
+
+  test("a fence opens even when its info string holds a comment marker", () => {
+    expect(unfilledSections(AB, "## A\nx\n```js <!-- note -->\n## B\nfake\n")).toEqual([2]);
+  });
+
+  test("a template comment left open still leaves later template headings required", () => {
+    expect(templateSections("## A\n<!-- open\n## B\n")).toEqual([
+      { level: 2, key: "a" },
+      { level: 2, key: "b" },
+    ]);
+    expect(templateSections("## A\n<!--\n## Example\n-->\n## B\n")).toEqual([
+      { level: 2, key: "a" },
+      { level: 2, key: "b" },
+    ]);
+  });
+
+  test("comment markers inside a closed fence are code, not comments", () => {
+    expect(unfilledSections(AB, "## A\n```\n<!-- shown as code\n```\n## B\nx\n")).toEqual([]);
+  });
+
+  test("a heading line after a comment closes on it is not a heading", () => {
+    expect(unfilledSections(AB, "## A\n<!--\n-->## B\nx\n")).toEqual([2]);
+    expect(unfilledSections(AB, "## A\nx\n<!-- c --> ## B\n")).toEqual([2]);
+  });
 });
