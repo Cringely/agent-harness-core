@@ -75,8 +75,9 @@ Exit codes:
 - **0** means done.
 - **2** means refused, with nothing new published. The message names a class of problem and never the text that tripped it.
 - **1** means a usage or runtime error.
+- **4** means `review-merge` stopped, by a refusal or an error, after it had already written to GitHub. The message opens with `already written to GitHub:` and lists each write in order (the App review, the bypass reason comment, the merge), then the cause. Look at the pull request before running again.
 
-A `review-merge` refusal that follows its `review:` line means the App's review was posted and nothing merged.
+The reviewer posts its review at step 7 below, so every `review-merge` stop after its `review:` line exits 4, never 2.
 
 ## Create and edit gates
 
@@ -104,8 +105,8 @@ A `review-merge` refusal that follows its `review:` line means the App's review 
 8. The pull request is read again, waiting out an `UNKNOWN` merge state, and the closing-keyword audit repeats. With `--allow-admin`, what the bypass needs is read next: `.github/CODEOWNERS` at the default branch head (the base, never the pull request's head, which the pull request could edit), the whole changed-file list, the pull request's reviews, and the default branch's active rules. Then the merge rule rules.
 9. `premerge` runs from the reviewer checkout on the pinned head, with `--closes`, the owner identity and the configured `termsFile`, and must print `PREMERGE OK` for this pull request and head. It checks what the diff does not carry: closing references GitHub links outside the text, every commit's author and committer, and personal terms in commit messages, title and body. Its channel lines are logged. CONTRIBUTING.md requires it for a bypass merge, and it runs before every merge here.
 10. The title and body are read once more and must equal the ones step 8 audited, or nothing is merged. For `--merge`, the merge commit's subject and body pass the step 4 scan again on this last read, because they are written into the default branch's history, where no push hook sees a commit GitHub writes and only a history rewrite removes them.
-11. For an administrator-bypass merge, the reason is posted as a pull request comment. It is the last write before the merge, after every check that can refuse, because a refusal exits 2 and reports that nothing new was published. A merge that fails after the reason is posted exits 1 with a message saying the reason is up. Then `gh pr merge` runs with `--match-head-commit` and, for `--merge`, an explicit `--subject` and body built from that audited title and body, so the merge commit never carries GitHub's default message built from whatever the pull request says at merge time.
-12. The merge is confirmed, and the issues GitHub links the merged pull request to close (`closingIssuesReferences`) must be exactly `--closes`. A mismatch, or a list that cannot be read, exits 1 with a message naming the merge commit: the merge has already happened, so the tool reports it and undoes nothing.
+11. For an administrator-bypass merge, the reason is posted as a pull request comment. It is the last write before the merge, after every check that can refuse, so a refused bypass leaves only the App review behind. A merge that fails after the reason is posted exits 4 with a message naming the review and the reason comment. Then `gh pr merge` runs with `--match-head-commit` and, for `--merge`, an explicit `--subject` and body built from that audited title and body, so the merge commit never carries GitHub's default message built from whatever the pull request says at merge time.
+12. The merge is confirmed, and the issues GitHub links the merged pull request to close (`closingIssuesReferences`) must be exactly `--closes`. A mismatch, a list that cannot be read, or a failed read of the merge itself exits 4 with a message naming the merge: the merge has already happened, so the tool reports it and undoes nothing.
 
 The merge rule, from the header of `tools/publish/merge-decision.ts`, is a pure function of the reviewer's `--json` output and the pull request's state, which under `--allow-admin` includes CODEOWNERS at the base commit, the changed files, the reviews and the base branch's rules. No model prose is parsed. A pull request merges only on the App's `APPROVE` with passing verification, in one of two cases and no other:
 
