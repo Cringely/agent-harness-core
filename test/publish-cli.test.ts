@@ -5,9 +5,10 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { assertNeutralCwd, main, parseCommand, type CliDeps } from "../tools/publish/cli";
+import { assertNeutralCwd, main, parseCommand, realDeps, type CliDeps } from "../tools/publish/cli";
 import { parsePublishConfig } from "../tools/publish/config";
 import { PublishRefusal, UsageError } from "../tools/publish/errors";
+import { childEnv, realRunner } from "../tools/publish/exec";
 import { FakeRunner, on, REPO } from "./publish-fakes";
 
 const ROOT = mkdtempSync(join(tmpdir(), "publish-cli-"));
@@ -168,6 +169,27 @@ describe("assertNeutralCwd()", () => {
   test("refuses a probe killed at a timeout or by a signal", () => {
     const killed = on(["git", "-C"], { code: null, stderr: "fatal: not a git repository (or any of the parent directories): .git" });
     expect(() => assertNeutralCwd(WORK, WORK, new FakeRunner([killed]), {})).toThrow(PublishRefusal);
+  });
+});
+
+// review-merge reads the tool's own checkout and the reviewer checkout through deps.toolState. git
+// exports GIT_DIR inside every hook, and one inherited from there must not answer for the checkout.
+// Bun hands a child the environment this process started with, not later edits to process.env, so
+// the inherited GIT_DIR is given to a fresh bun process that calls realDeps() itself.
+describe("realDeps()", () => {
+  test("reads a checkout's state with the inherited GIT_DIR removed", () => {
+    const clean = childEnv(process.env);
+    const other = join(ROOT, "other-repo");
+    realRunner.run(["git", "init", "-q", other], { env: clean });
+    realRunner.run(["git", "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "-C", other, "commit", "-q", "--allow-empty", "-m", "other"], {
+      env: clean,
+    });
+    const toolRoot = realDeps().toolRoot;
+    const expected = realRunner.run(["git", "-C", toolRoot, "rev-parse", "HEAD"], { env: clean }).stdout.trim();
+    const cli = JSON.stringify(join(import.meta.dir, "..", "tools", "publish", "cli.ts"));
+    const script = `const { realDeps } = await import(${cli}); const d = realDeps(); process.stdout.write(d.toolState(d.toolRoot).revision);`;
+    const result = realRunner.run([process.execPath, "-e", script], { cwd: ROOT, env: { ...clean, GIT_DIR: join(other, ".git") } });
+    expect(result.stdout.trim()).toBe(expected);
   });
 });
 

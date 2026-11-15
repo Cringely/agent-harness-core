@@ -552,6 +552,24 @@ Thanks, Fixture Person.
     );
   });
 
+  // git exports GIT_DIR inside every hook. Inherited, it would make the origin checks read whatever
+  // repository it names rather than the checkout -C names.
+  test("runs every git and child process without the inherited repository-redirecting variables", async () => {
+    const runner = withReviewer(scenario(), reviewerSays(APPROVE_OUTPUT));
+    const env = { PATH: "x", GH_TOKEN: "inherited", GIT_DIR: "/elsewhere/.git", git_work_tree: "/elsewhere", GIT_CONFIG_KEY_0: "core.worktree" };
+    await reviewMerge(ctx(runner, { env }), ARGS);
+    const gitCalls = runner.calls.filter((call) => call.argv[0] === "git");
+    expect(gitCalls.length).toBeGreaterThan(0);
+    for (const call of runner.calls) {
+      for (const name of ["GIT_DIR", "git_work_tree", "GIT_CONFIG_KEY_0"]) expect(call.options.env?.[name]).toBeUndefined();
+    }
+    for (const call of gitCalls) expect(call.argv).toContain("-C");
+    expect(runner.piped.length).toBe(1);
+    for (const spec of runner.piped.flatMap((pipe) => [pipe.producer, pipe.consumer])) {
+      for (const name of ["GIT_DIR", "git_work_tree", "GIT_CONFIG_KEY_0"]) expect(spec.env[name]).toBeUndefined();
+    }
+  });
+
   test("never fetches, switches or otherwise moves the reviewer checkout", async () => {
     const runner = withReviewer(scenario(), reviewerSays(APPROVE_OUTPUT));
     await reviewMerge(ctx(runner), ARGS);
