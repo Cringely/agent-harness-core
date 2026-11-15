@@ -67,7 +67,7 @@ interface Line {
   code: boolean;
 }
 
-const HEADING_RE = /^(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$/;
+const HEADING_RE = /^(#{1,6})[ \t]+(.*)$/;
 // Heading forms outside the subset. Four spaces or more is indented code, not a heading.
 const INDENTED_ATX_RE = /^ {1,3}#{1,6}(?:[ \t]|$)/;
 const SETEXT_UNDERLINE_RE = /^ {0,3}(?:=+|-+)[ \t]*$/;
@@ -145,8 +145,16 @@ function stripComments(text: string): string {
   return current;
 }
 
-function headingKey(text: string): string {
-  return text.trim().replace(/\s+/g, " ").toLowerCase();
+// The key a heading is matched by, from the text after its opening "#" run and the space after
+// it. Template and body headings both go through here, so the two sides cannot read one heading
+// differently. A closing "#" run counts only when a space or tab comes before it, or when it is
+// the whole text, as in CommonMark, so "C#" keeps its hash and "Source ##" drops its run.
+function headingKey(content: string): string {
+  return content
+    .replace(/(?:^|[ \t]+)#+[ \t]*$/, "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
 }
 
 // The part of one line outside comments. `state.open` carries a comment across lines. An opening
@@ -332,8 +340,7 @@ export function templateSections(template: string): TemplateSection[] {
     if (/[<>]/.test(line)) refuseLine(n, "a line holding an angle bracket");
     const heading = TEMPLATE_HEADING_RE.exec(line);
     if (heading) {
-      const text = heading[2]!.replace(/[ \t]+#+[ \t]*$/, "").replace(/^#+[ \t]*$/, "");
-      const key = headingKey(text);
+      const key = headingKey(heading[2]!);
       if (key === "") refuseLine(n, "an empty heading");
       sections.push({ level: heading[1]!.length, key });
       continue;
