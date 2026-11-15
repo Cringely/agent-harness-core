@@ -855,9 +855,48 @@ Thanks, Fixture Person.
     expect(runner.piped).toEqual([]);
   });
 
-  test("reviewer output that is not JSON is an error", async () => {
-    const runner = withReviewer(scenario(), reviewerSays("status=posted event=APPROVE"));
-    await expect(reviewMerge(ctx(runner), ARGS)).rejects.toBeInstanceOf(PublishError);
+  // The reviewer's contract: exit 2 means it refused with nothing posted. Any other end of a --post
+  // run (exit 0, exit 1, killed at its timeout) may have posted a review, so every stop from there,
+  // output parsing included, is an AfterWriteError (exit 4) that says a review may be posted.
+  async function mayBePosted(runner: FakeRunner, fragment: string, overrides: Partial<ReviewMergeContext> = {}): Promise<void> {
+    const error = await reviewMerge(ctx(runner, overrides), ARGS).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AfterWriteError);
+    expect((error as AfterWriteError).written).toEqual(["an App review may be posted on #9"]);
+    expect((error as Error).message).toStartWith("already written to GitHub: an App review may be posted on #9. Then stopped: ");
+    expect((error as Error).message).toContain(fragment);
+    expect(runner.publishing()).toEqual([]);
+  }
+
+  test("reviewer output that is not JSON, after an exit 0, is an after-write stop", async () => {
+    await mayBePosted(withReviewer(scenario(), reviewerSays("status=posted event=APPROVE")), "not JSON");
+  });
+
+  test("reviewer JSON with fields missing, after an exit 0, is an after-write stop", async () => {
+    await mayBePosted(withReviewer(scenario(), reviewerSays(JSON.stringify({ status: "posted" }))), "lacks event");
+  });
+
+  test("a key command that failed beside a reviewer that exited 0 is an after-write stop", async () => {
+    await mayBePosted(withReviewer(scenario(), reviewerSays(APPROVE_OUTPUT, 0, 1)), "key command failed");
+  });
+
+  test("a reviewer that exited 1 is an after-write stop", async () => {
+    await mayBePosted(withReviewer(scenario(), reviewerSays("", 1)), "the reviewer exited with an error");
+  });
+
+  test("a reviewer killed at its timeout is an after-write stop", async () => {
+    const runner = withReviewer(scenario(), { producerCode: 0, producerSpawnError: false, consumer: { code: null, stdout: "", stderr: "", spawnError: false, timedOut: true } });
+    await mayBePosted(runner, "did not finish in time");
+  });
+
+  test("an unexpected throw after the reviewer returned is an after-write stop that carries only its class", async () => {
+    const log = (line: string) => {
+      if (line.startsWith("review:")) throw new TypeError("quoted input");
+    };
+    const runner = withReviewer(scenario(), reviewerSays(APPROVE_OUTPUT));
+    const error = await reviewMerge(ctx(runner, { log }), ARGS).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AfterWriteError);
+    expect((error as Error).message).toEndWith("Then stopped: unexpected failure (TypeError)");
+    expect((error as Error).message).not.toContain("quoted input");
     expect(runner.publishing()).toEqual([]);
   });
 });
