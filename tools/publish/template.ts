@@ -28,7 +28,10 @@
 // would swallow the next template section's content and an empty section would read as filled.
 // The nth template section with a given heading matches the nth body heading with that text, so
 // one body section never fills two template sections. Comments in a body never count, so leaving
-// the template's instruction comments in place does not fill a section.
+// the template's instruction comments in place does not fill a section. Nor does leaving its
+// prose prompts in place: a body line that equals, after trimming whitespace, a prose or list line
+// of the matching template section or of a section nested under it is dropped before the letter
+// test. A prompt kept beside new text, or edited at all, leaves something that counts.
 //
 // The template side reads a deliberately narrow line grammar rather than approximating CommonMark,
 // because every CommonMark construct it approximates is a place a heading can hide. After a
@@ -294,9 +297,20 @@ function refuseLine(lineNumber: number, what: string): never {
 // The template's sections, read under the line grammar in the header. Throws PublishRefusal on
 // any line outside it.
 export function templateSections(template: string): TemplateSection[] {
+  return readTemplate(template).map(({ level, key }) => ({ level, key }));
+}
+
+type PromptedSection = TemplateSection & { prompts: Set<string> };
+
+// Each section with its prompt lines: the trimmed prose and list lines between its heading and
+// the next template heading.
+function readTemplate(template: string): PromptedSection[] {
   const lines = normalize(template).split("\n");
   if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
-  const sections: TemplateSection[] = [];
+  const sections: PromptedSection[] = [];
+  const prompt = (line: string): void => {
+    sections[sections.length - 1]?.prompts.add(line.trim());
+  };
   let i = 0;
   if (lines.length > 0 && FRONT_MATTER_FENCE_RE.test(lines[0]!)) {
     i = 1;
@@ -342,15 +356,19 @@ export function templateSections(template: string): TemplateSection[] {
     if (heading) {
       const key = headingKey(heading[2]!);
       if (key === "") refuseLine(n, "an empty heading");
-      sections.push({ level: heading[1]!.length, key });
+      sections.push({ level: heading[1]!.length, key, prompts: new Set() });
       continue;
     }
     if (FENCE_RE.test(line)) refuseLine(n, "a code fence");
     if (LIST_MARKER_RE.test(line)) {
       if (!LIST_ITEM_RE.test(line)) refuseLine(n, "a list item that does not open with plain text");
+      prompt(line);
       continue;
     }
-    if (PROSE_RE.test(line)) continue;
+    if (PROSE_RE.test(line)) {
+      prompt(line);
+      continue;
+    }
     refuseLine(n, "a line that opens with neither text nor a heading");
   }
   return sections;
@@ -359,7 +377,7 @@ export function templateSections(template: string): TemplateSection[] {
 // 1-based indexes of the template's sections that the body lacks or leaves empty.
 export function unfilledSections(template: string, body: string): number[] {
   const lines = splitLines(body);
-  const sections = templateSections(template);
+  const sections = readTemplate(template);
   const unfilled: number[] = [];
   const seen = new Map<string, number>();
   sections.forEach((section, index) => {
@@ -382,13 +400,16 @@ export function unfilledSections(template: string, body: string): number[] {
     const nested = new Set<number>();
     for (let j = index + 1; j < sections.length && sections[j]!.level > section.level; j++) nested.add(j);
     const stopKeys = new Set(sections.filter((_, j) => !nested.has(j)).map((s) => s.key));
+    // The template's own prompt lines, this section's and those of sections nested under it, are
+    // not the author's text, so a body line equal to one of them after trimming never counts.
+    const prompts = new Set([section, ...[...nested].map((j) => sections[j]!)].flatMap((s) => [...s.prompts]));
     const level = lines[start]!.heading!.level;
     let prose = "";
     let code = "";
     for (let i = start + 1; i < lines.length; i++) {
       const line = lines[i]!;
       if (line.heading && (line.heading.level <= level || stopKeys.has(line.heading.key))) break;
-      if (line.heading) continue;
+      if (line.heading || prompts.has(line.text.trim())) continue;
       if (line.code) code += line.text + "\n";
       else prose += line.text + "\n";
     }
