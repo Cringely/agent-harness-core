@@ -81,12 +81,15 @@ function Get-SkillDirectory {
     # One refinement, applied per root: a plugin whose marketplace or plugin directory shares its
     # skill's name (impeccable) produces same-named directories that are not the skill, such as
     # the marketplace clone root (.git, per-tool copies, test workspaces, 122 MB) and the cache
-    # root. Heaviest-wins picked the clone root and blocked a 13 KB skill at ~22M tokens. Claude
-    # Code loads a plugin skill from a directory whose parent is named `skills`, so within a root
-    # that has such hits, only they compete, and the heaviest of them still wins so a large real
-    # skill is not under-counted. A root with no such hit (bundled-skills, whose parents are hash
-    # directories) keeps the old heaviest-of-everything rule. The per-root winners then compete on
-    # size as before, so the bundled claude-api is not displaced by a lighter plugin copy.
+    # root. Heaviest-wins picked the clone root and blocked a 13 KB skill at ~22M tokens. A plugin
+    # skill sits under a directory named `skills` in the default layout, or at a custom path from
+    # the plugin manifest, where it is still a directory that directly contains SKILL.md. So within
+    # a root, a hit is a candidate when its parent is named `skills` OR it holds SKILL.md directly.
+    # Only candidates compete when any exist, and the heaviest of them still wins so a large real
+    # skill is not under-counted. A root with no candidate (bundled-skills, whose parents are hash
+    # directories and which lack SKILL.md) keeps the old heaviest-of-everything rule. The per-root
+    # winners then compete on size as before, so the bundled claude-api is not displaced by a
+    # lighter plugin copy.
     $best = $null; $bestSize = -1
     foreach ($root in $Roots) {
         if (-not (Test-Path $root)) { continue }
@@ -95,7 +98,9 @@ function Get-SkillDirectory {
         foreach ($h in $hits) {
             $size = Measure-SkillTokens -Path $h.FullName
             if ($size -gt $rSize) { $rSize = $size; $rBest = $h.FullName }
-            if ((Split-Path -Leaf (Split-Path -Parent $h.FullName)) -eq 'skills' -and $size -gt $rSkSize) {
+            $isCandidate = ((Split-Path -Leaf (Split-Path -Parent $h.FullName)) -eq 'skills') -or
+                           (Test-Path -LiteralPath (Join-Path $h.FullName 'SKILL.md') -PathType Leaf)
+            if ($isCandidate -and $size -gt $rSkSize) {
                 $rSkSize = $size; $rSk = $h.FullName
             }
         }
@@ -199,6 +204,19 @@ if ($SelfTest) {
     $got = Get-SkillDirectory -SkillName 'zzplug' -Roots @((Join-Path $fx 'plugins'))
     Assert-Equal 1 ([int]($null -ne $got -and (Measure-SkillTokens -Path $got) -ge 200000)) 'large skills/<name> dir is measured in full'
     Remove-Item -LiteralPath $fx -Recurse -Force -ErrorAction SilentlyContinue
+
+    # Plugin skill at a custom manifest path (parent not named `skills`) must still be measured,
+    # even when a lighter same-leaf `skills/<name>` mirror exists elsewhere under the plugins root.
+    $fx2 = Join-Path $env:TEMP "guard-skillsize-selftest-fx2"
+    Remove-Item -LiteralPath $fx2 -Recurse -Force -ErrorAction SilentlyContinue
+    $customSkill = Join-Path $fx2 'plugins/cache/mkt/p/1.0.0/extra/big'
+    $mirrorSkill = Join-Path $fx2 'plugins/marketplaces/mkt/.agents/skills/big'
+    New-Item -ItemType Directory -Force -Path $customSkill, $mirrorSkill | Out-Null
+    [IO.File]::WriteAllText((Join-Path $customSkill 'SKILL.md'), ('x' * 2000000))
+    [IO.File]::WriteAllText((Join-Path $mirrorSkill 'SKILL.md'), ('y' * 4000))
+    $got = Get-SkillDirectory -SkillName 'p:big' -Roots @((Join-Path $fx2 'plugins'))
+    Assert-Equal $customSkill ([string]$got) 'custom-path skill dir with SKILL.md beats lighter skills/<name> mirror'
+    Remove-Item -LiteralPath $fx2 -Recurse -Force -ErrorAction SilentlyContinue
 
     # Context reader: sums three fields, ignores sidechain records, takes the last main-thread one.
     $tmp = Join-Path $env:TEMP "guard-skillsize-selftest.jsonl"
