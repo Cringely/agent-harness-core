@@ -64,7 +64,10 @@ function ConvertTo-PositiveInt {
 }
 
 function Get-SkillDirectory {
-    param([string]$SkillName)
+    param(
+        [string]$SkillName,
+        [string[]]$Roots = $SkillRoots   # test seam; production uses the real roots
+    )
 
     # Plugin skills arrive as "plugin:skill"; the directory is named for the skill half.
     $leaf = ($SkillName -split ':')[-1]
@@ -74,14 +77,30 @@ function Get-SkillDirectory {
     # Take the heaviest match - that is the one that would actually cost us. Presence of a
     # SKILL.md would be a cleaner filter but is not usable: all 24 directories that match
     # `claude-api` across the bundled-skills root lack one.
+    #
+    # One refinement, applied per root: a plugin whose marketplace or plugin directory shares its
+    # skill's name (impeccable) produces same-named directories that are not the skill, such as
+    # the marketplace clone root (.git, per-tool copies, test workspaces, 122 MB) and the cache
+    # root. Heaviest-wins picked the clone root and blocked a 13 KB skill at ~22M tokens. Claude
+    # Code loads a plugin skill from a directory whose parent is named `skills`, so within a root
+    # that has such hits, only they compete, and the heaviest of them still wins so a large real
+    # skill is not under-counted. A root with no such hit (bundled-skills, whose parents are hash
+    # directories) keeps the old heaviest-of-everything rule. The per-root winners then compete on
+    # size as before, so the bundled claude-api is not displaced by a lighter plugin copy.
     $best = $null; $bestSize = -1
-    foreach ($root in $SkillRoots) {
+    foreach ($root in $Roots) {
         if (-not (Test-Path $root)) { continue }
         $hits = Get-ChildItem -LiteralPath $root -Recurse -Directory -Filter $leaf -ErrorAction SilentlyContinue
+        $rBest = $null; $rSize = -1; $rSk = $null; $rSkSize = -1
         foreach ($h in $hits) {
             $size = Measure-SkillTokens -Path $h.FullName
-            if ($size -gt $bestSize) { $bestSize = $size; $best = $h.FullName }
+            if ($size -gt $rSize) { $rSize = $size; $rBest = $h.FullName }
+            if ((Split-Path -Leaf (Split-Path -Parent $h.FullName)) -eq 'skills' -and $size -gt $rSkSize) {
+                $rSkSize = $size; $rSk = $h.FullName
+            }
         }
+        if ($rSk) { $rBest = $rSk; $rSize = $rSkSize }
+        if ($rBest -and $rSize -gt $bestSize) { $bestSize = $rSize; $best = $rBest }
     }
     return $best
 }
@@ -163,6 +182,23 @@ if ($SelfTest) {
 
     if (Get-SkillDirectory -SkillName 'no-such-skill-xyzzy') { Write-Host "FAIL: unknown skill resolved"; $failures++ }
     else { Write-Host "pass: unknown skill resolves to null (fails open)" }
+
+    # Plugin layout where the marketplace/plugin directory shares the skill's name (impeccable):
+    # a heavy same-named root must lose to the light skills/<name> dir Claude Code loads, while a
+    # heavy skills/<name> dir must still be measured in full.
+    $fx = Join-Path $env:TEMP "guard-skillsize-selftest-fx"
+    Remove-Item -LiteralPath $fx -Recurse -Force -ErrorAction SilentlyContinue
+    $heavyRoot = Join-Path $fx 'plugins/marketplaces/zzplug'
+    $lightSkill = Join-Path $fx 'plugins/cache/zzplug/zzplug/1.0.0/skills/zzplug'
+    New-Item -ItemType Directory -Force -Path $heavyRoot, $lightSkill | Out-Null
+    [IO.File]::WriteAllText((Join-Path $heavyRoot 'big.txt'), ('x' * 400000))
+    [IO.File]::WriteAllText((Join-Path $lightSkill 'SKILL.md'), ('y' * 4000))
+    $got = Get-SkillDirectory -SkillName 'zzplug:zzplug' -Roots @((Join-Path $fx 'plugins'))
+    Assert-Equal $lightSkill ([string]$got) 'same-named heavy root loses to light skills/<name> dir'
+    [IO.File]::WriteAllText((Join-Path $lightSkill 'ref.md'), ('z' * 800000))
+    $got = Get-SkillDirectory -SkillName 'zzplug' -Roots @((Join-Path $fx 'plugins'))
+    Assert-Equal 1 ([int]($null -ne $got -and (Measure-SkillTokens -Path $got) -ge 200000)) 'large skills/<name> dir is measured in full'
+    Remove-Item -LiteralPath $fx -Recurse -Force -ErrorAction SilentlyContinue
 
     # Context reader: sums three fields, ignores sidechain records, takes the last main-thread one.
     $tmp = Join-Path $env:TEMP "guard-skillsize-selftest.jsonl"
